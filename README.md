@@ -1,6 +1,6 @@
 # Dodam
 
-A general-purpose language that AI writes correctly and robustly: secure, fast to run and fast to compile, with security enforced by the compiler and rules that only ever tighten. Its first domain is the web, with one codebase for server and browser.
+A general-purpose language that AI writes correctly and robustly: secure, fast to run and fast to compile. No human needs to read it: AI refines it for AI, and people look only at the result and a security report. Security is enforced by the compiler, and the rules only ever tighten. Its first domain is the web, with one codebase for server and browser.
 
 > **Status: design phase.** There is no compiler yet. The current work is the charter and the benchmark that every design decision will be measured against.
 
@@ -17,7 +17,8 @@ AI now writes a large share of code, and the languages it writes in were designe
 - **Mandatory access policy** — every server function callable from the UI declares `access public` or `access auth(role)`.
 - **No hidden behavior** — no null, no exceptions, no implicit conversions, no global mutable state, no macros or reflection.
 - **Machine-readable diagnostics** — every error is JSON with a fix, and the compiler ships with an MCP server for agents.
-- **Rules that only tighten** — AI proposes new rules from real failures; humans approve them. Relaxing a rule requires proof that security metrics do not regress.
+- **A security report instead of code review** — people do not read the code. The compiler reports capabilities, where data leaves the program and every `trust` block; anything new must be approved by a person before a release build succeeds.
+- **A language AI refines itself** — AI changes syntax details, libraries and rules and merges them when benchmark numbers improve. Only relaxing a rule needs human approval, with proof that security metrics do not regress.
 
 ## Name
 
