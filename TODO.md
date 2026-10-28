@@ -7,7 +7,7 @@
 
 ## 지금 (0단계 첫 주)
 
-- [ ] 헌장(`docs/charter.ko.md`) 검토 → v0.2
-- [ ] DodamBench 과제 형식 정하고 첫 10개 만들기
-- [ ] 같은 10개를 TypeScript · Java로 AI에게 풀게 해서 기준선 재기
+- [ ] 헌장(`docs/charter.ko.md`) v0.2 초안 검토 → 확정 (판단 순서 · 1.0 목표 가안 포함)
+- [ ] DodamBench 과제 형식 정하고 첫 10개 만들기 (웹 6 · CLI · 데이터 처리 4)
+- [ ] 같은 10개를 핵심 7개 언어(Python · TypeScript · Java · C# · Go · Rust · C++)로 AI에게 풀게 해서 기준선 재기 — 실행 · 컴파일 속도 포함
 - [ ] 문법 후보 2~3개 → AI에게 명세만 주고 짜게 해서 비교
