@@ -9,11 +9,13 @@ from this machine, with this Python environment's own tools first on PATH.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -21,10 +23,15 @@ from pathlib import Path
 
 from .convert import verifier_env
 from .judge import judge
+from .languages import LANGUAGES, Language
 from .task import Task, load_task, materialize, validate
 
 FEATURE_KINDS = ("functional", "boundary")
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+BENCH = Path(__file__).resolve().parents[1]
+SCAFFOLDS = BENCH / "images"
+SCAFFOLD_CACHE = BENCH / ".cache" / "scaffolds"
+READY = ".ready"
 
 
 class VetError(Exception):
@@ -70,31 +77,71 @@ def judgement_problems(expect: str, weakness: str | None, report: dict) -> list[
     return problems
 
 
+def scaffold_cache(lang: Language, cache_root: Path, scaffolds_root: Path = SCAFFOLDS) -> Path | None:
+    """The language's starting /app with its dependencies installed, prepared once per content of the files."""
+    src = scaffolds_root / lang.key / "app"
+    if not src.is_dir():
+        return None
+    digest = hashlib.sha256()
+    for path in sorted(p for p in src.rglob("*") if p.is_file()):
+        digest.update(str(path.relative_to(src)).encode() + b"\0" + path.read_bytes() + b"\0")
+    dest = cache_root / f"{lang.key}-{digest.hexdigest()[:12]}"
+    if not (dest / READY).exists():
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest)
+        if lang.deps_cmd:
+            res = subprocess.run(lang.deps_cmd, shell=True, cwd=dest, capture_output=True, text=True)
+            if res.returncode != 0:
+                raise VetError(f"installing {lang.key} dependencies failed: {(res.stdout + res.stderr)[-500:]}")
+        (dest / READY).write_text("", encoding="utf-8")
+    return dest
+
+
+def assemble_app(scaffold: Path | None, links: tuple[str, ...], solution: Path, dest: Path) -> Path:
+    """Build an app folder as /app looks after the solution script: scaffold, linked dependencies, solution on top."""
+    dest.mkdir(parents=True)
+    if scaffold is not None:
+        for item in scaffold.iterdir():
+            if item.name == READY:
+                continue
+            if item.name in links:
+                (dest / item.name).symlink_to(item, target_is_directory=item.is_dir())
+            elif item.is_dir():
+                shutil.copytree(item, dest / item.name)
+            else:
+                shutil.copy2(item, dest / item.name)
+    shutil.copytree(solution, dest, dirs_exist_ok=True)
+    return dest
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def _missing_tools(lang_env: dict[str, str], path: str) -> list[str]:
+def _missing_tools(lang_env: dict[str, str], path: str, deps_cmd: str = "") -> list[str]:
     missing = []
-    for key in ("BUILD_CMD", "START_CMD"):
-        cmd = lang_env.get(key, "").strip()
+    for cmd in (lang_env.get("BUILD_CMD", ""), lang_env.get("START_CMD", ""), deps_cmd):
+        cmd = cmd.strip()
         tool = shlex.split(cmd)[0] if cmd else ""
-        if tool and not tool.startswith(("./", "/")) and not shutil.which(tool, path=path):
+        if tool and not tool.startswith(("./", "/")) and not shutil.which(tool, path=path) and tool not in missing:
             missing.append(tool)
     return missing
 
 
-def vet(task: Task, lang: str, out_dir: Path | str) -> list[dict]:
+def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE) -> list[dict]:
     """Judge each solution of one language at its step; write the judge's files and vet.json to out_dir."""
     problems = validate(task)
     if problems:
         raise VetError("; ".join(problems))
     out_dir = Path(out_dir)
+    language = LANGUAGES[lang]
     extra_env = {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
     lang_env = {**verifier_env(task, lang), "PORT": str(_free_port())}
-    missing = _missing_tools(lang_env, extra_env["PATH"])
+    missing = _missing_tools(lang_env, extra_env["PATH"], language.deps_cmd)
+    scaffold = None if missing else scaffold_cache(language, cache_root)
     results = []
     with tempfile.TemporaryDirectory(prefix="dodam-vet-") as work:
         tests_dir = Path(work) / "tests"
@@ -107,7 +154,9 @@ def vet(task: Task, lang: str, out_dir: Path | str) -> list[dict]:
                     result.update(ok=False, skipped=True, problems=[f"not on this machine: {', '.join(missing)}"])
                     results.append(result)
                     continue
-                app_dir = materialize(task, variant, Path(work) / "apps" / step.name / variant.label)
+                solution = materialize(task, variant, Path(work) / "solutions" / step.name / variant.label)
+                app_dir = assemble_app(scaffold, language.deps_links, solution,
+                                       Path(work) / "apps" / step.name / variant.label)
                 started = time.monotonic()
                 judged = judge(tests_dir, app_dir, step.name, out_dir / step.name / variant.label,
                                lang_env=lang_env, extra_env=extra_env)

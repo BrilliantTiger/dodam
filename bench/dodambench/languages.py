@@ -5,6 +5,8 @@ browser screen; a task with a browser screen will add a full-stack choice when s
 Package rule: besides the framework and the SQLite driver, a language gets the most-used packages for
 what tasks require of it but its standard library lacks: a slow salted password hash, HMAC and
 secure random bytes. Versions are pinned by the language images; the names here are what agents are told.
+A language's starting /app lives in bench/images/<key>/app; deps_cmd installs its dependencies there,
+and deps_links names the installed folders that vetting links instead of copying.
 """
 from __future__ import annotations
 
@@ -20,6 +22,8 @@ class Language:
     packages: str
     build_cmd: str
     start_cmd: str
+    deps_cmd: str = ""
+    deps_links: tuple[str, ...] = ()
 
     @property
     def image(self) -> str:
@@ -35,7 +39,8 @@ LANGUAGES: dict[str, Language] = {lang.key: lang for lang in (
              "Write the sources in /app/src with the entry point /app/src/main.ts. "
              "/app/package.json and /app/tsconfig.json are set up; the build writes /app/dist.",
              "express and better-sqlite3 with their type packages, plus Node.js built-in modules",
-             "npm run build --silent", "node dist/main.js"),
+             "npm run build --silent", "node dist/main.js",
+             deps_cmd="npm ci --no-audit --no-fund --silent", deps_links=("node_modules",)),
     Language("java", "Java", "Spring Boot",
              "The Maven project is /app with pom.xml set up; write the sources under /app/src/main/java.",
              "the Spring Boot web starter and the SQLite JDBC driver, plus the Java standard library",
