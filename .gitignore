@@ -5,3 +5,10 @@ node_modules/
 
 # Large media stays out of git; the published page keeps the copy
 *.mp4
+
+# Plan tools: generated files
+tools/plan/wbs.json
+tools/plan/wbs_section.md
+tools/plan/page.html
+tools/plan/shots/
+tools/plan/__pycache__/
