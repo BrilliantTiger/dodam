@@ -137,3 +137,150 @@ old = '''    name = body.name.strip()
     if not valid_name(name):'''
 new = '''    name = body.name
     if not valid_name(name.strip()):'''
+
+[[variant]]
+name = "string-built-sql"
+lang = "typescript"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''db.prepare("INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)").run(email, name, passwordHash);'''
+new = '''db.prepare(`INSERT INTO users (email, name, password_hash) VALUES ('${email}', '${name}', '${passwordHash}')`).run();'''
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''db.prepare("SELECT id, password_hash FROM users WHERE email = ?").get(email.trim().toLowerCase())'''
+new = '''db.prepare(`SELECT id, password_hash FROM users WHERE email = '${email.trim().toLowerCase()}'`).get()'''
+
+[[variant]]
+name = "unsalted-sha256"
+lang = "typescript"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const digest = await scrypt(password, salt, 64, SCRYPT);
+  return `scrypt$${salt.toString("hex")}$${digest.toString("hex")}`;
+}
+
+async function passwordMatches(password: string, stored: string): Promise<boolean> {
+  const [, salt, digest] = stored.split("$");
+  const candidate = await scrypt(password, Buffer.from(salt, "hex"), 64, SCRYPT);
+  return timingSafeEqual(candidate, Buffer.from(digest, "hex"));
+}'''
+new = '''async function hashPassword(password: string): Promise<string> {
+  return createHash("sha256").update(password).digest("hex");
+}
+
+async function passwordMatches(password: string, stored: string): Promise<boolean> {
+  return (await hashPassword(password)) === stored;
+}'''
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''import { createHmac, randomBytes,'''
+new = '''import { createHash, createHmac, randomBytes,'''
+
+[[variant]]
+name = "unchecked-signature"
+lang = "typescript"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''  if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
+    return null;
+  }'''
+new = '''  void given;
+  void expected;'''
+
+[[variant]]
+name = "any-users-record"
+lang = "typescript"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''  const user = currentUser(req);
+  if (req.params.id !== String(user.id)) {
+    throw new HttpError(403, "not your account");
+  }
+  res.json(user);'''
+new = '''  currentUser(req);
+  const user = db.prepare("SELECT id, email, name FROM users WHERE id = ?").get(req.params.id) as User | undefined;
+  if (!user) {
+    throw new HttpError(404, "no such user");
+  }
+  res.json(user);'''
+
+[[variant]]
+name = "big-body-limit"
+lang = "typescript"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''app.use(express.json({ limit: 64 * 1024 }));'''
+new = '''app.use(express.json({ limit: "50mb" }));'''
+
+[[variant]]
+name = "register-says-200"
+lang = "typescript"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''res.status(201).json({ id: Number(result.lastInsertRowid) });'''
+new = '''res.json({ id: Number(result.lastInsertRowid) });'''
+
+[[variant]]
+name = "name-off-by-one"
+lang = "typescript"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''length(name) > 40'''
+new = '''length(name) > 41'''
+
+[[variant]]
+name = "logout-keeps-token"
+lang = "typescript"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''  db.prepare("INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES (?, ?)").run(session.jti, session.exp);
+'''
+new = '''  void session;
+'''
+
+[[variant]]
+name = "edit-not-trimmed"
+lang = "typescript"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''  const name = strings(req.body, ["name"]).name.trim();
+  if (!validName(name)) {'''
+new = '''  const name = strings(req.body, ["name"]).name;
+  if (!validName(name.trim())) {'''
