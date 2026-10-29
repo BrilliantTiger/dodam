@@ -2,7 +2,9 @@
 
 Framework rule: an HTTP API task uses the most-used server framework of the language that needs no
 browser screen; a task with a browser screen will add a full-stack choice when such tasks exist.
-Versions are pinned by the language images; the names here are what agents are told.
+Package rule: besides the framework and the SQLite driver, a language gets the most-used packages for
+what tasks require of it but its standard library lacks: a slow salted password hash, HMAC and
+secure random bytes. Versions are pinned by the language images; the names here are what agents are told.
 """
 from __future__ import annotations
 
@@ -48,10 +50,11 @@ LANGUAGES: dict[str, Language] = {lang.key: lang for lang in (
              "go build -o app .", "./app"),
     Language("rust", "Rust", "axum on tokio",
              "/app/Cargo.toml is set up with a binary named app; write the sources in /app/src.",
-             "axum, tokio, serde, serde_json and rusqlite, plus the Rust standard library",
+             "axum, tokio, serde, serde_json, rusqlite, argon2, hmac, sha2, rand and base64, "
+             "plus the Rust standard library",
              "cargo build --release --offline --quiet", "./target/release/app"),
     Language("cpp", "C++", "Drogon",
              "/app/CMakeLists.txt is set up with a target named app; write the sources in /app/src.",
-             "Drogon and SQLite3, plus the C++ standard library",
+             "Drogon, SQLite3 and OpenSSL, plus the C++ standard library",
              "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j", "./build/app"),
 )}
