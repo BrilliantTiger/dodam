@@ -10,3 +10,4 @@ judge = ["httpx>=0.28", "pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
