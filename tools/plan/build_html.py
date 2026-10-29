@@ -115,7 +115,7 @@ def gantt():
 def load_charts():
     return ("<div class=\"charts\">"
             "<figure class=\"bars\"><figcaption>소유자 시간(달마다, 시간)</figcaption><svg id=\"c-hours\" role=\"img\" aria-label=\"달마다 소유자 시간 막대 그래프\"></svg></figure>"
-            "<figure class=\"bars\"><figcaption>AI 작업 수요(개발 + 측정, 주 평균 작업일)</figcaption><svg id=\"c-agents\" role=\"img\" aria-label=\"달마다 AI 작업 수요 막대 그래프. 점선은 구독 용량 가정 주 30작업일과 15작업일\"></svg></figure>"
+            "<figure class=\"bars\"><figcaption>AI 작업 수요(개발 + 측정, 주 평균 작업일)</figcaption><svg id=\"c-agents\" role=\"img\" aria-label=\"달마다 AI 작업 수요 막대 그래프. 점선은 구독 용량 가정 주 15작업일(기준)과 10작업일(두 회사)\"></svg></figure>"
             "</div><div class=\"tip\" id=\"tip\" role=\"status\" hidden></div>")
 
 

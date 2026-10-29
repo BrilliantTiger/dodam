@@ -36,7 +36,8 @@ while changed:
                 changed = True
 save()
 txt = open('wbs_data.py', encoding='utf-8').read()
-txt = txt.replace('RELEASE_DATE = "2029-09-28"', f'RELEASE_DATE = "{A["rel_10"]["p50"]}"')
+import re
+txt = re.sub(r'RELEASE_DATE = "[0-9-]+"', f'RELEASE_DATE = "{A["rel_10"]["p50"]}"', txt)
 per = [("방향 고정", "2026-10-29", A['g_dir']['p50']), ("최소 언어", None, A['g_min']['p50']), ("AI 개선 루프와 첫 공개", None, A['rel_01']['p50']),
        ("실제로 쓰기", None, A['rel_03']['p50']), ("1.0", None, A['rel_10']['p50'])]
 lines, prev = [], None
@@ -44,7 +45,6 @@ for name, s, e in per:
     s = s or (D(prev) + dt.timedelta(days=1)).isoformat()
     lines.append(f'    {{"name": "{name}", "start": "{s}", "end": "{e}"}},')
     prev = e
-import re
 txt = re.sub(r'PERIODS = \[\n.*?\n\]', 'PERIODS = [\n' + '\n'.join(lines) + '\n]', txt, flags=re.S)
 open('wbs_data.py', 'w', encoding='utf-8').write(txt)
 print(txt.split('GROUPS')[0][-700:])

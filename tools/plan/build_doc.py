@@ -43,6 +43,11 @@ def kmonth(s):
     return f"{int(y)}년 {int(m)}월"
 
 
+def months_between(a, b):
+    """Whole months from date a to date b, rounded."""
+    return round((dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days / 30.44)
+
+
 def demand_weeks():
     dem = defaultdict(float)
     for it in ITEMS:
@@ -80,8 +85,18 @@ def stats():
         "need_avg": (ai + meas) / weeks, "need_peak_month": kmonth(peak_month + "-01"),
         "need_peak": sum(by_month[peak_month]) / len(by_month[peak_month]),
         "direct_total": direct, "direct_k": man(direct),
-        "subs_k": man(BY["pm_subs"]["cost_usd"]), "subs2_k": man(BY["pm_subs"]["cost_usd"] * 2),
-        "direct2_k": man(direct + BY["pm_subs"]["cost_usd"]),
+        "subs_k": man(BY["pm_subs"]["cost_usd"]), "infra_k": man(BY["pm_infra_run"]["cost_usd"]),
+        "sub_months": months_between("2026-11-01", ANCH["rel_10"]["p50"]),
+        "pilot_k": kdate(BY["b_pilot"]["start"]), "reforecast_k": kdate(BY["pm_reforecast"]["start"]),
+        "base_p2030": SC["계정 하나, 측정을 구독에 맞게 줄임"]["p_2030"],
+        "two_p50_k": kmonth(SC["두 회사, 측정을 구독에 맞게 줄임"]["rel_10"][1]),
+        "two_p80_k": kmonth(SC["두 회사, 측정을 구독에 맞게 줄임"]["rel_10"][2]),
+        "double_p50_k": kmonth(SC["용량 두 배, 측정을 구독에 맞게 줄임"]["rel_10"][1]),
+        "double_p80_k": kmonth(SC["용량 두 배, 측정을 구독에 맞게 줄임"]["rel_10"][2]),
+        "m_double": months_between(SC["용량 두 배, 측정을 구독에 맞게 줄임"]["rel_10"][1],
+                                   SC["계정 하나, 측정을 구독에 맞게 줄임"]["rel_10"][1]),
+        "m_two": months_between(SC["계정 하나, 측정을 구독에 맞게 줄임"]["rel_10"][1],
+                                SC["두 회사, 측정을 구독에 맞게 줄임"]["rel_10"][1]),
         "audit_k": man(BY["q_audit01"]["cost_usd"] + BY["q_audit"]["cost_usd"]),
         "rel_p50": ANCH["rel_10"]["p50"], "rel_p80": ANCH["rel_10"]["p80"], "rel_p10": ANCH["rel_10"]["p10"],
         "rel_p50_k": kdate(ANCH["rel_10"]["p50"]), "rel_p80_k": kdate(ANCH["rel_10"]["p80"]),
@@ -155,10 +170,13 @@ def forecast_rows():
     rows = [
         ["계획에 적은 길이 그대로(넘침 · 위험 없음, 용량 무제한)", *r(MC2, "용량 무제한 · 위험 없음 · 초과 없음(계획 그대로)")],
         ["용량 무제한, 넘침 · 위험은 있음", *r(MC2, "용량 무제한 · 위험과 초과는 그대로")],
-        ["구독이 주 약 30작업일을 낼 때(회사마다 둘, 또는 셋이 넉넉할 때)", *r(SC, "구독 여섯, 측정을 구독에 맞게 줄임")],
-        ["같은 조건 + 패키지 저장소 · LLVM 배포 빌드를 1.0 뒤로", *r(SC, "구독 여섯, 측정 줄임 + 저장소 · LLVM 1.0 뒤로")],
-        ["구독이 주 약 15작업일을 낼 때(회사마다 하나)", *r(SC, "구독 셋, 측정을 구독에 맞게 줄임")],
-        ["같은 조건, 측정을 헌장 원안 크기로", *r(SC, "구독 셋, 측정 원안")],
+        ["기준: 회사마다 계정 하나, 최상위 요금제(주 약 15작업일)", ANCH["rel_10"]["p50"], ANCH["rel_10"]["p80"],
+         *r(SC, "계정 하나, 측정을 구독에 맞게 줄임")[2:]],
+        ["같은 조건 + 패키지 저장소 · LLVM 배포 빌드를 1.0 뒤로", *r(SC, "계정 하나, 측정 줄임 + 저장소 · LLVM 1.0 뒤로")],
+        ["같은 조건, 측정을 헌장 원안 크기로", *r(SC, "계정 하나, 측정 원안")],
+        ["Google을 못 써서 두 회사(주 약 10작업일)", *r(SC, "두 회사, 측정을 구독에 맞게 줄임")],
+        ["용량이 기준의 두 배(주 약 30작업일)", *r(SC, "용량 두 배, 측정을 구독에 맞게 줄임")],
+        ["같은 조건 + 패키지 저장소 · LLVM 배포 빌드를 1.0 뒤로", *r(SC, "용량 두 배, 측정 줄임 + 저장소 · LLVM 1.0 뒤로")],
     ]
     return ["경우", "1.0 가운데 날짜", "80%가 끝나는 날", "2029-09-28까지 끝날 확률", "2030년 안에 끝날 확률"], rows
 

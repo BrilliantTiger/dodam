@@ -5,14 +5,15 @@ import montecarlo as M
 random.seed(11)
 LIGHT = dict(M.MEASURE, b_ref27=85, b_full28=75, b_final=140)  # measurement sized for subscriptions
 DEFER = ("p_reg", "k_llvm")                                      # registry and LLVM release builds after 1.0
-S3, S6 = list(M.SCEN)
+ONE, DOUBLE, TWO_COMPANIES = list(M.SCEN)
 rows = {}
 for label, scen, kw in [
-    ("구독 셋, 측정 원안", S3, {}),
-    ("구독 셋, 측정을 구독에 맞게 줄임", S3, dict(measure=LIGHT)),
-    ("구독 셋, 측정 줄임 + 저장소 · LLVM 1.0 뒤로", S3, dict(measure=LIGHT, defer=DEFER)),
-    ("구독 여섯, 측정을 구독에 맞게 줄임", S6, dict(measure=LIGHT)),
-    ("구독 여섯, 측정 줄임 + 저장소 · LLVM 1.0 뒤로", S6, dict(measure=LIGHT, defer=DEFER)),
+    ("계정 하나, 측정 원안", ONE, {}),
+    ("계정 하나, 측정을 구독에 맞게 줄임", ONE, dict(measure=LIGHT)),
+    ("계정 하나, 측정 줄임 + 저장소 · LLVM 1.0 뒤로", ONE, dict(measure=LIGHT, defer=DEFER)),
+    ("용량 두 배, 측정을 구독에 맞게 줄임", DOUBLE, dict(measure=LIGHT)),
+    ("용량 두 배, 측정 줄임 + 저장소 · LLVM 1.0 뒤로", DOUBLE, dict(measure=LIGHT, defer=DEFER)),
+    ("두 회사, 측정을 구독에 맞게 줄임", TWO_COMPANIES, dict(measure=LIGHT)),
 ]:
     r = MC.summary(scen, True, sims=1200, **kw)
     rows[label] = r

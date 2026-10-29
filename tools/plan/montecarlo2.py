@@ -178,8 +178,8 @@ if __name__ == "__main__":
     # what it takes: unlimited capacity, no risks, no overruns (the plan as written)
     for label, kw in [("용량 무제한 · 위험 없음 · 초과 없음(계획 그대로)", dict(cap_scale=100, risk_scale=0, over_scale=0)),
                       ("용량 무제한 · 위험과 초과는 그대로", dict(cap_scale=100)),
-                      ("구독 여섯 · 위험 절반", dict(risk_scale=0.5))]:
-        scen = list(M.SCEN)[1]
+                      ("계정 하나 · 위험 절반", dict(risk_scale=0.5))]:
+        scen = list(M.SCEN)[0]
         r = summary(scen, True, sims=max(500, N // 2), **kw)
         report[label] = r
         print(label, "1.0 P10/P50/P80/P90", r["rel_10"], f"P(<=2029-09-28) {r['p_target']:.1%}")

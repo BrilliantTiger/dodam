@@ -153,7 +153,7 @@
     });
   }
   bars('c-hours', P.hours, '시간');
-  bars('c-agents', P.demand, '작업일', [30, 15]);
+  bars('c-agents', P.demand, '작업일', [15, 10]);
 
   // ---- work breakdown filters
   const chips = [...document.querySelectorAll('.chip[data-period]')];

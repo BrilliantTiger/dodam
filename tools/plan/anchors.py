@@ -1,4 +1,4 @@
-"""Milestone dates (P50, P80) for the planning scenario: about 30 AI working days a week, measurement sized for subscriptions."""
+"""Milestone dates (P50, P80) for the planning scenario: one account per company (about 15 AI working days a week), measurement sized for subscriptions."""
 import random, json, sys, datetime as dt
 from collections import defaultdict
 sys.argv = [sys.argv[0], '2000']
@@ -10,7 +10,7 @@ ms = [i['id'] for i in MC.ITEMS if i.get('milestone')]
 res = defaultdict(list)
 S = 2000
 for _ in range(S):
-    r = MC.run(list(M.SCEN)[1], True, measure=LIGHT)
+    r = MC.run(list(M.SCEN)[0], True, measure=LIGHT)
     for m in ms:
         res[m].append(r[m] if r[m] is not None else MC.HORIZON)
 out = {}

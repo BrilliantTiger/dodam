@@ -4,7 +4,7 @@
 
 A general-purpose language that AI writes correctly and robustly: secure, fast to run and fast to compile. No human needs to read it: AI refines it for AI, and people look only at the result and a security report. Security is enforced by the compiler, and the rules only ever tighten. Its first domain is the web, with one codebase for server and browser.
 
-> **Status: design phase.** There is no compiler yet. The current work is the design itself and the benchmark that every design decision will be measured against. AI agents build the language as well; 1.0 is expected around December 2030 (median estimate).
+> **Status: design phase.** There is no compiler yet. The current work is the design itself and the benchmark that every design decision will be measured against. AI agents build the language as well; 1.0 is expected around February 2032 (median estimate).
 
 ## Why
 

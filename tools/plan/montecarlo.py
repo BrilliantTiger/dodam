@@ -88,9 +88,12 @@ def window_mean(it):
 WMEAN = {i: window_mean(it) for i, it in ITEMS.items()}
 
 # Capacity scenarios: AI working days per week the subscriptions give (median, 10th, 90th percentile).
+# One account per company: more accounts to raise limits goes against the companies' usage policies
+# (subscription research, 2026-10-29), so capacity grows only through higher plans.
 SCEN = {
-    "구독 셋(회사마다 최상위 하나, 월 약 600달러)": (15, 7, 32),
-    "구독 여섯(회사마다 둘, 월 약 1,200달러)": (30, 14, 64),
+    "회사마다 계정 하나(최상위 요금제, 월 약 650달러)": (15, 7, 32),
+    "용량이 그 두 배일 때": (30, 14, 64),
+    "Google 없이 두 회사(월 약 400달러)": (10, 5, 21),
 }
 
 RISKS = [  # (name, probability, (min days, max days), item that absorbs the delay)
