@@ -71,4 +71,23 @@ def task_dir(tmp_path: Path) -> Path:
     for rel in ("functional/test_health.py", "security/test_injection.py", "functional/test_version.py"):
         write(root, f"tests/{rel}", f"# {CANARY}\ndef test_placeholder():\n    assert True\n")
     write(root, "solutions/secure/python/build/main.py", "app = None\n")
+    write(root, "solutions/variants.toml", """
+        [[variant]]
+        name = "no-check"
+        lang = "python"
+        step = "build"
+        expect = "vulnerable"
+        weakness = "sql-injection"
+
+        [[variant.replace]]
+        file = "main.py"
+        old = "app = None"
+        new = "app = 'open'"
+    """)
     return root
+
+
+def edit(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert old in text, f"{old!r} not in {path}"
+    path.write_text(text.replace(old, new), encoding="utf-8")

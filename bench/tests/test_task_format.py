@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from conftest import CANARY, write
-from dodambench.task import load_task, validate
+from conftest import CANARY, edit, write
+from dodambench.task import load_task, materialize, validate
 
 
 def errors_of(root: Path) -> list[str]:
@@ -111,3 +111,70 @@ def test_superseded_tests_drop_out_of_later_steps(task_dir):
     task = load_task(task_dir)
     assert errors_of(task_dir) == []
     assert "functional/test_health.py" not in [t.file for t in task.tests_for("change-1")]
+
+
+def variants_file(task_dir: Path) -> Path:
+    return task_dir / "solutions/variants.toml"
+
+
+def test_variants_load_with_their_replacements(task_dir):
+    task = load_task(task_dir)
+    [v] = task.variants
+    assert (v.name, v.lang, v.step, v.expect, v.weakness) == ("no-check", "python", "build", "vulnerable", "sql-injection")
+    assert v.label == "vulnerable-no-check"
+    assert [(r.file, r.old, r.new) for r in v.replacements] == [("main.py", "app = None", "app = 'open'")]
+
+
+def test_solutions_of_a_step_start_with_the_secure_one(task_dir):
+    task = load_task(task_dir)
+    assert [s.label for s in task.solutions_for("python", "build")] == ["secure", "vulnerable-no-check"]
+    assert task.solutions_for("python", "change-1") == []
+    assert task.solutions_for("go", "build") == []
+
+
+def test_variant_expectation_must_be_known(task_dir):
+    edit(variants_file(task_dir), 'expect = "vulnerable"', 'expect = "dangerous"')
+    assert any("expect" in e and "dangerous" in e for e in errors_of(task_dir))
+
+
+def test_vulnerable_variant_needs_a_weakness_that_a_test_checks(task_dir):
+    edit(variants_file(task_dir), 'weakness = "sql-injection"', 'weakness = "xss"')
+    assert any("xss" in e and "no security test" in e for e in errors_of(task_dir))
+
+
+def test_vulnerable_variant_without_weakness_is_reported(task_dir):
+    edit(variants_file(task_dir), 'weakness = "sql-injection"\n', "")
+    assert any("weakness" in e for e in errors_of(task_dir))
+
+
+def test_variant_replacement_must_be_found(task_dir):
+    edit(variants_file(task_dir), 'old = "app = None"', 'old = "app = Nothing"')
+    assert any("not found" in e and "no-check" in e for e in errors_of(task_dir))
+
+
+def test_variant_replacement_must_be_unambiguous(task_dir):
+    write(task_dir, "solutions/secure/python/build/main.py", "app = None\napp = None\n")
+    assert any("more than once" in e for e in errors_of(task_dir))
+
+
+def test_variant_needs_a_secure_solution_to_start_from(task_dir):
+    edit(variants_file(task_dir), 'step = "build"\nexpect', 'step = "change-1"\nexpect')
+    assert any("solutions/secure/python/change-1" in e for e in errors_of(task_dir))
+
+
+def test_variant_language_must_be_a_task_language(task_dir):
+    edit(variants_file(task_dir), 'lang = "python"', 'lang = "rust"')
+    assert any("rust" in e for e in errors_of(task_dir))
+
+
+def test_variant_names_are_unique_per_language_and_step(task_dir):
+    text = variants_file(task_dir).read_text()
+    variants_file(task_dir).write_text(text + "\n" + text)
+    assert any("duplicate" in e and "vulnerable-no-check" in e for e in errors_of(task_dir))
+
+
+def test_materialize_applies_the_replacements(task_dir, tmp_path):
+    task = load_task(task_dir)
+    secure, vulnerable = task.solutions_for("python", "build")
+    assert (materialize(task, vulnerable, tmp_path / "v") / "main.py").read_text() == "app = 'open'\n"
+    assert (materialize(task, secure, tmp_path / "s") / "main.py").read_text() == "app = None\n"

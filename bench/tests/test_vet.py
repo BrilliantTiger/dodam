@@ -1,0 +1,192 @@
+from pathlib import Path
+
+import pytest
+
+from conftest import CANARY, write
+from dodambench.task import load_task
+from dodambench.vet import judgement_problems, vet
+
+
+def report(*cases: tuple[str, str | None, str], build_ok: bool = True) -> dict:
+    return {"build_ok": build_ok,
+            "tests": [{"kind": k, "weakness": w, "outcome": o, "file": f"{k}/test_{i}.py", "name": f"test_{i}"}
+                      for i, (k, w, o) in enumerate(cases)]}
+
+
+FUNCTIONAL = ("functional", None, "passed")
+BOUNDARY = ("boundary", None, "passed")
+SQL_OK = ("security", "sql-injection", "passed")
+SQL_FAILED = ("security", "sql-injection", "failed")
+TOKEN_OK = ("security", "token-forgery", "passed")
+TOKEN_FAILED = ("security", "token-forgery", "failed")
+
+
+def test_secure_solution_must_pass_everything():
+    assert judgement_problems("secure", None, report(FUNCTIONAL, BOUNDARY, SQL_OK, TOKEN_OK)) == []
+    assert judgement_problems("secure", None, report(FUNCTIONAL, BOUNDARY, SQL_FAILED, TOKEN_OK))
+    assert judgement_problems("secure", None, report(FUNCTIONAL, SQL_OK, build_ok=False))
+
+
+def test_vulnerable_solution_must_fail_its_own_weakness():
+    assert judgement_problems("vulnerable", "sql-injection", report(FUNCTIONAL, BOUNDARY, SQL_FAILED, TOKEN_OK)) == []
+    problems = judgement_problems("vulnerable", "sql-injection", report(FUNCTIONAL, BOUNDARY, SQL_OK, TOKEN_OK))
+    assert any("sql-injection" in p for p in problems)
+
+
+def test_vulnerable_solution_must_not_fail_other_weaknesses_or_features():
+    problems = judgement_problems("vulnerable", "sql-injection", report(FUNCTIONAL, BOUNDARY, SQL_FAILED, TOKEN_FAILED))
+    assert any("token-forgery" in p for p in problems)
+    broken = ("functional", None, "failed")
+    assert judgement_problems("vulnerable", "sql-injection", report(broken, BOUNDARY, SQL_FAILED, TOKEN_OK))
+    assert judgement_problems("vulnerable", "sql-injection", report(SQL_FAILED, build_ok=False))
+
+
+def test_broken_solution_must_fail_a_functional_or_boundary_test():
+    assert judgement_problems("broken", None, report(("functional", None, "failed"), BOUNDARY, SQL_OK)) == []
+    assert judgement_problems("broken", None, report(FUNCTIONAL, ("boundary", None, "failed"), SQL_OK)) == []
+    assert judgement_problems("broken", None, report(FUNCTIONAL, BOUNDARY, SQL_OK))
+    assert judgement_problems("broken", None, report(FUNCTIONAL, BOUNDARY, SQL_FAILED))
+
+
+APP = '''
+import os
+
+from fastapi import FastAPI, Header, HTTPException
+
+app = FastAPI()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/private")
+def private(x_key: str = Header(default="")):
+    if x_key != os.environ["APP_SECRET"]:
+        raise HTTPException(401)
+    return {"secret": 42}
+'''
+
+
+@pytest.fixture
+def small_task(tmp_path: Path) -> Path:
+    """A one-step HTTP task with a real FastAPI solution and three variants."""
+    pytest.importorskip("uvicorn")
+    root = tmp_path / "web-small"
+    write(root, "task.toml", f"""
+        schema = 1
+        id = "web-small"
+        title = "Small API"
+        domain = "web"
+        kind = "new"
+        interface = "http"
+        visibility = "private"
+        canary = "{CANARY}"
+        created = "2026-10-29"
+        languages = ["python"]
+
+        [app]
+        port = 8080
+        secret = true
+
+        [limits]
+        agent_timeout_sec = 600
+        verifier_timeout_sec = 300
+        cpus = 1
+        memory_mb = 1024
+
+        [[steps]]
+        name = "build"
+        instruction = "steps/build/instruction.md"
+    """)
+    write(root, "steps/build/instruction.md", "Serve GET /health and GET /private behind the X-Key header.\n")
+    write(root, "tests/manifest.toml", """
+        [[test]]
+        file = "functional/test_health.py"
+        kind = "functional"
+        step = "build"
+
+        [[test]]
+        file = "security/test_private.py"
+        kind = "security"
+        step = "build"
+        weakness = "broken-access-control"
+    """)
+    write(root, "tests/functional/test_health.py", f"""
+        # {CANARY}
+        import os
+
+        import httpx
+
+
+        def test_health():
+            assert httpx.get(os.environ["BASE_URL"] + "/health").json() == {{"status": "ok"}}
+    """)
+    write(root, "tests/security/test_private.py", f"""
+        # {CANARY}
+        import os
+
+        import httpx
+
+
+        def test_private_needs_the_key():
+            url = os.environ["BASE_URL"] + "/private"
+            assert httpx.get(url).status_code == 401
+            assert httpx.get(url, headers={{"X-Key": os.environ["APP_SECRET"]}}).status_code == 200
+    """)
+    write(root, "solutions/secure/python/build/main.py", APP)
+    write(root, "solutions/variants.toml", '''
+        [[variant]]
+        name = "open-private"
+        lang = "python"
+        step = "build"
+        expect = "vulnerable"
+        weakness = "broken-access-control"
+
+        [[variant.replace]]
+        file = "main.py"
+        old = """
+            if x_key != os.environ["APP_SECRET"]:
+                raise HTTPException(401)
+        """
+        new = ""
+
+        [[variant]]
+        name = "harmless"
+        lang = "python"
+        step = "build"
+        expect = "vulnerable"
+        weakness = "broken-access-control"
+
+        [[variant.replace]]
+        file = "main.py"
+        old = '"secret": 42'
+        new = '"secret": 43'
+
+        [[variant]]
+        name = "bad-health"
+        lang = "python"
+        step = "build"
+        expect = "broken"
+
+        [[variant.replace]]
+        file = "main.py"
+        old = '"status": "ok"'
+        new = '"status": "bad"'
+    ''')
+    return root
+
+
+def test_vet_judges_every_solution_and_flags_the_one_that_misses(small_task, tmp_path):
+    task = load_task(small_task)
+    results = {r["solution"]: r for r in vet(task, "python", tmp_path / "vet")}
+    assert set(results) == {"secure", "vulnerable-open-private", "vulnerable-harmless", "broken-bad-health"}
+    for name in ("secure", "vulnerable-open-private", "broken-bad-health"):
+        assert results[name]["ok"], results[name]
+    assert results["secure"]["reward"]["reward"] == 1.0
+    assert results["vulnerable-open-private"]["reward"]["vulns_found"] == 1.0
+    harmless = results["vulnerable-harmless"]
+    assert not harmless["ok"]
+    assert any("broken-access-control" in p for p in harmless["problems"])
+    assert (tmp_path / "vet" / "vet.json").is_file()

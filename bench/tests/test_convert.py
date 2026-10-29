@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from conftest import CANARY
-from dodambench.convert import ConversionError, to_harbor
+from dodambench.convert import ConversionError, to_harbor, verifier_env
 from dodambench.languages import LANGUAGES
 from dodambench.task import load_task
 
@@ -77,3 +77,18 @@ def test_invalid_task_is_refused(task_dir, tmp_path):
     (task_dir / "steps/change-1/instruction.md").unlink()
     with pytest.raises(ConversionError):
         to_harbor(load_task(task_dir), "python", tmp_path / "out")
+
+
+def test_variants_are_written_with_their_replacements(task_dir, tmp_path):
+    out = to_harbor(load_task(task_dir), "python", tmp_path / "out")
+    variants = out / "steps/build/solution/variants"
+    assert (variants / "secure/main.py").read_text() == "app = None\n"
+    assert (variants / "vulnerable-no-check/main.py").read_text() == "app = 'open'\n"
+    assert not (out / "steps/change-1/solution/variants").exists()
+
+
+def test_verifier_env_lists_steps_and_commands(task_dir):
+    env = verifier_env(load_task(task_dir), "go")
+    assert env["STEPS"] == "build,change-1"
+    assert env["BUILD_CMD"] == LANGUAGES["go"].build_cmd and env["START_CMD"] == LANGUAGES["go"].start_cmd
+    assert env["PORT"] == "8080"
