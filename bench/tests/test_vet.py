@@ -198,3 +198,37 @@ def test_unjudged_tests_count_against_secure_and_vulnerable_solutions():
     assert any("unjudged" in p
                for p in judgement_problems("vulnerable", "sql-injection", report(FUNCTIONAL, SQL_FAILED, unjudged)))
     assert judgement_problems("broken", None, report(("functional", None, "failed"), unjudged)) == []
+
+
+def test_assemble_app_overlays_the_solution_on_the_scaffold_and_links_dependencies(tmp_path):
+    from dodambench.vet import assemble_app
+    scaffold = tmp_path / "scaffold"
+    write(scaffold, "package.json", '{"name": "app"}\n')
+    write(scaffold, "tsconfig.json", "{}\n")
+    write(scaffold, "node_modules/left-pad/index.js", "module.exports = 1\n")
+    write(scaffold, ".ready", "")
+    solution = tmp_path / "solution"
+    write(solution, "src/main.ts", "console.log(1)\n")
+    write(solution, "tsconfig.json", '{"strict": true}\n')
+    app = assemble_app(scaffold, ("node_modules",), solution, tmp_path / "app")
+    assert (app / "node_modules").is_symlink() and (app / "node_modules/left-pad/index.js").is_file()
+    assert (app / "package.json").read_text() == '{"name": "app"}\n'
+    assert (app / "tsconfig.json").read_text() == '{"strict": true}\n'
+    assert (app / "src/main.ts").is_file() and not (app / ".ready").exists()
+
+
+def test_scaffold_is_prepared_once_per_content(tmp_path):
+    from dodambench.languages import Language
+    from dodambench.vet import scaffold_cache
+    lang = Language("demo", "Demo", "none", "", "", "", "./run", deps_cmd="echo x >> installs && mkdir -p deps",
+                    deps_links=("deps",))
+    root = tmp_path / "images"
+    write(root, "demo/app/app.cfg", "a = 1\n")
+    first = scaffold_cache(lang, tmp_path / "cache", root)
+    second = scaffold_cache(lang, tmp_path / "cache", root)
+    assert first == second and (first / "deps").is_dir()
+    assert (first / "installs").read_text() == "x\n"
+    write(root, "demo/app/app.cfg", "a = 2\n")
+    third = scaffold_cache(lang, tmp_path / "cache", root)
+    assert third != first and (third / "app.cfg").read_text() == "a = 2\n"
+    assert scaffold_cache(Language("none", "", "", "", "", "", ""), tmp_path / "cache", root) is None
