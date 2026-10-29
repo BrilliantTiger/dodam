@@ -154,9 +154,11 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     shared_up = False
     for t in selected:
         path = tests_dir / t["file"]
+        # a program that does not build or start fails its features but shows no weakness
+        not_run = "skipped" if t.get("kind") == "security" else "failed"
         cases: list[dict]
         if not report["build_ok"]:
-            cases = [{"name": path.name, "outcome": "failed", "message": "build failed"}]
+            cases = [{"name": path.name, "outcome": not_run, "message": "build failed"}]
         else:
             fresh = t.get("fresh_app")
             if fresh or not shared_up or not app.alive():
@@ -165,7 +167,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             else:
                 up = True
             if not up:
-                cases = [{"name": path.name, "outcome": "failed", "message": "program did not start"}]
+                cases = [{"name": path.name, "outcome": not_run, "message": "program did not start"}]
             else:
                 env = {**app.env, "BASE_URL": f"http://127.0.0.1:{port}", "DODAM_APP_DIR": str(app_dir)}
                 junit = out_dir / ("junit-" + t["file"].replace("/", "-") + ".xml")
