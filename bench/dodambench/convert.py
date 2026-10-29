@@ -11,7 +11,7 @@ import stat
 from pathlib import Path
 
 from .languages import LANGUAGES, Language
-from .task import Task, validate
+from .task import Task, materialize, validate
 
 JUDGE_SOURCE = Path(__file__).with_name("judge.py")
 
@@ -56,22 +56,16 @@ def agent_instruction(task: Task, step_text: str, lang: Language) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _solution_variants(task: Task, lang: str, step: str) -> dict[str, Path]:
-    found: dict[str, Path] = {}
-    base = task.root / "solutions"
-    secure = base / "secure" / lang / step
-    if secure.is_dir():
-        found["secure"] = secure
-    for group in ("vulnerable", "broken"):
-        for case in sorted((base / group).glob("*")) if (base / group).is_dir() else []:
-            path = case / lang / step
-            if path.is_dir():
-                found[f"{group}-{case.name}"] = path
-    return found
+def verifier_env(task: Task, lang_key: str) -> dict[str, str]:
+    """What the judge needs to know about the task and the language, written to tests/lang.env."""
+    lang, app = LANGUAGES[lang_key], task.app
+    return {"STEPS": ",".join(s.name for s in task.steps), "BUILD_CMD": lang.build_cmd,
+            "START_CMD": lang.start_cmd, "PORT": str(app.get("port", 8080)),
+            "APP_DB": "1" if app.get("db") else "0", "APP_SECRET_NEEDED": "1" if app.get("secret") else "0"}
 
 
 SOLVE_SH = """#!/bin/sh
-# Copy one prepared solution into /app. SOLUTION picks it: secure (default), vulnerable-<weakness>, broken-<case>.
+# Copy one prepared solution into /app. SOLUTION picks it: secure (default), vulnerable-<name> or broken-<name>.
 set -eu
 variant="${SOLUTION:-secure}"
 here="$(dirname "$0")"
@@ -140,18 +134,15 @@ def to_harbor(task: Task, lang_key: str, out_root: Path | str, image: str | None
         (sdir / "tests" / "step.env").write_text(f"DODAM_STEP={step.name}\n", encoding="utf-8")
         soldir = sdir / "solution"
         soldir.mkdir()
-        for name, src in _solution_variants(task, lang_key, step.name).items():
-            shutil.copytree(src, soldir / "variants" / name)
+        for variant in task.solutions_for(lang_key, step.name):
+            materialize(task, variant, soldir / "variants" / variant.label)
         _executable(soldir / "solve.sh", SOLVE_SH)
 
     tests = out / "tests"
-    shutil.copytree(task.root / "tests", tests)
+    shutil.copytree(task.root / "tests", tests, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
     (tests / "lib").mkdir(exist_ok=True)
     shutil.copy(JUDGE_SOURCE, tests / "lib" / "dodam_judge.py")
-    app = task.app
-    env = [f"STEPS={','.join(s.name for s in task.steps)}",
-           f"BUILD_CMD={lang.build_cmd}", f"START_CMD={lang.start_cmd}", f"PORT={app.get('port', 8080)}",
-           f"APP_DB={'1' if app.get('db') else '0'}", f"APP_SECRET_NEEDED={'1' if app.get('secret') else '0'}"]
-    (tests / "lang.env").write_text("\n".join(env) + "\n", encoding="utf-8")
+    env = verifier_env(task, lang_key)
+    (tests / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
     _executable(tests / "test.sh", TEST_SH)
     return out

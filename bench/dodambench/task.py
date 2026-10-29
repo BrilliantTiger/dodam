@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ KINDS = {"new", "add-feature", "schema-change", "concurrency", "package-lure"}
 INTERFACES = {"http", "cli", "file"}
 VISIBILITY = {"public", "private"}
 TEST_KINDS = ("functional", "boundary", "security")
+EXPECTATIONS = ("secure", "vulnerable", "broken")
 WEAKNESSES = {
     "sql-injection", "xss", "command-injection", "code-injection", "path-traversal", "ssrf",
     "broken-access-control", "broken-authentication", "token-forgery", "plaintext-credentials",
@@ -43,6 +45,28 @@ class TestFile:
     superseded_in: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class Replacement:
+    file: str
+    old: str
+    new: str
+
+
+@dataclass(frozen=True)
+class Variant:
+    """A prepared solution of one language and step: the secure one, or exact replacements on it."""
+    name: str
+    lang: str
+    step: str
+    expect: str
+    weakness: str | None = None
+    replacements: tuple[Replacement, ...] = ()
+
+    @property
+    def label(self) -> str:
+        return self.expect if not self.name else f"{self.expect}-{self.name}"
+
+
 @dataclass
 class Task:
     root: Path
@@ -50,6 +74,8 @@ class Task:
     steps: list[Step]
     tests: list[TestFile]
     manifest_problem: str | None
+    variants: list[Variant]
+    variants_problem: str | None
 
     @property
     def id(self) -> str:
@@ -81,6 +107,30 @@ class Task:
         return [t for t in self.tests
                 if t.step in names and names.index(t.step) <= upto and step not in t.superseded_in]
 
+    def secure_dir(self, lang: str, step: str) -> Path:
+        return self.root / "solutions" / "secure" / lang / step
+
+    def solutions_for(self, lang: str, step: str) -> list[Variant]:
+        """The secure solution of a language and step, then its variants; empty when there is no secure one."""
+        if not self.secure_dir(lang, step).is_dir():
+            return []
+        return [Variant("", lang, step, "secure")] + [v for v in self.variants if v.lang == lang and v.step == step]
+
+
+def _load_variants(path: Path) -> tuple[list[Variant], str | None]:
+    if not path.is_file():
+        return [], None
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [], f"solutions/variants.toml: {exc}"
+    variants = []
+    for v in data.get("variant", []):
+        reps = tuple(Replacement(r.get("file", ""), r.get("old", ""), r.get("new", "")) for r in v.get("replace", []))
+        variants.append(Variant(str(v.get("name", "")), str(v.get("lang", "")), str(v.get("step", "")),
+                                str(v.get("expect", "")), v.get("weakness"), reps))
+    return variants, None
+
 
 def load_task(root: Path | str) -> Task:
     root = Path(root)
@@ -100,7 +150,23 @@ def load_task(root: Path | str) -> Task:
                 superseded_in=tuple(t.get("superseded_in", ()))))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         problem = f"tests/manifest.toml: {exc}"
-    return Task(root, meta, steps, tests, problem)
+    variants, variants_problem = _load_variants(root / "solutions" / "variants.toml")
+    return Task(root, meta, steps, tests, problem, variants, variants_problem)
+
+
+def materialize(task: Task, variant: Variant, dest: Path | str) -> Path:
+    """Write a prepared solution to dest: a copy of the secure solution with the variant's replacements applied."""
+    dest = Path(dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(task.secure_dir(variant.lang, variant.step), dest)
+    for r in variant.replacements:
+        path = dest / r.file
+        text = path.read_text(encoding="utf-8")
+        if text.count(r.old) != 1:
+            raise TaskError(f"variant {variant.label}: the text to replace in {r.file} must occur exactly once")
+        path.write_text(text.replace(r.old, r.new), encoding="utf-8")
+    return dest
 
 
 def _agent_visible_files(task: Task) -> list[Path]:
@@ -160,6 +226,7 @@ def validate(task: Task) -> list[str]:
                 where = "spec" if rel.parts[0] == "spec" else "instruction"
                 errors.append(f"{rel}: the canary must not appear in an agent {where} file")
 
+    errors += _variant_errors(task, names)
     if task.manifest_problem:
         errors.append(task.manifest_problem)
         return errors
@@ -189,4 +256,51 @@ def validate(task: Task) -> list[str]:
                 rel = str(path.relative_to(task.root / "tests"))
                 if rel not in listed:
                     errors.append(f"tests/{rel} is not listed in tests/manifest.toml")
+    return errors
+
+
+def _variant_errors(task: Task, step_names: list[str]) -> list[str]:
+    if task.variants_problem:
+        return [task.variants_problem]
+    errors: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    where = "solutions/variants.toml"
+    for v in task.variants:
+        label = v.label
+        if not SLUG.match(v.name):
+            errors.append(f"{where}: variant name {v.name!r} must be lowercase words joined by hyphens")
+        if v.expect not in EXPECTATIONS:
+            errors.append(f"{where}: variant {v.name} expect {v.expect!r} must be one of {list(EXPECTATIONS)}")
+        if v.lang not in task.languages:
+            errors.append(f"{where}: variant {v.name} language {v.lang} is not a language of this task")
+        if v.step not in step_names:
+            errors.append(f"{where}: variant {v.name} step {v.step} is not a step of this task")
+            continue
+        key = (v.lang, v.step, label)
+        if key in seen:
+            errors.append(f"{where}: duplicate variant {label} for {v.lang} at step {v.step}")
+        seen.add(key)
+        if v.expect == "vulnerable":
+            if v.weakness not in WEAKNESSES:
+                errors.append(f"{where}: vulnerable variant {v.name} needs a known weakness, got {v.weakness!r}")
+            elif task.manifest_problem is None and not any(
+                    t.kind == "security" and t.weakness == v.weakness for t in task.tests_for(v.step)):
+                errors.append(f"{where}: variant {v.name} is vulnerable to {v.weakness}, "
+                              f"but no security test checks {v.weakness} at step {v.step}")
+        base = task.secure_dir(v.lang, v.step)
+        if not base.is_dir():
+            errors.append(f"{where}: variant {v.name} needs {base.relative_to(task.root)} to start from")
+            continue
+        if not v.replacements:
+            errors.append(f"{where}: variant {v.name} has no replacements")
+        for r in v.replacements:
+            path = base / r.file
+            if not r.file or not path.is_file():
+                errors.append(f"{where}: variant {v.name} replaces text in {r.file!r}, which the secure solution lacks")
+                continue
+            count = path.read_text(encoding="utf-8").count(r.old) if r.old else 0
+            if count == 0:
+                errors.append(f"{where}: variant {v.name}: text to replace not found in {r.file}")
+            elif count > 1:
+                errors.append(f"{where}: variant {v.name}: text to replace occurs more than once in {r.file}")
     return errors
