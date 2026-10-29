@@ -19,7 +19,35 @@
 
 - [ ] **11월 첫 주** — 구독 결제: Claude Max 20x(월 200달러)와 ChatGPT Pro(월 200달러), 회사마다 계정 하나. Google AI Ultra는 아직 사지 않는다(아래 문의 답을 받은 뒤)
 - [ ] **11월 첫 주** — 두 계정 설정: claude.ai 개인정보 설정에서 대화를 학습에 쓰지 않게 하고 추가 사용 과금(usage credits)을 끈다. ChatGPT 설정에서 "Improve the model for everyone"을 끄고, Codex 설정의 "Include environments"도 끈다
-- [ ] **11월 첫 주** — Google에 자동 실행 문의 보내기: `docs/briefing/2026-10-29-google-inquiry.ko.md`의 영어 글을 Google AI 개발자 포럼의 Antigravity 게시판에 올린다(Google One 회원이면 고객센터 채팅에도)
+- [ ] **11월 첫 주** — Google에 자동 실행 문의 보내기. Google AI 개발자 포럼(https://discuss.ai.google.dev)의 Google Antigravity 게시판에 아래 영어 글을 새 글로 올린다(공식 이메일 창구는 없다). Google One 회원이면 고객센터 채팅(https://one.google.com/support)에도 보내고 문의 번호를 적어 둔다. 허락을 글로 받기 전에는 Google AI Ultra를 사지 않는다. 4주 안에 답이 없거나 안 된다고 하면 Google 개인 요금제는 쓰지 않는다
+
+  <details><summary>보낼 글(영어)</summary>
+
+  **Subject:** Is unattended use of Antigravity CLI (`agy -p`) on a Google AI Ultra plan allowed for an open-source benchmark?
+
+  Hello,
+
+  I plan to subscribe to Google AI Ultra for an open-source research project, Dodam, a new programming language. Before I buy, I would like a written answer, because the documentation leaves my case open.
+
+  What we would do:
+
+  - Run the official, unmodified Antigravity CLI in headless mode (`agy -p ...`) on a private server that I own, signed in with my own single Google AI Ultra account. No account sharing, no account rotation, no second account.
+  - Each run asks the CLI to write one small program, such as a sign-up API, in one of seven languages. The program is then tested in a separate container that has no credentials.
+  - Runs are sequential, at most a few hundred a month, within the plan's normal limits. Overage credits stay off.
+  - Our own scripts start a container, run `agy -p` in it and collect the files it wrote. We may use the open-source evaluation harness Harbor to start that container. The Antigravity CLI is the only program that talks to Google's service.
+  - We would publish scores per language, with the CLI version, model name and date. We would not use any output to train other models.
+
+  Questions:
+
+  1. Is this allowed under the Google AI Ultra plan and the Antigravity terms? Your FAQ says headless mode "is intended for direct scripting and CI workflows" and that "wrapping `agy` inside third-party coding agents or applications ... is not supported under consumer plans". Does running `agy -p` from our own scripts, or from a harness that only starts the container, count as wrapping?
+  2. If it is allowed, what is the supported way to sign in inside a Linux container that has no desktop keyring?
+  3. If it is not allowed on Google AI Ultra, which Google plan supports this use without API keys?
+
+  Thank you,
+  [name]
+
+  </details>
+
 - [ ] **11월 첫 주** — GitHub 조직 `dodam-lang` 만들기(https://github.com/organizations/new), 도메인 `dodam-lang.org` 사기
 - [ ] **11월 중** — 성능 측정 전용 서버 결제(한 달 약 330유로)
 - [ ] **2027년 1월 말까지** — 변리사 상표 의견 받기(한국에 'DoDam' 2025-12-15 출원, '(주)도담솔루션' 등록이 있다)
