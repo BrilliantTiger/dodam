@@ -19,7 +19,7 @@
 
 - [ ] **11월 첫 주** — 구독 결제: Claude Max 20x(월 200달러)와 ChatGPT Pro(월 200달러), 회사마다 계정 하나. Google AI Ultra는 아직 사지 않는다(아래 문의 답을 받은 뒤)
 - [ ] **11월 첫 주** — 두 계정 설정: claude.ai 개인정보 설정에서 대화를 학습에 쓰지 않게 하고 추가 사용 과금(usage credits)을 끈다. ChatGPT 설정에서 "Improve the model for everyone"을 끄고, Codex 설정의 "Include environments"도 끈다
-- [ ] **11월 첫 주** — Google에 서면 문의 보내기(초안은 AI가 쓴다): 자동 실행으로 벤치마크를 돌려도 되는지
+- [ ] **11월 첫 주** — Google에 자동 실행 문의 보내기: `docs/briefing/2026-10-29-google-inquiry.ko.md`의 영어 글을 Google AI 개발자 포럼의 Antigravity 게시판에 올린다(Google One 회원이면 고객센터 채팅에도)
 - [ ] **11월 첫 주** — GitHub 조직 `dodam-lang` 만들기(https://github.com/organizations/new), 도메인 `dodam-lang.org` 사기
 - [ ] **11월 중** — 성능 측정 전용 서버 결제(한 달 약 330유로)
 - [ ] **2027년 1월 말까지** — 변리사 상표 의견 받기(한국에 'DoDam' 2025-12-15 출원, '(주)도담솔루션' 등록이 있다)
