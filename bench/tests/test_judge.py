@@ -69,3 +69,28 @@ def test_security_test_whose_precondition_fails_is_unjudged_not_a_vulnerability(
     assert r["reward"] == 0.0
     written = json.loads((tmp_path / "out" / "reward.json").read_text())
     assert written == r and all(isinstance(v, float) for v in written.values())
+
+
+def test_program_that_does_not_start_fails_features_and_leaves_security_unjudged(tmp_path: Path):
+    tests = tmp_path / "tests"
+    write(tests, "manifest.toml", """
+        [[test]]
+        file = "functional/test_health.py"
+        kind = "functional"
+        step = "build"
+
+        [[test]]
+        file = "security/test_forgery.py"
+        kind = "security"
+        step = "build"
+        weakness = "token-forgery"
+    """)
+    write(tests, "functional/test_health.py", "def test_health():\n    assert True\n")
+    write(tests, "security/test_forgery.py", "def test_forgery():\n    assert True\n")
+    app = tmp_path / "app"
+    write(app, "main.py", "raise SystemExit(3)\n")
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    r = judge(tests, app, "build", tmp_path / "out", lang_env=env)["reward"]
+    assert r["functional_pass_rate"] == 0.0 and r["functional_judged"] == 1.0
+    assert r["vulns_found"] == 0.0 and r["unjudged"] == 1.0
+    assert r["reward"] == 0.0
