@@ -1,0 +1,1776 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"></head><body>
+<title>도담 설계 브리핑</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="도담 언어 설계 조사, 만들 언어의 모양, 실제 코드 조사 방법, 2029년 1.0까지의 계획">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Nanum+Gothic+Coding:wght@400;700&display=swap">
+<style>
+/* Layout: a 16:9 motion-graphics stage (a fixed 1920x1080 canvas scaled to fit) leads the page;
+   below it one reading column (max 72rem) whose two-up figure rows stack under 760px.
+   The stage keeps one night-screen palette in both themes, like a video frame; the document follows the viewer's theme.
+   Identity: 쪽빛(indigo) for what Dodam guarantees, 주홍(vermilion) for what breaks, on cool paper. */
+:root{
+  --bg:#f3f5f4; --surface:#fbfcfb; --ink:#132320; --ink-2:#44544f; --muted:#5f6c67; --rule:#d6deda;
+  --accent:#2f4fa2; --accent-ink:#2f4fa2; --accent-soft:#e6eaf6;
+  --danger:#c2412a; --safe:#1e7a5f;
+  --chart-1:#2f4fa2; --chart-2:#b8790a; --chart-mute:#bac4c0; --grid:#e3e8e5; --axis:#c3ccc8;
+  --code-bg:#eef2f0; --code-num:#8a5a00;
+  --font-display:"Black Han Sans","IBM Plex Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --font-body:"IBM Plex Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono","Nanum Gothic Coding",ui-monospace,Menlo,Consolas,monospace;
+  /* stage: fixed night-screen palette (same in both themes) */
+  --s-bg:#0d1322; --s-panel:#141c30; --s-panel-2:#1a2440; --s-ink:#eef2fa; --s-ink-2:#aeb8cf; --s-muted:#8792b0; --s-rule:#26304a;
+  --s-accent:#8ea8ff; --s-accent-soft:rgba(142,168,255,.14); --s-c1:#6a86e0; --s-c2:#c4861a; --s-mute:#36405a;
+  --s-danger:#ff7a5c; --s-danger-soft:rgba(255,122,92,.18); --s-safe:#4ccba4; --s-code:#0a0f1c; --s-num:#e0a640;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1614; --surface:#141e1c; --ink:#e6edea; --ink-2:#b3c0bb; --muted:#8c9a95; --rule:#25322e;
+    --accent:#6a86e0; --accent-ink:#93a9f0; --accent-soft:#1c2540;
+    --danger:#f07a5e; --safe:#55c4a0;
+    --chart-1:#6a86e0; --chart-2:#c4861a; --chart-mute:#3b4945; --grid:#1f2b28; --axis:#33413d;
+    --code-bg:#101a18; --code-num:#d9a13a;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1614; --surface:#141e1c; --ink:#e6edea; --ink-2:#b3c0bb; --muted:#8c9a95; --rule:#25322e;
+  --accent:#6a86e0; --accent-ink:#93a9f0; --accent-soft:#1c2540;
+  --danger:#f07a5e; --safe:#55c4a0;
+  --chart-1:#6a86e0; --chart-2:#c4861a; --chart-mute:#3b4945; --grid:#1f2b28; --axis:#33413d;
+  --code-bg:#101a18; --code-num:#d9a13a;
+  color-scheme:dark;
+}
+html,body{background:var(--bg)}
+body{color:var(--ink);font-family:var(--font-body);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+a{color:var(--accent-ink);text-underline-offset:.18em}
+a:focus-visible,button:focus-visible,[tabindex]:focus-visible,summary:focus-visible{outline:2px solid var(--accent-ink);outline-offset:2px}
+
+.page{padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 96px}
+.wrap{max-width:72rem;margin:0 auto}
+
+/* ---------- shared diagram/chart tokens ---------- */
+.stage{--dg-bg:var(--s-bg);--dg-panel:var(--s-panel);--dg-panel-2:var(--s-panel-2);--dg-ink:var(--s-ink);--dg-ink-2:var(--s-ink-2);--dg-muted:var(--s-muted);--dg-rule:var(--s-rule);--dg-axis:var(--s-rule);--dg-grid:#1b2440;--dg-accent:var(--s-accent);--dg-accent-soft:var(--s-accent-soft);--dg-c1:var(--s-c1);--dg-c2:var(--s-c2);--dg-mute:var(--s-mute);--dg-danger:var(--s-danger);--dg-danger-soft:var(--s-danger-soft);--dg-safe:var(--s-safe);--dg-code:var(--s-code);--dg-num:var(--s-num)}
+.doc{--dg-bg:var(--surface);--dg-panel:var(--surface);--dg-panel-2:var(--accent-soft);--dg-ink:var(--ink);--dg-ink-2:var(--ink-2);--dg-muted:var(--muted);--dg-rule:var(--rule);--dg-axis:var(--axis);--dg-grid:var(--grid);--dg-accent:var(--accent-ink);--dg-accent-soft:var(--accent-soft);--dg-c1:var(--chart-1);--dg-c2:var(--chart-2);--dg-mute:var(--chart-mute);--dg-danger:var(--danger);--dg-danger-soft:color-mix(in srgb,var(--danger) 14%,transparent);--dg-safe:var(--safe);--dg-code:var(--code-bg);--dg-num:var(--code-num)}
+
+/* ---------- header ---------- */
+.doc-head{display:grid;gap:14px;padding-block:8px 6px}
+.brand{margin:0;display:flex;align-items:center;gap:10px;font:600 .8rem/1 var(--font-mono);letter-spacing:.14em;color:var(--muted)}
+.brand svg{width:22px;height:22px;flex:none}
+.doc-head h1{margin:0;font:400 clamp(2.4rem,1.6rem + 3.4vw,4rem)/1.08 var(--font-display);letter-spacing:-.01em;text-wrap:balance}
+.lead{margin:0;max-width:44rem;font-size:1.08rem;color:var(--ink-2)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0;padding:0;list-style:none}
+.chip{border:1px solid var(--rule);border-radius:999px;padding:3px 12px;font-size:.84rem;color:var(--ink-2);background:var(--surface)}
+.chip-ok{color:var(--safe);border-color:color-mix(in srgb,var(--safe) 45%,var(--rule))}
+
+/* ---------- player ---------- */
+.player{display:grid;gap:12px;margin-block:26px 10px}
+.stage{position:relative;width:100%;max-width:100%;aspect-ratio:16/9;background:var(--s-bg);border-radius:12px;overflow:hidden;outline:none;color:var(--s-ink)}
+.stage:focus-visible{box-shadow:0 0 0 3px var(--accent-ink)}
+.stage-canvas{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;transform:scale(var(--k,.5));font-family:var(--font-body);font-size:26px;line-height:1.4;color:var(--s-ink)}
+.big-play{position:absolute;right:clamp(10px,2.4%,28px);bottom:clamp(10px,3.4%,30px);display:inline-flex;align-items:center;gap:10px;border:0;border-radius:999px;padding:10px 18px 10px 12px;background:var(--s-ink);color:var(--s-bg);font:700 clamp(.8rem,.6rem + .6vw,1rem)/1 var(--font-body);cursor:pointer;box-shadow:0 6px 22px rgba(0,0,0,.35)}
+.big-play svg{width:22px;height:22px}
+.big-play span.t{font-family:var(--font-mono);font-weight:500;opacity:.75}
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px}
+.ctl{appearance:none;border:1px solid var(--rule);background:var(--surface);color:var(--ink);border-radius:999px;height:40px;min-width:40px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:8px;font:600 .9rem/1 var(--font-body);cursor:pointer}
+.ctl:hover{border-color:var(--ink-2)}
+.ctl svg{width:16px;height:16px}
+.ctl-icon{padding:0;width:40px}
+.time{font-family:var(--font-mono);font-size:.85rem;color:var(--ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.controls .ctl-now{flex:1 1 14rem;min-width:0;font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+.track{display:flex;gap:3px;width:100%;height:26px}
+.seg{position:relative;flex:var(--w) 1 0;min-width:0;border:0;padding:0;background:transparent;cursor:pointer}
+.seg::before,.seg::after{content:"";position:absolute;left:0;right:0;top:10px;height:6px;border-radius:2px}
+.seg::before{background:var(--rule)}
+.seg::after{background:var(--accent);transform-origin:left;transform:scaleX(var(--p,0))}
+.seg:hover::before{background:var(--axis)}
+.hint{margin:0;font-size:.82rem;color:var(--muted)}
+
+/* ---------- stage scenes ---------- */
+.scene{position:absolute;inset:0;padding:78px 120px 66px;display:flex;flex-direction:column;gap:34px;visibility:hidden}
+.scene.is-on{visibility:visible;animation:scenein .35s ease-out both,sceneout .3s ease-in calc(var(--dur,10)*1s - .3s) both;animation-play-state:paused}
+@keyframes scenein{from{opacity:0}to{opacity:1}}
+@keyframes sceneout{from{opacity:1}to{opacity:0}}
+.sc-head{display:grid;gap:12px}
+.sc-kicker{margin:0;font:600 24px/1.2 var(--font-body);letter-spacing:.08em;color:var(--s-muted)}
+.sc-title{margin:0;font:400 74px/1.12 var(--font-display);color:var(--s-ink);text-wrap:balance;max-width:1640px;letter-spacing:-.005em}
+.sc-body{flex:1 1 auto;min-height:0;display:grid;gap:56px;align-content:start}
+.cols-2{grid-template-columns:1fr 1fr}
+.panel{display:grid;gap:22px;align-content:start;min-width:0}
+.panel-h{margin:0;font:600 27px/1.35 var(--font-body);color:var(--s-ink-2)}
+.sc-take{margin:0;display:flex;gap:18px;align-items:baseline;font:600 32px/1.35 var(--font-body);color:var(--s-ink)}
+.sc-take::before{content:"→";color:var(--s-accent);font-weight:700}
+.sc-foot{margin-top:auto;display:flex;justify-content:space-between;align-items:baseline;gap:40px;font:500 19px/1.4 var(--font-body);color:var(--s-muted)}
+.sc-no{font-family:var(--font-mono);white-space:nowrap}
+
+/* animation primitives: always paused; the player seeks them by time */
+.stage .an{animation-duration:.7s;animation-timing-function:cubic-bezier(.2,.7,.2,1);animation-fill-mode:both;animation-delay:calc(var(--d,0)*1s);animation-play-state:paused}
+.stage .an.rise{animation-name:rise}
+.stage .an.fade{animation-name:fade}
+.stage .an.pop{animation-name:pop;animation-duration:.55s}
+.stage .an.growx{animation-name:growx;animation-duration:1.1s;transform-origin:left center}
+.stage .an.growxr{animation-name:growx;animation-duration:.9s;transform-origin:right center}
+.stage .an.growy{animation-name:growy;animation-duration:1.1s;transform-origin:center bottom}
+.stage .an.wipe{animation-name:wipe;animation-duration:.8s;animation-timing-function:steps(28,end)}
+.stage .an.wipes{animation-name:wipe;animation-duration:.9s}
+.stage .an.draw{animation-name:draw;animation-duration:1.1s;stroke-dasharray:1;animation-timing-function:ease-in-out}
+.stage .an.mark{animation-name:mark;animation-duration:.5s}
+.stage svg .an{transform-box:fill-box;transform-origin:center}
+@keyframes rise{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
+@keyframes growx{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes growy{from{transform:scaleY(0)}to{transform:scaleY(1)}}
+@keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@keyframes mark{from{background-color:transparent;box-shadow:inset 0 -3px 0 transparent}to{background-color:var(--dg-danger-soft);box-shadow:inset 0 -3px 0 var(--dg-danger)}}
+@keyframes fillok{from{background-color:transparent;box-shadow:inset 0 0 0 3px var(--dg-mute)}to{background-color:var(--dg-c1);box-shadow:inset 0 0 0 0 var(--dg-mute)}}
+@keyframes fillhit{to{background-color:var(--dg-danger)}}
+
+/* title + end scenes */
+.flow{position:absolute;inset:0;width:1920px;height:1080px}
+.wall{position:absolute;left:1172px;top:640px;width:20px;height:356px;background:var(--s-panel-2);border:1px solid #3a4770;border-radius:3px}
+.wall-l{position:absolute;left:1182px;top:592px;transform:translateX(-50%);font:600 24px/1 var(--font-body);color:var(--s-ink);white-space:nowrap}
+.flow-l{position:absolute;top:592px;font:500 22px/1 var(--font-body);color:var(--s-muted);white-space:nowrap}
+.title-block{position:relative;display:grid;gap:20px;max-width:1100px;padding-top:40px}
+.hero{margin:0;font:400 230px/.95 var(--font-display);letter-spacing:-.02em;color:var(--s-ink)}
+.hero-sub{margin:0;font:600 46px/1.3 var(--font-body);color:var(--s-ink)}
+.hero-meta{margin:0;font:500 26px/1.4 var(--font-body);color:var(--s-ink-2)}
+.flow-cap{position:absolute;left:120px;bottom:38px;margin:0;font:500 22px/1.4 var(--font-body);color:var(--s-ink-2)}
+.flow-cap b{color:var(--s-ink)}
+
+/* scene 2 cards */
+.cards4{display:grid;grid-template-columns:repeat(4,1fr);gap:26px}
+.card{background:var(--s-panel);border:1px solid var(--s-rule);border-radius:16px;padding:32px 30px;display:flex;flex-direction:column;gap:16px;min-height:430px}
+.card-tag{font:600 22px/1 var(--font-body);color:var(--s-accent);letter-spacing:.06em}
+.card-title{margin:0;font:400 46px/1.15 var(--font-display)}
+.card-desc{margin:0;font:400 26px/1.5 var(--font-body);color:var(--s-ink-2)}
+.card-foot{margin-top:auto;font:500 22px/1 var(--font-mono);color:var(--s-muted)}
+
+/* legends / dots / tiles */
+.legend{display:flex;flex-wrap:wrap;gap:10px 26px;color:var(--dg-ink-2);font-size:.95em}
+.lg{display:inline-flex;align-items:center;gap:.5em}
+.sw{width:.8em;height:.8em;border-radius:50%;flex:none}
+.sw-bar{border-radius:2px}
+.sw-ring{box-shadow:inset 0 0 0 2px var(--dg-mute)}
+.dots{display:grid;grid-template-columns:repeat(10,var(--dot,1em));gap:var(--dot-gap,.5em)}
+.dot{width:var(--dot,1em);height:var(--dot,1em);border-radius:50%;box-shadow:inset 0 0 0 3px var(--dg-mute)}
+.dot.ok{background:var(--dg-c1);box-shadow:none}
+.dot.hit{background:var(--dg-danger)}
+.stage .dots{--dot:40px;--dot-gap:13px}
+.stage .dot.an{animation-name:pop;animation-duration:.4s}
+.stage .dot.ok.an{animation-name:pop,fillok;animation-duration:.4s,.6s;animation-delay:calc(var(--d)*1s),calc(var(--ok-at,2.4)*1s);animation-fill-mode:both,both}
+.stage .dot.hit.an{animation-name:pop,fillok,fillhit;animation-duration:.4s,.6s,.6s;animation-delay:calc(var(--d)*1s),calc(var(--ok-at,2.4)*1s),calc(var(--hit-at,4)*1s);animation-fill-mode:both,both,forwards}
+.dots-row{display:flex;gap:44px;align-items:center}
+.stage .legend.v{flex-direction:column;gap:22px;font-size:25px}
+.bignum{display:grid;gap:8px}
+.bignum-v{font:700 92px/1 var(--font-body);letter-spacing:-.02em}
+.bignum-l{font-size:24px;color:var(--s-ink-2)}
+.tiles{display:grid;gap:18px}
+.tile{background:var(--s-panel);border-radius:14px;padding:22px 28px;display:grid;grid-template-columns:230px 1fr;align-items:center;gap:20px}
+.tile-v{font:700 66px/1 var(--font-body);letter-spacing:-.02em}
+.tile-l{font-size:25px;color:var(--s-ink-2);line-height:1.4}
+.note{border:1px solid var(--s-rule);border-radius:14px;padding:22px 26px;font-size:25px;line-height:1.5;color:var(--s-ink-2)}
+.note b{color:var(--s-ink)}
+
+/* scene 4 answers */
+.answers{display:grid;gap:16px}
+.ans{display:grid;grid-template-columns:290px 1fr;gap:22px;align-items:baseline;padding:20px 24px;background:var(--s-panel);border-radius:12px;font-size:25px}
+.ans-q{display:flex;gap:12px;align-items:baseline;font-weight:700;color:var(--s-ink)}
+.ans-q::before{content:"";width:12px;height:12px;border-radius:50%;background:var(--s-danger);flex:none;transform:translateY(-2px)}
+.ans-a{color:var(--s-ink-2);line-height:1.45}
+
+/* scene 8 canonical */
+.canon{display:grid;grid-template-columns:690px 170px 1fr;gap:26px;align-items:center}
+.canon-l{display:grid;gap:22px}
+.code-card{margin:0;background:var(--dg-code);border:1px solid var(--dg-rule);border-radius:14px;padding:20px 26px;font:400 24px/1.6 var(--font-mono);white-space:pre;color:var(--dg-ink-2);overflow:hidden}
+.code-card .cap{display:block;font:600 18px/1.2 var(--font-body);color:var(--dg-muted);margin-bottom:8px;white-space:normal}
+.nm{border-radius:4px;padding:0 2px}
+.canon-arrow{display:grid;justify-items:center;gap:10px;color:var(--s-muted);font-size:22px;text-align:center}
+.canon-arrow svg{width:150px;height:40px}
+.canon-r{display:grid;gap:18px}
+.hashes{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.hash{font:500 22px/1 var(--font-mono);padding:12px 16px;border:1px solid var(--dg-rule);border-radius:999px;color:var(--dg-ink-2);white-space:nowrap}
+.same{font:700 26px/1 var(--font-body);color:var(--dg-danger)}
+.err{margin:0;background:var(--dg-code);border:1px solid var(--dg-danger);border-radius:14px;padding:18px 24px;font:400 21px/1.6 var(--font-mono);white-space:pre-wrap;color:var(--dg-ink-2)}
+.err .k{color:var(--dg-accent)} .err .s{color:var(--dg-safe)}
+
+/* scene 9 evidence */
+.evid{display:grid;grid-template-columns:1fr 1fr;gap:34px}
+.ev{display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:center}
+.ev-v{font:700 62px/1 var(--font-body);letter-spacing:-.02em;white-space:nowrap}
+.ev-l{font-size:24px;color:var(--s-ink-2);line-height:1.45}
+
+/* code block (shared) */
+.codebox{margin:0;background:var(--dg-code);border:1px solid var(--dg-rule);border-radius:12px;padding:22px 26px;font-family:var(--font-mono);color:var(--dg-ink-2);overflow-x:auto}
+.cl{display:flex;gap:16px;white-space:pre;min-height:1.5em;align-items:center}
+.cl-note{margin-left:auto;font:600 .78em/1.3 var(--font-body);color:var(--dg-accent);background:var(--dg-accent-soft);border-radius:6px;padding:2px 10px;white-space:nowrap}
+.tk-k{color:var(--dg-accent)} .tk-t{color:var(--dg-ink);font-weight:600} .tk-s{color:var(--dg-safe)} .tk-n{color:var(--dg-num)} .tk-c{color:var(--dg-muted)}
+.stage .codebox{font-size:20px;line-height:1.5;padding:22px 30px}
+.lang{display:grid;grid-template-columns:1010px 1fr;gap:46px;align-items:start}
+.profile{display:grid}
+.pr{display:grid;grid-template-columns:118px 1fr;gap:18px;padding:12px 0;border-bottom:1px solid var(--s-rule);font-size:23px;line-height:1.4}
+.pr:first-child{padding-top:0}
+.pr-k{color:var(--s-muted);font-weight:600}
+
+/* scene 11 report */
+.report{margin:0;background:var(--dg-code);border:1px solid var(--dg-rule);border-radius:12px;padding:18px 24px;font-family:var(--font-mono);display:grid;gap:4px;color:var(--dg-ink-2)}
+.rp{display:grid;grid-template-columns:1.6em minmax(0,1.1fr) minmax(0,1fr);gap:.8em;white-space:nowrap}
+.rp-cmd{color:var(--dg-ink)}
+.rp .plus{color:var(--dg-danger);font-weight:700}
+.rp .eq{color:var(--dg-muted)}
+.rp-sum{margin-top:6px;color:var(--dg-ink);font-family:var(--font-body);font-weight:600;white-space:normal}
+.stage .report{font-size:21px;line-height:1.55;max-width:1500px}
+
+/* scene 12 method */
+.method{display:grid;grid-template-columns:1020px 1fr;gap:46px;align-items:center}
+.rules{margin:0;padding:0;list-style:none;display:grid;gap:16px;font-size:26px}
+.rules li{display:grid;grid-template-columns:30px 1fr;gap:12px;align-items:baseline;line-height:1.4}
+.rules li::before{content:"";width:14px;height:8px;border-left:3px solid var(--dg-safe);border-bottom:3px solid var(--dg-safe);transform:rotate(-45deg) translate(2px,-4px)}
+
+/* scene 13 field */
+.eq{display:flex;align-items:flex-end;gap:26px;flex-wrap:wrap}
+.eq-n{display:grid;justify-items:center;gap:6px}
+.eq-v{font:700 86px/1 var(--font-body);letter-spacing:-.02em}
+.eq-l{font-size:21px;color:var(--s-muted)}
+.eq-op{font:400 52px/1 var(--font-body);color:var(--s-muted);padding-bottom:36px}
+.eq-res .eq-v{color:var(--s-accent)}
+.tracks{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+.trk{background:var(--dg-panel);border:1px solid var(--dg-rule);border-radius:14px;padding:22px 26px;display:grid;gap:10px;align-content:start;min-width:0}
+.trk-id{font:600 .74em/1 var(--font-mono);color:var(--dg-accent);letter-spacing:.06em}
+.trk-h{margin:0;font:400 1.4em/1.2 var(--font-display)}
+.trk ul{margin:0;padding-left:1.1em;display:grid;gap:6px;color:var(--dg-ink-2);line-height:1.45}
+.stage .trk{font-size:24px}
+.chain{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.ch{padding:8px 14px;border:1px solid var(--dg-rule);border-radius:999px;color:var(--dg-ink-2);white-space:nowrap}
+.ch-arrow{color:var(--dg-muted)}
+.stage .chain{font-size:21px}
+
+/* roadmap */
+.rm{display:grid;gap:0}
+.rm-bar{position:relative;display:flex;gap:3px;height:16px}
+.rm-seg{flex:var(--m) 1 0;background:var(--dg-mute);border-radius:3px}
+.rm-seg.now{background:var(--dg-c1)}
+.rm-ticks{position:relative;height:1.7em;font:500 .8em/1 var(--font-mono);color:var(--dg-muted)}
+.rm-ticks span{position:absolute;bottom:.45em;transform:translateX(-50%);white-space:nowrap}
+.rm-ticks span.first{transform:none}
+.rm-ticks span.now-l{color:var(--dg-accent)}
+.rm-conn{display:block;width:100%;height:46px}
+.rm-conn line{stroke:var(--dg-muted);stroke-opacity:.6;stroke-width:1.5}
+.rm-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));column-gap:1.5%}
+.ph{background:var(--dg-panel);border:1px solid var(--dg-rule);border-radius:12px;padding:16px 16px 18px;display:grid;gap:8px;align-content:start;min-width:0}
+.ph.now{border-color:var(--dg-c1)}
+.ph-when{font:600 .78em/1.2 var(--font-mono);color:var(--dg-ink-2)}
+.ph-title{margin:0;font:400 1.22em/1.2 var(--font-display)}
+.ph ul{margin:0;padding-left:1em;display:grid;gap:4px;color:var(--dg-ink-2);font-size:.86em;line-height:1.42}
+.stage .rm{font-size:25px}
+.stage .rm-bar{height:22px}
+
+/* gantt */
+.gt{display:grid;gap:0}
+.gt-axis,.gt-row{display:grid;grid-template-columns:var(--gt-label,22em) 1fr;gap:1.2em;align-items:center}
+.gt-scale{position:relative;height:1.8em;font:500 .8em/1 var(--font-mono);color:var(--dg-muted)}
+.gt-scale span{position:absolute;bottom:.4em;transform:translateX(-50%);white-space:nowrap}
+.gt-scale span.first{transform:none;color:var(--dg-accent)}
+.gt-row{padding:.42em 0;border-top:1px solid var(--dg-grid)}
+.gt-label{color:var(--dg-ink);font-weight:600;line-height:1.35;min-width:0}
+.gt-track{position:relative;height:var(--gt-h,1.1em)}
+.gt-track .gl{position:absolute;top:-.42em;bottom:-.42em;width:1px;background:var(--dg-grid)}
+.gt-track .today{position:absolute;top:-.6em;bottom:-.6em;width:2px;background:var(--dg-accent)}
+.gt-bar{position:absolute;top:0;bottom:0;background:var(--dg-c1);border-radius:4px}
+.gt-date{position:absolute;top:50%;transform:translate(.5em,-50%);white-space:nowrap;font:500 .8em/1 var(--font-mono);color:var(--dg-ink-2)}
+.stage .gt{font-size:24px;--gt-label:21em;--gt-h:34px}
+
+/* limits */
+.lims{display:grid}
+.lim{display:grid;grid-template-columns:880px 1fr;gap:40px;padding:20px 0;border-top:1px solid var(--s-rule);align-items:baseline}
+.lim-q{font-size:28px;font-weight:700;color:var(--s-ink);line-height:1.35}
+.lim-a{font-size:24px;color:var(--s-ink-2);line-height:1.45}
+
+/* ---------- charts (shared; sized in em) ---------- */
+.hb{display:grid;gap:.75em}
+.hb-row{display:grid;grid-template-columns:var(--hb-label,8.5em) minmax(0,1fr);align-items:center;gap:1em}
+.hb-label{color:var(--dg-ink-2);text-align:right;font-weight:500;line-height:1.25}
+.hb-track{position:relative;height:var(--bar-h,1.15em);margin-right:var(--hb-reserve,7em);box-shadow:-1px 0 0 var(--dg-axis)}
+.hb-bar{position:absolute;left:0;top:0;bottom:0;border-radius:0 4px 4px 0;background:var(--dg-c1)}
+.tone-mute{background:var(--dg-mute)} .tone-danger{background:var(--dg-danger)} .tone-main{background:var(--dg-c1)}
+.hb-val{position:absolute;top:50%;transform:translate(.6em,-50%);display:flex;align-items:center;gap:.6em;white-space:nowrap}
+.hb-num{font-weight:700;color:var(--dg-ink)}
+.hb-tag{display:inline-flex;align-items:center;gap:.3em;font-size:.78em;font-weight:600;color:var(--dg-ink-2)}
+.hb-tag svg{width:1.05em;height:1.05em;flex:none}
+.stage .hb{font-size:28px;--bar-h:40px;--hb-label:7.2em;--hb-reserve:7.6em}
+.doc .hb{font-size:14.5px;--bar-h:18px;--hb-label:8.2em;--hb-reserve:8.4em}
+
+.vb{display:grid;gap:.5em;padding-left:2.8em}
+.vb-plot{position:relative;height:var(--vb-h,12em);display:flex;align-items:stretch;justify-content:space-around;box-shadow:0 1px 0 var(--dg-axis);margin-top:1.6em}
+.vb-grid{position:absolute;left:0;right:0;height:1px;background:var(--dg-grid)}
+.vb-tick{position:absolute;right:100%;bottom:0;transform:translateY(50%);padding-right:.6em;font-size:.82em;color:var(--dg-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.vb-slot{position:relative;flex:1 1 0;display:flex;justify-content:center}
+.vb-col{position:absolute;bottom:0;width:var(--col-w,1.4em);left:50%;margin-left:calc(var(--col-w,1.4em)/-2);border-radius:4px 4px 0 0;background:var(--dg-mute)}
+.vb-cap{position:absolute;left:50%;transform:translate(-50%,-.35em);font-weight:700;white-space:nowrap;color:var(--dg-ink)}
+.vb-x{display:flex;justify-content:space-around}
+.vb-xl{flex:1 1 0;text-align:center;color:var(--dg-ink-2);font-weight:500;line-height:1.3}
+.stage .vb{font-size:26px;--vb-h:400px;--col-w:76px}
+.doc .vb{font-size:14px;--vb-h:190px;--col-w:24px}
+.gb-pair{position:absolute;bottom:0;top:0;left:50%;display:flex;gap:2px;transform:translateX(-50%)}
+.gb-col{position:relative;width:var(--col-w,1.4em);height:100%}
+.gb-col .vb-col{left:0;margin-left:0;width:100%}
+.stage .vb.grouped{--col-w:66px}
+.doc .vb.grouped{--col-w:22px}
+
+.dbb{display:grid;gap:1.2em}
+.db-row{display:grid;grid-template-columns:var(--db-label,9em) minmax(0,1fr) auto;align-items:center;gap:1em}
+.db-label{color:var(--dg-ink-2);text-align:right;font-weight:500;line-height:1.3}
+.db-track{position:relative;height:2.6em;margin:0 .6em}
+.db-scale{position:absolute;left:0;right:0;top:50%;height:1px;background:var(--dg-grid)}
+.db-line{position:absolute;top:50%;height:2px;margin-top:-1px;background:var(--dg-ink-2)}
+.db-dot{position:absolute;top:50%;width:.9em;height:.9em;margin:-.45em 0 0 -.45em;border-radius:50%;box-shadow:0 0 0 2px var(--dg-bg)}
+.db-from{background:var(--dg-mute)} .db-to{background:var(--dg-c1)}
+.db-v{position:absolute;bottom:62%;transform:translateX(-50%);font-weight:700;font-size:.92em;white-space:nowrap;color:var(--dg-ink)}
+.db-delta{font-weight:700;color:var(--dg-ink);white-space:nowrap}
+.db-axis{display:grid;grid-template-columns:var(--db-label,9em) minmax(0,1fr) auto;gap:1em;font-size:.8em;color:var(--dg-muted)}
+.db-axis .s{position:relative;height:1.2em;margin:0 .75em}
+.db-axis .s span{position:absolute;transform:translateX(-50%)}
+.stage .dbb{font-size:27px;--db-label:7.6em}
+.doc .dbb{font-size:14.5px;--db-label:9.5em}
+
+/* ---------- document ---------- */
+.toc{display:flex;flex-wrap:wrap;gap:6px 16px;margin:18px 0 0;padding:14px 0 0;border-top:1px solid var(--rule);list-style:none;font-size:.9rem}
+.toc a{color:var(--ink-2);text-decoration:none}
+.toc a:hover{color:var(--accent-ink);text-decoration:underline}
+.doc-sec{padding-block:56px 8px;border-top:1px solid var(--rule);margin-top:48px;display:grid;gap:26px}
+.sec-head{display:grid;gap:10px;max-width:48rem}
+.doc h2{margin:0;font:400 clamp(1.8rem,1.3rem + 1.6vw,2.5rem)/1.18 var(--font-display);letter-spacing:-.005em;text-wrap:balance}
+.doc h3{margin:0;font-size:1.22rem;line-height:1.35;font-weight:700;text-wrap:balance}
+.eyebrow{margin:0;font:600 .78rem/1 var(--font-body);letter-spacing:.1em;color:var(--muted)}
+.prose{margin:0;max-width:44rem;color:var(--ink-2)}
+.sub-sec{display:grid;gap:18px;padding-top:12px}
+.sub-sec + .sub-sec{border-top:1px solid var(--rule);padding-top:34px;margin-top:10px}
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+@media (max-width:760px){.grid-2{grid-template-columns:minmax(0,1fr)}}
+.fig{margin:0;background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:18px 18px 14px;display:grid;gap:14px;min-width:0;align-content:start}
+.fig figcaption{font-weight:700;line-height:1.4}
+.fig .sub{display:block;font-weight:400;color:var(--muted);font-size:.86rem;margin-top:2px}
+.src{margin:0;font-size:.8rem;color:var(--muted);line-height:1.5}
+.findings{margin:0;padding:0;list-style:none;display:grid;gap:10px;max-width:46rem}
+.findings li{position:relative;padding-left:1.2rem;color:var(--ink-2)}
+.findings li::before{content:"";position:absolute;left:0;top:.68em;width:.45rem;height:.45rem;border-radius:50%;background:var(--muted)}
+.findings b{color:var(--ink)}
+.decision{display:grid;gap:4px;padding:14px 18px;background:var(--accent-soft);border-radius:10px;max-width:46rem}
+.decision .lbl{font:700 .76rem/1 var(--font-body);letter-spacing:.1em;color:var(--accent-ink)}
+.badge{display:inline-block;font-size:.72rem;line-height:1.5;border:1px solid var(--rule);border-radius:4px;padding:0 6px;margin-left:.35em;color:var(--muted);white-space:nowrap;vertical-align:.08em;font-weight:500}
+.badge.ok{color:var(--safe);border-color:color-mix(in srgb,var(--safe) 50%,var(--rule))}
+details.tbl summary{cursor:pointer;font-size:.84rem;color:var(--ink-2);width:max-content}
+details.tbl[open] summary{margin-bottom:8px}
+.tbl-wrap{overflow-x:auto;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{padding:9px 12px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font-weight:700;color:var(--ink);white-space:nowrap;font-size:.84rem}
+td{color:var(--ink-2)}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.sum td:first-child{font-weight:700;color:var(--ink);white-space:nowrap}
+@media (max-width:640px){
+  table.sum thead{display:none}
+  table.sum,table.sum tbody,table.sum tr,table.sum td{display:block;width:100%}
+  table.sum tr{padding:12px 0;border-bottom:1px solid var(--rule)}
+  table.sum td{border:0;padding:3px 0;white-space:normal}
+  table.sum td:first-child{font-size:1.05rem}
+  table.sum td:nth-child(2)::before{content:"근거 · ";color:var(--muted);font-weight:600}
+  table.sum td:nth-child(3)::before{content:"결정 · ";color:var(--accent-ink);font-weight:600}
+}
+.doc .codebox{font-size:.84rem;line-height:1.6}
+.doc .lang-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:22px;align-items:start}
+@media (max-width:900px){.doc .lang-grid{grid-template-columns:minmax(0,1fr)}}
+.kv{margin:0;display:grid;grid-template-columns:7.5em minmax(0,1fr);border-top:1px solid var(--rule)}
+.kv dt,.kv dd{margin:0;padding:9px 0;border-bottom:1px solid var(--rule)}
+.kv dt{color:var(--muted);font-weight:600;font-size:.9rem;padding-right:12px}
+.kv dd{color:var(--ink)}
+.notes{margin:0;padding:0;list-style:none;display:grid;gap:8px;font-size:.92rem}
+.notes li{display:grid;grid-template-columns:minmax(9em,auto) minmax(0,1fr);gap:12px;color:var(--ink-2)}
+.notes code{font-family:var(--font-mono);font-size:.86em;color:var(--ink);background:var(--code-bg);border-radius:4px;padding:1px 6px;justify-self:start}
+.dg-wrap{overflow-x:auto;min-width:0}
+.stage [data-svg] svg{display:block;width:100%;height:auto}
+.dg-wrap svg{display:block;width:100%;min-width:680px;height:auto}
+.doc .tracks{grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media (max-width:900px){.doc .tracks{grid-template-columns:minmax(0,1fr)}}
+.doc .trk{font-size:.95rem}
+.doc .trk-h{font:400 1.32rem/1.2 var(--font-display)}
+.doc .chain{font-size:.85rem}
+.doc .report{font-size:.82rem;line-height:1.6;overflow-x:auto}
+.doc .rm{font-size:14.5px}
+@media (max-width:640px){.doc .rm-ticks span.y27{display:none}}
+@media (max-width:900px){
+  .doc .rm-cards{grid-template-columns:minmax(0,1fr);row-gap:10px}
+  .doc .rm-conn{display:none}
+}
+.doc .gt{font-size:14px;--gt-label:16em;--gt-h:16px}
+@media (max-width:640px){.doc .gt{--gt-label:9.5em;font-size:13px}}
+.lims-doc{margin:0;padding:0;list-style:none;display:grid;gap:0;max-width:52rem}
+.lims-doc li{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;padding:14px 0;border-top:1px solid var(--rule)}
+.lims-doc b{color:var(--ink)}
+.lims-doc span{color:var(--ink-2)}
+@media (max-width:640px){.lims-doc li{grid-template-columns:minmax(0,1fr);gap:4px}}
+.srcs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+@media (max-width:760px){.srcs{grid-template-columns:minmax(0,1fr)}}
+.srcs h3{font-size:1rem;margin-bottom:8px}
+.srcs ul{margin:0;padding-left:1.1em;display:grid;gap:5px;font-size:.88rem;color:var(--ink-2)}
+.doc-foot{margin-top:56px;padding-top:20px;border-top:1px solid var(--rule);font-size:.84rem;color:var(--muted)}
+.doc-foot p{margin:0 0 6px}
+.canon-doc{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+@media (max-width:760px){.canon-doc{grid-template-columns:minmax(0,1fr)}}
+.doc .code-card{font-size:.84rem;line-height:1.6;padding:14px 16px;overflow-x:auto}
+.doc .code-card .cap{font-size:.78rem}
+.doc .err{font-size:.82rem;padding:14px 16px}
+.doc .hashes{gap:10px}
+.doc .hash{font-size:.8rem;padding:6px 10px}
+.doc .same{font-size:.92rem}
+
+.tip{position:fixed;z-index:30;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--rule);border-radius:8px;padding:6px 10px;box-shadow:0 8px 24px rgba(0,0,0,.14);display:grid;gap:1px;font-size:.84rem;max-width:18rem}
+.tip strong{font-size:.95rem}
+.tip span{color:var(--ink-2)}
+.doc [data-tip-v]{cursor:default}
+.doc .hb-bar:hover,.doc .vb-col:hover{filter:brightness(1.12)}
+
+@media (prefers-reduced-motion: reduce){ .seg::after{transition:none} }
+
+/* record mode: the stage alone, 1920x1080, for frame capture */
+html.record,html.record body{margin:0;padding:0;background:var(--s-bg);overflow:hidden}
+html.record .page{padding:0}
+html.record .wrap{max-width:none}
+html.record .doc,html.record .controls,html.record .big-play,html.record .hint,html.record .toc{display:none!important}
+html.record .player{margin:0}
+html.record .stage{width:1920px;height:1080px;aspect-ratio:auto;border-radius:0}
+</style>
+
+<div class="page">
+<div class="wrap">
+
+<header class="doc doc-head">
+  <p class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 8h8M2 12h8M2 16h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><rect x="11" y="4" width="3" height="16" rx="1" fill="currentColor"/><path d="M16 12h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>DODAM · 도담</p>
+  <h1>도담 설계 브리핑</h1>
+  <p class="lead">AI가 짜고 사람은 결과물과 보안만 보는 언어, 도담. 네 갈래 조사에서 나온 근거, 그 근거로 정한 언어의 모양, 실제 코드를 조사하는 방법, 2029년 1.0까지의 계획을 한곳에 모았다.</p>
+  <ul class="chips" aria-label="문서 상태">
+    <li class="chip">2026-10-28 기준</li>
+    <li class="chip">설계 초안 · 확정 전</li>
+    <li class="chip">출처 50여 개</li>
+    <li class="chip chip-ok">핵심 수치 4건 원문 직접 확인</li>
+  </ul>
+</header>
+
+<section class="player" aria-label="모션 그래픽 브리핑">
+  <div class="stage" tabindex="0" aria-label="도담 설계 브리핑 모션 그래픽. 스페이스로 재생과 정지, 왼쪽·오른쪽 화살표로 장면 이동">
+    <div class="stage-canvas">
+
+      <!-- 01 title -->
+      <section class="scene" data-dur="8" data-title="도담 설계 브리핑" data-hook="flow" data-poster="3.4">
+        <canvas class="flow" width="1920" height="1080" data-wall="1182" data-y0="660" data-y1="980"></canvas>
+        <div class="wall an fade" style="--d:.2"></div>
+        <span class="wall-l an fade" style="--d:.5">컴파일러</span>
+        <span class="flow-l an fade" style="left:120px;--d:.7">외부 입력 · Untrusted</span>
+        <span class="flow-l an fade" style="left:1260px;--d:.9">검증을 통과한 값</span>
+        <div class="title-block">
+          <p class="sc-kicker an rise" style="--d:.2">DODAM · 설계 브리핑 · 2026-10-28</p>
+          <h2 class="hero an rise" style="--d:.4">도담</h2>
+          <p class="hero-sub an rise" style="--d:.8">AI가 짜고, 사람은 결과와 보안만 본다</p>
+          <p class="hero-meta an rise" style="--d:1.1">조사 4갈래 · 출처 50여 개 · 2029년 1.0까지의 계획</p>
+        </div>
+        <p class="flow-cap an fade" style="--d:1.8">외부 입력은 모두 <b>Untrusted</b>다. 검증을 통과한 값만 벽을 넘는다</p>
+      </section>
+
+      <!-- 02 demands -->
+      <section class="scene" data-dur="9" data-title="네 가지 요구">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">소유자가 정한 방향</p>
+          <h3 class="sc-title an rise" style="--d:.25">네 가지 요구</h3>
+        </header>
+        <div class="sc-body">
+          <div class="cards4">
+            <article class="card an rise" style="--d:.7"><span class="card-tag">보안</span><p class="card-title">보안은 무조건</p><p class="card-desc">어떤 목표와도 맞바꾸지 않는다</p><span class="card-foot">컴파일러가 막는다</span></article>
+            <article class="card an rise" style="--d:1.0"><span class="card-tag">AI</span><p class="card-title">AI 극강 최적화</p><p class="card-desc">사람이 읽을 필요가 없는 언어. AI가 AI를 위해 다듬는다</p><span class="card-foot">AI가 짜기 쉽게</span></article>
+            <article class="card an rise" style="--d:1.3"><span class="card-tag">중복</span><p class="card-title">중복 코드 없음</p><p class="card-desc">이름만 다른 같은 정의는 하나만 둔다</p><span class="card-foot">이름만 바꿔도 잡는다</span></article>
+            <article class="card an rise" style="--d:1.6"><span class="card-tag">데이터</span><p class="card-title">데이터가 각자 놀지 않게</p><p class="card-desc">한 곳에서 정의하고 한 곳이 소유한다</p><span class="card-foot">스키마·검증 자동 생성</span></article>
+          </div>
+          <p class="sc-take an fade" style="--d:2.6">네 가지를 조사해서 설계에 넣었다</p>
+        </div>
+        <footer class="sc-foot"><span>2026-10-28 조사 · 출처 50여 개</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 03 security 1 -->
+      <section class="scene" data-dur="11" data-title="보안: 모델이 좋아져도 제자리">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · 보안</p>
+          <h3 class="sc-title an rise" style="--d:.25">모델이 좋아져도 보안은 제자리</h3>
+        </header>
+        <div class="sc-body cols-2">
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:.6">AI 코드: 문법은 맞는데 보안은 절반 (Veracode 2026-03)</p>
+            <div data-chart="syntaxVsSec" data-d=".9"></div>
+            <p class="sc-take an fade" style="--d:6.4">더 좋은 모델을 기다릴 수 없다. 컴파일러가 막는다</p>
+          </div>
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:1.2">백엔드 392과제, 최고 모델 o1 (BaxBench) · 100번 중</p>
+            <div class="dots-row">
+              <div data-chart="bax" data-d="1.4"></div>
+              <div class="legend v">
+                <span class="lg an fade" style="--d:2.6"><i class="sw" style="background:var(--s-c1)"></i>정확 62번</span>
+                <span class="lg an fade" style="--d:4.2"><i class="sw" style="background:var(--s-danger)"></i>그중 약 절반은 공격 성공</span>
+                <span class="lg an fade" style="--d:1.8"><i class="sw sw-ring"></i>틀림 38번</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>Veracode 2026-03 (업체 보고서) · BaxBench, ICML 2025 · 원문 직접 확인</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 04 security 2 -->
+      <section class="scene" data-dur="11" data-title="보안: 어디서 뚫리나">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · 보안</p>
+          <h3 class="sc-title an rise" style="--d:.25">어디서 뚫리나</h3>
+        </header>
+        <div class="sc-body cols-2">
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:.5">종류별 보안 통과율 (Veracode 2026)</p>
+            <div data-chart="perClass" data-d=".8"></div>
+            <div class="bignum an rise" style="--d:3.4">
+              <span class="bignum-v"><span class="count" data-to="1839701" data-at="3.5" data-dur="1.4">1,839,701</span>건</span>
+              <span class="bignum-l">접근 제어 실패 발생 건수 · OWASP 2025 1위. 대부분 남의 레코드를 ID만 바꿔 읽는 객체 단위다</span>
+            </div>
+          </div>
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:4.4">도담의 답</p>
+            <div class="answers">
+              <div class="ans an rise" style="--d:4.8"><span class="ans-q">XSS · 로그 인젝션</span><span class="ans-a">HTML과 로그 출력은 안전한 타입만 받는다</span></div>
+              <div class="ans an rise" style="--d:5.3"><span class="ans-q">남의 레코드 읽기</span><span class="ans-a">데이터 타입마다 읽기 · 쓰기 정책이 없으면 컴파일 에러</span></div>
+              <div class="ans an rise" style="--d:5.8"><span class="ans-q">자원 고갈</span><span class="ans-a">입력 크기 제한 · 느려지지 않는 정규식 · 호출 속도 제한</span></div>
+              <div class="ans an rise" style="--d:6.3"><span class="ans-q">지어낸 패키지 이름</span><span class="ans-a">처음 보는 이름과 막 등록된 패키지는 받지 않는다</span></div>
+            </div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>Veracode 2026 (업체 보고서) · OWASP Top 10 2025 · USENIX Security 2025</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 05 ai 1 -->
+      <section class="scene" data-dur="11" data-title="AI: 쓰는 도중에 잡아 준다">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · AI 최적화</p>
+          <h3 class="sc-title an rise" style="--d:.25">쓰는 도중 검사로 컴파일 실패가 5분의 1로</h3>
+        </header>
+        <div class="sc-body cols-2">
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:.6">컴파일 안 된 비율 · Rust 저장소 과제, 최신 모델 7개</p>
+            <div data-chart="compileFail" data-d=".9"></div>
+          </div>
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:3.6">관례를 바꾸면 무너진다 · Python을 1부터 세게 하자 (GPT-4)</p>
+            <div data-chart="convention" data-d="3.9"></div>
+            <div class="legend an fade" style="--d:4.1;font-size:24px"><span class="lg"><i class="sw" style="background:var(--s-mute)"></i>원래 (0부터)</span><span class="lg"><i class="sw" style="background:var(--s-c1)"></i>1부터 세게 바꾼 뒤</span></div>
+          </div>
+        </div>
+        <p class="sc-take an fade" style="--d:6.6">쓰는 중인 코드도 검사한다 · 0부터 세기 같은 관례는 바꾸지 않는다</p>
+        <footer class="sc-foot"><span>Generative Compilation 2026-07 (사전 공개본) · Wu 등, NAACL 2024</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 06 ai 2 -->
+      <section class="scene" data-dur="10" data-title="메모리 모델: Rust 소유권의 값">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · 메모리 모델</p>
+          <h3 class="sc-title an rise" style="--d:.25">Rust 소유권은 비싸지만 고치면 회복된다</h3>
+        </header>
+        <div class="sc-body cols-2">
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:.6">같은 문제에서 첫 컴파일 실패 수 (모델 7개)</p>
+            <div data-chart="rustFail" data-d=".9"></div>
+          </div>
+          <div class="panel">
+            <div class="tiles">
+              <div class="tile an rise" style="--d:3.0"><span class="tile-v">16.7%</span><span class="tile-l">Rust 컴파일 에러 중 소유권 · 수명</span></div>
+              <div class="tile an rise" style="--d:3.5"><span class="tile-v">20.5%</span><span class="tile-l">import 누락 (소유권보다 많다)</span></div>
+              <div class="tile an rise" style="--d:4.0"><span class="tile-v">−75%</span><span class="tile-l">수정 루프를 돌린 뒤 빌림 에러</span></div>
+            </div>
+            <p class="note an fade" style="--d:5.2">GC · 참조 카운트 · 값 의미론을 AI 관점에서 비교한 연구는 <b>없다</b>. 2027년 1~2월에 도담이 시제품으로 처음 잰다. 기본 가설은 "시그니처에 수명 표기를 두지 않는다"</p>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>Nogueira 등, ISSRE 2026 · 원문 직접 확인 · CRUST-Bench, COLM 2025</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 07 dup 1 -->
+      <section class="scene" data-dur="11" data-title="중복: AI는 있던 코드를 다시 만든다">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · 중복</p>
+          <h3 class="sc-title an rise" style="--d:.25">AI는 있던 코드를 다시 만든다</h3>
+        </header>
+        <div class="sc-body cols-2">
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:.6">5줄 이상 중복 블록을 담은 커밋 비율 (GitClear)</p>
+            <div data-chart="gitclear" data-d=".9"></div>
+            <p class="panel-h an fade" style="--d:2.8;font-size:21px;font-weight:500;color:var(--s-muted)">2021년 값은 자료에 없다 · 한 회사 자료의 연도별 상관</p>
+          </div>
+          <div class="panel">
+            <p class="panel-h an fade" style="--d:3.4">앞 턴 코드를 주는 방식에 따라 (RepoReuse)</p>
+            <div class="legend an fade" style="--d:3.6;font-size:24px"><span class="lg"><i class="sw sw-bar" style="background:var(--s-c1)"></i>자기 재사용</span><span class="lg"><i class="sw sw-bar" style="background:var(--s-c2)"></i>중복</span></div>
+            <div data-chart="reuse" data-d="3.8"></div>
+          </div>
+        </div>
+        <p class="sc-take an fade" style="--d:7.2">AI에게는 전체 소스 대신 함수 목록을 준다 · 같은 정의는 컴파일 에러</p>
+        <footer class="sc-foot"><span>GitClear 2025 (업체 보고서) · RepoReuse 2026-09 (사전 공개본) · 원문 직접 확인</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 08 dup 2: canonical hash -->
+      <section class="scene" data-dur="10" data-title="이름만 바꾼 복사본">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">도담의 답 · 중복 금지</p>
+          <h3 class="sc-title an rise" style="--d:.25">이름만 바꾼 복사본은 컴파일되지 않는다</h3>
+        </header>
+        <div class="sc-body">
+          <div class="canon">
+            <div class="canon-l">
+              <pre class="code-card an rise" style="--d:.6"><span class="cap">이미 있던 함수</span><span class="tk-k">fn</span> <span class="nm an mark" style="--d:1.8">totalPrice</span>(<span class="nm an mark" style="--d:1.9">items</span>: <span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  <span class="nm an mark" style="--d:2.0">items</span>.map(<span class="nm an mark" style="--d:2.1">i</span> =&gt; <span class="nm an mark" style="--d:2.1">i</span>.price).sum()
+}</pre>
+              <pre class="code-card an rise" style="--d:1.0"><span class="cap">AI가 새로 쓴 함수</span><span class="tk-k">fn</span> <span class="nm an mark" style="--d:2.2">sumCost</span>(<span class="nm an mark" style="--d:2.3">xs</span>: <span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  <span class="nm an mark" style="--d:2.4">xs</span>.map(<span class="nm an mark" style="--d:2.5">x</span> =&gt; <span class="nm an mark" style="--d:2.5">x</span>.price).sum()
+}</pre>
+            </div>
+            <div class="canon-arrow an fade" style="--d:2.9">
+              <svg viewBox="0 0 150 40" aria-hidden="true"><line x1="6" y1="20" x2="132" y2="20" stroke="currentColor" stroke-width="3" class="an draw" style="--d:3.0" pathLength="1"/><polygon points="132,10 148,20 132,30" fill="currentColor"/></svg>
+              <span>이름을 지우고<br>해시한다</span>
+            </div>
+            <div class="canon-r">
+              <pre class="code-card an wipes" style="--d:3.6"><span class="cap">이름을 지운 꼴 (둘 다 같다)</span><span class="tk-k">fn</span> (<span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  #0.map(#1 =&gt; #1.price).sum()
+}</pre>
+              <div class="hashes">
+                <span class="hash an pop" style="--d:4.6">totalPrice → 7f3a…c21e</span>
+                <span class="hash an pop" style="--d:4.9">sumCost → 7f3a…c21e</span>
+                <span class="same an pop" style="--d:5.4">같다</span>
+              </div>
+              <pre class="err an rise" style="--d:6.0">{ <span class="k">"문제"</span>: <span class="s">"같은 함수가 이미 있습니다"</span>,
+  <span class="k">"설명"</span>: <span class="s">"sumCost는 totalPrice와 같은 함수입니다"</span>,
+  <span class="k">"고치는 법"</span>: <span class="s">"totalPrice를 쓴다"</span>, <span class="k">"자동 수정"</span>: <span class="s">"가능"</span> }</pre>
+            </div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>한계: 생김새가 다르고 동작만 같은 중복은 판정할 수 없다. 벤치마크로 재서 공개한다 · 해시값과 에러 문구는 예시</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 09 data -->
+      <section class="scene" data-dur="12" data-title="데이터: 다섯 번 정의하면 어긋난다">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">조사 · 데이터</p>
+          <h3 class="sc-title an rise" style="--d:.25">같은 데이터를 다섯 번 정의하면 어긋난다</h3>
+        </header>
+        <div class="sc-body" style="gap:34px">
+          <div data-svg="drift" style="width:1300px"></div>
+          <div class="evid">
+            <div class="ev an rise" style="--d:6.6"><span class="ev-v">53 / 91</span><span class="ev-l">손으로 짠 트랜잭션 가운데 정확성 문제가 있던 수 (웹 앱 8개, SIGMOD 2022)</span></div>
+            <div class="ev an rise" style="--d:7.1"><span class="ev-v">37배</span><span class="ev-l">Rails 앱 67개에서 트랜잭션보다 많이 쓴 앱 코드 검증. 동시 실행에서 깨진다 (SIGMOD 2015)</span></div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>선례: Ur/Web · Convex · Lamdera · DB를 직접 만든 Gel(옛 EdgeDB)은 2026년 1월 서비스 종료 → PostgreSQL 위에 짓는다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 10 language -->
+      <section class="scene" data-dur="14" data-title="만들 언어: 도담">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">그래서 만들 언어</p>
+          <h3 class="sc-title an rise" style="--d:.25">도담: AI가 쓰고 컴파일러가 지킨다</h3>
+        </header>
+        <div class="sc-body">
+          <div class="lang">
+            <div data-code="note" data-d=".8"></div>
+            <div class="profile">
+              <div class="pr an rise" style="--d:5.2"><span class="pr-k">종류</span><span>범용 · 정적 타입 · 컴파일 언어</span></div>
+              <div class="pr an rise" style="--d:5.4"><span class="pr-k">쓰는 쪽</span><span>AI 에이전트. 사람은 결과와 보안 보고서만</span></div>
+              <div class="pr an rise" style="--d:5.6"><span class="pr-k">생김새</span><span>TypeScript · Rust · Kotlin 계열, 0부터 세기</span></div>
+              <div class="pr an rise" style="--d:5.8"><span class="pr-k">타입</span><span>입출력 타입 필수 · null과 예외 없음 · 값 범위도 타입</span></div>
+              <div class="pr an rise" style="--d:6.0"><span class="pr-k">안전</span><span>권한 선언 · 외부 입력 검증 · 비밀값 보호 · 레코드 권한</span></div>
+              <div class="pr an rise" style="--d:6.2"><span class="pr-k">데이터</span><span>한 번 정의, 스키마와 동기화는 컴파일러가</span></div>
+              <div class="pr an rise" style="--d:6.4"><span class="pr-k">중복</span><span>이름만 바꾼 같은 정의는 에러</span></div>
+              <div class="pr an rise" style="--d:6.6"><span class="pr-k">출력</span><span>네이티브 · WASM · 첫 DB는 PostgreSQL</span></div>
+              <div class="pr an rise" style="--d:6.8"><span class="pr-k">메모리</span><span>2027년 1~2월 벤치마크로 결정</span></div>
+            </div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>문법은 임시다. 실제 문법은 시험 과제에서 잰 숫자로 정한다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 11 compiler -->
+      <section class="scene" data-dur="11" data-title="컴파일러가 하는 일, 사람이 보는 것">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">도담의 구조</p>
+          <h3 class="sc-title an rise" style="--d:.25">컴파일러가 하는 일, 사람이 보는 것</h3>
+        </header>
+        <div class="sc-body" style="gap:30px">
+          <div data-svg="flow" style="width:1400px"></div>
+          <div data-report="r" data-d="5.4"></div>
+        </div>
+        <footer class="sc-foot"><span>사람은 코드를 읽지 않는다. 늘어난 권한 · 외부 주소 · trust 블록만 승인한다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 12 method -->
+      <section class="scene" data-dur="10" data-title="어떻게 정하나: 숫자로">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">어떻게 할 건가</p>
+          <h3 class="sc-title an rise" style="--d:.25">취향이 아니라 숫자로 정한다</h3>
+        </header>
+        <div class="sc-body">
+          <div class="method">
+            <div data-svg="loop"></div>
+            <ul class="rules">
+              <li class="an rise" style="--d:3.6">테스트를 먼저 커밋하고 구현은 그다음</li>
+              <li class="an rise" style="--d:3.9">결정마다 시험 과제에서 잰 숫자를 남긴다</li>
+              <li class="an rise" style="--d:4.2">규칙은 조여지기만 한다</li>
+              <li class="an rise" style="--d:4.5">숫자가 나아지면 AI가 직접 병합한다</li>
+              <li class="an rise" style="--d:4.8">보안을 약하게 하는 변화만 사람이 승인</li>
+              <li class="an rise" style="--d:5.1">비공개 과제 30%는 AI가 볼 수 없다</li>
+            </ul>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>서로 다른 회사의 AI 모델 3개 이상으로 같이 잰다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 13 field -->
+      <section class="scene" data-dur="13" data-title="실제 코드 조사">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">실제 코드 조사</p>
+          <h3 class="sc-title an rise" style="--d:.25">실제 코드는 이렇게 조사한다</h3>
+        </header>
+        <div class="sc-body" style="gap:40px">
+          <div class="eq">
+            <div class="eq-n an pop" style="--d:.7"><span class="eq-v">10</span><span class="eq-l">과제</span></div>
+            <span class="eq-op an fade" style="--d:.9">×</span>
+            <div class="eq-n an pop" style="--d:1.0"><span class="eq-v">7</span><span class="eq-l">기존 언어</span></div>
+            <span class="eq-op an fade" style="--d:1.2">×</span>
+            <div class="eq-n an pop" style="--d:1.3"><span class="eq-v">3</span><span class="eq-l">AI 모델</span></div>
+            <span class="eq-op an fade" style="--d:1.5">×</span>
+            <div class="eq-n an pop" style="--d:1.6"><span class="eq-v">3</span><span class="eq-l">반복</span></div>
+            <span class="eq-op an fade" style="--d:1.9">=</span>
+            <div class="eq-n eq-res an pop" style="--d:2.1"><span class="eq-v"><span class="count" data-to="630" data-at="2.1" data-dur="1.1">630</span>번</span><span class="eq-l">도담이 넘어야 할 기준</span></div>
+          </div>
+          <div class="tracks">
+            <article class="trk an rise" style="--d:3.4"><span class="trk-id">첫째</span><p class="trk-h">기존 언어로 짜게 해서 잰다</p><ul><li>AI 모델 3개가 같은 과제를 기존 언어 7개로</li><li>격리된 컨테이너, 패키지는 미러에서만</li><li>수정 요청으로 탄탄함까지 잰다</li></ul></article>
+            <article class="trk an rise" style="--d:3.9"><span class="trk-id">둘째</span><p class="trk-h">세상의 코드를 표본으로</p><ul><li>공개 저장소의 AI PR과 사람 PR 비교</li><li>같은 도구로 보안 · 중복 · 데이터 정의 수</li><li>공개 벤치마크를 다시 돌려 측정기 보정</li></ul></article>
+            <article class="trk an rise" style="--d:4.4"><span class="trk-id">셋째</span><p class="trk-h">선행 구현의 소스를 읽는다</p><ul><li>Unison 해시 · Go Capslock 보고서</li><li>Ur/Web · Lamdera · Convex</li><li>논문과 구현이 다른 곳을 메모</li></ul></article>
+          </div>
+          <div class="chain" data-chain="1" data-d="6.0"></div>
+        </div>
+        <footer class="sc-foot"><span>결과는 2026년 12월 31일 보고서로 낸다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 14 roadmap -->
+      <section class="scene" data-dur="13" data-title="2029년 1.0까지">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">앞으로의 계획</p>
+          <h3 class="sc-title an rise" style="--d:.25">2029년 1.0까지</h3>
+        </header>
+        <div class="sc-body">
+          <div data-roadmap="1" data-d=".7"></div>
+        </div>
+        <footer class="sc-foot"><span>보류: GitHub 조직(dodam-lang) · 도메인(dodam-lang.org)은 첫 공개 판 전에 정한다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 15 weeks -->
+      <section class="scene" data-dur="12" data-title="올해 남은 9주">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">앞으로의 계획 · 2026년</p>
+          <h3 class="sc-title an rise" style="--d:.25">올해 남은 9주</h3>
+        </header>
+        <div class="sc-body">
+          <div data-gantt="1" data-d=".7"></div>
+        </div>
+        <footer class="sc-foot"><span>11월 22일까지 실행 비용을 재 보고, 그 숫자로 남은 일정을 다시 본다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 16 limits -->
+      <section class="scene" data-dur="10" data-title="아직 모르는 것">
+        <header class="sc-head">
+          <p class="sc-kicker an rise" style="--d:.1">열린 질문</p>
+          <h3 class="sc-title an rise" style="--d:.25">아직 모르는 것</h3>
+        </header>
+        <div class="sc-body">
+          <div class="lims">
+            <div class="lim an rise" style="--d:.7"><span class="lim-q">동작만 같은 중복은 판정할 수 없다</span><span class="lim-a">정확히 같은 꼴만 에러로 막고, 나머지는 재서 공개한다</span></div>
+            <div class="lim an rise" style="--d:1.1"><span class="lim-q">GC · 참조 카운트 · 값 의미론의 AI 비교 연구가 없다</span><span class="lim-a">2027년 1~2월 시제품으로 잰다</span></div>
+            <div class="lim an rise" style="--d:1.5"><span class="lim-q">기존 언어 측정 630번의 비용을 아직 모른다</span><span class="lim-a">과제 1개로 먼저 재고 일정을 다시 본다</span></div>
+            <div class="lim an rise" style="--d:1.9"><span class="lim-q">2026년 논문 다수는 사전 공개본, 업체 보고서는 검증이 약하다</span><span class="lim-a">결정에 쓰는 수치는 원문을 다시 연다</span></div>
+            <div class="lim an rise" style="--d:2.3"><span class="lim-q">오프라인 쓰기, 외부 API 데이터의 어긋남</span><span class="lim-a">첫 판에서 빼고, Stale&lt;T&gt; 타입으로 드러낸다</span></div>
+          </div>
+        </div>
+        <footer class="sc-foot"><span>모르는 것은 모른다고 적고, 벤치마크로 답을 찾는다</span><span class="sc-no"></span></footer>
+      </section>
+
+      <!-- 17 end -->
+      <section class="scene" data-dur="7" data-title="다음 할 일" data-hook="flow">
+        <canvas class="flow" width="1920" height="1080" data-wall="1182" data-y0="660" data-y1="980"></canvas>
+        <div class="wall an fade" style="--d:.1"></div>
+        <span class="wall-l an fade" style="--d:.3">컴파일러</span>
+        <div class="title-block">
+          <p class="sc-kicker an rise" style="--d:.2">다음 할 일 · 2026년 11월 2일 주</p>
+          <h2 class="hero an rise" style="--d:.4">도담</h2>
+          <p class="hero-sub an rise" style="--d:.8">언어를 시험할 과제부터 만든다</p>
+          <p class="hero-meta an rise" style="--d:1.1">dodam · .dodam · MIT OR Apache-2.0</p>
+        </div>
+        <p class="flow-cap an fade" style="--d:1.6">언어보다 벤치마크를 먼저 만든다</p>
+      </section>
+
+    </div>
+    <button class="big-play" type="button" aria-label="모션 그래픽 재생"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".12"/><path d="M9.5 7.5v9l7-4.5z" fill="currentColor"/></svg>재생 <span class="t"></span></button>
+  </div>
+  <div class="controls">
+    <button class="ctl ctl-icon" type="button" data-act="toggle" aria-label="재생"><svg viewBox="0 0 16 16" aria-hidden="true"><path class="ic-play" d="M4 2.5v11l9-5.5z" fill="currentColor"/><g class="ic-pause" fill="currentColor" style="display:none"><rect x="3.5" y="2.5" width="3" height="11" rx="1"/><rect x="9.5" y="2.5" width="3" height="11" rx="1"/></g></svg></button>
+    <button class="ctl ctl-icon" type="button" data-act="prev" aria-label="이전 장면"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3 5 8l5.5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button class="ctl ctl-icon" type="button" data-act="next" aria-label="다음 장면"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3 11 8l-5.5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <span class="time" aria-live="off">00:00 / 00:00</span>
+    <span class="ctl-now"></span>
+    <button class="ctl" type="button" data-act="restart">처음부터</button>
+    <div class="track" role="group" aria-label="장면 목록"></div>
+  </div>
+  <p class="hint">모션 그래픽 17장면. 스페이스로 재생과 정지, ←·→로 장면을 옮긴다. 같은 내용을 이 페이지 아래에 글로 자세히 적었다.</p>
+</section>
+
+<nav class="doc" aria-label="목차"><ul class="toc">
+  <li><a href="#summary">한눈에</a></li>
+  <li><a href="#evidence">조사 결과</a></li>
+  <li><a href="#language">만들 언어</a></li>
+  <li><a href="#method">어떻게 정하나</a></li>
+  <li><a href="#fieldwork">실제 코드 조사</a></li>
+  <li><a href="#roadmap">앞으로의 계획</a></li>
+  <li><a href="#unknowns">아직 모르는 것</a></li>
+  <li><a href="#sources">출처</a></li>
+</ul></nav>
+
+<main class="doc">
+
+<section class="doc-sec" id="summary">
+  <div class="sec-head">
+    <p class="eyebrow">한눈에</p>
+    <h2>네 가지 요구, 가장 강한 근거, 도담의 결정</h2>
+  </div>
+  <div class="tbl-wrap">
+    <table class="sum">
+      <thead><tr><th>요구</th><th>가장 강한 근거</th><th>도담의 결정</th></tr></thead>
+      <tbody>
+        <tr><td>보안은 무조건</td><td>모델이 좋아져도 AI 코드의 보안 통과율은 45~56%다. 백엔드 과제에서는 정확한 코드의 약 절반이 실제 공격에 뚫렸다.</td><td>데이터마다 누가 읽고 쓰는지 적게 하기, 쓰는 권한에 범위 붙이기, 서버를 내부망으로 끌어들이는 공격(SSRF) 차단, 입력 크기·호출 속도 한도, 비밀번호·암호 전용 타입, 사람이 승인하는 보안 보고서</td></tr>
+        <tr><td>AI 극강 최적화</td><td>쓰는 도중 컴파일러 피드백으로 컴파일 실패가 65.9%에서 13.1%로 줄었다. 0부터 세던 관례를 바꾸자 정확도가 87.4에서 68.2로 떨어졌다.</td><td>쓰는 중인 코드도 검사, 에러마다 고칠 방법 나열, 0부터 세기 같은 관례 유지, 테스트를 통과한 예제 모음 제공</td></tr>
+        <tr><td>중복 코드 없음</td><td>5줄 이상 중복 블록을 담은 커밋이 0.70%(2020)에서 6.66%(2024)로 늘었다. 함수 목록을 주자 재사용이 30.0%에서 67.8%로 올랐다.</td><td>이름만 바꾼 같은 함수는 컴파일 에러, AI 도구는 전체 소스 대신 함수 목록과 비슷한 함수 찾기를 제공</td></tr>
+        <tr><td>데이터가 각자 놀지 않게</td><td>손으로 짠 트랜잭션 91개 중 53개에 정확성 문제가 있었다. 스키마를 따로 두는 도구는 실행 중에 어긋난다.</td><td>데이터는 한 번만 정의하고, DB 스키마 · 검증 · 마이그레이션 · 화면 동기화는 컴파일러가 만든다</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="doc-sec" id="evidence">
+  <div class="sec-head">
+    <p class="eyebrow">조사 결과</p>
+    <h2>네 갈래 조사에서 나온 근거</h2>
+    <p class="prose">조사 에이전트 네 개가 원문(논문 · 공식 문서)을 열어 정리했다. 결정에 쓴 핵심 수치 4건은 원문을 다시 열어 직접 확인했다. 표시: <span class="badge ok">원문 직접 확인</span> <span class="badge">사전 공개본</span> <span class="badge">업체 보고서</span> <span class="badge">2차 자료</span></p>
+  </div>
+
+  <div class="sub-sec">
+    <p class="eyebrow">보안</p>
+    <h3>모델이 좋아져도 보안은 제자리다</h3>
+    <div class="grid-2">
+      <figure class="fig">
+        <figcaption>문법 정확도와 보안 통과율<span class="sub">AI가 쓴 코드, Veracode 2026-03</span></figcaption>
+        <div data-chart="syntaxVsSec"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="syntaxVsSec"></div></details>
+        <p class="src">Veracode, Spring 2026 GenAI Code Security <span class="badge">업체 보고서</span></p>
+      </figure>
+      <figure class="fig">
+        <figcaption>백엔드 392과제, 최고 모델 o1<span class="sub">100번 풀었다면: 정확 62번, 그중 약 절반은 공격 성공</span></figcaption>
+        <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center">
+          <div data-chart="bax"></div>
+          <div class="legend" style="flex-direction:column;gap:8px;font-size:.9rem">
+            <span class="lg"><i class="sw" style="background:var(--chart-1)"></i>정확, 공격 못 뚫음</span>
+            <span class="lg"><i class="sw" style="background:var(--danger)"></i>정확하지만 공격 성공</span>
+            <span class="lg"><i class="sw sw-ring"></i>틀림</span>
+          </div>
+        </div>
+        <p class="src">BaxBench, ICML 2025. "약 절반"을 31번으로 그렸다 <span class="badge ok">원문 직접 확인</span></p>
+      </figure>
+    </div>
+    <ul class="findings">
+      <li><b>Veracode 2025-07</b>: 모델 100여 개, 과제 80개에서 45%가 불안전했다. Java는 70% 넘게 실패했다. <span class="badge">업체 보고서</span></li>
+      <li><b>Veracode 2026-07</b>: 평균 56%, 가장 좋은 모델이 68%였다. 모델 크기에 따른 이점은 없었다. <span class="badge">업체 보고서</span></li>
+      <li><b>에이전트 과제는 더 나쁘다</b>: SusVibes에서 기능은 57% 정확했지만 안전한 것은 11.8%였다. 안전하게 짜 달라고 요청해도 23%가 취약했다(SecureForge). <span class="badge">사전 공개본</span></li>
+    </ul>
+    <div class="grid-2">
+      <figure class="fig">
+        <figcaption>종류별 보안 통과율<span class="sub">SQL 인젝션은 대체로 막고, XSS와 로그 인젝션은 거의 못 막는다</span></figcaption>
+        <div data-chart="perClass"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="perClass"></div></details>
+        <p class="src">Veracode 2026 <span class="badge">업체 보고서</span>. BaxBench에서도 로그 인젝션(0.91~1.00)과 XSS(0.70~0.96)가 가장 많았고 SQL 인젝션은 최대 0.14였다.</p>
+      </figure>
+      <figure class="fig">
+        <figcaption>그 밖의 근거</figcaption>
+        <ul class="findings">
+          <li><b>접근 제어 실패가 웹 보안 사고 1위</b>다. OWASP 2025 순위 1위 항목은 발생 1,839,701건이고, 대부분 ID만 바꿔 남의 레코드를 읽는 객체 단위 실패다.</li>
+          <li><b>AI는 없는 패키지 이름을 지어낸다.</b> 2025년 연구에서 19.7%, 최신 모델은 4.62~6.10%였다. 지어낸 이름의 43%는 다시 돌려도 또 나왔다.</li>
+          <li><b>타입으로 출력을 막은 실적</b>: Google Trusted Types를 적용한 서비스 130개 넘게에서 DOM XSS가 0건이었다. <span class="badge">2차 자료</span></li>
+          <li><b>메모리 안전</b>: Android의 메모리 안전 취약점 비중은 2019년 76%에서 2025년 20% 미만으로 줄었다.</li>
+        </ul>
+      </figure>
+    </div>
+    <div class="decision"><span class="lbl">결정</span><span>HTML과 로그로 나가는 값은 안전한 타입만 받게 하고, 데이터마다 누가 읽고 쓰는지 반드시 적게 한다. 쓰는 권한에는 범위(어느 테이블, 어느 주소)를 붙이고, 처음 보는 패키지 이름은 받지 않으며, 입력 크기와 호출 속도에 한도를 둔다.</span></div>
+  </div>
+
+  <div class="sub-sec">
+    <p class="eyebrow">AI 최적화</p>
+    <h3>컴파일러가 쓰는 도중에 잡아 줄 때 가장 효과가 크다</h3>
+    <div class="grid-2">
+      <figure class="fig">
+        <figcaption>컴파일 안 된 비율<span class="sub">Rust 저장소 단위 과제, 최신 모델 7개 평균</span></figcaption>
+        <div data-chart="compileFail"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="compileFail"></div></details>
+        <p class="src">Generative Compilation, 2026-07 <span class="badge">사전 공개본</span></p>
+      </figure>
+      <figure class="fig">
+        <figcaption>관례를 바꾸면 정확도가 무너진다<span class="sub">GPT-4, Python을 1부터 세도록 바꿨을 때 HumanEval 정확도</span></figcaption>
+        <div class="legend" style="font-size:.88rem"><span class="lg"><i class="sw" style="background:var(--chart-mute)"></i>원래 (0부터)</span><span class="lg"><i class="sw" style="background:var(--chart-1)"></i>1부터 세게 바꾼 뒤</span></div>
+        <div data-chart="convention"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="convention"></div></details>
+        <p class="src">Wu 등, NAACL 2024</p>
+      </figure>
+    </div>
+    <div class="grid-2">
+      <figure class="fig">
+        <figcaption>같은 문제에서 첫 컴파일 실패 수<span class="sub">모델 7개, 언어 4개</span></figcaption>
+        <div data-chart="rustFail"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="rustFail"></div></details>
+        <p class="src">Nogueira 등, ISSRE 2026 <span class="badge ok">원문 직접 확인</span></p>
+      </figure>
+      <figure class="fig">
+        <figcaption>그 밖의 근거</figcaption>
+        <ul class="findings">
+          <li><b>컴파일 에러의 94%는 타입 검사 실패</b>이고 문법 에러는 6%였다(TypeScript, PLDI 2025). Rust에서 가장 많은 에러는 없는 메서드와 없는 이름이었다. AI가 API를 지어낸다.</li>
+          <li><b>에러에 쓸 수 있는 대안을 나열</b>한 것이 개선 효과의 대부분이었다. 다만 컴파일러가 아니라 게임 환경 실험이다.</li>
+          <li><b>Rust 에러 중 소유권 · 수명은 16.7%</b>, import 누락은 20.5%였다. 수정 루프를 돌리자 빌림 에러가 75% 줄었다.</li>
+          <li><b>계약 검증 성공률</b>: Dafny 82.2%, Verus 44.2%, Lean 26.8%. AI는 <code>assume(false)</code>나 <code>ensures true</code>로 검증을 속인다.</li>
+          <li><b>GC · 참조 카운트 · 값 의미론을 AI 관점에서 비교한 연구는 찾지 못했다.</b></li>
+        </ul>
+      </figure>
+    </div>
+    <div class="decision"><span class="lbl">결정</span><span>쓰는 중인 코드도 검사할 수 있게 문법을 짠다(선언을 먼저 쓰고, 함수의 입력·출력 타입은 꼭 적는다). 에러마다 그 자리에 쓸 수 있는 대안을 나열하고, 0부터 세기 같은 관례는 바꾸지 않으며, 검증을 건너뛰는 <code>assume</code>은 거부한다. 메모리 관리 방식은 2027년 1~2월에 시제품으로 비교해 정한다.</span></div>
+  </div>
+
+  <div class="sub-sec">
+    <p class="eyebrow">중복</p>
+    <h3>AI는 있던 코드를 다시 만들고, 테스트는 그걸 못 잡는다</h3>
+    <div class="grid-2">
+      <figure class="fig">
+        <figcaption>5줄 이상 중복 블록을 담은 커밋 비율<span class="sub">변경 2억 1,100만 줄. 2021년 값은 자료에 없다</span></figcaption>
+        <div data-chart="gitclear"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="gitclear"></div></details>
+        <p class="src">GitClear 2025. 한 회사 자료의 연도별 상관이고, 줄마다 AI가 썼는지 가린 것은 아니다 <span class="badge">업체 보고서</span></p>
+      </figure>
+      <figure class="fig">
+        <figcaption>앞 턴 코드를 주는 방식에 따라<span class="sub">에이전트가 자기 코드를 다시 쓴 비율과 중복이 남은 비율</span></figcaption>
+        <div class="legend" style="font-size:.88rem"><span class="lg"><i class="sw sw-bar" style="background:var(--chart-1)"></i>자기 재사용</span><span class="lg"><i class="sw sw-bar" style="background:var(--chart-2)"></i>중복</span></div>
+        <div data-chart="reuse"></div>
+        <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap" data-table="reuse"></div></details>
+        <p class="src">RepoReuse, 2026-09. 모델 1개, 과제 사슬 75개 <span class="badge">사전 공개본</span> <span class="badge ok">원문 직접 확인</span></p>
+      </figure>
+    </div>
+    <figure class="fig">
+      <figcaption>같은 함수를 막는 방식: 이름을 지우고 비교한다<span class="sub">이름을 지운 꼴이 같으면 같은 함수로 본다(Unison 언어가 쓰는 방식). 에러 문구는 예시다</span></figcaption>
+      <div class="canon-doc">
+        <pre class="code-card"><span class="cap">이미 있던 함수</span><span class="tk-k">fn</span> totalPrice(items: <span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  items.map(i =&gt; i.price).sum()
+}</pre>
+        <pre class="code-card"><span class="cap">AI가 새로 쓴 함수</span><span class="tk-k">fn</span> sumCost(xs: <span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  xs.map(x =&gt; x.price).sum()
+}</pre>
+        <pre class="code-card"><span class="cap">이름을 지운 꼴 (둘 다 같다)</span><span class="tk-k">fn</span> (<span class="tk-t">List</span>&lt;<span class="tk-t">Item</span>&gt;) -&gt; <span class="tk-t">Money</span> {
+  #0.map(#1 =&gt; #1.price).sum()
+}</pre>
+        <pre class="err">{ <span class="k">"문제"</span>: <span class="s">"같은 함수가 이미 있습니다"</span>,
+  <span class="k">"설명"</span>: <span class="s">"sumCost는 totalPrice와 같은 함수입니다"</span>,
+  <span class="k">"고치는 법"</span>: <span class="s">"totalPrice를 쓴다"</span>,
+  <span class="k">"자동 수정"</span>: <span class="s">"가능"</span> }</pre>
+      </div>
+    </figure>
+    <ul class="findings">
+      <li><b>5턴째 과제 사슬의 50.8%에 중복 로직</b>이 남았는데 통과율은 거의 그대로였다. 테스트로는 중복을 잡을 수 없다. <span class="badge ok">원문 직접 확인</span></li>
+      <li><b>반대 증거도 있다.</b> Cursor를 쓴 저장소 806개와 대조군 1,380개를 비교한 연구에서 중복 줄 밀도 증가(+7.03%, ±4.79%)는 유의하지 않았다. 그래서 중복은 가정하지 않고 잰다.</li>
+      <li><b>정확히 같은 복제는 검출 도구 재현율이 60~100%</b>, 동작만 같은 복제는 0~1%였다. 정확 일치는 에러, 비슷한 것은 경고, 동작만 같은 것은 범위 밖으로 둔다.</li>
+    </ul>
+    <div class="decision"><span class="lbl">결정</span><span>이름만 바꾼 같은 함수, 모양이 같은 데이터 타입, 타입을 손으로 베낀 검증 코드는 컴파일 에러다. AI 도구는 전체 소스 대신 함수 목록을 준다.</span></div>
+  </div>
+
+  <div class="sub-sec">
+    <p class="eyebrow">데이터</p>
+    <h3>같은 데이터를 여러 번 정의하면 어긋난다</h3>
+    <figure class="fig">
+      <figcaption>지금의 웹 앱과 도담<span class="sub">왼쪽은 같은 회원 정보가 다섯 곳에 따로 정의된 흔한 모습이다. 값은 예시다</span></figcaption>
+      <div class="dg-wrap" data-svg="drift"></div>
+    </figure>
+    <ul class="findings">
+      <li><b>Rails 앱 67개</b>에서 앱 코드 검증이 트랜잭션보다 37배 넘게 많이 쓰였다. 유일성과 외래 키 검사는 동시 실행에서 깨진다(SIGMOD 2015).</li>
+      <li><b>손으로 짠 트랜잭션 91개 중 53개</b>에 정확성 문제가 있었다(SIGMOD 2022).</li>
+      <li><b>스키마를 따로 두면 실행 중에 어긋난다.</b> Prisma는 DB와 달라도 경고만 하고 실행한다. Zero는 스키마를 하나 더 두고, 어긋나면 페이지를 새로고침한다.</li>
+      <li><b>선례가 있다.</b> Ur/Web은 컴파일러가 스키마를 만들고, Convex는 결정적 함수로 트랜잭션을 다시 돌리고, Lamdera는 컴파일러가 마이그레이션을 강제한다.</li>
+      <li><b>DB를 직접 만든 Gel(옛 EdgeDB)</b>은 회사를 닫았고 서비스는 2026년 1월 31일에 끝났다. <span class="badge ok">원문 직접 확인</span></li>
+    </ul>
+    <div class="decision"><span class="lbl">결정</span><span>저장되는 데이터는 한 번만 선언하고 주인을 하나 둔다. 계산되는 값은 복사하지 않고 <code>derived</code>(계산식)로 선언하며, 다른 데이터를 가리키는 참조는 타입으로 검사하고, 꼭 지켜야 할 규칙은 DB 제약과 트랜잭션으로 지킨다. DB는 PostgreSQL을 쓴다.</span></div>
+  </div>
+</section>
+
+<section class="doc-sec" id="language">
+  <div class="sec-head">
+    <p class="eyebrow">만들 언어</p>
+    <h2>도담: AI가 쓰고 컴파일러가 지키는 범용 언어</h2>
+    <p class="prose">사람이 읽기 좋은지는 설계 기준이 아니다. AI가 처음부터 맞게 짜고, 고쳐도 다른 곳이 깨지지 않는 쪽을 고른다. 아래 문법은 임시이고, 실제 문법은 시험 과제에서 잰 숫자로 정한다.</p>
+  </div>
+  <div class="lang-grid">
+    <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:14px;min-width:0">
+      <div data-code="note" style="min-width:0"></div>
+      <ul class="notes">
+        <li><code>store type</code><span>저장되는 데이터는 한 번만 정의한다. DB 스키마 · 검증 · 마이그레이션은 컴파일러가 만든다</span></li>
+        <li><code>Ref&lt;User&gt; on delete</code><span>참조는 타입이고 삭제 정책이 필수다. DB의 외래 키가 된다</span></li>
+        <li><code>Text(1..120)</code><span>길이 범위를 타입에 적으면 검사가 자동으로 붙는다</span></li>
+        <li><code>read / write</code><span>레코드마다 누가 읽고 쓸 수 있는지. 없으면 컴파일 에러</span></li>
+        <li><code>derived</code><span>복사해 두지 않고 계산한다. 시스템이 갱신한다</span></li>
+        <li><code>access · limit · uses</code><span>누가 부를 수 있는지, 1분에 몇 번까지인지, 어떤 테이블에 무엇을 하는지</span></li>
+      </ul>
+    </div>
+    <dl class="kv">
+      <dt>종류</dt><dd>범용 · 정적 타입 · 컴파일 언어. 첫 분야는 웹(서버와 화면을 코드 한 벌로)</dd>
+      <dt>쓰는 쪽</dt><dd>AI 에이전트. 사람은 결과물과 보안 보고서만 본다</dd>
+      <dt>생김새</dt><dd>TypeScript · Rust · Kotlin 계열. 0부터 세기, ASCII, 공식 포매터 하나</dd>
+      <dt>타입</dt><dd>매개변수 · 반환 타입 필수, 추론은 함수 안에서만. null과 예외 없이 <code>Option</code> · <code>Result</code></dd>
+      <dt>안전</dt><dd>권한과 자원 범위, <code>Untrusted&lt;T&gt;</code>, <code>Secret&lt;T&gt;</code>, <code>Password</code>, 레코드별 정책, <code>trust</code>는 사유와 승인이 있어야</dd>
+      <dt>데이터</dt><dd>한 번 정의, 주인 하나. 스키마 · 마이그레이션 · 화면 동기화는 컴파일러가</dd>
+      <dt>중복</dt><dd>이름만 바꾼 같은 정의는 에러, 고칠 방법은 "있던 것을 쓴다"</dd>
+      <dt>메모리</dt><dd>GC · 소유권 · 참조 카운트 · 값 의미론 중 2027년 1~2월 벤치마크로 결정. 데이터 경쟁은 없다</dd>
+      <dt>출력</dt><dd>네이티브(개발은 Cranelift, 배포는 LLVM), 브라우저는 WASM, 격리 실행은 WASI</dd>
+      <dt>도구</dt><dd>컴파일러(Rust로 구현), 기계가 읽는 에러, AI 도구 연결(MCP 서버), 편집기 지원, 보안 보고서(<code>dodam report</code>)</dd>
+    </dl>
+  </div>
+  <figure class="fig">
+    <figcaption>컴파일러가 하는 일, 사람이 보는 것<span class="sub">실패하면 에러와 대안이 AI에게 돌아가고, 통과하면 보안 보고서의 차이만 사람에게 간다</span></figcaption>
+    <div class="dg-wrap" data-svg="flow"></div>
+    <div data-report="r"></div>
+  </figure>
+</section>
+
+<section class="doc-sec" id="method">
+  <div class="sec-head">
+    <p class="eyebrow">어떻게 정하나</p>
+    <h2>취향이 아니라 숫자로 정한다</h2>
+    <p class="prose">문법과 의미에 관한 결정은 모두 같은 고리를 돈다. 가설을 세우고, 시제품을 만들고, AI에게 풀게 하고, 자동으로 재고, 숨긴 과제로 평가한 뒤, 잰 숫자를 결정과 함께 기록한다.</p>
+  </div>
+  <div class="grid-2">
+    <figure class="fig"><figcaption>결정의 고리</figcaption><div class="dg-wrap" data-svg="loop"></div></figure>
+    <figure class="fig">
+      <figcaption>일하는 규칙</figcaption>
+      <ul class="findings">
+        <li><b>테스트를 먼저 커밋</b>하고 CI를 돌린 뒤 구현을 올린다.</li>
+        <li><b>결정마다 시험 과제에서 잰 숫자</b>를 함께 기록한다.</li>
+        <li><b>규칙은 조여지기만 한다.</b> 완화하려면 사유와 벤치마크 비교, 사람 승인이 필요하다.</li>
+        <li><b>숫자가 나아지면 AI가 직접 병합</b>한다. 보안을 약하게 하는 변화, 새 권한, 새 <code>trust</code> 블록만 사람이 승인한다.</li>
+        <li><b>비공개 과제 30%</b>는 언어를 고치는 AI가 볼 수 없고, 측정 도구도 고칠 수 없다.</li>
+        <li><b>서로 다른 회사의 모델 3개 이상</b>으로 같은 과제를 3번씩 푼다.</li>
+      </ul>
+    </figure>
+  </div>
+</section>
+
+<section class="doc-sec" id="fieldwork">
+  <div class="sec-head">
+    <p class="eyebrow">실제 코드 조사</p>
+    <h2>실제 코드는 세 갈래로 조사한다</h2>
+    <p class="prose">논문 숫자만으로는 도담이 무엇을 막아야 할지 정할 수 없다. AI에게 기존 언어로 코드를 직접 짜게 해서 재고, 세상에 있는 코드를 표본으로 재고, 선행 언어의 구현 소스를 읽는다.</p>
+  </div>
+  <div class="tracks">
+    <article class="trk"><span class="trk-id">첫째</span><h3 class="trk-h">기존 언어로 짜게 해서 잰다</h3><ul>
+      <li>AI 모델 3개가 과제 10개(웹 6 · CLI와 데이터 처리 4)를 지금 많이 쓰는 언어 7개(Python · TypeScript · Java · C# · Go · Rust · C++)로 짠다. 도담을 만들기 전에 도담이 넘어야 할 기준을 재 두는 일이다.</li>
+      <li>언어 7개 × 모델 3개 × 3번 = 과제마다 63번, 모두 630번.</li>
+      <li>실행마다 격리된 컨테이너를 쓴다. 패키지는 미러에서만 받고, 없는 패키지를 찾은 기록도 남긴다.</li>
+      <li>첫 구현 뒤 수정 요청 1~2개(요구사항 변경, 스키마 변경)로 탄탄함을 잰다.</li>
+    </ul></article>
+    <article class="trk"><span class="trk-id">둘째</span><h3 class="trk-h">세상의 코드를 표본으로</h3><ul>
+      <li>공개 저장소에서 AI 에이전트가 만든 PR과 사람이 만든 PR을 표본으로 뽑는다. 에이전트 계정과 커밋 표시로 구분한다.</li>
+      <li>같은 도구로 보안 약점, 중복, 같은 데이터 모양이 몇 곳에 따로 정의됐는지, 새 의존성을 잰다.</li>
+      <li>BaxBench · SusVibes · RepoReuse 일부를 우리 측정기로 다시 돌려 논문 숫자와 맞춘다.</li>
+      <li>공개 저장소만 쓰고, 라이선스를 지키고, 개인 정보는 모으지 않고, 묶음 통계로만 낸다.</li>
+    </ul></article>
+    <article class="trk"><span class="trk-id">셋째</span><h3 class="trk-h">선행 구현의 소스를 읽는다</h3><ul>
+      <li>Unison(이름을 지운 꼴로 같은 함수 찾기), Go Capslock(권한 보고서), Ur/Web(스키마 생성 · 트랜잭션), Lamdera(마이그레이션), Convex(결정적 함수와 재시도).</li>
+      <li>논문 설명과 실제 구현이 다른 곳, 한계와 예외 처리를 설계 메모로 남긴다.</li>
+    </ul></article>
+  </div>
+  <figure class="fig">
+    <figcaption>실행 하나가 거치는 측정</figcaption>
+    <div class="chain" data-chain="1"></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>무엇을</th><th>어떻게</th><th>도구 (후보)</th></tr></thead>
+        <tbody>
+          <tr><td>정확도</td><td>첫 컴파일 성공, 숨긴 기능 · 경계값 테스트. HTTP · 브라우저 · 명령줄로 바깥에서만 본다</td><td>언어 무관 테스트 러너</td></tr>
+          <tr><td>보안</td><td>실제 공격(인젝션 · XSS · 남의 레코드 · SSRF · 경로 탐색 · 자원 고갈 · 자격 증명)과 정적 분석으로 약점 종류(CWE)를 분류</td><td>공격 러너, Semgrep, CodeQL</td></tr>
+          <tr><td>중복</td><td>5줄 이상 중복 블록, 1천 줄당 중복률, 수정 요청 뒤 있던 기능을 다시 만든 비율</td><td>언어 무관 복제 검출기(jscpd 등)</td></tr>
+          <tr><td>데이터</td><td>스키마 변경 뒤 깨진 질의, 동시 요청으로 불변식 깨기(이중 예약 등)</td><td>동시 부하 스크립트</td></tr>
+          <tr><td>속도</td><td>응답 시간 p50 · p99, 처리량, 메모리, 빌드 시간. 같은 기계와 같은 부하로</td><td>k6 같은 부하 도구</td></tr>
+          <tr><td>비용</td><td>토큰, 시간, 고친 횟수</td><td>에이전트 실행 기록</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="src">결과는 2026년 12월 31일에 보고서(기존 언어별 기준, 실패 분류, 도담이 막아야 할 것의 순위)로 낸다.</p>
+  </figure>
+</section>
+
+<section class="doc-sec" id="roadmap">
+  <div class="sec-head">
+    <p class="eyebrow">앞으로의 계획</p>
+    <h2>2029년 1.0까지</h2>
+    <p class="prose">위 막대는 기간 길이를 그대로 그렸다. 올해 남은 9주는 그 아래에 주 단위로 쪼갰다.</p>
+  </div>
+  <figure class="fig"><figcaption>단계별 계획</figcaption><div data-roadmap="1"></div></figure>
+  <figure class="fig">
+    <figcaption>올해 남은 9주 (2026-10-28 ~ 12-31)<span class="sub">11월 22일까지 실행 비용을 재 보고, 그 숫자로 남은 일정을 다시 본다</span></figcaption>
+    <div data-gantt="1"></div>
+    <details class="tbl"><summary>표로 보기</summary><div class="tbl-wrap">
+      <table>
+        <thead><tr><th>기간</th><th>할 일</th><th>끝났다는 표시</th></tr></thead>
+        <tbody>
+          <tr><td class="num">10/28~11/1</td><td>설계 초안 검토와 커밋</td><td>커밋 3개(조사 · 설계 · 문서 정리)</td></tr>
+          <tr><td class="num">11/2~11/8</td><td>과제 형식 확정, 견본 과제 1개(회원가입)를 끝까지, 측정기 뼈대</td><td>견본 과제를 TypeScript로 한 번 돌려 숫자가 나온다</td></tr>
+          <tr><td class="num">11/9~11/22</td><td>과제 10개, 측정기 완성(공격 · 정적 분석 · 중복 · 데이터 · 속도), 비용 시범</td><td>과제 1개를 기존 언어 7개와 모델 1개로 돌린 실행 비용을 안다</td></tr>
+          <tr><td class="num">11/23~12/6</td><td>기존 언어 측정 630번, 실패 분류, 현장 표본 수집 시작</td><td>기존 언어별 기준 표</td></tr>
+          <tr><td class="num">12/7~12/20</td><td>과제 30개(비공개 9개 분리), 문법 후보 2~3개 비교, 선행 구현 소스 읽기</td><td>문법 후보별 숫자</td></tr>
+          <tr><td class="num">12/21~12/31</td><td>올해 결과 보고서, 설계 확정</td><td>설계 확정판 커밋</td></tr>
+        </tbody>
+      </table>
+    </div></details>
+  </figure>
+  <p class="src">처음에는 이 일들을 첫 주에 끝낼 일로 잡았지만, 실제로는 11월 한 달이 걸리는 양이라 날짜를 이렇게 다시 잡았다. GitHub 조직(dodam-lang)과 도메인(dodam-lang.org)은 첫 공개 판 전에 정한다.</p>
+</section>
+
+<section class="doc-sec" id="unknowns">
+  <div class="sec-head">
+    <p class="eyebrow">열린 질문</p>
+    <h2>아직 모르는 것</h2>
+  </div>
+  <ul class="lims-doc">
+    <li><b>동작만 같은 중복은 판정할 수 없다</b><span>정확히 같은 꼴만 에러로 막고, 나머지는 시험 과제로 재서 공개한다.</span></li>
+    <li><b>GC · 참조 카운트 · 값 의미론을 AI 관점에서 비교한 연구가 없다</b><span>2027년 1~2월에 시제품 넷을 만들어 잰다.</span></li>
+    <li><b>기존 언어 측정 630번의 비용을 아직 모른다</b><span>과제 1개로 먼저 재고, 그 숫자로 일정을 다시 본다.</span></li>
+    <li><b>2026년 논문 다수는 사전 공개본이고, 업체 보고서는 검증이 약하다</b><span>결정에 쓰는 수치는 원문을 다시 연다.</span></li>
+    <li><b>오프라인 쓰기와 외부 API 데이터의 어긋남</b><span>첫 판에서 오프라인 쓰기는 빼고, 외부 데이터는 <code>Stale&lt;T&gt;</code> 타입으로 드러낸다.</span></li>
+    <li><b>직렬화 트랜잭션은 쓰기가 많으면 느리다</b><span>속도 벤치마크에 쓰기가 많은 과제를 넣어 잰다.</span></li>
+  </ul>
+</section>
+
+<section class="doc-sec" id="sources">
+  <div class="sec-head">
+    <p class="eyebrow">출처</p>
+    <h2>주요 출처</h2>
+    <p class="prose">결정에 쓴 핵심 출처다. 본문의 숫자 옆에 원문을 다시 열어 확인했는지 적어 두었다.</p>
+  </div>
+  <div class="srcs">
+    <div><h3>보안</h3><ul>
+      <li><a href="https://arxiv.org/abs/2502.11844" target="_blank" rel="noopener">BaxBench (ICML 2025)</a></li>
+      <li><a href="https://veracode.com/blog/spring-2026-genai-code-security" target="_blank" rel="noopener">Veracode Spring 2026 GenAI Code Security</a></li>
+      <li><a href="https://arxiv.org/abs/2512.03262" target="_blank" rel="noopener">SusVibes</a> · <a href="https://arxiv.org/abs/2605.08382" target="_blank" rel="noopener">SecureForge</a></li>
+      <li><a href="https://top10.owasp.org/2025/A01_2025-Broken_Access_Control" target="_blank" rel="noopener">OWASP Top 10 2025 · 1위 접근 제어 실패</a></li>
+      <li><a href="https://arxiv.org/abs/2406.10279" target="_blank" rel="noopener">지어낸 패키지 이름 (USENIX Security 2025)</a></li>
+      <li><a href="https://security.googleblog.com/2024/09/eliminating-memory-safety-vulnerabilities-Android.html" target="_blank" rel="noopener">Android 메모리 안전 (Google, 2024)</a></li>
+    </ul></div>
+    <div><h3>AI 최적화</h3><ul>
+      <li><a href="https://arxiv.org/abs/2607.13921" target="_blank" rel="noopener">Generative Compilation (2026)</a></li>
+      <li><a href="https://arxiv.org/abs/2504.09246" target="_blank" rel="noopener">타입 제약 디코딩 (PLDI 2025)</a></li>
+      <li><a href="https://arxiv.org/abs/2307.02477" target="_blank" rel="noopener">관례를 바꾼 실험 (NAACL 2024)</a></li>
+      <li><a href="https://arxiv.org/abs/2608.00661" target="_blank" rel="noopener">LLM 코드 에러 연구 (Nogueira 등, 2026)</a></li>
+      <li><a href="https://arxiv.org/abs/2504.15254" target="_blank" rel="noopener">CRUST-Bench</a> · <a href="https://arxiv.org/abs/2509.22908" target="_blank" rel="noopener">Vericoding</a></li>
+      <li><a href="https://arxiv.org/abs/2602.09447" target="_blank" rel="noopener">SWE-AGI (MoonBit 과제)</a></li>
+    </ul></div>
+    <div><h3>중복</h3><ul>
+      <li><a href="https://www.gitclear.com/ai_assistant_code_quality_2025_research" target="_blank" rel="noopener">GitClear 2025</a></li>
+      <li><a href="https://arxiv.org/abs/2609.35357" target="_blank" rel="noopener">RepoReuse (2026)</a></li>
+      <li><a href="https://arxiv.org/html/2511.04427v3" target="_blank" rel="noopener">Cursor 도입 저장소 비교 (MSR'26)</a></li>
+      <li><a href="https://www.unison-lang.org/docs/the-big-idea/" target="_blank" rel="noopener">Unison: The big idea</a></li>
+      <li><a href="https://arxiv.org/pdf/1512.06448" target="_blank" rel="noopener">BigCloneBench 비교 (ICSE'16)</a></li>
+    </ul></div>
+    <div><h3>데이터</h3><ul>
+      <li><a href="http://adam.chlipala.net/papers/UrWebPOPL15/UrWebPOPL15.pdf" target="_blank" rel="noopener">Ur/Web (POPL 2015)</a></li>
+      <li><a href="https://docs.convex.dev/database/advanced/occ" target="_blank" rel="noopener">Convex OCC</a> · <a href="https://github.com/lamdera/compiler" target="_blank" rel="noopener">Lamdera compiler</a></li>
+      <li><a href="http://www.bailis.org/papers/feral-sigmod2015.pdf" target="_blank" rel="noopener">Feral Concurrency Control (SIGMOD 2015)</a></li>
+      <li><a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/relation-mode" target="_blank" rel="noopener">Prisma relation mode</a> · <a href="https://zero.rocicorp.dev/docs/schema" target="_blank" rel="noopener">Zero schema</a></li>
+      <li><a href="https://www.geldata.com/blog/gel-joins-vercel" target="_blank" rel="noopener">Gel joins Vercel (2025-12-02)</a></li>
+      <li><a href="https://www.vldb.org/pvldb/vol16/p1601-budiu.pdf" target="_blank" rel="noopener">DBSP (PVLDB 2023)</a></li>
+    </ul></div>
+  </div>
+</section>
+
+</main>
+
+<footer class="doc doc-foot">
+  <p>도담 · MIT OR Apache-2.0 · 2026-10-28 기준</p>
+  <p>모든 수치는 출처의 값을 그대로 옮겼다. 범위로 보고된 값(예: 82~83%)은 막대를 가운데 값으로 그리고 라벨에 범위를 적었다.</p>
+</footer>
+
+</div>
+</div>
+<div class="tip" role="tooltip" hidden></div>
+
+<script>
+(() => {
+'use strict';
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const isRecord = new URLSearchParams(location.search).has('record');
+if (isRecord) document.documentElement.classList.add('record');
+
+/* ---------------- data (every number comes from the research doc) ---------------- */
+const DATA = {
+  syntaxVsSec: { aria: '문법 정확도 95% 넘음, 보안 통과 약 55%', max: 100, labelW: '6.6em',
+    rows: [ { label: '문법 정확도', value: 95, display: '95% 넘음', tone: 'mute' }, { label: '보안 통과', value: 55, display: '약 55%', tone: 'main' } ] },
+  perClass: { aria: '종류별 보안 통과율: 암호 86~87%, SQL 인젝션 82~83%, XSS 약 15%, 로그 인젝션 12~13%', max: 100, labelW: '6.6em',
+    rows: [ { label: '암호', value: 86.5, display: '86~87%', tone: 'mute' }, { label: 'SQL 인젝션', value: 82.5, display: '82~83%', tone: 'mute' },
+            { label: 'XSS', value: 15, display: '약 15%', tone: 'danger', tag: '많이 뚫림' }, { label: '로그 인젝션', value: 12.5, display: '12~13%', tone: 'danger', tag: '많이 뚫림' } ] },
+  compileFail: { aria: '컴파일 안 된 비율: 피드백 없음 65.9%, 생성 뒤 피드백 20.7%, 생성 중 피드백 13.1%', max: 70, ticks: [0, 20, 40, 60], tick: v => v + '%',
+    rows: [ { label: '피드백 없음', value: 65.9, display: '65.9%', tone: 'mute' }, { label: '생성 뒤 피드백', value: 20.7, display: '20.7%', tone: 'mute' }, { label: '생성 중 피드백', value: 13.1, display: '13.1%', tone: 'main' } ] },
+  convention: { aria: 'HumanEval 전체 87.4에서 68.2로, 인덱싱이 중요한 문제 82.5에서 40.5로', max: 100,
+    items: [ { label: 'HumanEval 전체', from: 87.4, to: 68.2 }, { label: '인덱싱이 중요한 문제', from: 82.5, to: 40.5 } ] },
+  rustFail: { aria: '첫 컴파일 실패 수: Java 6,996, C++ 9,953, C 12,304, Rust 23,416', max: 25000, labelW: '4.2em',
+    rows: [ { label: 'Java', value: 6996, display: '6,996', tone: 'mute' }, { label: 'C++', value: 9953, display: '9,953', tone: 'mute' }, { label: 'C', value: 12304, display: '12,304', tone: 'mute' }, { label: 'Rust', value: 23416, display: '23,416', tone: 'main' } ] },
+  gitclear: { aria: '5줄 이상 중복 블록을 담은 커밋 비율: 2020년 0.70%, 2022년 0.45%, 2023년 1.80%, 2024년 6.66%', max: 7, ticks: [0, 2, 4, 6], tick: v => v + '%',
+    rows: [ { label: '2020', value: 0.70, display: '0.70%', tone: 'mute' }, { label: '2022', value: 0.45, display: '0.45%', tone: 'mute' }, { label: '2023', value: 1.80, display: '1.80%', tone: 'mute' }, { label: '2024', value: 6.66, display: '6.66%', tone: 'main' } ] },
+  reuse: { aria: '자기 재사용과 중복: 주지 않음 30.0%와 65.1%, 함수 목록 67.8%와 46.7%, 전체 소스 29.2%와 70.7%', max: 80, ticks: [0, 20, 40, 60, 80], tick: v => v + '%',
+    series: ['자기 재사용', '중복'],
+    groups: [ { label: '주지 않음', a: 30.0, b: 65.1 }, { label: '함수 목록', a: 67.8, b: 46.7 }, { label: '전체 소스', a: 29.2, b: 70.7 } ] },
+  bax: { ok: 62, hit: 31 },
+  phases: [
+    { when: '2026-11~12', months: 2, title: '방향 고정', now: true, items: ['설계 확정', '시험 과제 30개와 측정기', '기존 언어 7개 측정'] },
+    { when: '2027-01~02', months: 2, title: '결정', items: ['메모리 모델: 시제품 4개 비교', '문법 v0'] },
+    { when: '2027-03~06', months: 4, title: '최소 컴파일러', items: ['검사기 · JSON 진단 · 쓰는 중 검사', '중복 검사 · 스키마 생성 · 보안 보고서', '네이티브 · WASM · 예제 앱'] },
+    { when: '2027-07~12', months: 6, title: 'AI 개선 루프', items: ['AI 도구 연결 · 편집기 지원 · 과제 100개', 'AI 자동 병합 · 화면 동기화', '첫 공개 판 0.1'] },
+    { when: '2028', months: 12, title: '실제로 쓰기', items: ['표준 라이브러리 · 패키지 매니저', 'LLVM 배포 빌드 · 시스템 분야', '실제 서비스 운영'] },
+    { when: '2029~', months: 12, title: '1.0', items: ['핵심 고정', '벤치마크 결과 공개', '이후 임베디드 · 게임 · 수치'] },
+  ],
+  weeks: { start: '2026-10-28', end: '2027-01-01',
+    ticks: [ ['2026-11-15', '11/15'], ['2026-12-01', '12/1'], ['2026-12-15', '12/15'] ],
+    rows: [
+      { label: '설계 초안 확정 · 커밋', from: '2026-10-28', to: '2026-11-01', d: '10/28~11/1' },
+      { label: '과제 형식 · 견본 과제 · 측정기 뼈대', from: '2026-11-02', to: '2026-11-08', d: '11/2~11/8' },
+      { label: '과제 10개 · 측정기 완성 · 비용 시범', from: '2026-11-09', to: '2026-11-22', d: '11/9~11/22' },
+      { label: '기존 언어 630번 측정 · 실패 분류 · 현장 표본', from: '2026-11-23', to: '2026-12-06', d: '11/23~12/6' },
+      { label: '과제 30개 · 문법 후보 비교 · 소스 읽기', from: '2026-12-07', to: '2026-12-20', d: '12/7~12/20' },
+      { label: '올해 결과 보고서 · 설계 확정', from: '2026-12-21', to: '2026-12-31', d: '12/21~12/31' },
+    ] },
+  chain: ['실행', '기능 테스트', '공격 테스트', '정적 분석', '중복 검출', '동시 실행', '부하 측정', '실패 분류'],
+  code: `store type Note {
+  owner: Ref<User> on delete cascade
+  title: Text(1..120)
+  body:  Text(0..10000)
+  read(v)  = owner == v.user
+  write(v) = owner == v.user
+}
+
+derived fn noteCount(u: Ref<User>) -> Int =
+  count(Note where owner == u)
+
+server fn createNote(
+  v: Viewer, title: Text(1..120), body: Text(0..10000)
+) -> Result<Id<Note>, NoteError>
+  access auth(Member)
+  limit 30 per minute
+  uses Db(notes, write)
+{
+  Db.insert(Note { owner: v.user, title, body })
+}`,
+  codeNotes: { 0: '한 번만 정의', 1: '참조는 타입으로 검사', 2: '길이 검사 자동', 4: '레코드별 읽기 권한', 5: '레코드별 쓰기 권한', 8: '복사하지 않고 계산', 14: '누가 부를 수 있나', 15: '1분에 30번까지', 16: '쓰는 권한과 범위' },
+};
+
+/* ---------------- helpers ---------------- */
+const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const A = (e, type, d, on) => { if (on) { e.classList.add('an', type); e.style.setProperty('--d', (+d).toFixed(3)); } return e; };
+function warnIcon() {
+  const ns = 'http://www.w3.org/2000/svg';
+  const s = document.createElementNS(ns, 'svg'); s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('aria-hidden', 'true');
+  const p = document.createElementNS(ns, 'path'); p.setAttribute('d', 'M8 1.5 15 14H1z'); p.setAttribute('fill', 'var(--dg-danger)');
+  const t = document.createElementNS(ns, 'path'); t.setAttribute('d', 'M8 6v3.6M8 11.4v.2'); t.setAttribute('stroke', 'var(--dg-bg)'); t.setAttribute('stroke-width', '1.6'); t.setAttribute('stroke-linecap', 'round');
+  s.append(p, t); return s;
+}
+function tipify(el, label, value) { el.tabIndex = 0; el.dataset.tipL = label; el.dataset.tipV = value; el.setAttribute('aria-label', label + ' ' + value); }
+
+/* ---------------- chart builders (stage = animated, doc = static + tooltips) ---------------- */
+function hbar(root, cfg, stage, d0) {
+  const wrap = h('div', 'hb'); wrap.setAttribute('role', 'img'); wrap.setAttribute('aria-label', cfg.aria);
+  if (cfg.labelW) wrap.style.setProperty('--hb-label', cfg.labelW);
+  cfg.rows.forEach((r, i) => {
+    const row = h('div', 'hb-row'), lab = h('div', 'hb-label', r.label), track = h('div', 'hb-track');
+    const pct = Math.min(100, r.value / cfg.max * 100);
+    const bar = h('div', 'hb-bar tone-' + (r.tone || 'main')); bar.style.width = pct + '%';
+    const val = h('div', 'hb-val'); val.style.left = pct + '%';
+    val.append(h('span', 'hb-num', r.display));
+    if (r.tag) { const t = h('span', 'hb-tag'); t.append(warnIcon(), document.createTextNode(r.tag)); val.append(t); }
+    track.append(bar, val); row.append(lab, track); wrap.append(row);
+    if (!stage) tipify(bar, r.label, r.display);
+    A(lab, 'fade', d0 + i * .12, stage); A(bar, 'growx', d0 + .2 + i * .14, stage); A(val, 'fade', d0 + 1.0 + i * .14, stage);
+  });
+  root.append(wrap);
+}
+function vgrid(plot, cfg) {
+  (cfg.ticks || []).forEach(tk => {
+    const g = h('div', 'vb-grid'); g.style.bottom = (tk / cfg.max * 100) + '%';
+    g.append(h('span', 'vb-tick', cfg.tick ? cfg.tick(tk) : String(tk))); plot.append(g);
+  });
+}
+function vbar(root, cfg, stage, d0) {
+  const wrap = h('div', 'vb'); wrap.setAttribute('role', 'img'); wrap.setAttribute('aria-label', cfg.aria);
+  const plot = h('div', 'vb-plot'); vgrid(plot, cfg);
+  const xs = h('div', 'vb-x');
+  cfg.rows.forEach((r, i) => {
+    const slot = h('div', 'vb-slot'); const pct = r.value / cfg.max * 100;
+    const col = h('div', 'vb-col tone-' + (r.tone || 'mute')); col.style.height = pct + '%';
+    const cap = h('div', 'vb-cap', r.display); cap.style.bottom = pct + '%';
+    slot.append(col, cap); plot.append(slot);
+    if (!stage) tipify(col, r.label, r.display);
+    A(col, 'growy', d0 + .2 + i * .2, stage); A(cap, 'fade', d0 + 1.1 + i * .2, stage);
+    xs.append(A(h('div', 'vb-xl', r.label), 'fade', d0 + i * .1, stage));
+  });
+  wrap.append(plot, xs); root.append(wrap);
+}
+function grouped(root, cfg, stage, d0) {
+  const wrap = h('div', 'vb grouped'); wrap.setAttribute('role', 'img'); wrap.setAttribute('aria-label', cfg.aria);
+  const plot = h('div', 'vb-plot'); vgrid(plot, cfg);
+  const xs = h('div', 'vb-x');
+  cfg.groups.forEach((g, i) => {
+    const slot = h('div', 'vb-slot'); const pair = h('div', 'gb-pair');
+    [['a', 'main', cfg.series[0]], ['b', 'c2', cfg.series[1]]].forEach(([k, tone, name], j) => {
+      const holder = h('div', 'gb-col'); const pct = g[k] / cfg.max * 100;
+      const col = h('div', 'vb-col'); col.style.height = pct + '%'; col.style.background = tone === 'main' ? 'var(--dg-c1)' : 'var(--dg-c2)';
+      const cap = h('div', 'vb-cap', g[k].toFixed(1) + '%'); cap.style.bottom = pct + '%'; cap.style.fontSize = '.86em';
+      holder.append(col, cap); pair.append(holder);
+      if (!stage) tipify(col, g.label + ' · ' + name, g[k].toFixed(1) + '%');
+      A(col, 'growy', d0 + .3 + i * .35 + j * .12, stage); A(cap, 'fade', d0 + 1.2 + i * .35 + j * .12, stage);
+    });
+    slot.append(pair); plot.append(slot);
+    xs.append(A(h('div', 'vb-xl', g.label), 'fade', d0 + i * .1, stage));
+  });
+  wrap.append(plot, xs); root.append(wrap);
+}
+function dumbbell(root, cfg, stage, d0) {
+  const wrap = h('div', 'dbb'); wrap.setAttribute('role', 'img'); wrap.setAttribute('aria-label', cfg.aria);
+  cfg.items.forEach((it, i) => {
+    const row = h('div', 'db-row'); const lab = h('div', 'db-label', it.label); const tr = h('div', 'db-track');
+    const sc = h('div', 'db-scale'); const line = h('div', 'db-line'); line.style.left = it.to + '%'; line.style.width = (it.from - it.to) + '%';
+    const df = h('span', 'db-dot db-from'); df.style.left = it.from + '%';
+    const dt = h('span', 'db-dot db-to'); dt.style.left = it.to + '%';
+    const vf = h('span', 'db-v', String(it.from)); vf.style.left = it.from + '%';
+    const vt = h('span', 'db-v', String(it.to)); vt.style.left = it.to + '%';
+    tr.append(sc, line, df, dt, vf, vt);
+    const delta = h('div', 'db-delta', '▼ ' + (it.from - it.to).toFixed(1) + '점');
+    row.append(lab, tr, delta); wrap.append(row);
+    if (!stage) { tipify(df, it.label + ' · 원래', String(it.from)); tipify(dt, it.label + ' · 1부터 센 뒤', String(it.to)); }
+    const b = d0 + i * .5;
+    A(lab, 'fade', b, stage); A(df, 'pop', b + .2, stage); A(vf, 'fade', b + .3, stage); A(line, 'growxr', b + .6, stage); A(dt, 'pop', b + 1.3, stage); A(vt, 'fade', b + 1.4, stage); A(delta, 'fade', b + 1.6, stage);
+  });
+  const ax = h('div', 'db-axis'); ax.append(h('span')); const s = h('div', 's');
+  [0, 50, 100].forEach(v => { const t = h('span', null, String(v)); t.style.left = v + '%'; s.append(t); });
+  ax.append(s, h('span')); A(ax, 'fade', d0, stage); wrap.append(ax);
+  root.append(wrap);
+}
+function dotgrid(root, cfg, stage, d0) {
+  const g = h('div', 'dots'); g.setAttribute('role', 'img'); g.setAttribute('aria-label', '100번 중 정확 62번, 그중 약 절반인 31번은 공격 성공, 틀림 38번');
+  if (stage) { g.style.setProperty('--ok-at', (d0 + 1.5).toFixed(2)); g.style.setProperty('--hit-at', (d0 + 3.1).toFixed(2)); }
+  for (let i = 0; i < 100; i++) {
+    const d = h('span', 'dot');
+    if (i < cfg.ok) { d.classList.add('ok'); if (i % 2 === 1 && Math.floor(i / 2) < cfg.hit) d.classList.add('hit'); }
+    if (stage) { d.classList.add('an'); d.style.setProperty('--d', (d0 + i * .011).toFixed(3)); }
+    g.append(d);
+  }
+  root.append(g);
+}
+const CHARTS = {
+  syntaxVsSec: (el, s, d) => hbar(el, DATA.syntaxVsSec, s, d),
+  perClass: (el, s, d) => hbar(el, DATA.perClass, s, d),
+  compileFail: (el, s, d) => vbar(el, DATA.compileFail, s, d),
+  convention: (el, s, d) => dumbbell(el, DATA.convention, s, d),
+  rustFail: (el, s, d) => hbar(el, DATA.rustFail, s, d),
+  gitclear: (el, s, d) => vbar(el, DATA.gitclear, s, d),
+  reuse: (el, s, d) => grouped(el, DATA.reuse, s, d),
+  bax: (el, s, d) => dotgrid(el, DATA.bax, s, d),
+};
+
+/* ---------------- table views ---------------- */
+function table(head, rows) {
+  const t = h('table'); const th = h('thead'); const tr = h('tr');
+  head.forEach((c, i) => { const x = h('th', null, c); if (i > 0) x.style.textAlign = 'right'; tr.append(x); }); th.append(tr);
+  const tb = h('tbody');
+  rows.forEach(r => { const row = h('tr'); r.forEach((c, i) => row.append(h('td', i > 0 ? 'num' : null, c))); tb.append(row); });
+  t.append(th, tb); return t;
+}
+const TABLES = {
+  syntaxVsSec: () => table(['항목', '값'], DATA.syntaxVsSec.rows.map(r => [r.label, r.display])),
+  perClass: () => table(['종류', '보안 통과율'], DATA.perClass.rows.map(r => [r.label, r.display])),
+  compileFail: () => table(['조건', '컴파일 안 된 비율'], DATA.compileFail.rows.map(r => [r.label, r.display])),
+  convention: () => table(['문제', '원래', '1부터 센 뒤', '차이'], DATA.convention.items.map(r => [r.label, String(r.from), String(r.to), '−' + (r.from - r.to).toFixed(1)])),
+  rustFail: () => table(['언어', '첫 컴파일 실패 수'], DATA.rustFail.rows.map(r => [r.label, r.display])),
+  gitclear: () => table(['연도', '중복 블록 커밋 비율'], DATA.gitclear.rows.map(r => [r.label, r.display])),
+  reuse: () => table(['주는 방식', '자기 재사용', '중복'], DATA.reuse.groups.map(g => [g.label, g.a.toFixed(1) + '%', g.b.toFixed(1) + '%'])),
+};
+
+/* ---------------- code block ---------------- */
+const KW = new Set(['store', 'type', 'derived', 'fn', 'server', 'access', 'auth', 'limit', 'per', 'minute', 'uses', 'on', 'delete', 'cascade', 'where', 'read', 'write']);
+function tokens(line) {
+  const out = []; const re = /(\/\/.*$)|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_]*)|(\d+(?:\.\.\d+)?)|([\s\S])/g; let m;
+  while ((m = re.exec(line))) {
+    if (m[1]) out.push(['c', m[1]]); else if (m[2]) out.push(['s', m[2]]);
+    else if (m[3]) out.push([KW.has(m[3]) ? 'k' : /^[A-Z]/.test(m[3]) ? 't' : '', m[3]]);
+    else if (m[4]) out.push(['n', m[4]]); else out.push(['', m[0]]);
+  }
+  return out;
+}
+function codeBlock(root, stage, d0) {
+  const pre = h('pre', 'codebox'); pre.setAttribute('aria-label', '도담 코드 예시 (임시 문법)');
+  DATA.code.split('\n').forEach((line, i) => {
+    const cl = h('div', 'cl'); const code = h('span', 'cl-code');
+    tokens(line).forEach(([c, t]) => code.append(c ? h('span', 'tk-' + c, t) : document.createTextNode(t)));
+    if (!line.length) code.textContent = ' ';
+    cl.append(code);
+    const note = DATA.codeNotes[i];
+    if (stage && note) cl.append(A(h('span', 'cl-note', note), 'pop', d0 + i * .2 + .55, true));
+    A(code, 'wipe', d0 + i * .2, stage);
+    pre.append(cl);
+  });
+  root.append(pre);
+}
+
+/* ---------------- report mock ---------------- */
+function report(root, stage, d0) {
+  const box = h('div', 'report'); box.setAttribute('aria-label', '보안 보고서 예시');
+  const rows = [
+    ['$', 'dodam report --compare approved.json', '', 'rp-cmd'],
+    ['+', 'Net("api.stripe.com")', 'checkout.pay → Stripe.charge', 'plus'],
+    ['+', 'trust html "마크다운 미리보기"', 'notes/preview.dodam:42', 'plus'],
+    ['=', 'Db(notes, write)', '변화 없음', 'eq'],
+  ];
+  rows.forEach(([s, a, b, k], i) => {
+    const r = h('div', 'rp'); const si = h('span', k === 'rp-cmd' ? 'eq' : k, s);
+    const aa = h('span', k === 'rp-cmd' ? 'rp-cmd' : null, a); const bb = h('span', 'eq', b);
+    r.append(si, aa, bb); box.append(A(r, 'fade', d0 + i * .45, stage));
+  });
+  box.append(A(h('div', 'rp-sum', '늘어난 항목 2개 · 사람이 승인하기 전까지 배포 빌드는 실패한다'), 'fade', d0 + 2.1, stage));
+  root.append(box);
+}
+
+/* ---------------- measurement chain ---------------- */
+function chain(root, stage, d0) {
+  DATA.chain.forEach((c, i) => {
+    if (i) root.append(A(h('span', 'ch-arrow', '→'), 'fade', d0 + i * .22 - .1, stage));
+    root.append(A(h('span', 'ch', c), 'pop', d0 + i * .22, stage));
+  });
+}
+
+/* ---------------- roadmap ---------------- */
+function roadmap(root, stage, d0) {
+  const total = DATA.phases.reduce((s, p) => s + p.months, 0);
+  const rm = h('div', 'rm'); rm.setAttribute('role', 'img');
+  rm.setAttribute('aria-label', '로드맵: ' + DATA.phases.map(p => p.when + ' ' + p.title).join(', '));
+  const ticks = h('div', 'rm-ticks');
+  [['지금', 0, 'first now-l'], ['2027', 2, 'y27'], ['2028', 14], ['2029', 26]].forEach(([t, m, c]) => {
+    const s = h('span', c || null, t); s.style.left = (m / total * 100) + '%'; ticks.append(A(s, 'fade', d0 + .2, stage));
+  });
+  const bar = h('div', 'rm-bar');
+  DATA.phases.forEach((p, i) => { const s = h('div', 'rm-seg' + (p.now ? ' now' : '')); s.style.setProperty('--m', p.months); bar.append(A(s, 'growx', d0 + .3 + i * .18, stage)); });
+  // connectors: segment centres -> card centres (cards use a 1.5% column gap)
+  const ns = 'http://www.w3.org/2000/svg'; const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'rm-conn'); svg.setAttribute('viewBox', '0 0 1000 46'); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('aria-hidden', 'true');
+  const gap = .015, cw = (1 - gap * 5) / 6; let acc = 0;
+  DATA.phases.forEach((p, i) => {
+    const sx = (acc + p.months / 2) / total * 1000; acc += p.months;
+    const cx = (i * (cw + gap) + cw / 2) * 1000;
+    const l = document.createElementNS(ns, 'line');
+    l.setAttribute('x1', sx.toFixed(1)); l.setAttribute('y1', '0'); l.setAttribute('x2', cx.toFixed(1)); l.setAttribute('y2', '46');
+    l.setAttribute('vector-effect', 'non-scaling-stroke'); l.setAttribute('pathLength', '1');
+    if (stage) { l.classList.add('an', 'fade'); l.style.setProperty('--d', (d0 + 1.4 + i * .18).toFixed(2)); }
+    svg.append(l);
+  });
+  const cards = h('div', 'rm-cards');
+  DATA.phases.forEach((p, i) => {
+    const c = h('article', 'ph' + (p.now ? ' now' : ''));
+    c.append(h('span', 'ph-when', p.when), h('p', 'ph-title', p.title));
+    const ul = h('ul'); p.items.forEach(t => ul.append(h('li', null, t))); c.append(ul);
+    cards.append(A(c, 'rise', d0 + 1.8 + i * .32, stage));
+  });
+  rm.append(ticks, bar, svg, cards); root.append(rm);
+}
+
+/* ---------------- gantt ---------------- */
+function gantt(root, stage, d0) {
+  const W = DATA.weeks; const day = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+  const t0 = day(W.start), t1 = day(W.end), span = t1 - t0, x = s => (day(s) - t0) / span * 100;
+  const gt = h('div', 'gt'); gt.setAttribute('role', 'img');
+  gt.setAttribute('aria-label', '올해 남은 9주 일정: ' + W.rows.map(r => r.d + ' ' + r.label).join(', '));
+  const axis = h('div', 'gt-axis'); axis.append(h('span')); const sc = h('div', 'gt-scale');
+  const today = h('span', 'first', '오늘 10/28'); today.style.left = '0%'; sc.append(today);
+  W.ticks.forEach(([d, t]) => { const s = h('span', null, t); s.style.left = x(d) + '%'; sc.append(s); });
+  axis.append(sc); gt.append(A(axis, 'fade', d0, stage));
+  W.rows.forEach((r, i) => {
+    const row = h('div', 'gt-row'); const lab = h('div', 'gt-label', r.label); const tr = h('div', 'gt-track');
+    W.ticks.forEach(([d]) => { const g = h('span', 'gl'); g.style.left = x(d) + '%'; tr.append(g); });
+    if (i === 0) { const td = h('span', 'today'); td.style.left = '0%'; tr.append(td); }
+    const left = x(r.from), right = (day(r.to) + 86400000 - t0) / span * 100;
+    const bar = h('div', 'gt-bar'); bar.style.left = left + '%'; bar.style.width = (right - left) + '%';
+    const dt = h('span', 'gt-date', r.d); dt.style.left = right + '%';
+    if (right > 82) { dt.style.left = 'auto'; dt.style.right = (100 - left) + '%'; dt.style.transform = 'translate(-.5em,-50%)'; }
+    tr.append(bar, dt); row.append(lab, tr); gt.append(row);
+    if (!stage) tipify(bar, r.label, r.d);
+    A(lab, 'fade', d0 + .3 + i * .3, stage); A(bar, 'growx', d0 + .4 + i * .3, stage); A(dt, 'fade', d0 + 1.1 + i * .3, stage);
+  });
+  root.append(gt);
+}
+
+/* ---------------- diagrams (own constant markup) ---------------- */
+function svgAnim(stage, cls, type, d) { return stage ? `class="${cls} an ${type}" style="--d:${d}"` : `class="${cls}"`; }
+const SVG_STYLE = `<style>
+.b{fill:var(--dg-panel);stroke:var(--dg-rule);stroke-width:1.5}
+.bh{fill:var(--dg-panel);stroke:var(--dg-accent);stroke-width:2}
+.bd{fill:var(--dg-panel);stroke:var(--dg-danger);stroke-width:1.5}
+.th{fill:var(--dg-ink);font:700 19px var(--font-body)}
+.tl{fill:var(--dg-ink-2);font:500 15px var(--font-body)}
+.tm{fill:var(--dg-muted);font:500 14px var(--font-body)}
+.tc{fill:var(--dg-ink-2);font:500 14.5px var(--font-mono)}
+.ta{fill:var(--dg-accent);font:700 17px var(--font-mono)}
+.tw{fill:var(--dg-danger);font:700 13.5px var(--font-body)}
+.ln{stroke:var(--dg-ink-2);stroke-width:1.6;fill:none}
+.lr{stroke:var(--dg-rule);stroke-width:1.5;fill:none}
+.ld{stroke:var(--dg-danger);stroke-width:1.8;fill:none}
+.ah{fill:var(--dg-ink-2)} .ahd{fill:var(--dg-danger)}
+.big{fill:var(--dg-ink);font:400 30px var(--font-display)}
+</style>`;
+// The style element above is the SVG's own presentation; the diagramming guide asks for no <style> inside SVG,
+// so it is applied as an inline <style> sibling outside the <svg> instead (see mountSvg).
+const SVGS = {
+  drift(stage) {
+    const L = [
+      ['DB 테이블', 'email VARCHAR(50) NOT NULL', ''],
+      ['ORM 모델', 'email = Column(String(60))', '길이 다름'],
+      ['API DTO', 'mail: string', '이름 다름'],
+      ['검증 스키마', 'email: z.string().max(40)', '규칙 다름'],
+      ['화면 타입', 'email?: string', '필수 여부 다름'],
+    ];
+    let s = `<svg viewBox="0 0 1000 430" role="img" aria-label="지금은 같은 회원 정보가 DB 테이블, ORM 모델, API DTO, 검증 스키마, 화면 타입 다섯 곳에 따로 정의돼 서로 어긋난다. 도담에서는 store type 하나에서 컴파일러가 DB 스키마, 타입, 직렬화와 검증, 마이그레이션, 화면 동기화를 만든다">`;
+    s += `<text x="0" y="22" class="th">지금: 같은 회원 정보가 다섯 곳에</text>`;
+    L.forEach(([a, b, w], i) => {
+      const y = 44 + i * 68;
+      s += `<g ${svgAnim(stage, '', 'rise', (0.6 + i * .18).toFixed(2))}><rect x="0" y="${y}" width="420" height="56" rx="8" class="${w ? 'bd' : 'b'}"/>`;
+      s += `<text x="16" y="${y + 22}" class="tm">${a}</text><text x="16" y="${y + 44}" class="tc">${b}</text></g>`;
+      if (w) s += `<text x="406" y="${y + 23}" text-anchor="end" ${svgAnim(stage, 'tw', 'pop', (2.0 + i * .2).toFixed(2))}>${w}</text>`;
+    });
+    s += `<text x="0" y="420" ${svgAnim(stage, 'tm', 'fade', '2.8')}>고칠 때마다 다섯 곳을 같이 고쳐야 하고, 하나라도 빠지면 어긋난다</text>`;
+    s += `<g ${svgAnim(stage, '', 'fade', '3.2')}><line x1="446" y1="214" x2="512" y2="214" class="ln"/><polygon points="512,206 526,214 512,222" class="ah"/></g>`;
+    s += `<text x="560" y="22" ${svgAnim(stage, 'th', 'fade', '3.3')}>도담: 한 번 정의</text>`;
+    s += `<g ${svgAnim(stage, '', 'pop', '3.5')}><rect x="540" y="150" width="230" height="128" rx="10" class="bh"/>`;
+    s += `<text x="558" y="182" class="ta">store type User</text><text x="558" y="210" class="tc">email: Email</text><text x="558" y="234" class="tc">name: Text(1..40)</text><text x="558" y="258" class="tc">read(v) = …</text></g>`;
+    const outs = ['DB 스키마', '서버 · 화면 타입', '직렬화 · 검증', '마이그레이션', '화면 동기화'];
+    s += `<text x="822" y="22" ${svgAnim(stage, 'tm', 'fade', '4.0')}>컴파일러가 만든다</text>`;
+    outs.forEach((o, i) => {
+      const y = 44 + i * 68;
+      s += `<path d="M770 214 C 795 214, 795 ${y + 28}, 818 ${y + 28}" pathLength="1" ${svgAnim(stage, 'ln', 'draw', (4.1 + i * .12).toFixed(2))}/>`;
+      s += `<g ${svgAnim(stage, '', 'pop', (4.3 + i * .16).toFixed(2))}><rect x="822" y="${y + 6}" width="178" height="44" rx="22" class="b"/><text x="911" y="${y + 34}" text-anchor="middle" class="tl">${o}</text></g>`;
+    });
+    s += `<text x="540" y="420" ${svgAnim(stage, 'tm', 'fade', '5.4')}>정의는 한 번, 나머지는 생성. 시작할 때 DB와 다르면 멈춘다</text>`;
+    return s + `</svg>`;
+  },
+  flow(stage) {
+    const B = [
+      [0, 140, 'AI 에이전트', ['.dodam 코드'], 'b'],
+      [170, 220, '검사', ['타입 · 권한 · 오염 · 접근', '중복 · 데이터 · 자원'], 'b'],
+      [420, 200, '만들기', ['네이티브 · WASM', 'DB 스키마 · 마이그레이션'], 'b'],
+      [650, 150, '보안 보고서', ['늘어난 항목만'], 'bh'],
+      [830, 170, '사람', ['승인하면 배포'], 'b'],
+    ];
+    const arrowsL = ['컴파일', '통과', '', '차이'];
+    let s = `<svg viewBox="0 0 1000 300" role="img" aria-label="AI가 쓴 코드를 컴파일러가 검사한다. 통과하면 네이티브와 WASM, DB 스키마와 마이그레이션을 만들고 보안 보고서를 낸다. 사람은 늘어난 항목만 보고 승인한다. 검사에 실패하면 JSON 에러와 쓸 수 있는 대안이 AI에게 돌아간다">`;
+    B.forEach(([x, w, t, lines, cls], i) => {
+      s += `<g ${svgAnim(stage, '', 'rise', (0.6 + i * .45).toFixed(2))}><rect x="${x}" y="30" width="${w}" height="118" rx="10" class="${cls}"/>`;
+      s += `<text x="${x + w / 2}" y="70" text-anchor="middle" class="th">${t}</text>`;
+      lines.forEach((l, j) => { s += `<text x="${x + w / 2}" y="${100 + j * 24}" text-anchor="middle" class="tl">${l}</text>`; });
+      s += `</g>`;
+      if (i < 4) {
+        const x1 = x + w + 2, x2 = B[i + 1][0] - 2;
+        s += `<g ${svgAnim(stage, '', 'fade', (0.9 + i * .45).toFixed(2))}><line x1="${x1}" y1="89" x2="${x2 - 8}" y2="89" class="ln"/><polygon points="${x2 - 8},83 ${x2},89 ${x2 - 8},95" class="ah"/>`;
+        if (arrowsL[i]) s += `<text x="${(x1 + x2) / 2}" y="22" text-anchor="middle" class="tm">${arrowsL[i]}</text>`;
+        s += `</g>`;
+      }
+    });
+    s += `<path d="M280 148 L280 214 L70 214 L70 158" pathLength="1" ${svgAnim(stage, 'ld', 'draw', '3.4')}/>`;
+    s += `<polygon points="63,160 70,148 77,160" ${svgAnim(stage, 'ahd', 'fade', '4.2')}/>`;
+    s += `<text x="70" y="244" ${svgAnim(stage, 'tw', 'fade', '4.0')}>실패하면 JSON 에러와 쓸 수 있는 대안이 AI에게 돌아가고, AI가 고친다</text>`;
+    s += `<text x="650" y="196" ${svgAnim(stage, 'tm', 'fade', '4.6')}>권한 · 외부 주소 · trust 블록 · 의존성이</text><text x="650" y="216" ${svgAnim(stage, 'tm', 'fade', '4.7')}>지난 배포보다 늘었을 때만 사람이 본다</text>`;
+    return s + `</svg>`;
+  },
+  loop(stage) {
+    const cx = 500, cy = 200, rx = 380, ry = 148;
+    const N = [
+      ['가설', '예: 수명 표기 없음'], ['시제품', '문법 · 규칙 후보'], ['AI가 푼다', '모델 3개 × 3번'],
+      ['자동 측정', '정확도 · 보안 · 중복 · 속도'], ['비공개 평가', '과제 30%는 숨긴다'], ['결정 기록', '숫자를 남기고 설계에 반영'],
+    ];
+    const ang = [-150, -90, -30, 30, 90, 150].map(a => a * Math.PI / 180);
+    let s = `<svg viewBox="0 0 1000 400" role="img" aria-label="결정의 고리: 가설, 시제품, AI가 푼다, 자동 측정, 비공개 평가, 결정 기록, 다시 가설로">`;
+    s += `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" pathLength="1" ${svgAnim(stage, 'lr', 'draw', '.5')}/>`;
+    [-120, -60, 0, 60, 120, 180].forEach((a, i) => {
+      const t = a * Math.PI / 180; const px = cx + rx * Math.cos(t), py = cy + ry * Math.sin(t);
+      const dx = -rx * Math.sin(t), dy = ry * Math.cos(t); const r = Math.atan2(dy, dx) * 180 / Math.PI;
+      s += `<polygon points="-8,-7 8,0 -8,7" transform="translate(${px.toFixed(1)} ${py.toFixed(1)}) rotate(${r.toFixed(1)})" ${svgAnim(stage, 'ah', 'fade', (1.0 + i * .3).toFixed(2))}/>`;
+    });
+    N.forEach(([t, sub], i) => {
+      const px = cx + rx * Math.cos(ang[i]), py = cy + ry * Math.sin(ang[i]);
+      s += `<g ${svgAnim(stage, '', 'pop', (0.8 + i * .3).toFixed(2))}><rect x="${(px - 105).toFixed(1)}" y="${(py - 34).toFixed(1)}" width="210" height="68" rx="10" class="${i === 5 ? 'bh' : 'b'}"/>`;
+      s += `<text x="${px.toFixed(1)}" y="${(py - 6).toFixed(1)}" text-anchor="middle" class="th">${i + 1}. ${t}</text><text x="${px.toFixed(1)}" y="${(py + 20).toFixed(1)}" text-anchor="middle" class="tm">${sub}</text></g>`;
+    });
+    s += `<text x="${cx}" y="${cy + 4}" text-anchor="middle" ${svgAnim(stage, 'big', 'fade', '2.8')}>숫자로 정한다</text>`;
+    s += `<text x="${cx}" y="${cy + 34}" text-anchor="middle" ${svgAnim(stage, 'tm', 'fade', '3.0')}>취향이 아니라 시험 결과로</text>`;
+    return s + `</svg>`;
+  },
+};
+function mountSvg(el, stage) {
+  // SVG markup is built only from the constants above; no outside data reaches innerHTML.
+  el.innerHTML = SVGS[el.dataset.svg](stage);
+}
+
+/* ---------------- mount everything ---------------- */
+if (!document.getElementById('dg-svg-style')) {
+  const st = document.createElement('style'); st.id = 'dg-svg-style';
+  st.textContent = SVG_STYLE.replace(/<\/?style>/g, '').replace(/(^|\})\s*\./g, '$1 [data-svg] svg .');
+  document.head ? document.head.append(st) : document.body.prepend(st);
+}
+document.querySelectorAll('[data-chart]').forEach(el => CHARTS[el.dataset.chart](el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+document.querySelectorAll('[data-table]').forEach(el => el.append(TABLES[el.dataset.table]()));
+document.querySelectorAll('[data-svg]').forEach(el => mountSvg(el, !!el.closest('.stage')));
+document.querySelectorAll('[data-code]').forEach(el => codeBlock(el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+document.querySelectorAll('[data-report]').forEach(el => report(el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+document.querySelectorAll('[data-chain]').forEach(el => chain(el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+document.querySelectorAll('[data-roadmap]').forEach(el => roadmap(el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+document.querySelectorAll('[data-gantt]').forEach(el => gantt(el, !!el.closest('.stage'), parseFloat(el.dataset.d || '0')));
+
+/* ---------------- tooltip (doc only) ---------------- */
+const tip = document.querySelector('.tip');
+function showTip(t, x, y) {
+  tip.replaceChildren(h('strong', null, t.dataset.tipV), h('span', null, t.dataset.tipL)); tip.hidden = false;
+  const r = tip.getBoundingClientRect(); let left = x + 14, top = y - r.height - 12;
+  if (left + r.width > innerWidth - 8) left = x - r.width - 14; if (top < 8) top = y + 16;
+  tip.style.left = Math.max(8, left) + 'px'; tip.style.top = top + 'px';
+}
+document.addEventListener('pointermove', e => { const t = e.target.closest && e.target.closest('.doc [data-tip-v]'); if (t) showTip(t, e.clientX, e.clientY); else tip.hidden = true; });
+document.addEventListener('focusin', e => { const t = e.target.closest && e.target.closest('.doc [data-tip-v]'); if (t) { const r = t.getBoundingClientRect(); showTip(t, r.right, r.top + r.height / 2); } });
+document.addEventListener('focusout', () => { tip.hidden = true; });
+addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
+
+/* ---------------- player: every frame is a pure function of time ---------------- */
+const stage = document.querySelector('.stage');
+const cnv = stage.querySelector('.stage-canvas');
+const scenes = [...cnv.querySelectorAll('.scene')];
+const durs = scenes.map(s => parseFloat(s.dataset.dur));
+const starts = []; let total = 0; durs.forEach(d => { starts.push(total); total += d; });
+scenes.forEach((s, i) => { s.style.setProperty('--dur', durs[i]); const no = s.querySelector('.sc-no'); if (no) no.textContent = String(i + 1).padStart(2, '0') + ' / ' + scenes.length; });
+
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const HOOKS = {
+  flow(scene, t) {
+    const cv = scene.querySelector('canvas.flow'); if (!cv) return; const ctx = cv.getContext('2d');
+    const W = cv.width, wall = +cv.dataset.wall, y0 = +cv.dataset.y0, y1 = +cv.dataset.y1;
+    const cs = getComputedStyle(cv); const col = n => cs.getPropertyValue(n).trim();
+    const cIn = col('--s-ink-2'), cOk = col('--s-safe'), cBad = col('--s-danger'), cRule = col('--s-rule');
+    ctx.clearRect(0, 0, W, cv.height);
+    ctx.strokeStyle = cRule; ctx.lineWidth = 1; ctx.globalAlpha = .55;
+    for (let y = y0; y <= y1; y += 32) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    const rnd = mulberry32(11); const N = 150, Lp = W + 200;
+    for (let k = 0; k < N; k++) {
+      const yy = y0 + 16 + rnd() * (y1 - y0 - 32), sp = 110 + rnd() * 130, ph = rnd(), bad = rnd() < .42, r = 4 + rnd() * 3.5;
+      let x = ((ph * Lp + sp * t) % Lp) - 100, c = cIn, a = .9;
+      if (bad && x > wall - 18) { const stuck = (x - (wall - 18)) / sp; x = wall - 18 - (k % 4) * 4; c = cBad; a = Math.max(0, 1 - stuck * .8); if (a <= 0) continue; }
+      else if (!bad && x > wall + 16) { c = cOk; a = 1; }
+      ctx.globalAlpha = a; ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, yy, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  },
+};
+const nf = new Intl.NumberFormat('ko-KR');
+function updateCount(c, t) {
+  const to = +c.dataset.to, at = +c.dataset.at, du = +c.dataset.dur;
+  const p = Math.min(1, Math.max(0, (t - at) / du)); const e = 1 - Math.pow(1 - p, 3);
+  c.textContent = nf.format(Math.round(to * e));
+}
+let cur = -1, T = 0, playing = false, started = false, lastNow = null;
+const segs = [];
+function sceneIndex(t) { for (let i = scenes.length - 1; i >= 0; i--) if (t >= starts[i]) return i; return 0; }
+function render(t) {
+  t = Math.max(0, Math.min(total - .0005, t)); T = t;
+  const i = sceneIndex(t);
+  if (i !== cur) { if (cur >= 0) scenes[cur].classList.remove('is-on'); scenes[i].classList.add('is-on'); cur = i; }
+  let lt = t - starts[i];
+  if (reduce && !isRecord) lt = Math.max(0, durs[i] - .45);
+  const ms = lt * 1000;
+  for (const a of scenes[i].getAnimations({ subtree: true })) { a.pause(); a.currentTime = ms; }
+  scenes[i].querySelectorAll('.count').forEach(c => updateCount(c, lt));
+  const hk = scenes[i].dataset.hook; if (hk && HOOKS[hk]) HOOKS[hk](scenes[i], lt);
+  ui();
+}
+const timeEl = document.querySelector('.time'), nowEl = document.querySelector('.controls .ctl-now');
+const toggleBtn = document.querySelector('[data-act="toggle"]'), bigPlay = document.querySelector('.big-play');
+const mmss = s => { s = Math.max(0, Math.round(s)); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+function ui() {
+  if (timeEl) timeEl.textContent = mmss(T) + ' / ' + mmss(total);
+  if (nowEl) nowEl.textContent = (cur + 1) + '. ' + scenes[cur].dataset.title;
+  segs.forEach((sg, j) => sg.style.setProperty('--p', Math.min(1, Math.max(0, (T - starts[j]) / durs[j])).toFixed(4)));
+}
+function setPlaying(on) {
+  playing = on; lastNow = null;
+  toggleBtn.setAttribute('aria-label', on ? '정지' : '재생');
+  toggleBtn.querySelector('.ic-play').style.display = on ? 'none' : '';
+  toggleBtn.querySelector('.ic-pause').style.display = on ? '' : 'none';
+  if (on) { if (!started || T >= total - .05) { T = 0; } started = true; bigPlay.hidden = true; requestAnimationFrame(tick); }
+}
+function tick(now) {
+  if (!playing) return;
+  if (lastNow != null) T += Math.min(.1, (now - lastNow) / 1000);
+  lastNow = now;
+  if (T >= total - .001) { render(total - .001); setPlaying(false); return; }
+  render(T); requestAnimationFrame(tick);
+}
+function settle(j) { return starts[j] + Math.max(0, durs[j] - .5); }
+function go(j) { j = Math.max(0, Math.min(scenes.length - 1, j)); started = true; bigPlay.hidden = true; render(playing ? starts[j] + .001 : settle(j)); }
+const track = document.querySelector('.track');
+scenes.forEach((s, j) => {
+  const b = h('button', 'seg'); b.type = 'button'; b.style.setProperty('--w', durs[j]);
+  b.setAttribute('aria-label', (j + 1) + '. ' + s.dataset.title); b.title = (j + 1) + '. ' + s.dataset.title;
+  b.addEventListener('click', () => go(j)); track.append(b); segs.push(b);
+});
+document.querySelector('.controls').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return; const act = b.dataset.act;
+  if (act === 'toggle') setPlaying(!playing);
+  else if (act === 'prev') go(cur - 1);
+  else if (act === 'next') go(cur + 1);
+  else if (act === 'restart') { T = 0; started = true; bigPlay.hidden = true; render(0); if (!playing) setPlaying(true); }
+});
+bigPlay.addEventListener('click', () => setPlaying(true));
+bigPlay.querySelector('.t').textContent = mmss(total);
+stage.addEventListener('keydown', e => {
+  if (e.key === ' ' || e.key === 'k') { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); go(cur + 1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); go(cur - 1); }
+  else if (e.key === 'Home') { e.preventDefault(); go(0); }
+});
+stage.addEventListener('click', e => { if (e.target.closest('.big-play')) return; if (started) setPlaying(!playing); });
+function fit() { const k = stage.clientWidth / 1920; cnv.style.setProperty('--k', k); }
+new ResizeObserver(fit).observe(stage); fit();
+document.addEventListener('visibilitychange', () => { if (document.hidden && playing) setPlaying(false); });
+
+render(isRecord ? 0 : parseFloat(scenes[0].dataset.poster || '3'));
+
+window.dodamPlayer = {
+  total,
+  seek: t => new Promise(res => { render(t); requestAnimationFrame(() => requestAnimationFrame(res)); }),
+  warm: async () => { for (let i = 0; i < scenes.length; i++) { render(settle(i)); await new Promise(r => requestAnimationFrame(r)); } render(0); },
+};
+})();
+</script>
+
+</body></html>
