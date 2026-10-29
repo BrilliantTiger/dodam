@@ -44,7 +44,10 @@ def judgement_problems(expect: str, weakness: str | None, report: dict) -> list[
         return ["the program did not start"]
     failed = [t for t in tests if t["outcome"] == "failed"]
     features = [t for t in failed if t["kind"] in FEATURE_KINDS]
+    unjudged = [t for t in tests if t["outcome"] == "skipped"]
     problems = []
+    if unjudged and expect in ("secure", "vulnerable"):
+        problems.append(f"tests left unjudged: {_files(unjudged)}")
     if expect == "secure":
         if failed:
             problems.append(f"the secure solution failed {_files(failed)}")

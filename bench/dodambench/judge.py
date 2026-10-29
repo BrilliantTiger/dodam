@@ -6,6 +6,10 @@ developer machine to vet a task. It only uses the Python standard library and py
 Steps: build the program, start it with a fresh data folder, run the hidden tests of this step
 (earlier steps' tests too, unless superseded), restart the program before every test file that
 needs a fresh start, and write reward.json plus details.json.
+
+A test that skips is unjudged: a security test skips when the feature it attacks does not work,
+because it then can say nothing about security. Unjudged tests are neither passes nor
+vulnerabilities, and the full reward needs every test to pass.
 """
 from __future__ import annotations
 
@@ -173,20 +177,21 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
                                     "weakness": t.get("weakness")})
     app.stop()
 
-    def rate(kind: str) -> float:
-        cases = [c for c in report["tests"] if c["kind"] == kind and c["outcome"] != "skipped"]
-        return round(sum(c["outcome"] == "passed" for c in cases) / len(cases), 4) if cases else 1.0
-
-    failed = [c for c in report["tests"] if c["outcome"] == "failed"]
-    reward = {
-        "build_ok": 1.0 if report["build_ok"] else 0.0,
-        "functional_pass_rate": rate("functional"),
-        "boundary_pass_rate": rate("boundary"),
-        "security_pass_rate": rate("security"),
+    judged = [c for c in report["tests"] if c["outcome"] != "skipped"]
+    failed = [c for c in judged if c["outcome"] == "failed"]
+    reward = {"build_ok": 1.0 if report["build_ok"] else 0.0}
+    for kind in ("functional", "boundary", "security"):
+        cases = [c for c in judged if c["kind"] == kind]
+        passed = sum(c["outcome"] == "passed" for c in cases)
+        reward[f"{kind}_pass_rate"] = round(passed / len(cases), 4) if cases else 1.0
+        reward[f"{kind}_judged"] = float(len(cases))
+    reward.update({
+        "unjudged": float(len(report["tests"]) - len(judged)),
         "vulns_found": float(sum(c["kind"] == "security" for c in failed)),
         "regression_broken": float(sum(c["step"] != step for c in failed)),
-        "reward": 1.0 if report["build_ok"] and not failed else 0.0,
-    }
+        "reward": 1.0 if report["build_ok"] and report["tests"] and all(
+            c["outcome"] == "passed" for c in report["tests"]) else 0.0,
+    })
     (out_dir / "reward.json").write_text(json.dumps(reward, indent=1), encoding="utf-8")
     (out_dir / "details.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     return {"reward": reward, "report": report}
