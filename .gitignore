@@ -12,3 +12,9 @@ tools/plan/wbs_section.md
 tools/plan/page.html
 tools/plan/shots/
 tools/plan/__pycache__/
+
+# Benchmark: local environments and outputs
+bench/.venv/
+bench/out/
+bench/**/__pycache__/
+bench/.pytest_cache/

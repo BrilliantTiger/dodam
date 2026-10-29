@@ -1,0 +1,12 @@
+[project]
+name = "dodambench"
+version = "0.1.0"
+description = "Dodam benchmark: source task format, conversion to Harbor tasks, judge helpers"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+judge = ["httpx>=0.28", "pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
