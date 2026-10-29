@@ -190,3 +190,11 @@ def test_vet_judges_every_solution_and_flags_the_one_that_misses(small_task, tmp
     assert not harmless["ok"]
     assert any("broken-access-control" in p for p in harmless["problems"])
     assert (tmp_path / "vet" / "vet.json").is_file()
+
+
+def test_unjudged_tests_count_against_secure_and_vulnerable_solutions():
+    unjudged = ("security", "token-forgery", "skipped")
+    assert any("unjudged" in p for p in judgement_problems("secure", None, report(FUNCTIONAL, SQL_OK, unjudged)))
+    assert any("unjudged" in p
+               for p in judgement_problems("vulnerable", "sql-injection", report(FUNCTIONAL, SQL_FAILED, unjudged)))
+    assert judgement_problems("broken", None, report(("functional", None, "failed"), unjudged)) == []
