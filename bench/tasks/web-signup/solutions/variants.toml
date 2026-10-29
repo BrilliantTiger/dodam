@@ -1,0 +1,139 @@
+# Each variant is the secure solution of one language and step with exact text replacements.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "string-built-sql"
+lang = "python"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "main.py"
+old = '''            user_id = db.execute("INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)",
+                                 (email, name, password_hash)).lastrowid'''
+new = '''            user_id = db.execute(f"INSERT INTO users (email, name, password_hash) "
+                                 f"VALUES ('{email}', '{name}', '{password_hash}')").lastrowid'''
+
+[[variant.replace]]
+file = "main.py"
+old = '''row = db.execute("SELECT id, password_hash FROM users WHERE email = ?", (email,)).fetchone()'''
+new = '''row = db.execute(f"SELECT id, password_hash FROM users WHERE email = '{email}'").fetchone()'''
+
+[[variant]]
+name = "unsalted-sha256"
+lang = "python"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "main.py"
+old = '''def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    return f"scrypt${salt.hex()}${hashlib.scrypt(password.encode(), salt=salt, **SCRYPT).hex()}"
+
+
+def password_matches(password: str, stored: str) -> bool:
+    _, salt, digest = stored.split("$")
+    candidate = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), **SCRYPT).hex()
+    return hmac.compare_digest(candidate, digest)'''
+new = '''def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def password_matches(password: str, stored: str) -> bool:
+    return hmac.compare_digest(hash_password(password), stored)'''
+
+[[variant]]
+name = "unchecked-signature"
+lang = "python"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    if not dot or utf8(token) is None or not hmac.compare_digest(sig.encode(), signature(payload).encode()):'''
+new = '''    if not dot or utf8(token) is None:'''
+
+[[variant]]
+name = "any-users-record"
+lang = "python"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    if user_id != str(user["id"]):
+        raise HTTPException(403, "not your account")
+    return user'''
+new = '''    with database() as db:
+        row = db.execute("SELECT id, email, name FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "no such user")
+    return {"id": row[0], "email": row[1], "name": row[2]}'''
+
+[[variant]]
+name = "no-body-limit"
+lang = "python"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "main.py"
+old = '''app.add_middleware(BodyLimit)
+'''
+new = ""
+
+[[variant]]
+name = "register-says-200"
+lang = "python"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.py"
+old = '''@app.post("/register", status_code=201)'''
+new = '''@app.post("/register")'''
+
+[[variant]]
+name = "name-off-by-one"
+lang = "python"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.py"
+old = '''not 1 <= len(name) <= 40'''
+new = '''not 1 <= len(name) <= 41'''
+
+[[variant]]
+name = "logout-keeps-token"
+lang = "python"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    with database() as db:
+        db.execute("INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES (?, ?)", (session.jti, session.expires))
+'''
+new = ""
+
+[[variant]]
+name = "edit-not-trimmed"
+lang = "python"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    name = body.name.strip()
+    if not valid_name(name):'''
+new = '''    name = body.name
+    if not valid_name(name.strip()):'''

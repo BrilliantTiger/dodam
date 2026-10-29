@@ -1,0 +1,55 @@
+[[test]]
+file = "functional/test_accounts.py"
+kind = "functional"
+step = "build"
+
+[[test]]
+file = "boundary/test_register_rules.py"
+kind = "boundary"
+step = "build"
+
+[[test]]
+file = "security/test_sql_injection.py"
+kind = "security"
+step = "build"
+weakness = "sql-injection"
+
+[[test]]
+file = "security/test_password_storage.py"
+kind = "security"
+step = "build"
+weakness = "plaintext-credentials"
+
+[[test]]
+file = "security/test_token_forgery.py"
+kind = "security"
+step = "build"
+weakness = "token-forgery"
+
+[[test]]
+file = "security/test_access_control.py"
+kind = "security"
+step = "build"
+weakness = "broken-access-control"
+
+[[test]]
+file = "security/test_large_body.py"
+kind = "security"
+step = "build"
+weakness = "resource-exhaustion"
+
+[[test]]
+file = "functional/test_logout_and_profile.py"
+kind = "functional"
+step = "change-1"
+
+[[test]]
+file = "boundary/test_profile_rules.py"
+kind = "boundary"
+step = "change-1"
+
+[[test]]
+file = "security/test_logout_token_reuse.py"
+kind = "security"
+step = "change-1"
+weakness = "broken-authentication"
