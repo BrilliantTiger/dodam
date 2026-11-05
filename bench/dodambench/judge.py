@@ -57,6 +57,14 @@ def select_tests(manifest: dict, steps: list[str], step: str) -> list[dict]:
     return chosen
 
 
+def port_in_use(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def wait_for_port(port: int, timeout: float, proc: subprocess.Popen) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -98,8 +106,11 @@ def close_to_others(*paths: Path) -> None:
         for root, dirs, files in os.walk(top):
             for name in [""] + dirs + files:
                 path = os.path.join(root, name) if name else root
-                if not os.path.islink(path):
-                    os.chmod(path, os.stat(path).st_mode & ~0o022)
+                try:
+                    if not os.path.islink(path):
+                        os.chmod(path, os.stat(path).st_mode & ~0o022)
+                except OSError:
+                    pass  # a read-only folder is closed already
 
 
 def user_pids(uid: int, proc_root: Path = Path("/proc")) -> list[int]:
@@ -154,6 +165,12 @@ class App:
 
     def start(self, timeout: float = 60) -> bool:
         self.stop()
+        # whatever still answers on the port is not this start's program
+        deadline = time.monotonic() + 5
+        while port_in_use(self.port):
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.2)
         self.data_dir = Path(tempfile.mkdtemp(prefix="dodam-data-"))
         if self.run_as:
             subprocess.run(["chown", "-R", self.run_as, str(self.data_dir)], check=False)
@@ -179,6 +196,9 @@ class App:
                     os.killpg(self.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+        if self.proc and self.run_as:
+            # su starts the program in a session of its own, out of reach of the group signal
+            kill_user(self.run_as)
         self.proc = None
 
 
