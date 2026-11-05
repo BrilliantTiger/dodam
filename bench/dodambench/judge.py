@@ -10,14 +10,21 @@ needs a fresh start, and write reward.json plus details.json.
 A test that skips is unjudged: a security test skips when the feature it attacks does not work,
 because it then can say nothing about security. Unjudged tests are neither passes nor
 vulnerabilities, and the full reward needs every test to pass.
+
+In the verifier the judge runs as root and builds and starts the program as a plain user
+(--run-as, or DODAM_APP_USER). That code is the agent's, so before the build the judge hands /app
+to that user and relinks the dependency folders to the image's pinned copies; afterwards it kills
+every process of that user and replaces, never follows, whatever sits where the results go.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import pwd
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -61,6 +68,80 @@ def wait_for_port(port: int, timeout: float, proc: subprocess.Popen) -> bool:
         except OSError:
             time.sleep(0.2)
     return False
+
+
+def restore_deps(app_dir: Path, deps_dir: Path, links: list[str]) -> None:
+    """Point each dependency folder of the app at the pinned copy, dropping what the app brought."""
+    for name in links:
+        target = app_dir / name
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.exists():
+            shutil.rmtree(target)
+        target.symlink_to(deps_dir / name, target_is_directory=True)
+
+
+def give_app_to(app_dir: Path, user: str) -> None:
+    """Make the plain user own the app folder so its build can write there; links are not followed."""
+    entry = pwd.getpwnam(user)
+    os.lchown(app_dir, entry.pw_uid, entry.pw_gid)
+    for root, dirs, files in os.walk(app_dir):
+        for name in dirs + files:
+            os.lchown(os.path.join(root, name), entry.pw_uid, entry.pw_gid)
+
+
+def close_to_others(*paths: Path) -> None:
+    """Take away group and other write access, so the plain user cannot change tests or results."""
+    for top in paths:
+        if not top.exists():
+            continue
+        for root, dirs, files in os.walk(top):
+            for name in [""] + dirs + files:
+                path = os.path.join(root, name) if name else root
+                if not os.path.islink(path):
+                    os.chmod(path, os.stat(path).st_mode & ~0o022)
+
+
+def user_pids(uid: int, proc_root: Path = Path("/proc")) -> list[int]:
+    """Processes with uid as their real, effective, saved or file-system user."""
+    found = []
+    for entry in proc_root.iterdir() if proc_root.is_dir() else []:
+        if not entry.name.isdigit():
+            continue
+        try:
+            status = (entry / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in status.splitlines():
+            if line.startswith("Uid:"):
+                if str(uid) in line.split()[1:]:
+                    found.append(int(entry.name))
+                break
+    return found
+
+
+def kill_user(user: str) -> None:
+    """Kill everything the plain user still runs, including daemons that left the process group."""
+    uid = pwd.getpwnam(user).pw_uid
+    for _ in range(3):
+        pids = user_pids(uid)
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.2)
+
+
+def write_output(path: Path, text: str) -> None:
+    """Write through a new file and rename it into place, replacing a planted link instead of following it."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
 
 
 class App:
@@ -126,6 +207,8 @@ def run_pytest(test_path: Path, env: dict[str, str], junit: Path, timeout: float
 
 def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str = "",
           lang_env: dict[str, str] | None = None, extra_env: dict[str, str] | None = None) -> dict:
+    # pytest runs from each test's folder, so every folder handed on must be absolute
+    tests_dir, app_dir, out_dir = tests_dir.resolve(), app_dir.resolve(), out_dir.resolve()
     lang_env = lang_env if lang_env is not None else read_env_file(tests_dir / "lang.env")
     manifest = tomllib.loads((tests_dir / "manifest.toml").read_text(encoding="utf-8"))
     steps = [s for s in lang_env.get("STEPS", "").split(",") if s] or [step]
@@ -133,6 +216,12 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     port = int(lang_env.get("PORT", "8080"))
     out_dir.mkdir(parents=True, exist_ok=True)
     report: dict = {"step": step, "build_ok": False, "tests": []}
+    if run_as:
+        close_to_others(tests_dir, out_dir)
+        give_app_to(app_dir, run_as)
+    deps_dir, links = lang_env.get("DEPS_DIR", ""), [n for n in lang_env.get("DEPS_LINKS", "").split(",") if n]
+    if deps_dir and links:
+        restore_deps(app_dir, Path(deps_dir), links)
 
     build_cmd = lang_env.get("BUILD_CMD", "").strip()
     started = time.monotonic()
@@ -178,6 +267,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             report["tests"].append({**c, "file": t["file"], "kind": t.get("kind"), "step": t.get("step"),
                                     "weakness": t.get("weakness")})
     app.stop()
+    if run_as:
+        kill_user(run_as)
 
     judged = [c for c in report["tests"] if c["outcome"] != "skipped"]
     failed = [c for c in judged if c["outcome"] == "failed"]
@@ -194,8 +285,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         "reward": 1.0 if report["build_ok"] and report["tests"] and all(
             c["outcome"] == "passed" for c in report["tests"]) else 0.0,
     })
-    (out_dir / "reward.json").write_text(json.dumps(reward, indent=1), encoding="utf-8")
-    (out_dir / "details.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
+    write_output(out_dir / "details.json", json.dumps(report, indent=1, ensure_ascii=False))
+    write_output(out_dir / "reward.json", json.dumps(reward, indent=1))
     return {"reward": reward, "report": report}
 
 

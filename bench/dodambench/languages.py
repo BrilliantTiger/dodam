@@ -6,11 +6,16 @@ Package rule: besides the framework and the SQLite driver, a language gets the m
 what tasks require of it but its standard library lacks: a slow salted password hash, HMAC and
 secure random bytes. Versions are pinned by the language images; the names here are what agents are told.
 A language's starting /app lives in bench/images/<key>/app; deps_cmd installs its dependencies there,
-and deps_links names the installed folders that vetting links instead of copying.
+and deps_links names the installed folders that vetting links instead of copying. The language image
+keeps those folders under DEPS_DIR and the verifier relinks /app to them before every build, so a
+program is always judged with the pinned packages, whatever the agent installed.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+DEPS_DIR = "/opt/deps"
 
 
 @dataclass(frozen=True)

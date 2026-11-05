@@ -142,6 +142,8 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
     lang_env = {**verifier_env(task, lang), "PORT": str(_free_port())}
     missing = _missing_tools(lang_env, extra_env["PATH"], language.deps_cmd)
     scaffold = None if missing else scaffold_cache(language, cache_root)
+    # on this machine the pinned dependency folders are the prepared scaffold's, not the image's
+    lang_env["DEPS_DIR"] = str(scaffold) if scaffold and language.deps_links else ""
     results = []
     with tempfile.TemporaryDirectory(prefix="dodam-vet-") as work:
         tests_dir = Path(work) / "tests"

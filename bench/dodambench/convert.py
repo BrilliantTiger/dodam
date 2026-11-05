@@ -10,7 +10,7 @@ import shutil
 import stat
 from pathlib import Path
 
-from .languages import LANGUAGES, Language
+from .languages import DEPS_DIR, LANGUAGES, Language
 from .task import Task, materialize, validate
 
 JUDGE_SOURCE = Path(__file__).with_name("judge.py")
@@ -61,7 +61,8 @@ def verifier_env(task: Task, lang_key: str) -> dict[str, str]:
     lang, app = LANGUAGES[lang_key], task.app
     return {"STEPS": ",".join(s.name for s in task.steps), "BUILD_CMD": lang.build_cmd,
             "START_CMD": lang.start_cmd, "PORT": str(app.get("port", 8080)),
-            "APP_DB": "1" if app.get("db") else "0", "APP_SECRET_NEEDED": "1" if app.get("secret") else "0"}
+            "APP_DB": "1" if app.get("db") else "0", "APP_SECRET_NEEDED": "1" if app.get("secret") else "0",
+            "DEPS_DIR": DEPS_DIR if lang.deps_links else "", "DEPS_LINKS": ",".join(lang.deps_links)}
 
 
 SOLVE_SH = """#!/bin/sh
@@ -79,9 +80,11 @@ cp -R "$here/variants/$variant/." /app/
 
 TEST_SH = """#!/bin/sh
 # Judge one step: build the program from /app, start it, run the hidden tests, write /logs/verifier/reward.json.
+# The judge runs as root with its own Python; the program builds and runs as the plain user agent.
 set -u
 . /tests/step.env
-exec python3 /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out /logs/verifier
+export DODAM_APP_USER="${DODAM_APP_USER:-agent}"
+exec /opt/judge/bin/python /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out /logs/verifier
 """
 
 
