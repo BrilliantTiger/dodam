@@ -57,7 +57,7 @@ LANGUAGES: dict[str, Language] = {lang.key: lang for lang in (
     Language("go", "Go", "the standard library net/http",
              "/app/go.mod is set up as module app; write the sources in /app.",
              "the Go standard library and modernc.org/sqlite",
-             "go build -o app .", "./app"),
+             "go build -o app .", "./app", deps_cmd="go mod download"),
     Language("rust", "Rust", "axum on tokio",
              "/app/Cargo.toml is set up with a binary named app; write the sources in /app/src.",
              "axum, tokio, serde, serde_json, rusqlite, argon2, hmac, sha2, rand and base64, "
