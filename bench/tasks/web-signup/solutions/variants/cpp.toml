@@ -1,0 +1,147 @@
+# Variants of the C++ secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "string-built-sql"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''Statement insert(db_.get(), "INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)",
+                       {email, name, passwordHash});'''
+new = '''Statement insert(db_.get(),
+                       "INSERT INTO users (email, name, password_hash) VALUES ('" + email + "', '" + name + "', '" +
+                           passwordHash + "')",
+                       {});'''
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''Statement select(db_.get(), "SELECT id, password_hash FROM users WHERE email = ?", {email});'''
+new = '''Statement select(db_.get(), "SELECT id, password_hash FROM users WHERE email = '" + email + "'", {});'''
+
+[[variant]]
+name = "unsalted-sha256"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''// Stored as pbkdf2-sha256$<iterations>$<salt>$<key>, with salt and key in hex.
+std::string hashPassword(std::string_view password) {
+  const std::string salt = randomBytes(SALT_BYTES);
+  return std::format("pbkdf2-sha256${}${}${}", PBKDF2_ITERATIONS, hex(salt),
+                     hex(pbkdf2(password, salt, PBKDF2_ITERATIONS)));
+}
+
+bool passwordMatches(std::string_view password, const std::string &stored) {
+  const std::vector<std::string> parts = utils::splitString(stored, "$");
+  if (parts.size() != 4 || parts[0] != "pbkdf2-sha256") {
+    throw std::runtime_error("unknown password hash format");
+  }
+  const std::string salt = utils::hexToBinaryString(parts[2].data(), parts[2].size());
+  const std::string expected = utils::hexToBinaryString(parts[3].data(), parts[3].size());
+  const std::string actual = pbkdf2(password, salt, std::stoi(parts[1]));
+  return actual.size() == expected.size() && CRYPTO_memcmp(actual.data(), expected.data(), actual.size()) == 0;
+}'''
+new = '''std::string hashPassword(std::string_view password) {
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int size = 0;
+  EVP_Digest(password.data(), password.size(), digest, &size, EVP_sha256(), nullptr);
+  return hex(std::string_view(reinterpret_cast<const char *>(digest), size));
+}
+
+bool passwordMatches(std::string_view password, const std::string &stored) { return hashPassword(password) == stored; }'''
+
+[[variant]]
+name = "unchecked-signature"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''    if (given.size() != expected.size() || CRYPTO_memcmp(given.data(), expected.data(), given.size()) != 0) {
+      return std::nullopt;
+    }'''
+new = '''    (void)given;
+    (void)expected;'''
+
+[[variant]]
+name = "any-users-record"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''                          const User user = currentUser(req);
+                          if (id != std::to_string(user.id)) {
+                            throw HttpError(k403Forbidden, "not your account");
+                          }
+                          callback(json(userJson(user)));'''
+new = '''                          currentUser(req);
+                          const auto user = db.findUser(std::stoll(id));
+                          if (!user) {
+                            throw HttpError(k404NotFound, "no such user");
+                          }
+                          callback(json(userJson(*user)));'''
+
+[[variant]]
+name = "big-body-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''.setClientMaxBodySize(MAX_BODY)'''
+new = '''.setClientMaxBodySize(50 * 1024 * 1024)'''
+
+[[variant]]
+name = "register-says-200"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''callback(json(created, k201Created));'''
+new = '''callback(json(created));'''
+
+[[variant]]
+name = "name-off-by-one"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''length(name) > 40'''
+new = '''length(name) > 41'''
+
+[[variant]]
+name = "logout-keeps-token"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''                          db.revoke(session.jti, session.exp);
+'''
+new = '''                          (void)session;
+'''
+
+[[variant]]
+name = "edit-not-trimmed"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''                          const std::string name = trim(field(jsonObject(req), "name"));
+                          if (!validName(name)) {'''
+new = '''                          const std::string name = field(jsonObject(req), "name");
+                          if (!validName(trim(name))) {'''
