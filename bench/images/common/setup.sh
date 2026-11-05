@@ -10,14 +10,22 @@ judge)
     --only-binary=:all: -r /opt/dodam/judge-requirements.txt
   ;;
 agent)
+  # A base image's own uid-1000 user (node, ubuntu) can sit in groups such as sudo or adm, so it is
+  # removed and agent is made afresh, in no group but its own.
   existing="$(getent passwd 1000 | cut -d: -f1 || true)"
   if [ -n "$existing" ] && [ "$existing" != agent ]; then
-    group="$(id -gn "$existing")"
-    usermod --login agent --home /home/agent --move-home "$existing"
-    [ "$group" = agent ] || groupmod --new-name agent "$group"
-  elif [ -z "$existing" ]; then
-    useradd --create-home --uid 1000 --shell /bin/bash agent
+    userdel --remove "$existing" 2>/dev/null || true
+    if getent passwd "$existing" >/dev/null; then
+      echo "could not remove the user $existing" >&2
+      exit 1
+    fi
   fi
+  if ! getent passwd agent >/dev/null; then
+    stale_group="$(getent group 1000 | cut -d: -f1 || true)"
+    [ -z "$stale_group" ] || groupdel "$stale_group"
+    useradd --create-home --uid 1000 --user-group --shell /bin/bash agent
+  fi
+  usermod --groups "" agent
   mkdir -p /app
   chown -R -h agent:agent /app
   ;;

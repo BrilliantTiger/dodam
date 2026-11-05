@@ -14,8 +14,7 @@ COPY judge/requirements.txt /opt/dodam/judge-requirements.txt
 RUN /opt/dodam/setup.sh judge
 
 COPY csharp/app/ /app/
-# The base image's own uid-1000 user, ubuntu, is in groups such as sudo and adm; agent starts without them.
-RUN userdel --remove ubuntu && /opt/dodam/setup.sh agent
+RUN /opt/dodam/setup.sh agent
 
 # The user agent restores the pinned packages once, in locked mode, into its NuGet folder
 # (~/.nuget/packages); the lock file holds every version and content hash. /app/obj keeps the restore
