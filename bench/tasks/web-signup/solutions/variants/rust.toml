@@ -1,0 +1,201 @@
+# Variants of the Rust secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "string-built-sql"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+        "INSERT INTO users (email, name, password_hash) VALUES (?1, ?2, ?3)",
+        params![email, name, password_hash],
+'''
+new = '''
+        &format!("INSERT INTO users (email, name, password_hash) VALUES ('{email}', '{name}', '{password_hash}')"),
+        [],
+'''
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+            "SELECT id, password_hash FROM users WHERE email = ?1",
+            [&email],
+'''
+new = '''
+            &format!("SELECT id, password_hash FROM users WHERE email = '{email}'"),
+            [],
+'''
+
+[[variant]]
+name = "unsalted-sha256"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+/// Argon2id with its default parameters and a random salt, stored as a PHC string.
+async fn hash_password(password: String) -> Result<String, ApiError> {
+    hashing(move || {
+        Argon2::default()
+            .hash_password(password.as_bytes())
+            .map(|hash| hash.to_string())
+    })
+    .await?
+    .map_err(internal)
+}
+
+/// Rehashes with the salt and parameters of the stored hash and compares in constant time.
+async fn password_matches(password: String, stored: String) -> Result<bool, ApiError> {
+    hashing(move || {
+        Argon2::default()
+            .verify_password(password.as_bytes(), stored.as_str())
+            .is_ok()
+    })
+    .await
+}
+'''
+new = '''
+async fn hash_password(password: String) -> Result<String, ApiError> {
+    let digest = Sha256::digest(password.as_bytes());
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+async fn password_matches(password: String, stored: String) -> Result<bool, ApiError> {
+    Ok(hash_password(password).await? == stored)
+}
+'''
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''use sha2::Sha256;'''
+new = '''use sha2::{Digest, Sha256};'''
+
+[[variant]]
+name = "unchecked-signature"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+        let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+        // verify_slice compares in constant time
+        self.sign(payload).verify_slice(&signature).ok()?;
+'''
+new = '''
+        let _signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
+'''
+
+[[variant]]
+name = "any-users-record"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+async fn user_by_id(
+    CurrentUser(user): CurrentUser,
+    id: Result<Path<String>, PathRejection>,
+) -> Result<Json<User>, ApiError> {
+    // an id that cannot be read as text is not the caller's either
+    match id {
+        Ok(Path(id)) if id == user.id.to_string() => Ok(Json(user)),
+        _ => Err(ApiError(StatusCode::FORBIDDEN, "not your account")),
+    }
+}
+'''
+new = '''
+async fn user_by_id(
+    State(app): State<Arc<App>>,
+    _: CurrentUser,
+    Path(id): Path<String>,
+) -> Result<Json<User>, ApiError> {
+    let user = app
+        .db()
+        .query_row("SELECT id, email, name FROM users WHERE id = ?1", [&id], |row| {
+            Ok(User { id: row.get(0)?, email: row.get(1)?, name: row.get(2)? })
+        })
+        .optional()?;
+    user.map(Json).ok_or(ApiError(StatusCode::NOT_FOUND, "no such user"))
+}
+'''
+
+[[variant]]
+name = "big-body-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''const MAX_BODY: usize = 64 * 1024;'''
+new = '''const MAX_BODY: usize = 50 * 1024 * 1024;'''
+
+[[variant]]
+name = "register-says-200"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+        Ok(_) => Ok((
+            StatusCode::CREATED,
+'''
+new = '''
+        Ok(_) => Ok((
+            StatusCode::OK,
+'''
+
+[[variant]]
+name = "name-off-by-one"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''(1..=40).contains(&length(name))'''
+new = '''(1..=41).contains(&length(name))'''
+
+[[variant]]
+name = "logout-keeps-token"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+    app.db().execute(
+        "INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES (?1, ?2)",
+        params![session.jti, session.exp],
+    )?;
+'''
+new = '''
+    let _ = (app, session);
+'''
+
+[[variant]]
+name = "edit-not-trimmed"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+    let name = change.name.trim();
+    if !valid_name(name) {
+'''
+new = '''
+    let name = change.name.as_str();
+    if !valid_name(name.trim()) {
+'''
