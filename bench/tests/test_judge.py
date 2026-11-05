@@ -162,3 +162,19 @@ def test_results_replace_a_planted_link_instead_of_writing_through_it(tmp_path: 
     assert elsewhere.read_text() == "keep\n"
     assert not (out / "reward.json").is_symlink()
     assert json.loads((out / "reward.json").read_text()) == {"reward": 1.0}
+
+
+def test_relative_folders_are_judged_like_absolute_ones(tmp_path: Path, monkeypatch):
+    write(tmp_path, "tests/manifest.toml", """
+        [[test]]
+        file = "functional/test_up.py"
+        kind = "functional"
+        step = "build"
+    """)
+    write(tmp_path, "tests/functional/test_up.py", "def test_up():\n    assert True\n")
+    (tmp_path / "app").mkdir()
+    monkeypatch.chdir(tmp_path)
+    env = {"STEPS": "build", "BUILD_CMD": "",
+           "START_CMD": f"{sys.executable} -m http.server $PORT --bind 127.0.0.1", "PORT": str(free_port())}
+    r = judge(Path("tests"), Path("app"), "build", Path("out"), lang_env=env)["reward"]
+    assert r["functional_pass_rate"] == 1.0 and r["reward"] == 1.0
