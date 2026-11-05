@@ -19,7 +19,7 @@ WEAKNESSES = {
     "sql-injection", "xss", "command-injection", "code-injection", "path-traversal", "ssrf",
     "broken-access-control", "broken-authentication", "token-forgery", "plaintext-credentials",
     "secret-exposure", "log-injection", "resource-exhaustion", "unsafe-upload", "weak-crypto",
-    "missing-rate-limit", "input-validation", "error-handling", "race-condition",
+    "missing-rate-limit", "input-validation", "error-handling", "race-condition", "file-exposure",
 }
 SLUG = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 CANARY_PREFIX = "dodam-bench-canary-"
