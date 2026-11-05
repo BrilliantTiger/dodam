@@ -15,6 +15,12 @@ step = "build"
 weakness = "sql-injection"
 
 [[test]]
+file = "security/test_sql_text_in_data.py"
+kind = "security"
+step = "build"
+weakness = "sql-injection"
+
+[[test]]
 file = "security/test_password_storage.py"
 kind = "security"
 step = "build"
