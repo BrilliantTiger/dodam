@@ -6,7 +6,7 @@ import pytest
 
 from conftest import CANARY
 from dodambench.convert import ConversionError, to_harbor, verifier_env
-from dodambench.languages import LANGUAGES
+from dodambench.languages import DEPS_DIR, LANGUAGES
 from dodambench.task import load_task
 
 
@@ -92,3 +92,17 @@ def test_verifier_env_lists_steps_and_commands(task_dir):
     assert env["STEPS"] == "build,change-1"
     assert env["BUILD_CMD"] == LANGUAGES["go"].build_cmd and env["START_CMD"] == LANGUAGES["go"].start_cmd
     assert env["PORT"] == "8080"
+
+
+def test_verifier_runs_the_judge_with_its_own_python_and_the_app_as_a_plain_user(task_dir, tmp_path):
+    out = to_harbor(load_task(task_dir), "python", tmp_path / "out")
+    text = (out / "tests/test.sh").read_text()
+    assert "/opt/judge/bin/python " in text
+    assert "DODAM_APP_USER" in text and "agent" in text
+
+
+def test_verifier_env_names_the_pristine_dependency_folders(task_dir):
+    task = load_task(task_dir)
+    env = verifier_env(task, "typescript")
+    assert env["DEPS_DIR"] == DEPS_DIR == "/opt/deps" and env["DEPS_LINKS"] == "node_modules"
+    assert verifier_env(task, "python")["DEPS_LINKS"] == ""

@@ -20,3 +20,4 @@ bench/**/__pycache__/
 bench/.pytest_cache/
 bench/vet-out/
 bench/.cache/
+bench/.harbor-venv/

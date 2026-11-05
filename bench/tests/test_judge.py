@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import write
-from dodambench.judge import judge
+from dodambench.judge import judge, restore_deps, user_pids, write_output
 
 
 def free_port() -> int:
@@ -94,3 +94,71 @@ def test_program_that_does_not_start_fails_features_and_leaves_security_unjudged
     assert r["functional_pass_rate"] == 0.0 and r["functional_judged"] == 1.0
     assert r["vulns_found"] == 0.0 and r["unjudged"] == 1.0
     assert r["reward"] == 0.0
+
+
+def test_pristine_dependencies_replace_whatever_the_app_brought(tmp_path: Path):
+    deps = tmp_path / "deps"
+    write(deps, "node_modules/express/index.js", "pristine\n")
+    app = tmp_path / "app"
+    write(app, "node_modules/express/index.js", "patched by the agent\n")
+    write(app, "node_modules/extra/index.js", "a package the language does not get\n")
+    restore_deps(app, deps, ["node_modules"])
+    link = app / "node_modules"
+    assert link.is_symlink() and link.resolve() == (deps / "node_modules").resolve()
+    assert (link / "express/index.js").read_text() == "pristine\n"
+    assert not (link / "extra").exists()
+
+
+def test_dependency_link_is_made_when_the_app_has_none_or_a_file_there(tmp_path: Path):
+    deps = tmp_path / "deps"
+    (deps / "node_modules").mkdir(parents=True)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    restore_deps(empty, deps, ["node_modules"])
+    assert (empty / "node_modules").is_symlink()
+    with_file = tmp_path / "with-file"
+    write(with_file, "node_modules", "a file, not a folder\n")
+    restore_deps(with_file, deps, ["node_modules"])
+    assert (with_file / "node_modules").is_symlink()
+
+
+def test_judge_builds_against_the_pristine_dependencies(tmp_path: Path):
+    tests = tmp_path / "tests"
+    write(tests, "manifest.toml", """
+        [[test]]
+        file = "functional/test_up.py"
+        kind = "functional"
+        step = "build"
+    """)
+    write(tests, "functional/test_up.py", "def test_up():\n    assert True\n")
+    deps = tmp_path / "deps"
+    write(deps, "node_modules/pinned.txt", "pinned\n")
+    app = tmp_path / "app"
+    write(app, "node_modules/brought.txt", "brought by the agent\n")
+    env = {"STEPS": "build", "BUILD_CMD": "test -L node_modules && test -f node_modules/pinned.txt",
+           "START_CMD": f"{sys.executable} -m http.server $PORT --bind 127.0.0.1", "PORT": str(free_port()),
+           "DEPS_DIR": str(deps), "DEPS_LINKS": "node_modules"}
+    r = judge(tests, app, "build", tmp_path / "out", lang_env=env)["reward"]
+    assert r["build_ok"] == 1.0 and r["reward"] == 1.0
+
+
+def test_processes_of_the_app_user_are_found_by_uid(tmp_path: Path):
+    proc = tmp_path / "proc"
+    write(proc, "101/status", "Name:\tapp\nUid:\t1000\t1000\t1000\t1000\n")
+    write(proc, "102/status", "Name:\tjudge\nUid:\t0\t0\t0\t0\n")
+    write(proc, "103/status", "Name:\tdaemon\nUid:\t0\t1000\t1000\t1000\n")
+    write(proc, "self/status", "Name:\tself\nUid:\t1000\t1000\t1000\t1000\n")
+    write(proc, "104/cmdline", "a process that ended while being read\n")
+    assert sorted(user_pids(1000, proc)) == [101, 103]
+
+
+def test_results_replace_a_planted_link_instead_of_writing_through_it(tmp_path: Path):
+    out = tmp_path / "out"
+    out.mkdir()
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("keep\n")
+    (out / "reward.json").symlink_to(elsewhere)
+    write_output(out / "reward.json", '{"reward": 1.0}')
+    assert elsewhere.read_text() == "keep\n"
+    assert not (out / "reward.json").is_symlink()
+    assert json.loads((out / "reward.json").read_text()) == {"reward": 1.0}
