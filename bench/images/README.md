@@ -23,6 +23,10 @@ Every image keeps these rules, which the judge relies on:
   `/app/<name>` links to them. Before every build the verifier replaces whatever `/app` holds there
   with the link, so a program is always judged with the pinned packages.
 - The build and start commands in `dodambench/languages.py` work without network.
+- A program may use whatever the image installs, the listed packages' own dependencies included,
+  and nothing else: judging has no network, and only `/app` comes from the agent's container.
+  Agents are told the listed packages; reaching for one of their dependencies is allowed,
+  because it adds nothing that every agent of that language could not also use.
 
 To check an image with a task's prepared solutions, judged exactly as the verifier judges them:
 
