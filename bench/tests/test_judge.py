@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import write
-from dodambench.judge import judge, restore_deps, user_pids, write_output
+from dodambench.judge import App, judge, restore_deps, user_pids, write_output
 
 
 def free_port() -> int:
@@ -178,3 +178,14 @@ def test_relative_folders_are_judged_like_absolute_ones(tmp_path: Path, monkeypa
            "START_CMD": f"{sys.executable} -m http.server $PORT --bind 127.0.0.1", "PORT": str(free_port())}
     r = judge(Path("tests"), Path("app"), "build", Path("out"), lang_env=env)["reward"]
     assert r["functional_pass_rate"] == 1.0 and r["reward"] == 1.0
+
+
+def test_a_program_is_not_up_while_another_process_holds_its_port(tmp_path: Path):
+    """A stale instance on the port would answer for the new one, with an old secret and an old database."""
+    port = free_port()
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", port))
+        holder.listen()
+        app = App(tmp_path, f"{sys.executable} -c pass", port, "", {})
+        assert not app.start(timeout=3)
+        app.stop()
