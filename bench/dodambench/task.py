@@ -61,6 +61,7 @@ class Variant:
     expect: str
     weakness: str | None = None
     replacements: tuple[Replacement, ...] = ()
+    source: str = ""
 
     @property
     def label(self) -> str:
@@ -117,19 +118,31 @@ class Task:
         return [Variant("", lang, step, "secure")] + [v for v in self.variants if v.lang == lang and v.step == step]
 
 
-def _load_variants(path: Path) -> tuple[list[Variant], str | None]:
-    if not path.is_file():
-        return [], None
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        return [], f"solutions/variants.toml: {exc}"
+def _load_variants(folder: Path) -> tuple[list[Variant], str | None]:
+    """Variants live in solutions/variants/<language>.toml; a variant's language defaults to its file's."""
+    problems: list[str] = []
+    if (folder.parent / "variants.toml").exists():
+        problems.append("solutions/variants.toml is no longer read; "
+                        "put each language's variants in solutions/variants/<language>.toml")
     variants = []
-    for v in data.get("variant", []):
-        reps = tuple(Replacement(r.get("file", ""), r.get("old", ""), r.get("new", "")) for r in v.get("replace", []))
-        variants.append(Variant(str(v.get("name", "")), str(v.get("lang", "")), str(v.get("step", "")),
-                                str(v.get("expect", "")), v.get("weakness"), reps))
-    return variants, None
+    for path in sorted(folder.glob("*.toml")) if folder.is_dir() else []:
+        where = f"solutions/variants/{path.name}"
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            problems.append(f"{where}: {exc}")
+            continue
+        for v in data.get("variant", []):
+            lang = str(v.get("lang", path.stem))
+            if lang != path.stem:
+                problems.append(f"{where}: variant {v.get('name', '')} says language {lang}, "
+                                f"but this file holds {path.stem} variants")
+                continue
+            reps = tuple(Replacement(r.get("file", ""), r.get("old", ""), r.get("new", ""))
+                         for r in v.get("replace", []))
+            variants.append(Variant(str(v.get("name", "")), lang, str(v.get("step", "")),
+                                    str(v.get("expect", "")), v.get("weakness"), reps, where))
+    return variants, "; ".join(problems) or None
 
 
 def load_task(root: Path | str) -> Task:
@@ -150,7 +163,7 @@ def load_task(root: Path | str) -> Task:
                 superseded_in=tuple(t.get("superseded_in", ()))))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         problem = f"tests/manifest.toml: {exc}"
-    variants, variants_problem = _load_variants(root / "solutions" / "variants.toml")
+    variants, variants_problem = _load_variants(root / "solutions" / "variants")
     return Task(root, meta, steps, tests, problem, variants, variants_problem)
 
 
@@ -264,9 +277,8 @@ def _variant_errors(task: Task, step_names: list[str]) -> list[str]:
         return [task.variants_problem]
     errors: list[str] = []
     seen: set[tuple[str, str, str]] = set()
-    where = "solutions/variants.toml"
     for v in task.variants:
-        label = v.label
+        label, where = v.label, v.source or "solutions/variants"
         if not SLUG.match(v.name):
             errors.append(f"{where}: variant name {v.name!r} must be lowercase words joined by hyphens")
         if v.expect not in EXPECTATIONS:
