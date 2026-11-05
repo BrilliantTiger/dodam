@@ -26,6 +26,9 @@ agent)
     useradd --create-home --uid 1000 --user-group --shell /bin/bash agent
   fi
   usermod --groups "" agent
+  # su, which the judge starts the program with, takes PATH from /etc/environment on some bases
+  # (Ubuntu); give it the image's PATH so the language tools are found the same way everywhere.
+  printf 'PATH="%s"\n' "$PATH" > /etc/environment
   mkdir -p /app
   chown -R -h agent:agent /app
   ;;

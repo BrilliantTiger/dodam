@@ -6,10 +6,7 @@ FROM maven:3.10.0-eclipse-temurin-25-resolute@sha256:047a82fc82c613266cfb1b66fd9
 ENTRYPOINT []
 CMD ["bash"]
 
-# The judge starts the program through su, whose session takes PATH from /etc/environment; give it the
-# image's PATH so that java, which lives in the JDK's own folder, is found there too.
-RUN echo "PATH=\"$PATH\"" > /etc/environment \
- && apt-get update \
+RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
@@ -41,8 +38,6 @@ RUN cd /tmp/prefetch \
  && cd / && rm -rf /tmp/prefetch /root/.m2 /opt/deps/maven-repository/.locks /opt/deps/maven-repository/.meta
 ENV MAVEN_ARGS=--offline
 
-# The base image's uid-1000 user, which setup.sh takes over, is in adm, sudo and other groups;
-# the agent keeps none of them.
 COPY java/app/ /app/
-RUN /opt/dodam/setup.sh agent && usermod -G "" agent
+RUN /opt/dodam/setup.sh agent
 WORKDIR /app
