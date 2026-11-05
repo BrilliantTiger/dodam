@@ -3,8 +3,10 @@
 The secure solution must pass every test. A vulnerable variant must pass every functional and boundary
 test and fail the security tests of its own weakness, and only those. A broken variant must fail a
 functional or boundary test. Tests that cannot tell these apart would let weak programs through, so a
-task that fails vetting is not ready. The judge is the one the verifier runs; the language tools come
-from this machine, with this Python environment's own tools first on PATH.
+task that fails vetting is not ready. The judge is the one the verifier runs. By default the language
+tools come from this machine, with this Python environment's own tools first on PATH; with an image,
+each solution is judged inside the language image exactly as the verifier does it: no network, the
+judge as root with its own Python, the program built and run as the plain user agent.
 """
 from __future__ import annotations
 
@@ -19,9 +21,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
-from .convert import verifier_env
+from .convert import to_harbor, verifier_env
 from .judge import judge
 from .languages import LANGUAGES, Language
 from .task import Task, load_task, materialize, validate
@@ -131,12 +134,69 @@ def _missing_tools(lang_env: dict[str, str], path: str, deps_cmd: str = "") -> l
     return missing
 
 
-def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE) -> list[dict]:
-    """Judge each solution of one language at its step; write the judge's files and vet.json to out_dir."""
+def docker_create_cmd(name: str, image: str, step: str) -> list[str]:
+    """A stopped container that, once /tests and /solution are copied in, judges the solution like the verifier."""
+    script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && exec /opt/judge/bin/python "
+              f"/tests/lib/dodam_judge.py --tests /tests --app /app --step {shlex.quote(step)} --out /logs/verifier")
+    return ["docker", "create", "--name", name, "--network", "none", "--user", "0",
+            "-e", "DODAM_APP_USER=agent", image, "sh", "-c", script]
+
+
+def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Path, step: str,
+                   timeout: float = 1800) -> dict:
+    """Judge one solution in a fresh container of the image; the judge's files land in out_dir."""
+    name = f"dodam-vet-{uuid.uuid4().hex[:12]}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(docker_create_cmd(name, image, step), check=True, capture_output=True, text=True)
+        subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
+        subprocess.run(["docker", "cp", f"{solution_dir}/.", f"{name}:/solution"], check=True, capture_output=True)
+        subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=timeout)
+        subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out_dir)], check=True, capture_output=True)
+    finally:
+        subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+    return {"reward": json.loads((out_dir / "reward.json").read_text(encoding="utf-8")),
+            "report": json.loads((out_dir / "details.json").read_text(encoding="utf-8"))}
+
+
+def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]:
+    results = []
+    with tempfile.TemporaryDirectory(prefix="dodam-vet-") as work:
+        harbor = to_harbor(task, lang, Path(work), image)
+        for step in task.steps:
+            for variant in task.solutions_for(lang, step.name):
+                result = {"lang": lang, "step": step.name, "solution": variant.label,
+                          "expect": variant.expect, "weakness": variant.weakness, "image": image}
+                started = time.monotonic()
+                try:
+                    judged = judge_in_image(image, harbor / "tests",
+                                            harbor / "steps" / step.name / "solution" / "variants" / variant.label,
+                                            out_dir / step.name / variant.label, step.name)
+                except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                    result.update(ok=False, problems=[f"could not judge in {image}: {exc}"])
+                else:
+                    found = judgement_problems(variant.expect, variant.weakness, judged["report"])
+                    result.update(ok=not found, problems=found, reward=judged["reward"])
+                result["seconds"] = round(time.monotonic() - started, 1)
+                results.append(result)
+    return results
+
+
+def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE,
+        image: str | None = None) -> list[dict]:
+    """Judge each solution of one language at its step; write the judge's files and vet.json to out_dir.
+
+    With an image, judge inside that language image instead of with this machine's tools."""
     problems = validate(task)
     if problems:
         raise VetError("; ".join(problems))
     out_dir = Path(out_dir)
+    if image is not None:
+        results = vet_in_image(task, lang, out_dir, image or LANGUAGES[lang].image)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "vet.json").write_text(json.dumps({"task": task.id, "lang": lang, "results": results}, indent=1),
+                                          encoding="utf-8")
+        return results
     language = LANGUAGES[lang]
     extra_env = {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
     lang_env = {**verifier_env(task, lang), "PORT": str(_free_port())}
@@ -177,13 +237,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("task", type=Path)
     p.add_argument("--lang", action="append", help="language to vet; repeat for several (default: every one with a secure solution)")
     p.add_argument("--out", type=Path, default=Path("vet-out"))
+    p.add_argument("--image", nargs="?", const="", default=None,
+                   help="judge inside the language image (default tag dodam-bench/<language>:dev) instead of on this machine")
     a = p.parse_args(argv)
     task = load_task(a.task)
     langs = a.lang or [lang for lang in task.languages if (task.root / "solutions" / "secure" / lang).is_dir()]
     good = True
     for lang in langs:
         try:
-            results = vet(task, lang, a.out / task.id / lang)
+            results = vet(task, lang, a.out / task.id / lang, image=a.image)
         except VetError as exc:
             print(f"task {task.id} is not valid: {exc}", file=sys.stderr)
             return 2
