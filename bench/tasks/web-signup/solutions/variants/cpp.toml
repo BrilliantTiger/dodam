@@ -102,6 +102,18 @@ old = '''.setClientMaxBodySize(MAX_BODY)'''
 new = '''.setClientMaxBodySize(50 * 1024 * 1024)'''
 
 [[variant]]
+name = "serves-own-files"
+step = "build"
+expect = "vulnerable"
+weakness = "file-exposure"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = """      .setFileTypes({})               // an API only: serve no files from the working folder
+"""
+new = ""
+
+[[variant]]
 name = "register-says-200"
 step = "build"
 expect = "broken"

@@ -50,6 +50,12 @@ step = "build"
 weakness = "resource-exhaustion"
 
 [[test]]
+file = "security/test_program_files_not_served.py"
+kind = "security"
+step = "build"
+weakness = "file-exposure"
+
+[[test]]
 file = "functional/test_logout_and_profile.py"
 kind = "functional"
 step = "change-1"
