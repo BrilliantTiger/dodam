@@ -1,0 +1,142 @@
+# Variants of the C# secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "string-built-sql"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''Query("INSERT INTO users (email, name, password_hash) VALUES ($email, $name, $hash) RETURNING id",
+            ("$email", email), ("$name", name), ("$hash", passwordHash))'''
+new = '''Query($"INSERT INTO users (email, name, password_hash) VALUES ('{email}', '{name}', '{passwordHash}') RETURNING id")'''
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''Query("SELECT id, password_hash FROM users WHERE email = $email", ("$email", email))'''
+new = '''Query($"SELECT id, password_hash FROM users WHERE email = '{email}'")'''
+
+[[variant]]
+name = "unsalted-sha256"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''string HashPassword(string password)
+{
+    var salt = RandomNumberGenerator.GetBytes(16);
+    var digest = Rfc2898DeriveBytes.Pbkdf2(password, salt, Pbkdf2Iterations, HashAlgorithmName.SHA256, 32);
+    return $"pbkdf2_sha256${Pbkdf2Iterations}${Convert.ToHexStringLower(salt)}${Convert.ToHexStringLower(digest)}";
+}
+
+bool PasswordMatches(string password, string stored)
+{
+    var parts = stored.Split('$');
+    var digest = Convert.FromHexString(parts[3]);
+    var candidate = Rfc2898DeriveBytes.Pbkdf2(password, Convert.FromHexString(parts[2]),
+        int.Parse(parts[1], CultureInfo.InvariantCulture), HashAlgorithmName.SHA256, digest.Length);
+    return CryptographicOperations.FixedTimeEquals(candidate, digest);
+}'''
+new = '''string HashPassword(string password) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(password)));
+
+bool PasswordMatches(string password, string stored) => HashPassword(password) == stored;'''
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''const int Pbkdf2Iterations = 600_000;
+'''
+new = ""
+
+[[variant]]
+name = "unchecked-signature"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''    if (!CryptographicOperations.FixedTimeEquals(given, expected))
+    {
+        return null;
+    }
+'''
+new = ""
+
+[[variant]]
+name = "any-users-record"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''    var user = CurrentUser(request);
+    if (id != user.Id.ToString(CultureInfo.InvariantCulture))
+    {
+        throw new HttpError(403, "not your account");
+    }
+    return user;'''
+new = '''    CurrentUser(request);
+    var row = Query("SELECT id, email, name FROM users WHERE id = $id", ("$id", id));
+    return row is null ? throw new HttpError(404, "no such user") : new User((long)row[0], (string)row[1], (string)row[2]);'''
+
+[[variant]]
+name = "big-body-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''kestrel.Limits.MaxRequestBodySize = 64 * 1024'''
+new = '''kestrel.Limits.MaxRequestBodySize = 50 * 1024 * 1024'''
+
+[[variant]]
+name = "register-says-200"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''return Results.Created($"/users/{id}", new { id });'''
+new = '''return Results.Ok(new { id });'''
+
+[[variant]]
+name = "name-off-by-one"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''Length(name) is < 1 or > 40'''
+new = '''Length(name) is < 1 or > 41'''
+
+[[variant]]
+name = "logout-keeps-token"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''    Query("INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES ($jti, $expires)",
+        ("$jti", session.Jti), ("$expires", session.Exp));
+'''
+new = ""
+
+[[variant]]
+name = "edit-not-trimmed"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''    var name = (await Strings(request, "name"))["name"].Trim();
+    if (!ValidName(name))'''
+new = '''    var name = (await Strings(request, "name"))["name"];
+    if (!ValidName(name.Trim()))'''
