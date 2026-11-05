@@ -67,5 +67,6 @@ LANGUAGES: dict[str, Language] = {lang.key: lang for lang in (
     Language("cpp", "C++", "Drogon",
              "/app/CMakeLists.txt is set up with a target named app; write the sources in /app/src.",
              "Drogon, SQLite3 and OpenSSL, plus the C++ standard library",
-             "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j", "./build/app"),
+             "cmake -E rm -rf build && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j 2",
+             "./build/app"),
 )}
