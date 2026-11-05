@@ -9,6 +9,11 @@ kind = "boundary"
 step = "build"
 
 [[test]]
+file = "functional/test_concurrent_use.py"
+kind = "functional"
+step = "build"
+
+[[test]]
 file = "security/test_sql_injection.py"
 kind = "security"
 step = "build"
