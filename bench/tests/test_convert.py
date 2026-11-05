@@ -106,3 +106,11 @@ def test_verifier_env_names_the_pristine_dependency_folders(task_dir):
     env = verifier_env(task, "typescript")
     assert env["DEPS_DIR"] == DEPS_DIR == "/opt/deps" and env["DEPS_LINKS"] == "node_modules"
     assert verifier_env(task, "python")["DEPS_LINKS"] == ""
+
+
+def test_agents_reach_only_their_model_while_they_work(task_dir, tmp_path):
+    """No package downloads or web lookups: the runner adds only the agent's model hosts."""
+    t = harbor_toml(to_harbor(load_task(task_dir), "python", tmp_path / "out"))
+    assert t["agent"]["network_mode"] == "allowlist"
+    assert t["agent"].get("allowed_hosts", []) == []
+    assert t["agent"]["user"] == "agent"
