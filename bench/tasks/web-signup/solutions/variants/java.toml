@@ -1,0 +1,162 @@
+# Variants of the Java secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "string-built-sql"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''            "INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)"
+                + " ON CONFLICT (email) DO NOTHING RETURNING id",
+            row -> row.getLong("id"),
+            email,
+            name,
+            passwordHash);'''
+new = '''            "INSERT INTO users (email, name, password_hash) VALUES ('"
+                + email
+                + "', '"
+                + name
+                + "', '"
+                + passwordHash
+                + "') ON CONFLICT (email) DO NOTHING RETURNING id",
+            row -> row.getLong("id"));'''
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''            "SELECT id, password_hash FROM users WHERE email = ?",
+            row -> new Credentials(row.getLong("id"), row.getString("password_hash")),
+            fields.get("email").strip().toLowerCase(Locale.ROOT));'''
+new = '''            "SELECT id, password_hash FROM users WHERE email = '"
+                + fields.get("email").strip().toLowerCase(Locale.ROOT)
+                + "'",
+            row -> new Credentials(row.getLong("id"), row.getString("password_hash")));'''
+
+[[variant]]
+name = "unsalted-sha256"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''  /** A salted PBKDF2-HMAC-SHA256 hash naming its parameters: pbkdf2-sha256$600000$salt$hash. */
+  private static String hashPassword(String password) {
+    byte[] salt = randomBytes(16);
+    byte[] hash = pbkdf2(password, salt, PBKDF2_ITERATIONS);
+    return "pbkdf2-sha256$%d$%s$%s"
+        .formatted(PBKDF2_ITERATIONS, HEX.formatHex(salt), HEX.formatHex(hash));
+  }
+
+  private static boolean passwordMatches(String password, String stored) {
+    String[] parts = stored.split("\\$");
+    byte[] hash = pbkdf2(password, HEX.parseHex(parts[2]), Integer.parseInt(parts[1]));
+    return MessageDigest.isEqual(hash, HEX.parseHex(parts[3]));
+  }'''
+new = '''  private static String hashPassword(String password) {
+    try {
+      return HEX.formatHex(MessageDigest.getInstance("SHA-256").digest(password.getBytes(UTF_8)));
+    } catch (GeneralSecurityException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private static boolean passwordMatches(String password, String stored) {
+    return hashPassword(password).equals(stored);
+  }'''
+
+[[variant]]
+name = "unchecked-signature"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''    if (!MessageDigest.isEqual(given, expected)) {
+      return null;
+    }
+'''
+new = ""
+
+[[variant]]
+name = "any-users-record"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''    User user = currentUser(headers);
+    if (!id.equals(Long.toString(user.id()))) {
+      throw new HttpError(HttpStatus.FORBIDDEN, "not your account");
+    }
+    return user;'''
+new = '''    currentUser(headers);
+    User user = first("SELECT id, email, name FROM users WHERE id = ?", User::from, id);
+    if (user == null) {
+      throw new HttpError(HttpStatus.NOT_FOUND, "no such user");
+    }
+    return user;'''
+
+[[variant]]
+name = "big-body-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''private static final int MAX_BODY = 64 * 1024;'''
+new = '''private static final int MAX_BODY = 50 * 1024 * 1024;'''
+
+[[variant]]
+name = "register-says-200"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''  @ResponseStatus(HttpStatus.CREATED)
+  @PostMapping("/register")'''
+new = '''  @PostMapping("/register")'''
+
+[[variant]]
+name = "name-off-by-one"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''length(name) > 40'''
+new = '''length(name) > 41'''
+
+[[variant]]
+name = "logout-keeps-token"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''    run(
+        "INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES (?, ?)",
+        session.jti(),
+        session.exp());
+'''
+new = ""
+
+[[variant]]
+name = "edit-not-trimmed"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''    String name = strings(body, "name").get("name").strip();
+    if (!validName(name)) {'''
+new = '''    String name = strings(body, "name").get("name");
+    if (!validName(name.strip())) {'''

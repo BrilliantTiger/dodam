@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maven in the Java image. Builds take the pinned packages and plugins from a repository owned by
+     root that nothing writes to, so the locks that guard it stay in memory instead of in lock files
+     beside it, and no prefix lists are fetched for it. Plugins come from a repository of their own
+     name, and the repository remembers where each file came from: a library that only a plugin needs
+     is not available as a dependency of the program. -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <localRepository>/opt/deps/maven-repository</localRepository>
+  <profiles>
+    <profile>
+      <id>pinned-packages</id>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>maven-plugins</id>
+          <url>https://repo.maven.apache.org/maven2</url>
+          <snapshots>
+            <enabled>false</enabled>
+          </snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+      <properties>
+        <aether.system.named.factory>rwlock-local</aether.system.named.factory>
+        <aether.syncContext.named.nameMapper>gaecv</aether.syncContext.named.nameMapper>
+        <aether.remoteRepositoryFilter.prefixes>false</aether.remoteRepositoryFilter.prefixes>
+      </properties>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>pinned-packages</activeProfile>
+  </activeProfiles>
+</settings>
