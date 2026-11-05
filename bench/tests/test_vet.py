@@ -136,7 +136,7 @@ def small_task(tmp_path: Path) -> Path:
             assert httpx.get(url, headers={{"X-Key": os.environ["APP_SECRET"]}}).status_code == 200
     """)
     write(root, "solutions/secure/python/build/main.py", APP)
-    write(root, "solutions/variants.toml", '''
+    write(root, "solutions/variants/python.toml", '''
         [[variant]]
         name = "open-private"
         lang = "python"

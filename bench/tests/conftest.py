@@ -71,7 +71,7 @@ def task_dir(tmp_path: Path) -> Path:
     for rel in ("functional/test_health.py", "security/test_injection.py", "functional/test_version.py"):
         write(root, f"tests/{rel}", f"# {CANARY}\ndef test_placeholder():\n    assert True\n")
     write(root, "solutions/secure/python/build/main.py", "app = None\n")
-    write(root, "solutions/variants.toml", """
+    write(root, "solutions/variants/python.toml", """
         [[variant]]
         name = "no-check"
         lang = "python"

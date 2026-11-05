@@ -114,7 +114,7 @@ def test_superseded_tests_drop_out_of_later_steps(task_dir):
 
 
 def variants_file(task_dir: Path) -> Path:
-    return task_dir / "solutions/variants.toml"
+    return task_dir / "solutions/variants/python.toml"
 
 
 def test_variants_load_with_their_replacements(task_dir):
@@ -163,8 +163,38 @@ def test_variant_needs_a_secure_solution_to_start_from(task_dir):
 
 
 def test_variant_language_must_be_a_task_language(task_dir):
-    edit(variants_file(task_dir), 'lang = "python"', 'lang = "rust"')
-    assert any("rust" in e for e in errors_of(task_dir))
+    text = variants_file(task_dir).read_text().replace('lang = "python"\n', "")
+    (task_dir / "solutions/variants/rust.toml").write_text(text)
+    assert any("rust" in e and "not a language of this task" in e for e in errors_of(task_dir))
+
+
+def test_each_language_keeps_its_variants_in_its_own_file(task_dir):
+    edit(variants_file(task_dir), 'lang = "python"\n', "")
+    write(task_dir, "solutions/secure/go/build/main.go", "package main // open = false\n")
+    write(task_dir, "solutions/variants/go.toml", """
+        [[variant]]
+        name = "open"
+        step = "build"
+        expect = "broken"
+
+        [[variant.replace]]
+        file = "main.go"
+        old = "open = false"
+        new = "open = true"
+    """)
+    task = load_task(task_dir)
+    assert sorted((v.lang, v.name) for v in task.variants) == [("go", "open"), ("python", "no-check")]
+    assert errors_of(task_dir) == []
+
+
+def test_variant_language_must_match_its_file(task_dir):
+    edit(variants_file(task_dir), 'lang = "python"', 'lang = "go"')
+    assert any("variants/python.toml" in e and "go" in e for e in errors_of(task_dir))
+
+
+def test_the_old_single_variants_file_is_refused(task_dir):
+    variants_file(task_dir).rename(task_dir / "solutions/variants.toml")
+    assert any("solutions/variants.toml" in e and "solutions/variants/" in e for e in errors_of(task_dir))
 
 
 def test_variant_names_are_unique_per_language_and_step(task_dir):
