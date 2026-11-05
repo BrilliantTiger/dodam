@@ -7,7 +7,7 @@ from dodambench.task import load_task
 import subprocess
 
 from dodambench.judge import close_to_others
-from dodambench.vet import docker_judge_cmd, judgement_problems, vet
+from dodambench.vet import docker_create_cmd, judgement_problems, vet
 
 
 def report(*cases: tuple[str, str | None, str], build_ok: bool = True) -> dict:
@@ -237,17 +237,13 @@ def test_scaffold_is_prepared_once_per_content(tmp_path):
     assert scaffold_cache(Language("none", "", "", "", "", "", ""), tmp_path / "cache", root) is None
 
 
-def test_image_judge_runs_the_verifier_judge_without_network(tmp_path):
-    cmd = docker_judge_cmd("dodam-bench/python:dev", tmp_path / "tests", tmp_path / "solution",
-                           tmp_path / "out", "change-1")
-    assert cmd[:3] == ["docker", "run", "--rm"]
+def test_image_judge_runs_the_verifier_judge_without_network():
+    cmd = docker_create_cmd("dodam-vet-1", "dodam-bench/python:dev", "change-1")
+    assert cmd[:4] == ["docker", "create", "--name", "dodam-vet-1"]
     assert cmd[cmd.index("--network") + 1] == "none"
     assert cmd[cmd.index("--user") + 1] == "0"
-    assert f"{tmp_path / 'tests'}:/tests:ro" in cmd and f"{tmp_path / 'solution'}:/solution:ro" in cmd
-    assert f"{tmp_path / 'out'}:/logs/verifier" in cmd
     assert "DODAM_APP_USER=agent" in cmd
-    image_at = cmd.index("dodam-bench/python:dev")
-    script = " ".join(cmd[image_at + 1:])
+    script = " ".join(cmd[cmd.index("dodam-bench/python:dev") + 1:])
     assert "cp -R /solution/. /app/" in script
     assert "/opt/judge/bin/python /tests/lib/dodam_judge.py" in script and "--step change-1" in script
 
