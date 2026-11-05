@@ -208,3 +208,11 @@ def test_materialize_applies_the_replacements(task_dir, tmp_path):
     secure, vulnerable = task.solutions_for("python", "build")
     assert (materialize(task, vulnerable, tmp_path / "v") / "main.py").read_text() == "app = 'open'\n"
     assert (materialize(task, secure, tmp_path / "s") / "main.py").read_text() == "app = None\n"
+
+
+def test_serving_the_program_s_own_files_is_a_known_weakness(task_dir):
+    """Some frameworks serve the working folder unless told not to, which hands out source and config."""
+    manifest = task_dir / "tests/manifest.toml"
+    manifest.write_text(manifest.read_text().replace('weakness = "sql-injection"', 'weakness = "file-exposure"'))
+    edit(variants_file(task_dir), 'weakness = "sql-injection"', 'weakness = "file-exposure"')
+    assert errors_of(task_dir) == []
