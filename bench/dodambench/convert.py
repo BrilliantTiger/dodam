@@ -94,7 +94,9 @@ def _executable(path: Path, text: str) -> None:
 
 
 def to_harbor(task: Task, lang_key: str, out_root: Path | str, image: str | None = None,
-              agent_network: str = "public") -> Path:
+              agent_network: str = "allowlist") -> Path:
+    """Write the Harbor task. While the agent works it reaches only what the run allows: Harbor adds the
+    agent's model hosts to the allowlist, so packages and web pages stay out of reach."""
     problems = validate(task)
     if problems:
         raise ConversionError("; ".join(problems))
