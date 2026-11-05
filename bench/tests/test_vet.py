@@ -4,7 +4,10 @@ import pytest
 
 from conftest import CANARY, write
 from dodambench.task import load_task
-from dodambench.vet import judgement_problems, vet
+import subprocess
+
+from dodambench.judge import close_to_others
+from dodambench.vet import docker_judge_cmd, judgement_problems, vet
 
 
 def report(*cases: tuple[str, str | None, str], build_ok: bool = True) -> dict:
@@ -232,3 +235,43 @@ def test_scaffold_is_prepared_once_per_content(tmp_path):
     third = scaffold_cache(lang, tmp_path / "cache", root)
     assert third != first and (third / "app.cfg").read_text() == "a = 2\n"
     assert scaffold_cache(Language("none", "", "", "", "", "", ""), tmp_path / "cache", root) is None
+
+
+def test_image_judge_runs_the_verifier_judge_without_network(tmp_path):
+    cmd = docker_judge_cmd("dodam-bench/python:dev", tmp_path / "tests", tmp_path / "solution",
+                           tmp_path / "out", "change-1")
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert cmd[cmd.index("--network") + 1] == "none"
+    assert cmd[cmd.index("--user") + 1] == "0"
+    assert f"{tmp_path / 'tests'}:/tests:ro" in cmd and f"{tmp_path / 'solution'}:/solution:ro" in cmd
+    assert f"{tmp_path / 'out'}:/logs/verifier" in cmd
+    assert "DODAM_APP_USER=agent" in cmd
+    image_at = cmd.index("dodam-bench/python:dev")
+    script = " ".join(cmd[image_at + 1:])
+    assert "cp -R /solution/. /app/" in script
+    assert "/opt/judge/bin/python /tests/lib/dodam_judge.py" in script and "--step change-1" in script
+
+
+def test_closing_a_read_only_folder_is_not_an_error(tmp_path, monkeypatch):
+    write(tmp_path, "tests/manifest.toml", "")
+    def read_only(path, mode):
+        raise OSError(30, "Read-only file system", str(path))
+    monkeypatch.setattr("os.chmod", read_only)
+    close_to_others(tmp_path / "tests")
+
+
+def _image_ready(image: str) -> bool:
+    try:
+        return subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _image_ready("dodam-bench/python:dev"), reason="needs Docker and the Python image")
+def test_vet_in_the_language_image_gives_the_same_judgements(small_task, tmp_path):
+    results = vet(load_task(small_task), "python", tmp_path / "out", image="dodam-bench/python:dev")
+    by_label = {r["solution"]: r for r in results}
+    for name in ("secure", "vulnerable-open-private", "broken-bad-health"):
+        assert by_label[name]["ok"], by_label[name]
+    assert not by_label["vulnerable-harmless"]["ok"]
+    assert (tmp_path / "out/build/secure/reward.json").exists()
