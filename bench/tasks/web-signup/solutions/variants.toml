@@ -284,3 +284,177 @@ old = '''  const name = strings(req.body, ["name"]).name.trim();
   if (!validName(name)) {'''
 new = '''  const name = strings(req.body, ["name"]).name;
   if (!validName(name.trim())) {'''
+
+[[variant]]
+name = "string-built-sql"
+lang = "go"
+step = "build"
+expect = "vulnerable"
+weakness = "sql-injection"
+
+[[variant.replace]]
+file = "main.go"
+old = '''s.db.Exec(`INSERT INTO users (email, name, password_hash) VALUES (?, ?, ?)
+		ON CONFLICT(email) DO NOTHING`, email, name, hash)'''
+new = '''s.db.Exec(fmt.Sprintf(`INSERT INTO users (email, name, password_hash) VALUES ('%s', '%s', '%s')
+		ON CONFLICT(email) DO NOTHING`, email, name, hash))'''
+
+[[variant.replace]]
+file = "main.go"
+old = '''s.db.QueryRow("SELECT id, password_hash FROM users WHERE email = ?", email)'''
+new = '''s.db.QueryRow(fmt.Sprintf("SELECT id, password_hash FROM users WHERE email = '%s'", email))'''
+
+[[variant]]
+name = "unsalted-sha256"
+lang = "go"
+step = "build"
+expect = "vulnerable"
+weakness = "plaintext-credentials"
+
+[[variant.replace]]
+file = "main.go"
+old = '''// hashPassword returns a PBKDF2-HMAC-SHA256 hash with a random salt, written in hashFormat.
+func hashPassword(password string) (string, error) {
+	salt := make([]byte, 16)
+	rand.Read(salt)
+	key, err := pbkdf2.Key(sha256.New, password, salt, iterations, 32)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(hashFormat, iterations, salt, key), nil
+}
+
+// passwordMatches checks a password against a hash in hashFormat, comparing in constant time.
+func passwordMatches(password, stored string) bool {
+	var n int
+	var salt, key []byte
+	if _, err := fmt.Sscanf(stored, hashFormat, &n, &salt, &key); err != nil {
+		return false
+	}
+	candidate, err := pbkdf2.Key(sha256.New, password, salt, n, len(key))
+	return err == nil && subtle.ConstantTimeCompare(candidate, key) == 1
+}'''
+new = '''// hashPassword returns the SHA-256 digest of the password in hex.
+func hashPassword(password string) (string, error) {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(password))), nil
+}
+
+// passwordMatches checks a password against its stored digest, comparing in constant time.
+func passwordMatches(password, stored string) bool {
+	digest, _ := hashPassword(password)
+	return subtle.ConstantTimeCompare([]byte(digest), []byte(stored)) == 1
+}'''
+
+[[variant.replace]]
+file = "main.go"
+old = '''	"crypto/pbkdf2"
+'''
+new = ""
+
+[[variant]]
+name = "unchecked-signature"
+lang = "go"
+step = "build"
+expect = "vulnerable"
+weakness = "token-forgery"
+
+[[variant.replace]]
+file = "main.go"
+old = '''payload, sig, found := strings.Cut(token, ".")
+	if !found || !hmac.Equal([]byte(sig), []byte(s.sign(payload))) {'''
+new = '''payload, _, found := strings.Cut(token, ".")
+	if !found {'''
+
+[[variant]]
+name = "any-users-record"
+lang = "go"
+step = "build"
+expect = "vulnerable"
+weakness = "broken-access-control"
+
+[[variant.replace]]
+file = "main.go"
+old = '''if r.PathValue("id") != strconv.FormatInt(u.ID, 10) {
+		return &httpError{http.StatusForbidden, "not your account"}
+	}'''
+new = '''err = s.db.QueryRow("SELECT id, email, name FROM users WHERE id = ?", r.PathValue("id")).Scan(&u.ID, &u.Email, &u.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &httpError{http.StatusNotFound, "no such user"}
+	}
+	if err != nil {
+		return err
+	}'''
+
+[[variant.replace]]
+file = "main.go"
+old = '''	"strconv"
+'''
+new = ""
+
+[[variant]]
+name = "no-body-limit"
+lang = "go"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "main.go"
+old = '''io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))'''
+new = '''io.ReadAll(r.Body)'''
+
+[[variant]]
+name = "register-says-200"
+lang = "go"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.go"
+old = '''reply(w, http.StatusCreated, map[string]int64{"id": id})'''
+new = '''reply(w, http.StatusOK, map[string]int64{"id": id})'''
+
+[[variant]]
+name = "name-off-by-one"
+lang = "go"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.go"
+old = '''lengthIn(name, 1, 40)'''
+new = '''lengthIn(name, 1, 41)'''
+
+[[variant]]
+name = "logout-keeps-token"
+lang = "go"
+step = "change-1"
+expect = "vulnerable"
+weakness = "broken-authentication"
+
+[[variant.replace]]
+file = "main.go"
+old = '''_, c, err := s.authenticate(r)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("INSERT OR IGNORE INTO revoked_tokens (jti, expires) VALUES (?, ?)", c.JTI, c.Exp)
+	if err != nil {
+		return err
+	}'''
+new = '''if _, _, err := s.authenticate(r); err != nil {
+		return err
+	}'''
+
+[[variant]]
+name = "edit-not-trimmed"
+lang = "go"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.go"
+old = '''name := strings.TrimSpace(in["name"])
+	if !validName(name) {'''
+new = '''name := in["name"]
+	if !validName(strings.TrimSpace(name)) {'''
