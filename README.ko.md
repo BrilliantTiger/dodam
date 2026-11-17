@@ -1,5 +1,7 @@
 # 도담
 
+[English](README.md) · [소개 페이지](https://brillianttigercorp.com/dodam/ko/)는 네 언어로 볼 수 있다: [English](https://brillianttigercorp.com/dodam/), 한국어, [日本語](https://brillianttigercorp.com/dodam/ja/), [Español](https://brillianttigercorp.com/dodam/es/)
+
 AI가 정확하고 탄탄하게 짤 수 있는, 안전하고 빠른 범용 언어. 사람이 읽을 필요가 없는 언어다. AI가 AI를 위해 스스로 다듬고, 사람은 결과물과 보안 보고서만 본다. 보안 규칙은 컴파일러가 강제하고, 그 규칙은 시간이 갈수록 조여지기만 한다. 첫 분야는 웹이고, 서버와 화면을 코드 한 벌로 쓴다.
 
 > **상태: 설계 단계.** 아직 컴파일러는 없다. 지금 하는 일은 설계를 정하고, 모든 설계 결정을 잴 벤치마크를 만드는 것이다. 언어를 만드는 일도 AI 에이전트가 한다. AI 회사 세 곳의 구독을 하나씩 쓰면 1.0은 2032년 2월(가운데 추정)이다. 당분간은 Claude 하나로 일하는데, 끝까지 그대로 가면 가운데 날짜가 2038년 11월로 밀린다.

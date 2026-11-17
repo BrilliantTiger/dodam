@@ -65,7 +65,7 @@ class Page(HTMLParser):
         elif here == "script":
             self.inline_script += data
         elif here != "style":
-            self.text += data
+            self.text += data + " "  # elements are separate words
 
     def all(self, tag: str) -> list[dict[str, str | None]]:
         return [a for t, a in self.tags if t == tag]
@@ -244,7 +244,7 @@ def page_facts(lang: str) -> dict:
         "outline": [t for t, _ in p.tags if t in {"section", "h1", "h2", "h3", "li", "figure", "pre", "footer"}],
         "links": sorted(h for h in p.hrefs() if not is_local(h)),
         "counted": [a["data-count"] for _, a in p.tags if a.get("data-count")],
-        "years": sorted(re.findall(r"\b20\d\d\b", p.text)),
+        "years": sorted(re.findall(r"(?<!\d)20[2-4]\d(?!\d)", p.text)),
         "percents": sorted(re.findall(r"\d+(?=\s?%)", p.text)),
     }
 
