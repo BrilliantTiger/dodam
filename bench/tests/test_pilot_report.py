@@ -243,3 +243,42 @@ def test_the_document_stands_on_its_own(lang):
     assert not re.search(r"/Users|/home/|@|~/", text)
     for word in ("b_baseline", "g_dir", "after_x", "p50", "seven_day", "five_hour"):
         assert word not in text
+
+
+# --- the charter -------------------------------------------------------------------------------------------------
+
+CHARTER_DATES = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}|\d{1,2}월(?: \d{1,2}일)?|January 1\b")
+CHARTER_LINES = {
+    "ko": {"row": "| 11/17(끝남", "night": "| 11/18~12/6 | 하룻밤 묶음 측정", "text": "시범(2026-11-17)은"},
+    "en": {"row": "| 11/17 (finished", "night": "| 11/18~12/6 | One-night batch measurement",
+           "text": "The trial run (2026-11-17) finished"},
+}
+
+
+def charter_figures(lang: str, which: str) -> list[str]:
+    text = (ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.startswith(CHARTER_LINES[lang][which])]
+    assert len(lines) == 1, f"the {lang} charter has no single line for the pilot's {which}"
+    return sorted(re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", CHARTER_DATES.sub(" ", lines[0])))
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_charter_quotes_the_pilot_s_figures(lang):
+    replan = json.loads(REPLAN.read_text(encoding="utf-8"))
+    used, cap, sched = replan["usage"], replan["capacity"], replan["schedule"]
+    plan = sched["capacities"]["planning"]
+    share = lambda case: str(round(plan[case]["p_baseline_by_row_end"] * 100))
+    said = lambda values: sorted(f"{v:,}" for v in values)
+    assume = cap["assumptions"]
+    assert charter_figures(lang, "row") == said([
+        assume["languages"], used["agent_seconds_mean"], used["wall_seconds_mean"], used["weekly"]["later_runs"],
+        used["weekly"]["display_step_points"], used["weekly"]["one_run_below_points"], assume["guard_window_hours"]])
+    assert charter_figures(lang, "night") == said([
+        cap["next_measurement"]["same_model_runs"], assume["languages"], assume["repeats"],
+        cap["next_measurement"]["larger_model_runs"]])
+    nights = [case["nights"] for case in cap["cases"]]
+    assert charter_figures(lang, "text") == sorted(said([
+        sched["pilot_row"]["days_before_its_start"], assume["runs"], assume["guard_window_hours"],
+        round(assume["guard_limit_minutes"]), assume["night_hours"], *nights, cap["row"]["nights"],
+        cap["agent_minutes_per_run_at_that_factor"], cap["largest_factor_that_fits_the_row"], sched["sims"],
+        assume["tasks"]]) + [share(c) for c in ("before", "after_x1", "after_x2", "after_x4")])
