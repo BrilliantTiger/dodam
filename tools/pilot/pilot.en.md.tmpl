@@ -148,7 +148,7 @@ The pilot changes these inputs.
 
 One input did not change: the AI working days the subscriptions give in a week. The pilot was meant to measure it, but the weekly utilization did not move, so it could not. The capacity was therefore run with the same assumptions as before.
 
-The schedule simulation rolls the tasks of the work breakdown forward week by week, in the order of what must come first. Tasks that run in the same week share the subscription capacity, tasks run over their planned length, and risks strike. Each case was run {{sims}} times. "Middle" means half of those runs had ended by that day, and "{{pct80}}%" means {{pct80}}% of them had. The simulation does not know how far the {{plan.tasks}} tasks and the measuring tool have come by now, so it counts both as starting the day after the pilot with all their work still ahead.
+The schedule simulation rolls the tasks of the work breakdown forward week by week, in the order of what must come first. Tasks that run in the same week share the subscription capacity, tasks run over their planned length, and risks strike. Each case was run {{sims}} times. The number of runs is finite, so a chance can be off by a few percentage points. "Middle" means half of those runs had ended by that day, and "{{pct80}}%" means {{pct80}}% of them had. The simulation does not know how far the {{plan.tasks}} tasks and the measuring tool have come by now, so it counts both as starting the day after the pilot with all their work still ahead.
 
 At the plan's capacity (one account per AI company, about {{planning.days_a_week}} working days a week):
 
