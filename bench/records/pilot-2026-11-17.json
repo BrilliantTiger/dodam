@@ -1,0 +1,839 @@
+{
+ "schema": 1,
+ "what": "measured values of pilot runs, copied field by field from the pilot's records",
+ "task": "web-signup",
+ "date_utc": "2026-11-17",
+ "batches": [
+  {
+   "started_utc": "2026-11-17T08:05:56Z",
+   "task": "web-signup",
+   "languages": [
+    "python"
+   ],
+   "claude_code_pinned": "2.1.326",
+   "model_asked_for": "agent default",
+   "stop_at_weekly_percent": 50.0,
+   "stop_at_five_hour_percent": 50.0,
+   "guard_agent_minutes_per_five_hours": 30.0
+  },
+  {
+   "started_utc": "2026-11-17T11:37:39Z",
+   "task": "web-signup",
+   "languages": [
+    "typescript"
+   ],
+   "claude_code_pinned": "2.1.326",
+   "model_asked_for": "agent default",
+   "stop_at_weekly_percent": 50.0,
+   "stop_at_five_hour_percent": 50.0,
+   "guard_agent_minutes_per_five_hours": 30.0
+  },
+  {
+   "started_utc": "2026-11-17T11:40:41Z",
+   "task": "web-signup",
+   "languages": [
+    "java",
+    "csharp",
+    "go",
+    "rust",
+    "cpp"
+   ],
+   "claude_code_pinned": "2.1.326",
+   "model_asked_for": "agent default",
+   "stop_at_weekly_percent": 50.0,
+   "stop_at_five_hour_percent": 50.0,
+   "guard_agent_minutes_per_five_hours": 30.0
+  }
+ ],
+ "runs": [
+  {
+   "language": "python",
+   "batch_started_utc": "2026-11-17T08:05:56Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 45.00503,
+     "judge_seconds": 34.570408,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 29.708311,
+     "judge_seconds": 37.805269,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 208.5,
+   "harbor_wall_seconds": 205.415419,
+   "time_limit_seconds": 10800.0,
+   "turns": 7,
+   "tokens": {
+    "input": 12,
+    "cache_read": 110196,
+    "cache_creation": 11409,
+    "output": 8266
+   },
+   "cost_usd_as_the_cli_counts_it": 0.13933959999999998,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 25.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 27.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 27.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 0.0,
+    "minutes_after": 1.2
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 381,
+    "readings_while_the_agent_worked": 136,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": null,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": null,
+   "run_error": false
+  },
+  {
+   "language": "typescript",
+   "batch_started_utc": "2026-11-17T11:37:39Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 53.895477,
+     "judge_seconds": 26.955847,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 19.609276,
+     "judge_seconds": 29.450411,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 160.2,
+   "harbor_wall_seconds": 157.103761,
+   "time_limit_seconds": 10800.0,
+   "turns": 12,
+   "tokens": {
+    "input": 22,
+    "cache_read": 209781,
+    "cache_creation": 24000,
+    "output": 10451
+   },
+   "cost_usd_as_the_cli_counts_it": 0.2215321,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 27.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 0.0,
+    "minutes_after": 1.2
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 287,
+    "readings_while_the_agent_worked": 129,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  },
+  {
+   "language": "java",
+   "batch_started_utc": "2026-11-17T11:40:41Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 47.233113,
+     "judge_seconds": 37.351454,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 61.78508,
+     "judge_seconds": 42.448757,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 314.1,
+   "harbor_wall_seconds": 311.247201,
+   "time_limit_seconds": 10800.0,
+   "turns": 10,
+   "tokens": {
+    "input": 20,
+    "cache_read": 191238,
+    "cache_creation": 24202,
+    "output": 10301
+   },
+   "cost_usd_as_the_cli_counts_it": 0.2189818,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 1.2,
+    "minutes_after": 3.0
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 563,
+    "readings_while_the_agent_worked": 193,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  },
+  {
+   "language": "csharp",
+   "batch_started_utc": "2026-11-17T11:40:41Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 40.631315,
+     "judge_seconds": 29.168742,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 22.783725,
+     "judge_seconds": 32.103723,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 305.5,
+   "harbor_wall_seconds": 302.903382,
+   "time_limit_seconds": 10800.0,
+   "turns": 6,
+   "tokens": {
+    "input": 12,
+    "cache_read": 97530,
+    "cache_creation": 19631,
+    "output": 7665
+   },
+   "cost_usd_as_the_cli_counts_it": 0.16495100000000001,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 3.0,
+    "minutes_after": 4.1
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 546,
+    "readings_while_the_agent_worked": 113,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  },
+  {
+   "language": "go",
+   "batch_started_utc": "2026-11-17T11:40:41Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 39.302574,
+     "judge_seconds": 30.080612,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 31.32318,
+     "judge_seconds": 32.367435,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 186.2,
+   "harbor_wall_seconds": 183.602133,
+   "time_limit_seconds": 10800.0,
+   "turns": 8,
+   "tokens": {
+    "input": 16,
+    "cache_read": 144315,
+    "cache_creation": 22463,
+    "output": 9658
+   },
+   "cost_usd_as_the_cli_counts_it": 0.2008955,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 4.1,
+    "minutes_after": 5.3
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 335,
+    "readings_while_the_agent_worked": 124,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  },
+  {
+   "language": "rust",
+   "batch_started_utc": "2026-11-17T11:40:41Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 43.501328,
+     "judge_seconds": 27.85105,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 23.473134,
+     "judge_seconds": 30.172791,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 181.6,
+   "harbor_wall_seconds": 178.996815,
+   "time_limit_seconds": 10800.0,
+   "turns": 7,
+   "tokens": {
+    "input": 14,
+    "cache_read": 121461,
+    "cache_creation": 21703,
+    "output": 8588
+   },
+   "cost_usd_as_the_cli_counts_it": 0.18486609999999998,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 5.3,
+    "minutes_after": 6.4
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 327,
+    "readings_while_the_agent_worked": 119,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  },
+  {
+   "language": "cpp",
+   "batch_started_utc": "2026-11-17T11:40:41Z",
+   "status": "ok",
+   "reward": 0.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 0.0,
+     "agent_seconds": 53.011474,
+     "judge_seconds": 29.579119,
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 0.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 0.875,
+      "unjudged": 0.0,
+      "vulns_found": 1.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 0.0,
+     "agent_seconds": 42.841955,
+     "judge_seconds": 31.944274,
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 1.0,
+      "reward": 0.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 0.8889,
+      "unjudged": 0.0,
+      "vulns_found": 1.0
+     }
+    }
+   ],
+   "failed_checks": [
+    {
+     "judged_at": "build",
+     "name": "test_the_program_does_not_serve_its_own_files",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "file-exposure",
+     "outcome": "failed",
+     "judge_said": "AssertionError: GET /CMakeLists.txt returned the file itself"
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_the_program_does_not_serve_its_own_files",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "file-exposure",
+     "outcome": "failed",
+     "judge_said": "AssertionError: GET /CMakeLists.txt returned the file itself"
+    }
+   ],
+   "wall_seconds": 211.4,
+   "harbor_wall_seconds": 208.772922,
+   "time_limit_seconds": 10800.0,
+   "turns": 10,
+   "tokens": {
+    "input": 20,
+    "cache_read": 194007,
+    "cache_creation": 27670,
+    "output": 13177
+   },
+   "cost_usd_as_the_cli_counts_it": 0.26189070000000003,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "first": {
+     "percent": 35.0,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 35.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": [
+    "five_hour"
+   ],
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": {
+    "window_hours": 5,
+    "limit_minutes": 30.0,
+    "minutes_before": 6.4,
+    "minutes_after": 8.0
+   },
+   "process_watch": {
+    "interval_seconds": 0.5,
+    "readings": 381,
+    "readings_while_the_agent_worked": 170,
+    "readings_with_the_token": 0,
+    "readings_with_the_token_after_the_end": 0,
+    "processes_with_the_token": 0,
+    "clean": true,
+    "stopped_harbor": false,
+    "error": false
+   },
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": 0
+   },
+   "containers_left": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "missing_steps": 0,
+   "run_error": false
+  }
+ ]
+}
