@@ -17,6 +17,7 @@ out/pilot/<UTC timestamp>/.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -25,8 +26,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +43,7 @@ from .proctable import ProcessTableWatch, process_table
 from .task import load_task
 
 BENCH = Path(__file__).resolve().parents[1]
+REPO = BENCH.parent  # a token file inside it is refused
 DEFAULT_TOKEN_FILE = Path("~/.dodam/claude-token-dodam")
 DEFAULT_OUT = BENCH / "out" / "pilot"
 DEFAULT_HARBOR = BENCH / ".harbor-venv" / "bin" / "harbor"
@@ -50,6 +55,9 @@ DEFAULT_AGENT_HOSTS = ("api.anthropic.com",)
 SCAN_CHUNK = 1 << 20
 RESET_MARGIN_SECONDS = 30
 MAX_WAITS = 3
+# A wait reads the guard file again at least this often: a pilot that is still going closes its entry
+# within minutes, so a wait on it ends soon after, without polling the file every few seconds.
+WAIT_STEP_SECONDS = 900.0
 STATE_FILE = "state.json"
 CREDENTIAL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # Host variables that could steer the agent to another credential or provider.
@@ -206,6 +214,8 @@ def decide(windows: dict[str, dict], max_five_hour: float, max_weekly: float, no
 def read_token(path: Path) -> str:
     """The bare token in a one-line file only its owner can read. Errors never contain the token."""
     path = Path(path).expanduser()
+    if path.resolve().is_relative_to(Path(REPO).resolve()):
+        raise PilotError(f"the token file {path} is inside the repository; keep it outside, for example in ~/.dodam")
     try:
         mode = path.stat().st_mode
     except OSError as err:
@@ -306,7 +316,12 @@ SETUP_MARGIN_SECONDS = 1800
 def harbor_time_limit(task) -> float:
     """Longer than Harbor may take by its own limits: each step's agent and judge time-outs, plus room
     for building and starting the environments and installing the agent."""
-    per_step = task.limits["agent_timeout_sec"] + task.limits["verifier_timeout_sec"]
+    limits = getattr(task, "limits", None) or {}
+    missing = [k for k in ("agent_timeout_sec", "verifier_timeout_sec") if not _finite(limits.get(k), 1e-9)]
+    if missing:
+        raise PilotError(f"task {task.id} gives no {' and no '.join(missing)} in its limits, so the time Harbor may "
+                         "take cannot be known; add them to the task")
+    per_step = limits["agent_timeout_sec"] + limits["verifier_timeout_sec"]
     return float(per_step * len(task.steps) + SETUP_MARGIN_SECONDS)
 
 
@@ -317,42 +332,137 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
         pass
 
 
-def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float) -> None:
+def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float,
+                       announce: Callable[[], None] | None = None) -> None:
     """Ask Harbor to stop as Ctrl-C does, so it removes its containers; then SIGTERM, which Harbor also
-    turns into a clean stop; then kill whatever is left of its process group."""
+    turns into a clean stop; then kill whatever is left of its process group. The group's first signal goes
+    out before anything else; what the pilot has to say is printed only after it, while it waits."""
     for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, term_grace)):
         _signal_group(proc, sig)
-        try:
-            proc.wait(timeout=wait)
+        if announce is not None:
+            announce, say = None, announce
+            say()
+        if _wait_saying(proc, wait):
             break
-        except subprocess.TimeoutExpired:
-            continue
     _signal_group(proc, signal.SIGKILL)  # anything Harbor left running in its group
     proc.wait()
+
+
+def _wait_saying(proc: subprocess.Popen, wait: float) -> bool:
+    """Wait up to wait seconds for Harbor to exit, printing the notices of held signals as they come."""
+    end = time.monotonic() + wait
+    while True:
+        _gate().flush_notices()
+        left = end - time.monotonic()
+        if left <= 0:
+            return proc.poll() is not None
+        try:
+            proc.wait(timeout=min(1.0, left))
+            return True
+        except subprocess.TimeoutExpired:
+            continue
+
+
+# How long to wait for Harbor's process group to be confirmed gone after it was stopped or exited.
+CONFIRM_SECONDS = 30.0
+# Harbor process groups this pilot started and has not yet confirmed gone.
+_live_groups: set[int] = set()
+
+
+def _group_gone(pgid: int, within: float) -> bool:
+    """Whether no process of the group is left, waiting up to within seconds for it."""
+    end = time.monotonic() + within
+    while _signal_pgid(pgid, 0):
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _confirm_gone(pgid: int) -> None:
+    if _group_gone(pgid, CONFIRM_SECONDS):
+        _live_groups.discard(pgid)
+
+
+def harbor_groups_left() -> list[int]:
+    """The Harbor process groups this pilot started that are not confirmed gone."""
+    for pgid in list(_live_groups):
+        if _group_gone(pgid, 0.0):
+            _live_groups.discard(pgid)
+    return sorted(_live_groups)
 
 
 def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout: float, *,
                    grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS,
                    on_start: Callable[[subprocess.Popen], None] | None = None) -> int:
-    """Run Harbor in its own process group. At the time limit, or on Ctrl-C, stop the whole group.
-    `on_start` gets the process as soon as it runs (the process-table watch stops it through it)."""
-    with open(log_path, "ab") as log:
-        proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+    """Run Harbor in its own process group. At the time limit, or on a stop signal, stop the whole group; no
+    further signal can cut that stop short. The group stays registered until it is confirmed gone.
+    `on_start` gets the process once it is registered (the process-table watch stops it through it)."""
+    gate = _gate()
+    proc: subprocess.Popen | None = None
+    log = open(log_path, "ab")  # when Harbor's log cannot be opened, nothing has started yet
+    try:
+        # Harbor's start, the wait, ending what it left behind and the confirmation are one try. On every way out
+        # that is not a clean confirmation, stopping the whole group is the first thing that happens; the steps
+        # after it (the pilot's line in Harbor's log, the confirmation) cannot skip it or each other.
         try:
+            with gate.holding():  # Harbor is never started without being registered
+                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+                _live_groups.add(proc.pid)
+            gate.raise_held()
             if on_start is not None:
                 on_start(proc)
-            return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
-            log.flush()
-            stop_process_group(proc, grace, term_grace)
-            return TIMEOUT_RETURNCODE
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                gate.stop_begun()
+                stop_process_group(proc, grace, term_grace, announce=lambda: _say(
+                    f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}"))
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
+                    log, b"\npilot: harbor did not finish within the time limit; it and its processes were stopped\n"))
+                code = TIMEOUT_RETURNCODE
+            else:
+                end_leftover_processes(proc.pid, term_grace)
+            _confirm_gone(proc.pid)
+            return code
         except BaseException:
-            log.write(b"\npilot: interrupted; stopping harbor and its processes\n")
-            log.flush()
-            stop_process_group(proc, grace, term_grace)
+            gate.stop_begun()
+            if proc is not None and proc.pid in _live_groups:  # a group already confirmed gone is not stopped again
+                stop_process_group(proc, grace, term_grace, announce=gate.flush_notices)
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
+                    log, b"\npilot: interrupted; harbor and its processes were stopped\n"))
+                _confirm_gone(proc.pid)
             raise
+    finally:
+        gate.step("closing Harbor's log", log.close)
+
+
+def _log_line(log, text: bytes) -> None:
+    log.write(text)
+    log.flush()
+
+
+def _signal_pgid(pgid: int, sig: int) -> bool:
+    """Send sig to the process group; False when the group no longer exists."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def end_leftover_processes(pgid: int, term_grace: float) -> None:
+    """End what a Harbor that exited on its own left running in its process group: SIGTERM, then SIGKILL."""
+    if not _signal_pgid(pgid, 0):
+        return
+    _signal_pgid(pgid, signal.SIGTERM)
+    end = time.monotonic() + term_grace
+    while _signal_pgid(pgid, 0) and time.monotonic() < end:
+        time.sleep(0.05)
+    _signal_pgid(pgid, signal.SIGKILL)
 
 
 def image_present(image: str) -> None:
@@ -361,11 +471,36 @@ def image_present(image: str) -> None:
         raise PilotError(f"the image {image} is not in Docker; build it from bench/images (see its README)")
 
 
+def task_trial_prefix(task_id: str) -> str:
+    """The start of the compose project names of every trial of the task, in any language. Harbor names a trial
+    after its task folder ("<task id>__<language>") cut to 32 characters with any trailing "_" and "-" removed,
+    then "__" and 7 random characters; this keeps the part all languages share, also for a long task id."""
+    return compose_prefix(f"{task_id}__"[:32].rstrip("_-"))
+
+
 def compose_prefix(task_folder_name: str) -> str:
     """Harbor names each Docker compose project after the trial: the task folder name, two underscores and
     a random id, in lower case, with a suffix for the agent's or the verifier's environment. Every project
     of a run of this task folder starts with this."""
     return re.sub(r"[^a-z0-9_-]", "-", task_folder_name.lower()) + "__"
+
+
+def run_trials(job_dir: Path) -> list[str]:
+    """The trial folders Harbor created for this run. Harbor writes a trial's folder before it starts any of
+    its environments, and names every compose project of the trial after it."""
+    try:
+        return sorted(p.name for p in Path(job_dir).iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def remove_run_containers(docker, job_dir: Path) -> list[str]:
+    """Remove the containers and networks of this run's trials only; nothing when Harbor created no trial.
+    Returns the projects that still have containers."""
+    left: list[str] = []
+    for trial in run_trials(job_dir):
+        left += docker.remove(compose_prefix(trial))
+    return left
 
 
 class DockerContainers:
@@ -656,42 +791,85 @@ def read_agent_output(job_dir: Path, step_order: list[str] | None = None) -> dic
 
 FIVE_HOURS = 5 * 3600
 DEFAULT_GUARD_MINUTES = 30.0
+# The guard protects the account, not one output folder or one token file, so its state is one file per user:
+# every pilot this user runs shares one allowance, whatever token file or --out folder it uses. Its folder is
+# ~/.dodam, or the folder in DODAM_PILOT_GUARD_DIR (the tests use that to keep it in their own folders).
+GUARD_FILE = "pilot-guard.json"
+GUARD_DIR_ENV = "DODAM_PILOT_GUARD_DIR"
 GUARD_NOTE = ("a guard on this runner's own agent time per rolling five hours, not a measurement of the "
               "account's five-hour usage: the agent does not report that window, and the owner's own use "
               "of the account is not counted")
 
 
 def agent_minutes(runs: Iterable[dict], now: float) -> float:
-    """This runner's agent minutes in the five hours before now."""
-    return sum(float(r.get("agent_seconds") or 0) for r in _inside(runs, now)) / 60.0
+    """This runner's agent minutes that may lie in the five hours before now (never fewer)."""
+    return sum(_counted(r)[0] for r in _inside(runs, now)) / 60.0
+
+
+def _finite(value, minimum: float = 0.0) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            and value >= minimum)
+
+
+def _counted(run: dict) -> tuple[float, float | None]:
+    """The seconds a run counts for, and until when it may lie in a window. A finished run counts its agent
+    time until its end. A run with no recorded end may still be going, or its pilot died: it counts its
+    whole possible duration until its start plus that duration (None when even that is unknown)."""
+    end = _end(run)
+    if end is not None:
+        return float(run.get("agent_seconds") or 0.0), end
+    limit, started = run.get("max_seconds"), run.get("started_at")
+    if _finite(limit) and _finite(started):
+        return float(limit), float(started) + float(limit)
+    agent = run.get("agent_seconds")
+    return (float(agent) if _finite(agent) else math.inf), None
+
+
+def _end(run: dict) -> float | None:
+    try:
+        return float(run["ended_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _inside(runs: Iterable[dict], now: float) -> list[dict]:
+    """The runs whose agent time may lie in the last five hours. A run counts in full until its end leaves
+    the window, so recent work of a run that started earlier is never dropped; a run with no end time
+    counts as still going."""
     out = []
     for r in runs:
-        try:
-            started = float(r["started_at"])
-        except (KeyError, TypeError, ValueError):
+        if not isinstance(r, dict):
             continue
-        if now - FIVE_HOURS < started <= now:
+        reach = _counted(r)[1]
+        if reach is None or reach > now - FIVE_HOURS:
             out.append(r)
     return out
 
 
 def guard_decision(runs: Iterable[dict], limit_minutes: float, now: float) -> Decision:
-    """Start only while this runner's agents worked less than the limit in the last five hours."""
-    inside = sorted(_inside(runs, now), key=lambda r: float(r["started_at"]))
-    used = sum(float(r.get("agent_seconds") or 0) for r in inside) / 60.0
+    """Start only while this runner's agents worked less than the limit in runs that ended in the last five
+    hours or have no end time."""
+    inside = sorted(_inside(runs, now), key=lambda r: (_counted(r)[1] is None, _counted(r)[1] or 0.0))
+    used = sum(_counted(r)[0] for r in inside) / 60.0
     if used < limit_minutes:
         return Decision(True)
     remaining, wait = used, None
-    for r in inside:  # the time when enough of the oldest runs have left the window
-        remaining -= float(r.get("agent_seconds") or 0) / 60.0
-        wait = float(r["started_at"]) + FIVE_HOURS
+    for r in inside:  # the time when enough of the earliest runs have left the window
+        seconds, reach = _counted(r)
+        if reach is None:
+            wait = None  # a run whose reach is unknown never leaves the window by itself
+            break
+        remaining -= seconds / 60.0
+        wait = reach + FIVE_HOURS
         if remaining < limit_minutes:
             break
-    return Decision(False, f"five-hour guard: this runner's agents worked {used:.1f} minutes in the last five "
-                           f"hours, at or above the {limit_minutes:g}-minute limit ({GUARD_NOTE})", wait)
+    open_runs = sum(1 for r in inside if _end(r) is None)
+    counted = "an unknown number of" if math.isinf(used) else f"{used:.1f}"
+    also = (f", {open_runs} of them with no recorded end, each counted at its whole time limit (a run still "
+            "going, or one whose pilot died)" if open_runs else "")
+    return Decision(False, f"five-hour guard: this runner's agents count {counted} minutes in runs that ended in "
+                           f"the last five hours or may still be going{also}, at or above the "
+                           f"{limit_minutes:g}-minute limit ({GUARD_NOTE})", wait)
 
 
 def start_decision(windows: dict[str, dict], runs: list[dict], max_five_hour: float, max_weekly: float,
@@ -719,17 +897,267 @@ def load_state(out_root: Path) -> dict[str, dict]:
     return windows if isinstance(windows, dict) else {}
 
 
-def load_runs(out_root: Path) -> list[dict]:
-    runs = _read_state(out_root).get("runs")
-    return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
+def guard_path(token_file: Path | None = None) -> Path:
+    """The guard's file: one per user, whatever token file the pilot uses."""
+    folder = os.environ.get(GUARD_DIR_ENV) or str(DEFAULT_TOKEN_FILE.parent)
+    return Path(folder).expanduser() / GUARD_FILE
 
 
-def save_state(out_root: Path, windows: dict[str, dict], timestamp: str, runs: list[dict] | None = None,
-               now: float | None = None) -> None:
+GUARD_VERSION = 1
+NO_RUN_STARTED = "No run was started."
+REPAIR_ADVICE = ("Repair it, or move it aside only when no pilot has used this token in the last five hours: "
+                 "the guard then starts from nothing.")
+WRITE_ADVICE = "Make the file and its folder writable for this user."
+
+
+class GuardError(PilotError):
+    """The guard's file cannot be used, so the guard cannot vouch for a start."""
+
+    def __init__(self, path: Path, reason: str, advice: str, consequence: str = NO_RUN_STARTED):
+        self.path, self.reason, self.advice = path, reason, advice
+        super().__init__(self.saying(consequence))
+
+    def saying(self, consequence: str) -> str:
+        return f"the five-hour guard file {self.path} {self.reason}. {consequence} {self.advice}"
+
+
+class Guard:
+    """The five-hour guard's file beside the token: a versioned JSON document listing this runner's runs.
+
+    Every change is read, change and write under an exclusive lock on a lock file beside it, so deciding a
+    start and entering it is one step for every pilot on this token. A run is entered before Harbor starts,
+    with no end and its whole possible duration, and gets its end when it is over; a pilot that dies leaves
+    the entry open, and an open entry counts that whole duration. Every write goes whole to the disk: a
+    temporary file, fsync, rename, fsync of the folder; the file is mode 0600 and never holds the token. A
+    file that is damaged, unreadable or cannot be written stops the start; only a missing file is a first use.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def locked(self):
+        try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as err:
+            raise GuardError(self.path, f"cannot be written: its lock file cannot be opened ({err.strerror})",
+                             WRITE_ADVICE) from None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing it releases the lock
+
+    def read(self) -> list[dict]:
+        """The runs in the file; none when there is no file yet. Call it under the lock."""
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return []
+        except OSError as err:
+            raise GuardError(self.path, f"cannot be read ({err.strerror})", REPAIR_ADVICE) from None
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise GuardError(self.path, "is not whole JSON (it may have been cut off)", REPAIR_ADVICE) from None
+        if not isinstance(data, dict) or data.get("version") != GUARD_VERSION or not isinstance(data.get("runs"), list):
+            raise GuardError(self.path, f"is not in this runner's format (version {GUARD_VERSION} with a list of runs)",
+                             REPAIR_ADVICE)
+        if not all(self._valid(r) for r in data["runs"]):
+            raise GuardError(self.path, "holds a run this runner cannot read", REPAIR_ADVICE)
+        return data["runs"]
+
+    @staticmethod
+    def _valid(run) -> bool:
+        if not isinstance(run, dict) or not isinstance(run.get("id"), str):
+            return False
+        started, limit = run.get("started_at"), run.get("max_seconds")
+        if not (_finite(started) and _finite(limit) and limit > 0):
+            return False
+        ended, agent = run.get("ended_at"), run.get("agent_seconds")
+        if ended is None:
+            return agent is None or _finite(agent)
+        return _finite(ended) and ended >= started and _finite(agent)
+
+    def write(self, runs: list[dict], now: float) -> None:
+        """Replace the file whole with the runs that may still count. Call it under the lock."""
+        data = (json.dumps({"version": GUARD_VERSION, "note": GUARD_NOTE, "runs": _inside(runs, now)},
+                           indent=2, allow_nan=False) + "\n").encode("utf-8")
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self.path)
+            folder = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
+        except OSError as err:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise GuardError(self.path, f"cannot be written ({err.strerror})", WRITE_ADVICE) from None
+
+
+def end_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: float) -> tuple[list[dict], str | None]:
+    """Give the run its end in the guard file. When that fails the run stays counted at its whole possible
+    duration, and the returned problem stops the batch."""
+    # A clock set back during the run must not write an end before the start.
+    closed = {**entry, "ended_at": max(float(ended_at), float(entry["started_at"])),
+              "agent_seconds": round(float(agent_seconds), 1)}
+    try:
+        with guard.locked():
+            runs = [r for r in guard.read() if r.get("id") != entry["id"]] + [closed]
+            guard.write(runs, ended_at)
+        return runs, None
+    except GuardError as err:
+        return [entry], err.saying(f"The end of the {entry['language']} run was not recorded, so it stays counted "
+                                   "at its whole time limit; the batch stops.")
+
+
+class Stopped(KeyboardInterrupt):
+    """SIGTERM or a hang-up (a closed terminal or a dropped session), handled like Ctrl-C."""
+
+    def __init__(self, signum: int):
+        super().__init__(f"stopped by signal {signum}")
+        self.signum = signum
+
+
+class SignalGate:
+    """The stop signals of one batch: SIGINT, SIGTERM and hang-up.
+
+    The first signal begins the stop. From then on, and inside the sections that must not be cut (Harbor's
+    start, the containers step and the run-folder scan, the guard's entries, the summary and the final scans),
+    further signals are held: a second or third signal can never cut the stop short. A signal held in such a
+    section while no stop has begun begins the stop once the section is over."""
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self):
+        self.depth, self.stopping, self.held, self.previous = 0, False, [], {}
+        self.notices: list[str] = []  # what the handler has to say, printed only where it cannot delay a stop
+        self.failures: list[str] = []  # the steps of the stop and the cleanup that failed, for the report
+        # Messages that could not be printed: they cannot be reported by printing, so they are kept in the
+        # batch summary, and listed when the batch ends with an error for another reason. They fail nothing.
+        self.unprinted: list[dict] = []
+
+    def install(self) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self.previous = {sig: signal.signal(sig, self._handle) for sig in self.SIGNALS}
+
+    def restore(self) -> None:
+        for sig, handler in self.previous.items():
+            signal.signal(sig, handler)
+        self.previous = {}
+
+    def _handle(self, signum, frame) -> None:
+        # No input or output here: the handler only records, so nothing it does can stand before the stop.
+        name = signal.Signals(signum).name
+        if self.stopping:
+            self.held.append(signum)
+            self.notices.append(f"pilot: {name} held: {STOPPING}")
+            return
+        if self.depth:
+            self.held.append(signum)
+            self.notices.append(f"pilot: {name} held until the current step is done; then {STOPPING}")
+            return
+        self.stopping = True
+        self.notices.append(f"pilot: {name} received: {STOPPING}; further stop signals are held until then")
+        raise Stopped(signum)
+
+    def flush_notices(self) -> None:
+        while self.notices:
+            _say(self.notices.pop(0))
+
+    def step(self, what: str, action: Callable[[], object]) -> tuple[bool, object]:
+        """One step of the stop or the cleanup: a failure is noted for the report and never skips the next step."""
+        try:
+            return True, action()
+        except Exception as err:
+            self.failures.append(f"{what} failed ({type(err).__name__}: {err})")
+            return False, err
+
+    def stop_begun(self) -> None:
+        self.stopping = True
+
+    def enter(self) -> None:
+        self.depth += 1
+
+    def leave(self) -> None:
+        self.depth = max(0, self.depth - 1)
+
+    @contextmanager
+    def holding(self):
+        self.enter()
+        try:
+            yield
+        finally:
+            self.leave()
+
+    def raise_held(self) -> None:
+        if self.held and not self.stopping:
+            self.stopping = True
+            raise Stopped(self.held[0])
+
+
+STOPPING = ("the pilot is stopping Harbor and will exit when the cleanup is done (Harbor's containers removed, the "
+            "output scanned, the run closed in the five-hour guard), which can take up to about 15 minutes")
+_gates = threading.local()
+_NO_GATE = SignalGate()  # outside a batch: never installed, holds nothing
+
+
+def _gate() -> SignalGate:
+    return getattr(_gates, "current", None) or _NO_GATE
+
+
+def close_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: float) -> tuple[list[dict], str | None]:
+    """Give the run its end, but only once Harbor's process group is confirmed gone. Until then Harbor may
+    still be going, so the entry stays open and counts the run's whole possible duration."""
+    left = harbor_groups_left()
+    if left:
+        return [entry], (f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed gone, so the "
+                         f"{entry['language']} run stays open in the five-hour guard file, counted at its whole "
+                         "possible duration; the batch stops")
+    return end_guard_run(guard, entry, ended_at, agent_seconds)
+
+
+def _say(text: str) -> None:
+    """Print to stderr. A print that fails (a hung-up terminal, a full disk behind stderr) is never raised and
+    fails nothing: the message is kept for the batch summary."""
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except Exception as err:
+        _gate().unprinted.append({"message": text, "error": f"{type(err).__name__}: {err}"})
+
+
+def _duration(seconds: float) -> str:
+    minutes = max(0, int(round(seconds / 60)))
+    return f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def _missing_steps(task, trial: dict, job_dir: Path) -> list[str]:
+    """The task's steps with no judged result or no agent log."""
+    judged = {s["step"] for s in trial["steps"] if s["reward"] is not None}
+    logged = {p.parent.parent.name for p in Path(job_dir).glob("*/steps/*/agent/claude-code.txt")}
+    return [s.name for s in task.steps if s.name not in judged or s.name not in logged]
+
+
+def save_state(out_root: Path, windows: dict[str, dict], timestamp: str) -> None:
     Path(out_root).mkdir(parents=True, exist_ok=True)
-    kept = _inside(runs or [], now) if now is not None else list(runs or [])
     (Path(out_root) / STATE_FILE).write_text(
-        json.dumps({"updated_by_batch": timestamp, "windows": windows, "runs": kept}, indent=2), encoding="utf-8")
+        json.dumps({"updated_by_batch": timestamp, "windows": windows}, indent=2), encoding="utf-8")
 
 
 def _write_json(path: Path, obj) -> None:
@@ -755,9 +1183,12 @@ def _summary_entry(record: dict) -> dict:
 
 
 def _run_agent_seconds(record: dict) -> float:
-    """The agent time a run used, for the guard: the steps' agent time when known, else the whole run."""
-    known = [s["agent_seconds"] for s in record.get("steps", []) if s.get("agent_seconds") is not None]
-    return float(sum(known)) if known else float(record.get("wall_seconds") or 0.0)
+    """The agent time a run used, for the guard, never less than it was: the steps' agent time only when
+    the run is ok and every step has one; otherwise the whole run, since a step cut short has no time."""
+    times = [s.get("agent_seconds") for s in record.get("steps", [])]
+    if record.get("status") == "ok" and times and all(t is not None for t in times):
+        return float(sum(times))
+    return float(max(sum(t for t in times if t is not None), record.get("wall_seconds") or 0.0))
 
 
 def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file: Path, harbor: Path,
@@ -779,8 +1210,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     for lang in languages:
         if lang not in LANGUAGES or lang not in task.languages:
             raise PilotError(f"task {task.id} does not run in {lang}")
+    own_limit = harbor_time_limit(task)  # a task without time limits is refused here, before anything is made
     docker = docker if docker is not None else DockerContainers()
-    timeout = harbor_time_limit(task) if timeout is None else timeout
+    timeout = own_limit if timeout is None else timeout
     base = dict(os.environ if base_env is None else base_env)
     harbor = resolve_program(harbor, base.get("PATH"))  # the file checked is the file run
     harbor_check(harbor)
@@ -794,7 +1226,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     batch = out_root / timestamp
     batch.mkdir(parents=True, exist_ok=True)
     windows = load_state(out_root)
-    runs = load_runs(out_root)
+    guard = Guard(guard_path(token_file))
     summary = {"timestamp": timestamp, "task": task.id, "languages": languages, "claude_code_pinned": claude_version,
                "model": model or "agent default", "agent_hosts": list(allow_hosts), "time_limit_seconds": timeout,
                "limits": {"max_five_hour_percent": max_five_hour, "max_weekly_percent": max_weekly,
@@ -802,69 +1234,188 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                           "five_hour_guard": {"max_agent_minutes": max_agent_minutes_per_5h, "note": GUARD_NOTE}},
                "runs": []}
     stopped: str | None = None
+    gate, outer_gate = SignalGate(), getattr(_gates, "current", None)
+    _gates.current = gate
+    in_flight: BaseException | None = None
+    gate.install()
     try:
         for lang in languages:
             before = json.loads(json.dumps(windows))
-            if stopped is None:
-                decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h, now())
-                waits = 0
-                while not decision.start and wait_for_reset and decision.wait_until and waits < MAX_WAITS:
-                    sleep(max(0.0, decision.wait_until - now()) + RESET_MARGIN_SECONDS)
-                    waits += 1
+            entry: dict | None = None
+            waits, announced = 0, None
+            while stopped is None and entry is None:
+                # Deciding and entering the start is one step under the guard's lock, on the file as it is now.
+                with gate.holding(), guard.locked():
+                    runs = guard.read()
                     decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h,
                                               now())
-                if not decision.start:
-                    when = (f"; it clears at {utc_text(decision.wait_until)}" if decision.wait_until
-                            else "; the reset time is unknown")
-                    stopped = (decision.reason + when + "; not started (run again after the reset, "
-                               "or pass --wait-for-reset to wait for it)")
-            if stopped is None:
-                left = docker.leftovers(compose_prefix(f"{task.id}__{lang}"))
-                if left:
-                    stopped = ("containers of an earlier run of this task and language are still in Docker ("
-                               + ", ".join(left) + "); not started until they are removed")
+                    if decision.start:
+                        left = docker.leftovers(task_trial_prefix(task.id))  # every language of the task
+                        if left:
+                            stopped = ("containers of an earlier run of this task are still in Docker ("
+                                       + ", ".join(left) + "); not started until they are removed")
+                            break
+                        minutes_before = agent_minutes(runs, now())
+                        entry = {"id": uuid.uuid4().hex, "batch": timestamp, "language": lang, "pid": os.getpid(),
+                                 "started_at": now(), "max_seconds": open_run_seconds(task, timeout),
+                                 "ended_at": None, "agent_seconds": None}
+                        guard.write(runs + [entry], now())
+                        break
+                gate.raise_held()  # nothing was entered: a signal held meanwhile stops the batch before any wait
+                if wait_for_reset and decision.wait_until and waits < MAX_WAITS:
+                    target = decision.wait_until + RESET_MARGIN_SECONDS
+                    if target != announced:
+                        announced = target
+                        _say(f"pilot: {lang}: waiting until {utc_text(target)} ({_duration(target - now())}), reading "
+                             f"the guard file again every {WAIT_STEP_SECONDS / 60:g} minutes, because {decision.reason}")
+                    sleep(max(0.0, min(target - now(), WAIT_STEP_SECONDS)))
+                    if now() >= target:
+                        waits += 1
+                    continue
+                when = (f"; it clears at {utc_text(decision.wait_until)}" if decision.wait_until
+                        else "; the reset time is unknown")
+                stopped = (decision.reason + when + "; not started (run again after the reset, "
+                           "or pass --wait-for-reset to wait for it)")
             if stopped is not None:
                 record = {"language": lang, "status": "not-started", "reason": stopped, "reward": None, "steps": [],
                           "rate_limits": {"before": before, "first": {}, "after": before}}
                 summary["runs"].append(_summary_entry(record))
+                gate.raise_held()
                 continue
-            minutes_before = agent_minutes(runs, now())
-            started_at, t0 = now(), time.monotonic()
+            failures_before = len(gate.failures)  # counted from before the run: a step failing inside it counts
+            t0 = time.monotonic()
             try:
                 harbor_check(harbor)
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
                                  image_check, timeout, now, allow_hosts, docker, process_sampler, process_interval)
             except BaseException:
-                # whatever stopped the run, its time still counts for the guard and its record is listed
-                runs.append({"batch": timestamp, "language": lang, "started_at": started_at,
-                             "agent_seconds": round(time.monotonic() - t0, 1)})
-                save_state(out_root, windows, timestamp, runs, now())
-                try:
-                    summary["runs"].append(_summary_entry(
-                        json.loads((batch / lang / "record.json").read_text(encoding="utf-8"))))
-                except (OSError, ValueError, KeyError):
-                    pass
+                # whatever stopped the run: nothing cuts what follows short, the guard gets the run's end (its whole
+                # wall time) only once Harbor is gone, and the record is listed
+                gate.stop_begun()
+                with gate.holding():
+                    gate.flush_notices()
+                    closed, result = gate.step(f"closing the {lang} run in the five-hour guard file",
+                                               lambda: close_guard_run(guard, entry, now(), time.monotonic() - t0))
+                    report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
+                    if closed and result[1]:
+                        report_to(sys.exc_info()[1], result[1])
                 raise
-            runs.append({"batch": timestamp, "language": lang, "started_at": started_at,
-                         "agent_seconds": _run_agent_seconds(record)})
-            windows = {**windows, **record["rate_limits"]["after"]}
-            save_state(out_root, windows, timestamp, runs, now())
-            record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
-                                         "limit_minutes": max_agent_minutes_per_5h,
-                                         "minutes_before": round(minutes_before, 1),
-                                         "minutes_after": round(agent_minutes(runs, now()), 1)}
-            _write_record(batch / lang, batch, record)
-            summary["runs"].append(_summary_entry(record))
-            _write_json(batch / "summary.json", summary)
+            with gate.holding():
+                closed, result = gate.step(f"closing the {lang} run in the five-hour guard file",
+                                           lambda: close_guard_run(guard, entry, now(), _run_agent_seconds(record)))
+                runs_after, problem = result if closed else ([entry], None)
+                problems = [problem] if problem else []
+                windows = {**windows, **record["rate_limits"]["after"]}
+                try:
+                    save_state(out_root, windows, timestamp)
+                except OSError as err:
+                    problems.append(f"the state file could not be written ({err.strerror or err}); the batch stops")
+                record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
+                                             "limit_minutes": max_agent_minutes_per_5h,
+                                             "minutes_before": round(minutes_before, 1),
+                                             "minutes_after": round(agent_minutes(runs_after, now()), 1)}
+                # the finished run is listed before anything else can stop the batch
+                gate.step(f"writing the {lang} record", lambda: _write_record(batch / lang, batch, record))
+                summary["runs"].append(_summary_entry(record))
+                gate.step("writing the batch summary", lambda: _write_json(batch / "summary.json", summary))
+            if len(gate.failures) > failures_before:
+                problems.append("a step after the run failed (see below); the batch stops")
+            if problems:
+                raise PilotError("; ".join(problems))
             if record["status"] == "timeout":
                 stopped = (f"the {lang} run hit the time limit of {timeout:g} s; Harbor was stopped and its "
                            "containers removed; later languages were not started")
+            gate.raise_held()
+        gate.enter()  # from the end of the last run, the summary and the final scans are never cut short
+    except BaseException as err:
+        gate.stop_begun()
+        in_flight = err
+        raise
     finally:
-        _write_json(batch / "summary.json", summary)
-        # Last, whatever happened: everything the batch left behind, the records, the summary and the state.
-        assert_no_leak(batch, token, "in the batch folder")
-        assert_no_leak(out_root / STATE_FILE, token, "in the state file")
+        gate.enter()  # the summary and the final scans are never cut short
+        try:
+            gate.flush_notices()
+            if gate.unprinted:
+                summary["unprinted_messages"] = [{k: mask(v, token) for k, v in m.items()} for m in gate.unprinted]
+            summary_written, _ = gate.step("writing the batch summary",
+                                           lambda: _write_json(batch / "summary.json", summary))
+            # Last, whatever happened: everything the batch left behind, the records, the summary, the state and
+            # the guard file. Every scan runs, and every failure is reported together.
+            failures = []
+            for root, where in ((batch, "in the batch folder"), (out_root / STATE_FILE, "in the state file"),
+                                (guard.path, "in the five-hour guard file")):
+                scanned, scan = gate.step(f"the scan {where}", lambda root=root: check_for_token(root, token))
+                if not scanned:
+                    failures.append(f"the scan {where} itself failed, so the token could not be ruled out there")
+                elif not scan.clean:
+                    failures.append(scan.message(where))
+            steps_failed = ("steps of the stop or the cleanup that failed, each without skipping the others: "
+                            + mask("; ".join(gate.failures), token)) if gate.failures else ""
+            if failures:
+                if in_flight is not None:
+                    said = "; ".join([f"{type(in_flight).__name__}: {in_flight}", *getattr(in_flight, "__notes__", [])])
+                    failures.append("the batch had already stopped: " + mask(said, token))
+                if steps_failed:
+                    failures.append(steps_failed)
+                if gate.unprinted:
+                    failures.append(f"{len(gate.unprinted)} message(s) could not be printed; the batch summary keeps them")
+                raise TokenLeak("; ".join(failures))
+            left = harbor_groups_left()
+            if left:
+                scan_note = (f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed gone, so its "
+                             "run stays open in the five-hour guard file; the scans of the batch folder, the state file "
+                             "and the guard file found no token, but Harbor may still be running")
+            else:
+                scan_note = "the batch folder, the state file and the guard file were scanned for the token: clean"
+            report_to(in_flight, scan_note)
+            if steps_failed:
+                report_to(in_flight, steps_failed)
+            if gate.unprinted:
+                report_to(in_flight, f"{len(gate.unprinted)} message(s) could not be printed "
+                                     f"({gate.unprinted[0]['error']}); the batch summary keeps them")
+            if in_flight is None and (steps_failed or not summary_written):
+                stop = PilotError("the batch ended, but steps of the cleanup failed; the details follow")
+                stop.add_note(scan_note)
+                stop.add_note(steps_failed)
+                raise stop
+        finally:
+            gate.restore()
+            _gates.current = outer_gate
+    if gate.held:  # a stop signal came while the last steps were held: the batch is done, now stop
+        stop = Stopped(gate.held[0])
+        stop.add_note("the batch had finished; the batch folder, the state file and the guard file were scanned "
+                      "for the token: clean")
+        raise stop
     return summary
+
+
+def open_run_seconds(task, timeout: float) -> float:
+    """What a run with no recorded end counts: the longest time Harbor could still run without the pilot, which
+    is the larger of the pilot's time limit and the task's own limits as Harbor applies them (a pilot that
+    died no longer enforces its own), plus the time Harbor is given to stop."""
+    return max(float(timeout), harbor_time_limit(task)) + STOP_GRACE_SECONDS + TERM_GRACE_SECONDS
+
+
+def report_to(err: BaseException | None, note: str) -> None:
+    """Attach what happened to whatever stopped the batch, so the command line reports it instead of assuming it."""
+    if err is not None:
+        err.add_note(note)
+
+
+def _record_note(batch: Path, lang: str, summary: dict) -> str:
+    """What the record of a run that did not finish says, and list it in the summary."""
+    path = batch / lang / "record.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        summary["runs"].append(_summary_entry(record))
+    except Exception:
+        summary["runs"].append({"language": lang, "status": "no-record", "steps": [],
+                                "reason": "the run stopped and its record could not be written or read"})
+        return f"{lang}: no record was written"
+    scan = record.get("leak_scan") or {}
+    return (f"{lang}: {record.get('status')}; containers left: {', '.join(record.get('containers_left') or []) or 'none'}"
+            f"; run folder scan: {'clean' if scan.get('clean') else 'not clean, see the record'}"
+            f"; record: {path.relative_to(batch.parent)}")
 
 
 def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbor: Path, claude_version: str,
@@ -873,6 +1424,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
             process_sampler: Callable[[], bytes] = process_table,
             process_interval: float = DEFAULT_PROCESS_INTERVAL) -> dict:
     docker = docker if docker is not None else DockerContainers()
+    _gate().raise_held()  # a signal held while the start was entered stops the run before Harbor starts
     run_dir = batch / lang
     run_dir.mkdir(parents=True, exist_ok=True)
     image = LANGUAGES[lang].image
@@ -903,15 +1455,24 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                                                      on_start=watch.track)
         finished = True
     finally:
+        _gate().enter()  # the containers step, the scan and the record are never cut short
+        _gate().flush_notices()
         record["wall_seconds"] = round(time.monotonic() - started, 1)
-        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE or not watch.clean:
-            # Harbor was cut short and may have left its containers running: remove them first, so nothing
-            # keeps writing into the output or using the subscription, and the scan sees the final output.
-            try:
-                record["containers_left"] = docker.remove(compose_prefix(task_dir.name))
-            except Exception as err:
-                record["containers_left"] = [mask(f"could not check: {type(err).__name__}: {err}", token)]
-        scan = check_for_token(run_dir, token)
+        if job_dir.is_dir():
+            # Harbor may have left this run's containers running, cut short or not: remove them first, so
+            # nothing keeps writing into the output or using the subscription, and the scan sees the final output.
+            removed, result = _gate().step(f"the containers step of the {lang} run",
+                                           lambda: remove_run_containers(docker, job_dir))
+            if not removed:
+                record["containers_left"] = [mask(f"could not check: {type(result).__name__}: {result}", token)]
+            else:
+                record["containers_left"] = result
+                if result:  # containers that stay are reported with the other failures, record or not
+                    _gate().failures.append(f"the containers of the {lang} run are still in Docker: "
+                                            + ", ".join(result))
+        scanned, scan = _gate().step(f"the scan of the {lang} run folder", lambda: check_for_token(run_dir, token))
+        if not scanned:  # a scan that could not run rules nothing out: it counts as a failed scan
+            scan = LeakScan([], ["the whole run folder (the scan itself failed)"])
         record["leak_scan"] = scan.as_dict()
         record["process_watch"] = watch.record()
         try:
@@ -928,7 +1489,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         elif not finished:
             record["status"] = "interrupted"
         if record["status"]:
-            _write_record(run_dir, batch, record)
+            _gate().step(f"writing the {lang} record", lambda: _write_record(run_dir, batch, record))
         if not scan.clean:
             raise TokenLeak(scan.message(f"in the {lang} run folder"))
         left = (f"; containers still in Docker: {', '.join(record['containers_left'])}"
@@ -959,7 +1520,8 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                                  "after": latest_windows(agent["rate_limit_infos"]),
                                  "unreported": unreported_windows(latest_windows(agent["rate_limit_infos"])),
                                  "events": agent["rate_limit_infos"]}
-        if status == "ok" and (not trial["steps"] or any(s["reward"] is None for s in trial["steps"])):
+        record["missing_steps"] = _missing_steps(task, trial, job_dir)
+        if status == "ok" and (not trial["steps"] or record["missing_steps"]):
             status = "incomplete"
         if status in ("ok", "incomplete"):
             # Harbor judges a step even when the agent's command failed, so a reward alone proves nothing.
@@ -971,10 +1533,12 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
     if record["verifier_env_problems"]:
         status = "verifier-env"
     record["status"] = status
-    _write_record(run_dir, batch, record)
+    _gate().step(f"writing the {lang} record", lambda: _write_record(run_dir, batch, record))
+    _gate().leave()
     if record["containers_left"]:
         raise PilotError(f"the {lang} run was stopped but its containers are still in Docker ("
                          + ", ".join(record["containers_left"]) + "); not starting anything else")
+    _gate().raise_held()
     return record
 
 
@@ -990,7 +1554,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="the same for the weekly windows (default 50)")
     p.add_argument("--max-agent-minutes-per-5h", type=float, default=DEFAULT_GUARD_MINUTES,
                    help="five-hour guard: do not start when this runner's agents worked this many minutes or more "
-                        "in the last five hours (default 30); a guard, not a measurement of the account")
+                        "in runs that ended in the last five hours, a run with no recorded end counting its whole time "
+                        "limit (default 30); a guard, not a measurement of the account; its state is a locked file "
+                        "in ~/.dodam, shared by every pilot this user runs")
     p.add_argument("--wait-for-reset", action="store_true", help="wait for the window to reset instead of stopping")
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -1009,15 +1575,24 @@ def main(argv: list[str] | None = None) -> int:
                             allow_hosts=args.agent_host or DEFAULT_AGENT_HOSTS,
                             max_agent_minutes_per_5h=args.max_agent_minutes_per_5h)
     except TokenLeak as err:
-        print(f"TOKEN LEAK CHECK FAILED: {err}", file=sys.stderr)
+        _say(f"TOKEN LEAK CHECK FAILED: {err}")
+        for note in getattr(err, "__notes__", []):
+            _say(f"  {note}")
         return 3
     except PilotError as err:
-        print(f"pilot: {err}", file=sys.stderr)
+        _say(f"pilot: {err}")
+        for note in getattr(err, "__notes__", []):
+            _say(f"  {note}")
         return 2
-    except KeyboardInterrupt:
-        print("pilot: interrupted; a running Harbor was stopped, its containers removed and the output scanned",
-              file=sys.stderr)
-        return 130
+    except KeyboardInterrupt as err:
+        signum = getattr(err, "signum", None)
+        try:
+            print(f"pilot: stopped by {signal.Signals(signum).name}" if signum else "pilot: interrupted", file=sys.stderr)
+            for note in getattr(err, "__notes__", []) or ["nothing more is known; look at the batch folder"]:
+                print(f"  {note}", file=sys.stderr)
+        except OSError:  # a hung-up terminal
+            pass
+        return 128 + signum if signum else 130
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
         print(f"{run['language']}: {run['status']}" + (f" ({steps})" if steps else "") + (f" - {run['reason']}" if run.get("reason") else ""))

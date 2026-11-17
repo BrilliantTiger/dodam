@@ -2,11 +2,14 @@
 
 None of these tests needs Docker, Harbor or a real token; the token below is a made-up string.
 """
+import functools
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -850,6 +853,8 @@ import signal, subprocess, sys, time
 out, mode = sys.argv[1], sys.argv[2]
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
 open(out + "/child.pid", "w").write(str(child.pid))
+if mode == "exit":
+    sys.exit(0)  # exits on its own and leaves its child running
 if mode == "polite":
     def stop(*_):
         open(out + "/stopped-politely", "w").write("1")
@@ -948,20 +953,47 @@ def test_limits_outside_their_range_are_refused_before_anything_runs(tmp_path, k
 
 
 def test_the_five_hour_guard_counts_this_runners_agent_minutes_of_the_last_five_hours():
-    runs = [{"started_at": NOW - 6 * 3600, "agent_seconds": 5000},  # outside the window
-            {"started_at": NOW - 3600, "agent_seconds": 1500}]
+    runs = [{"started_at": NOW - 7 * 3600, "ended_at": NOW - 5 * 3600 - 60, "agent_seconds": 5000},  # ended outside
+            {"started_at": NOW - 3600, "ended_at": NOW - 2100, "agent_seconds": 1500}]
     assert pilot.guard_decision(runs, 30, NOW).start  # 25 minutes
-    runs.append({"started_at": NOW - 600, "agent_seconds": 400})
+    runs.append({"started_at": NOW - 600, "ended_at": NOW - 200, "agent_seconds": 400})
     d = pilot.guard_decision(runs, 30, NOW)  # 31.7 minutes
-    assert not d.start and d.wait_until == NOW - 3600 + 5 * 3600
+    assert not d.start and d.wait_until == NOW - 2100 + 5 * 3600  # when the older run's end leaves the window
     assert "guard" in d.reason and "not a measurement" in d.reason
+
+
+def test_the_guard_counts_a_run_until_its_end_leaves_the_window():
+    # started 5 h 1 min ago, its agent worked 120 minutes, it ended 3 hours ago: that work is recent
+    runs = [{"started_at": NOW - 5 * 3600 - 60, "ended_at": NOW - 3 * 3600, "agent_seconds": 7200}]
+    assert pilot.agent_minutes(runs, NOW) == pytest.approx(120)
+    d = pilot.guard_decision(runs, 30, NOW)
+    assert not d.start and d.wait_until == NOW - 3 * 3600 + 5 * 3600
+
+
+def test_a_run_without_an_end_time_counts_and_gives_no_wait_time():
+    runs = [{"started_at": NOW - 6 * 3600, "agent_seconds": 600}]
+    d = pilot.guard_decision(runs, 5, NOW)
+    assert not d.start and d.wait_until is None
+
+
+def test_a_run_cut_short_counts_its_whole_wall_time_for_the_guard():
+    # a step without an agent time was cut short; its agent may have worked for most of the run
+    cut = [{"agent_seconds": 60.0}, {"agent_seconds": None}]
+    assert pilot._run_agent_seconds({"status": "timeout", "wall_seconds": 3000.0, "steps": cut}) == 3000.0
+    assert pilot._run_agent_seconds({"status": "ok", "wall_seconds": 3000.0, "steps": cut}) == 3000.0
+    whole = [{"agent_seconds": 60.0}, {"agent_seconds": 90.0}]
+    assert pilot._run_agent_seconds({"status": "agent-error", "wall_seconds": 3000.0, "steps": whole}) == 3000.0
+    assert pilot._run_agent_seconds({"status": "ok", "wall_seconds": 3000.0, "steps": whole}) == 150.0
 
 
 def test_a_run_adds_its_agent_time_to_the_guard_and_the_record_says_it_is_a_guard(tmp_path):
     pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
-    state = json.loads((tmp_path / "out" / "state.json").read_text())
-    assert state["runs"] == [{"batch": "20261117T070000Z", "language": "python", "started_at": NOW,
-                              "agent_seconds": 240.0}]
+    guard_state = json.loads((tmp_path / "pilot-guard.json").read_text())  # beside the token file
+    assert guard_state["version"] == 1
+    [run] = guard_state["runs"]
+    assert {k: run[k] for k in ("batch", "language", "started_at", "ended_at", "agent_seconds")} == {
+        "batch": "20261117T070000Z", "language": "python", "started_at": NOW, "ended_at": NOW, "agent_seconds": 240.0}
+    assert run["max_seconds"] >= pilot.harbor_time_limit(load_task(TASKS / "web-signup"))
     guard = read_record(tmp_path)["five_hour_guard"]
     assert guard["limit_minutes"] == 30 and guard["minutes_before"] == 0 and guard["minutes_after"] == 4
     assert "not a measurement" in guard["note"]
@@ -983,10 +1015,13 @@ def test_waiting_for_the_guard_waits_until_old_runs_leave_the_window(tmp_path):
         slept.append(seconds)
         clock["t"] += seconds
 
+    runs = [{"batch": "b", "language": "go", "started_at": NOW - 5 * 3600 - 1300, "ended_at": NOW - 5 * 3600 + 600,
+             "agent_seconds": 1900}]
     state = tmp_path / "out" / "state.json"
     state.parent.mkdir(parents=True)
-    state.write_text(json.dumps({"windows": {}, "runs": [
-        {"batch": "b", "language": "go", "started_at": NOW - 5 * 3600 + 600, "agent_seconds": 1900}]}))
+    state.write_text(json.dumps({"windows": {}, "runs": runs}))
+    (tmp_path / "pilot-guard.json").write_text(json.dumps({"version": 1, "runs": [
+        {"id": "old", "pid": 1, "max_seconds": 10800.0, **r} for r in runs]}))
     summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
                                                                 now=lambda: clock["t"]))
     assert summary["runs"][0]["status"] == "ok"
@@ -1150,10 +1185,10 @@ def break_ps(monkeypatch, how):
     monkeypatch.setattr(subprocess, "run", run)
 
 
-def run_watched(tmp_path, then):
+def run_watched(tmp_path, then, runner=pilot.run_subprocess):
     started = time.monotonic()
     try:
-        pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+        pilot.run_pilot(runner=runner, **pilot_args(
             tmp_path, harbor=watched_harbor(tmp_path), timeout=20.0, process_sampler=ReadyTables(tmp_path, then),
             process_interval=0.05))
     except pilot.PilotError as err:
@@ -1195,8 +1230,10 @@ def test_a_stop_that_fails_ends_harbor_another_way_and_the_record_says_so(tmp_pa
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr(os, "killpg", refuse)
+    # With the group refusing signals, the runner cannot confirm it gone: keep its waits for that short.
+    monkeypatch.setattr(pilot, "CONFIRM_SECONDS", 1.0)
     try:
-        err, seconds = run_watched(tmp_path, "token")
+        err, seconds = run_watched(tmp_path, "token", runner=functools.partial(pilot.run_subprocess, term_grace=1.0))
         assert seconds < 12
         assert isinstance(err, pilot.TokenLeak)
         watch = read_record(tmp_path)["process_watch"]
@@ -1274,3 +1311,951 @@ def test_the_token_is_never_handed_over_under_a_name_the_patched_harbor_would_pu
         pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tmp_path / "missing"))
     assert "CLAUDE_CODE_OAUTH_TOKEN" in str(err.value) and "token file" not in str(err.value)
     assert runner.calls == []
+
+
+# --- the review of the guard and the cleanup ---------------------------------------------------------------------------
+
+def test_the_guard_is_shared_by_batches_with_different_output_folders(tmp_path):
+    first = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, max_agent_minutes_per_5h=3))
+    assert first["runs"][0]["status"] == "ok"
+    runner = FakeRunner()
+    second = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, out_root=tmp_path / "elsewhere",
+                                                         max_agent_minutes_per_5h=3))
+    assert second["runs"][0]["status"] == "not-started" and "guard" in second["runs"][0]["reason"]
+    assert runner.calls == []
+
+
+def test_the_cleanup_leaves_other_trials_of_the_same_task_and_language_alone(tmp_path):
+    docker = FakeDocker()
+    runner = FakeRunner(interrupt=True, docker=docker,
+                        containers=["web-signup__python__abc__env", "web-signup__python__someoneelse__env"])
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert docker.removed == ["web-signup__python__abc__env"]
+    assert docker.projects == ["web-signup__python__someoneelse__env"]
+
+
+def test_nothing_is_removed_when_harbor_never_started(tmp_path):
+    docker = FakeDocker()
+
+    def harbor_missing(cmd, env, log_path, timeout, on_start=None):
+        docker.projects.append("web-signup__python__someoneelse__env")  # another run, started meanwhile
+        raise FileNotFoundError("harbor")
+
+    with pytest.raises(FileNotFoundError):
+        pilot.run_pilot(runner=harbor_missing, **pilot_args(tmp_path, docker=docker))
+    assert docker.removed == []
+
+
+def test_containers_left_after_harbor_exits_on_its_own_are_removed(tmp_path):
+    docker = FakeDocker()
+    runner = FakeRunner(docker=docker, containers=["web-signup__python__abc__env"])
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert docker.removed == ["web-signup__python__abc__env"]
+    assert summary["runs"][0]["status"] == "ok"
+
+
+def test_containers_that_stay_after_harbor_exits_on_its_own_stop_the_batch(tmp_path):
+    docker = FakeDocker(stuck=["web-signup__python__abc__env"])
+    runner = FakeRunner(returncode=1, docker=docker, containers=["web-signup__python__abc__env"])
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker, languages=["python", "go"]))
+    assert "web-signup__python__abc__env" in str(err.value)
+    assert len(runner.calls) == 1
+
+
+def test_leftover_containers_of_another_language_of_the_task_keep_a_run_from_starting(tmp_path):
+    runner = FakeRunner()
+    docker = FakeDocker(leftovers=["web-signup__go__old__env"])
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+    assert "web-signup__go__old__env" in summary["runs"][0]["reason"]
+
+
+def test_processes_harbor_leaves_behind_when_it_exits_on_its_own_are_ended(tmp_path):
+    code = pilot.run_subprocess(start_stand_in(tmp_path, "exit"), dict(os.environ), tmp_path / "h.log", 30.0,
+                                grace=2.0, term_grace=2.0)
+    pid = int((tmp_path / "child.pid").read_text())
+    try:
+        assert code == 0
+        assert gone(pid, within=5.0)
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_ctrl_c_reports_what_the_record_says(tmp_path):
+    docker = FakeDocker(stuck=["web-signup__python__abc__env"])
+    runner = FakeRunner(interrupt=True, docker=docker, containers=["web-signup__python__abc__env"])
+    with pytest.raises(KeyboardInterrupt) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    notes = "\n".join(getattr(err.value, "__notes__", []))
+    assert "python: interrupted" in notes and "web-signup__python__abc__env" in notes
+    assert "python/record.json" in notes and "scanned" in notes
+
+
+def test_main_prints_what_happened_after_ctrl_c_and_claims_nothing_else(monkeypatch, capsys):
+    def interrupted(*args, **kwargs):
+        err = KeyboardInterrupt()
+        err.add_note("python: interrupted; containers left: web-signup__python__abc__env")
+        raise err
+
+    monkeypatch.setattr(pilot, "run_pilot", interrupted)
+    code = pilot.main([str(TASKS / "web-signup"), "--lang", "python", "--claude-version", "2.1.326"])
+    out = capsys.readouterr().err
+    assert code == 130
+    assert "containers left: web-signup__python__abc__env" in out and "containers removed" not in out
+
+
+def test_the_final_scans_run_even_when_the_summary_cannot_be_written(tmp_path):
+    (tmp_path / "out" / "20261117T070000Z" / "summary.json").mkdir(parents=True)  # the write will fail
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(stray_leak=True), **pilot_args(tmp_path))
+    assert "stray.log" in str(err.value)
+
+
+# --- the five-hour guard as a whole: no lost time, one step, fail closed, whole writes, signals ----------------------
+
+BENCH = TASKS.parent
+
+
+def guard_entry(started, ended=None, agent=None, max_seconds=10800.0, ident="r1"):
+    return {"id": ident, "batch": "b", "language": "go", "pid": 1, "started_at": started, "max_seconds": max_seconds,
+            "ended_at": ended, "agent_seconds": agent}
+
+
+def write_guard(folder: Path, *runs, raw=None) -> Path:
+    path = folder / "pilot-guard.json"
+    path.write_text(raw if raw is not None else json.dumps({"version": 1, "runs": list(runs)}))
+    return path
+
+
+def test_a_run_with_no_recorded_end_counts_its_whole_time_limit():
+    runs = [guard_entry(NOW - 3600, max_seconds=10800.0)]
+    assert pilot.agent_minutes(runs, NOW) == pytest.approx(180)
+    d = pilot.guard_decision(runs, 30, NOW)
+    assert not d.start and d.wait_until == NOW - 3600 + 10800 + 5 * 3600
+    assert "no recorded end" in d.reason
+
+
+def test_a_start_with_no_end_in_the_guard_file_keeps_a_run_from_starting(tmp_path):
+    write_guard(tmp_path, guard_entry(NOW - 3600))
+    runner = FakeRunner()
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+    assert "no recorded end" in summary["runs"][0]["reason"]
+
+
+def test_a_pilot_sees_the_run_of_another_pilot_that_is_still_going(tmp_path):
+    inner = {}
+
+    class OverlappingRunner(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            other = FakeRunner()
+            inner["summary"] = pilot.run_pilot(runner=other, **pilot_args(
+                tmp_path, out_root=tmp_path / "elsewhere", timestamp="20261117T070100Z"))
+            inner["calls"] = other.calls
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=OverlappingRunner(), **pilot_args(tmp_path))
+    assert inner["calls"] == [] and inner["summary"]["runs"][0]["status"] == "not-started"
+    assert "guard" in inner["summary"]["runs"][0]["reason"]
+
+
+def test_two_overlapping_pilots_both_keep_their_runs_in_the_guard(tmp_path):
+    class OverlappingRunner(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            pilot.run_pilot(runner=FakeRunner(), **pilot_args(
+                tmp_path, out_root=tmp_path / "elsewhere", timestamp="20261117T070100Z", max_agent_minutes_per_5h=1000))
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=OverlappingRunner(), **pilot_args(tmp_path, max_agent_minutes_per_5h=1000))
+    runs = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    assert sorted(r["batch"] for r in runs) == ["20261117T070000Z", "20261117T070100Z"]
+    assert all(r["ended_at"] is not None for r in runs)
+
+
+def test_two_pilots_cannot_both_pass_on_the_same_allowance(tmp_path, monkeypatch):
+    real = pilot.start_decision
+    other = {}
+
+    def run_other():
+        runner = FakeRunner()
+        other["summary"] = pilot.run_pilot(runner=runner, **pilot_args(
+            tmp_path, out_root=tmp_path / "elsewhere", timestamp="20261117T070100Z"))
+        other["calls"] = runner.calls
+
+    def decide_then_let_the_other_try(*args, **kwargs):
+        decision = real(*args, **kwargs)
+        if "thread" not in other:  # the other pilot decides while this one has decided but not yet recorded
+            other["thread"] = threading.Thread(target=run_other)
+            other["thread"].start()
+            other["thread"].join(timeout=1.0)
+        return decision
+
+    monkeypatch.setattr(pilot, "start_decision", decide_then_let_the_other_try)
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    other["thread"].join(timeout=60)
+    assert other["calls"] == [] and other["summary"]["runs"][0]["status"] == "not-started"
+
+
+@pytest.mark.parametrize("raw", [
+    '{"version": 1, "runs": [',  # cut off
+    "[]",
+    '{"version": 1, "runs": null}',
+    '{"runs": []}',  # no version: not this runner's format
+    json.dumps({"version": 1, "runs": [guard_entry(NOW - 600, ended=float("nan"), agent=99999)]}),
+])
+def test_a_damaged_guard_file_starts_nothing_and_says_what_to_do(tmp_path, raw):
+    write_guard(tmp_path, raw=raw)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    assert runner.calls == []
+    assert "pilot-guard.json" in str(err.value) and "No run was started" in str(err.value)
+
+
+@skip_as_root
+def test_an_unreadable_guard_file_starts_nothing(tmp_path):
+    path = write_guard(tmp_path, guard_entry(NOW - 600, ended=NOW - 60, agent=99999))
+    path.chmod(0)
+    runner = FakeRunner()
+    try:
+        with pytest.raises(pilot.PilotError) as err:
+            pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    finally:
+        path.chmod(0o600)
+    assert runner.calls == [] and "No run was started" in str(err.value)
+
+
+@skip_as_root
+def test_a_guard_file_that_cannot_be_written_starts_nothing(tmp_path, monkeypatch):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
+    tf = token_file(keys)
+    write_guard(keys)
+    (keys / "pilot-guard.json.lock").write_text("")
+    keys.chmod(0o500)
+    runner = FakeRunner()
+    try:
+        with pytest.raises(pilot.PilotError) as err:
+            pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tf))
+    finally:
+        keys.chmod(0o700)
+    assert runner.calls == [] and "cannot be written" in str(err.value) and "No run was started" in str(err.value)
+
+
+def test_the_guard_file_is_private_and_reaches_the_disk(tmp_path, monkeypatch):
+    synced = []
+    real_fsync = os.fsync
+
+    def fsync(fd):
+        synced.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(pilot.os, "fsync", fsync)
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    assert stat.S_IMODE((tmp_path / "pilot-guard.json").stat().st_mode) == 0o600
+    assert len(synced) >= 2  # the run's start and its end
+
+
+def test_a_guard_write_that_fails_leaves_the_old_file_whole_and_starts_nothing(tmp_path, monkeypatch):
+    before = json.dumps({"version": 1, "runs": [guard_entry(NOW - 7 * 3600, ended=NOW - 6 * 3600, agent=60)]})
+    path = write_guard(tmp_path, raw=before)
+
+    def no_room(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pilot.os, "replace", no_room)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    assert runner.calls == [] and path.read_text() == before
+    assert not [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+HARBOR_FAKE = """#!{python}
+import os, signal, sys, time
+args = sys.argv[1:]
+out = os.environ["STAND_IN_DIR"]
+mode = os.environ.get("STAND_IN_MODE", "polite")
+jobs, job = args[args.index("-o") + 1], args[args.index("--job-name") + 1]
+os.makedirs(os.path.join(jobs, job, "web-signup__python__abc"), exist_ok=True)
+open(os.path.join(out, "harbor.pid"), "w").write(str(os.getpid()))
+def finish(code):
+    open(os.path.join(out, "harbor-exit"), "w").write(repr(time.time()))
+    sys.exit(code)
+def stop(*_):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if mode == "slow-stop":
+        time.sleep(2.0)  # Harbor removing its containers
+    open(os.path.join(out, "harbor-stopped"), "w").write("1")
+    finish(130)
+signal.signal(signal.SIGINT, stop)
+open(os.path.join(out, "harbor-ready"), "w").write("1")
+if mode == "signal-parent":
+    os.kill(os.getppid(), signal.SIGTERM)  # the pilot gets a stop signal while Harbor runs
+if mode == "leave-child":
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    open(os.path.join(out, "child.pid"), "w").write(str(child.pid))
+    finish(0)
+if mode == "exit":
+    finish(0)
+time.sleep(120)
+"""
+
+PILOT_DRIVER = """
+import functools, os, signal, sys
+from pathlib import Path
+bench, tmp = sys.argv[1], Path(sys.argv[2])
+stage = sys.argv[3] if len(sys.argv) > 3 else ""
+sig = int(sys.argv[4]) if len(sys.argv) > 4 else int(signal.SIGTERM)
+sys.path.insert(0, bench)
+from dodambench import pilot
+
+
+def poke():
+    os.kill(os.getpid(), sig)
+
+
+class NoContainers:
+    def leftovers(self, prefix):
+        return []
+
+    def remove(self, prefix):
+        (tmp / "containers-step").write_text(prefix)
+        return []
+
+
+runner = functools.partial(pilot.run_subprocess, grace=10.0, term_grace=2.0)
+if stage == "before-harbor":
+    real_runner = runner
+
+    def runner(*args, **kwargs):
+        poke()
+        return real_runner(*args, **kwargs)
+if stage == "scans":
+    real_check = pilot.check_for_token
+
+    def check(*args, **kwargs):
+        poke()
+        return real_check(*args, **kwargs)
+    pilot.check_for_token = check
+if stage == "leftover":
+    real_leftover = pilot.end_leftover_processes
+
+    def leftover(*args, **kwargs):
+        poke()
+        return real_leftover(*args, **kwargs)
+    pilot.end_leftover_processes = leftover
+if stage == "guard-end":
+    real_end = pilot.end_guard_run
+
+    def end(*args, **kwargs):
+        poke()
+        return real_end(*args, **kwargs)
+    pilot.end_guard_run = end
+
+try:
+    pilot.run_pilot(task_path=Path(bench) / "tasks" / "web-signup", languages=["python"], out_root=tmp / "out",
+                    token_file=tmp / "claude-token", harbor=tmp / "harbor", claude_version="2.1.326",
+                    base_env={"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp),
+                              "STAND_IN_MODE": os.environ.get("STAND_IN_MODE", "polite")},
+                    image_check=lambda image: None, docker=NoContainers(), timestamp="20261117T070000Z",
+                    runner=runner, harbor_check=lambda harbor: None)  # the stand-in is not the pinned Harbor
+except KeyboardInterrupt as err:
+    (tmp / "notes.txt").write_text("\\n".join(getattr(err, "__notes__", [])))
+    sys.exit(128 + getattr(err, "signum", 2))
+"""
+
+
+def make_harbor(tmp_path) -> Path:
+    harbor = tmp_path / "harbor"
+    harbor.write_text(HARBOR_FAKE.replace("{python}", sys.executable))
+    harbor.chmod(0o755)
+    return harbor
+
+
+def launch_pilot(tmp_path, stage="", sig=signal.SIGTERM, mode="polite"):
+    token_file(tmp_path)
+    make_harbor(tmp_path)
+    (tmp_path / "driver.py").write_text(PILOT_DRIVER)
+    with open(tmp_path / "pilot-stderr.txt", "wb") as said:
+        return subprocess.Popen([sys.executable, str(tmp_path / "driver.py"), str(BENCH), str(tmp_path), stage,
+                                 str(int(sig))], env={**os.environ, "STAND_IN_MODE": mode},
+                                stdout=subprocess.DEVNULL, stderr=said)
+
+
+def start_pilot_process(tmp_path):
+    proc = launch_pilot(tmp_path)
+    end = time.monotonic() + 60
+    while not (tmp_path / "harbor-ready").exists():
+        assert proc.poll() is None and time.monotonic() < end, "the pilot did not start the stand-in Harbor"
+        time.sleep(0.05)
+    return proc
+
+
+def stop_stray_harbor(tmp_path, proc):
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    for name in ("harbor.pid", "child.pid"):
+        try:
+            os.kill(int((tmp_path / name).read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_sigterm_and_hangup_are_handled_like_ctrl_c(tmp_path, sig):
+    proc = start_pilot_process(tmp_path)
+    try:
+        proc.send_signal(sig)
+        assert proc.wait(timeout=120) == 128 + sig
+        assert (tmp_path / "harbor-stopped").exists()  # Harbor was asked to stop, as on Ctrl-C
+        assert gone(int((tmp_path / "harbor.pid").read_text()))
+        [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+        assert run["ended_at"] is not None and run["agent_seconds"] is not None
+        record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+        assert record["status"] == "interrupted"
+        assert "scanned" in (tmp_path / "notes.txt").read_text()
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+def test_a_pilot_killed_outright_leaves_its_run_counted(tmp_path):
+    proc = start_pilot_process(tmp_path)
+    try:
+        proc.send_signal(signal.SIGKILL)
+        proc.wait(timeout=30)
+        runner = FakeRunner()
+        summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, timestamp="20261117T080000Z", now=time.time))
+        assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+        assert "no recorded end" in summary["runs"][0]["reason"]
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+# --- the smaller points of the third review -------------------------------------------------------------------------------
+
+def test_every_final_scan_runs_and_every_failure_is_reported(tmp_path):
+    def leaky(cmd, env, log_path, timeout, on_start=None):
+        token = env["CLAUDE_CODE_OAUTH_TOKEN"]
+        (Path(log_path).parents[1] / "stray.log").write_text(token)
+        (tmp_path / "out" / "state.json").write_text(token)
+        raise KeyboardInterrupt
+
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=leaky, **pilot_args(tmp_path))
+    assert "batch folder" in str(err.value) and "state file" in str(err.value)
+    assert FAKE_TOKEN not in str(err.value)
+
+
+@pytest.mark.parametrize("damage", ["step result", "agent log"])
+def test_a_run_without_every_step_of_the_task_is_not_ok(tmp_path, damage):
+    def runner(cmd, env, log_path, timeout, on_start=None):
+        code = FakeRunner()(cmd, env, log_path, timeout)
+        jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
+        trial = next(jobs.glob("*/result.json"))
+        if damage == "step result":
+            data = json.loads(trial.read_text())
+            data["step_results"] = data["step_results"][:1]
+            trial.write_text(json.dumps(data))
+        else:
+            (trial.parent / "steps" / "change-1" / "agent" / "claude-code.txt").unlink()
+        return code
+
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    assert summary["runs"][0]["status"] == "incomplete"
+
+
+@skip_as_root
+@pytest.mark.parametrize("what", ["state", "guard"])
+def test_a_failed_save_keeps_the_finished_run_in_the_summary_and_stops_the_batch(tmp_path, what, monkeypatch):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
+    tf = token_file(keys)
+    if what == "state":
+        (tmp_path / "out" / "state.json").mkdir(parents=True)
+
+    class Runner(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            code = super().__call__(cmd, env, log_path, timeout)
+            if what == "guard":
+                keys.chmod(0o500)  # the guard can no longer be written when the run ends
+            return code
+
+    runner = Runner()
+    try:
+        with pytest.raises(pilot.PilotError):
+            pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tf, languages=["python", "go"]))
+    finally:
+        keys.chmod(0o700)
+    summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert [(r["language"], r["status"]) for r in summary["runs"]] == [("python", "ok")]
+    assert len(runner.calls) == 1
+
+
+# --- the stop path, signal by signal, and the guard's remaining holes ----------------------------------------------------
+
+def wait_for_file(path: Path, proc, within=60.0):
+    end = time.monotonic() + within
+    while not path.exists():
+        assert proc.poll() is None and time.monotonic() < end, f"{path.name} did not appear"
+        time.sleep(0.02)
+
+
+@pytest.mark.parametrize("stage,sig", [
+    ("before-harbor", signal.SIGTERM),
+    ("running", signal.SIGTERM),
+    ("stopping", signal.SIGTERM),
+    ("stopping", signal.SIGHUP),
+    ("stopping", signal.SIGINT),
+    ("leftover", signal.SIGTERM),
+    ("scans", signal.SIGTERM),
+    ("guard-end", signal.SIGHUP),
+])
+def test_a_signal_at_any_stage_never_cuts_the_stop_short(tmp_path, stage, sig):
+    mode = {"stopping": "slow-stop", "leftover": "leave-child", "scans": "exit", "guard-end": "exit"}.get(stage, "polite")
+    proc = launch_pilot(tmp_path, stage=stage if stage in ("before-harbor", "leftover", "scans", "guard-end") else "",
+                        sig=sig, mode=mode)
+    try:
+        if stage in ("running", "stopping"):
+            wait_for_file(tmp_path / "harbor-ready", proc)
+            proc.send_signal(sig)
+        if stage == "stopping":  # a second and a third signal while Harbor takes 2 s to stop
+            time.sleep(0.5)
+            proc.send_signal(sig)
+            time.sleep(0.5)
+            proc.send_signal(sig)
+        assert proc.wait(timeout=120) == 128 + sig
+        harbor_started = (tmp_path / "harbor.pid").exists()
+        assert harbor_started == (stage != "before-harbor")
+        if harbor_started:
+            assert gone(int((tmp_path / "harbor.pid").read_text()), within=0.5)  # gone before the pilot ended
+            assert (tmp_path / "containers-step").exists()
+        if (tmp_path / "child.pid").exists():  # what Harbor left in its group is gone too
+            assert gone(int((tmp_path / "child.pid").read_text()), within=0.5)
+        assert "scanned" in (tmp_path / "notes.txt").read_text()
+        [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+        assert run["ended_at"] is not None
+        if (tmp_path / "harbor-exit").exists():  # closed only once Harbor was gone
+            assert run["ended_at"] >= float((tmp_path / "harbor-exit").read_text())
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+def test_the_guard_entry_stays_open_while_harbor_is_not_confirmed_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(pilot, "_group_gone", lambda pgid, within: False, raising=False)
+    runner = functools.partial(pilot.run_subprocess, grace=1.0, term_grace=1.0)
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env))
+    assert "confirmed gone" in str(err.value)
+    [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    assert run["ended_at"] is None  # still counted at its whole possible duration
+
+
+def test_an_open_entry_counts_the_longest_time_harbor_could_run_without_the_pilot(tmp_path):
+    seen = {}
+
+    class Peek(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            seen["entry"] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"][-1]
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=Peek(), **pilot_args(tmp_path, timeout=600.0))
+    harbor_own = pilot.harbor_time_limit(load_task(TASKS / "web-signup"))
+    assert seen["entry"]["max_seconds"] >= harbor_own + pilot.STOP_GRACE_SECONDS + pilot.TERM_GRACE_SECONDS
+
+
+def test_a_clock_set_back_during_a_run_keeps_the_guard_file_usable(tmp_path):
+    clock = {"t": NOW}
+
+    class ClockBack(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            clock["t"] = NOW - 3600
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=ClockBack(), **pilot_args(tmp_path, now=lambda: clock["t"]))
+    [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    assert run["ended_at"] >= run["started_at"]
+    again = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, timestamp="20261117T080000Z",
+                                                              now=lambda: clock["t"]))
+    assert again["runs"][0]["status"] == "ok"
+
+
+@skip_as_root
+def test_a_failed_guard_end_is_reported_whatever_stopped_the_run(tmp_path, monkeypatch):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
+    tf = token_file(keys)
+    docker = FakeDocker(stuck=["web-signup__python__abc__env"])
+
+    class Runner(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
+            code = super().__call__(cmd, env, log_path, timeout)
+            keys.chmod(0o500)  # the guard can no longer be written when the run ends
+            return code
+
+    runner = Runner(docker=docker, containers=["web-signup__python__abc__env"])
+    try:
+        with pytest.raises(pilot.PilotError) as err:
+            pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tf, docker=docker))
+    finally:
+        keys.chmod(0o700)
+    said = str(err.value) + "\n" + "\n".join(getattr(err.value, "__notes__", []))
+    assert "web-signup__python__abc__env" in said and "pilot-guard.json" in said
+
+
+def test_waiting_says_why_and_until_when_and_reads_the_guard_again(tmp_path, capsys):
+    other = guard_entry(NOW - 60, max_seconds=11160.0, ident="other")
+    write_guard(tmp_path, other)
+    slept = []
+    clock = {"t": NOW}
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+        if len(slept) == 1:  # the other pilot finishes meanwhile
+            write_guard(tmp_path, {**other, "ended_at": NOW, "agent_seconds": 60.0})
+
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                                now=lambda: clock["t"]))
+    assert summary["runs"][0]["status"] == "ok"
+    assert slept and slept[0] <= 900  # a short step, then the guard file is read again
+    said = capsys.readouterr().err
+    assert "waiting until" in said and "no recorded end" in said
+
+
+def test_a_signal_while_the_start_is_decided_stops_the_batch_before_any_wait(tmp_path, monkeypatch):
+    clock = {"t": NOW}
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    def decide_and_get_a_signal(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)  # held while the start is decided
+        return pilot.Decision(False, "not yet", clock["t"] + 600)
+
+    monkeypatch.setattr(pilot, "start_decision", decide_and_get_a_signal)
+    runner = FakeRunner()
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                    now=lambda: clock["t"]))
+    assert slept == [] and runner.calls == []
+
+
+
+def test_the_stop_says_what_it_is_doing(tmp_path):
+    proc = launch_pilot(tmp_path, mode="slow-stop")
+    try:
+        wait_for_file(tmp_path / "harbor-ready", proc)
+        proc.send_signal(signal.SIGTERM)
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGINT)  # held: Harbor takes 2 s to stop
+        assert proc.wait(timeout=120) == 128 + signal.SIGTERM
+        said = (tmp_path / "pilot-stderr.txt").read_text()
+        assert "stopping Harbor" in said and "exit when the cleanup is done" in said
+        assert "SIGINT" in said and "held" in said
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+def test_a_signal_as_the_last_run_ends_still_gets_the_summary_and_the_final_scans(tmp_path, monkeypatch):
+    real_enter = pilot.SignalGate.enter
+    sent = []
+
+    def enter(self):
+        if not sent and sys._getframe(1).f_code.co_name == "run_pilot":
+            sent.append(True)  # the first time run_pilot itself starts holding, after its last run
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_enter(self)
+
+    monkeypatch.setattr(pilot.SignalGate, "enter", enter)
+    with pytest.raises(KeyboardInterrupt) as err:
+        pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    assert sent
+    assert "scanned" in "\n".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_task_without_time_limits_gets_a_clear_message(tmp_path):
+    task = load_task(TASKS / "web-signup")
+    task.limits.pop("agent_timeout_sec")
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.harbor_time_limit(task)
+    assert "agent_timeout_sec" in str(err.value) and task.id in str(err.value)
+    with pytest.raises(pilot.PilotError):
+        pilot.open_run_seconds(task, 600.0)
+
+
+
+# --- every step of the stop and the cleanup is independent of the others ----------------------------------------------
+
+class CountingDocker(FakeDocker):
+    def __init__(self, broken=False, stuck=False):
+        super().__init__()
+        self.calls, self.broken, self.stays = [], broken, stuck
+
+    def remove(self, prefix):
+        self.calls.append(prefix)
+        if self.broken:
+            raise RuntimeError("docker broke")
+        if self.stays:  # this run's container will not go
+            self.projects.append("web-signup__python__abc__env")
+            self.stuck = ["web-signup__python__abc__env"]
+        return super().remove(prefix)
+
+
+class BrokenLog:
+    """Harbor's log on a full disk: Harbor writes to its file, the pilot's own lines fail."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def fileno(self):
+        return self._f.fileno()
+
+    def write(self, data):
+        raise OSError(28, "No space left on device (log broke)")
+
+    def flush(self):
+        raise OSError(28, "No space left on device (log broke)")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+class BrokenStream:
+    def write(self, text):
+        raise OSError("messages broke")
+
+    def flush(self):
+        raise OSError("messages broke")
+
+
+def fail_first_call(real, err):
+    calls = []
+
+    def wrapper(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise err
+        return real(*args, **kwargs)
+    return wrapper
+
+
+STOP_STEPS = {"log": "log broke", "containers": "docker broke", "scan": "scan broke", "guard": "guard broke",
+              "record": "record broke", "messages": "could not be printed",
+              "stuck": "web-signup__python__abc__env"}
+
+
+@pytest.mark.parametrize("path", ["signal", "time-limit"])
+@pytest.mark.parametrize("fault", sorted(set(STOP_STEPS) - {"stuck"}) + ["containers+record", "stuck+record"])
+def test_a_failing_step_of_the_stop_never_skips_the_stop_or_another_step(tmp_path, monkeypatch, fault, path):
+    faults = set(fault.split("+"))  # two steps fail together in the last two cases
+    docker = CountingDocker(broken="containers" in faults, stuck="stuck" in faults)
+    if "log" in faults:
+        real_open = open
+
+        def fake_open(file, mode="r", *args, **kwargs):
+            f = real_open(file, mode, *args, **kwargs)
+            return BrokenLog(f) if str(file).endswith("harbor.log") and "a" in mode else f
+        monkeypatch.setattr(pilot, "open", fake_open, raising=False)
+    if "scan" in faults:
+        monkeypatch.setattr(pilot, "check_for_token", fail_first_call(pilot.check_for_token, RuntimeError("scan broke")))
+    if "guard" in faults:
+        def broken_end(*args, **kwargs):
+            raise OSError("guard broke")
+        monkeypatch.setattr(pilot, "end_guard_run", broken_end)
+    if "record" in faults:
+        monkeypatch.setattr(pilot, "_write_record", fail_first_call(pilot._write_record, OSError("record broke")))
+    if "messages" in faults:
+        monkeypatch.setattr(sys, "stderr", BrokenStream())
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path),
+           "STAND_IN_MODE": "signal-parent" if path == "signal" else "polite"}
+    extra = {"timeout": 2.0} if path == "time-limit" else {}
+    runner = functools.partial(pilot.run_subprocess, grace=5.0, term_grace=1.0)
+    err = None
+    try:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env,
+                                                    docker=docker, **extra))
+    except BaseException as caught:  # the signal path ends in an interrupt
+        err = caught
+    harbor_pid = int((tmp_path / "harbor.pid").read_text())
+    harbor_gone = gone(harbor_pid, within=0.5)
+    if not harbor_gone:
+        os.kill(harbor_pid, signal.SIGKILL)
+    report = "" if err is None else str(err) + "\n" + "\n".join(getattr(err, "__notes__", []))
+    run_dir = tmp_path / "out" / "20261117T070000Z" / "python"
+
+    assert harbor_gone  # the stop came first, whatever failed after it
+    if "log" not in faults:
+        assert b"pilot: " in (run_dir / "harbor.log").read_bytes()
+    assert docker.calls  # the containers step ran
+    if "record" not in faults:
+        assert (run_dir / "record.json").exists()  # the record was written
+        record = json.loads((run_dir / "record.json").read_text())
+        if "scan" not in faults:
+            assert record["leak_scan"] is not None
+    [entry] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    if "guard" not in faults:
+        assert entry["ended_at"] is not None
+    summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert [r["language"] for r in summary["runs"]] == ["python"]
+    if "messages" in faults:  # a failed print cannot be reported by printing: the summary keeps it
+        assert summary["unprinted_messages"]
+    if err is None:  # only a failed print leaves a run that hit its time limit without an error
+        assert faults == {"messages"} and path == "time-limit"
+    else:
+        assert "scanned" in report  # the final scans ran
+        for step in faults:  # and every failure is in the report
+            assert STOP_STEPS[step] in report
+
+
+def test_a_group_already_confirmed_gone_is_not_stopped_again(tmp_path, monkeypatch):
+    stopped = []
+    real_confirm = pilot._confirm_gone
+
+    def confirm_then_get_a_signal(pgid):
+        real_confirm(pgid)
+        raise KeyboardInterrupt  # a stop signal right after the check
+
+    monkeypatch.setattr(pilot, "_confirm_gone", confirm_then_get_a_signal)
+    monkeypatch.setattr(pilot, "stop_process_group", lambda *args, **kwargs: stopped.append(args))
+    env = {**os.environ, "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    cmd = [str(make_harbor(tmp_path)), "run", "-o", str(tmp_path / "jobs"), "--job-name", "j"]
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_subprocess(cmd, env, tmp_path / "h.log", 30.0, grace=1.0, term_grace=1.0)
+    assert stopped == []
+
+
+def test_a_task_without_time_limits_is_refused_with_the_other_argument_checks(tmp_path, monkeypatch):
+    real_load = pilot.load_task
+
+    def load_without_limits(path):
+        task = real_load(path)
+        task.limits.pop("verifier_timeout_sec")
+        return task
+
+    monkeypatch.setattr(pilot, "load_task", load_without_limits)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, timeout=600.0))
+    assert "verifier_timeout_sec" in str(err.value)
+    assert runner.calls == [] and not (tmp_path / "out").exists()  # refused before anything was made
+
+
+
+class CloseFails:
+    """Harbor's log that cannot be closed at the end."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def fileno(self):
+        return self._f.fileno()
+
+    def write(self, data):
+        return self._f.write(data)
+
+    def flush(self):
+        return self._f.flush()
+
+    def close(self):
+        self._f.close()
+        raise OSError("close broke")
+
+
+def test_a_step_that_fails_inside_a_run_that_ended_on_its_own_stops_the_batch(tmp_path, monkeypatch):
+    real_open = open
+
+    def fake_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return CloseFails(f) if str(file).endswith("harbor.log") and "a" in mode else f
+
+    monkeypatch.setattr(pilot, "open", fake_open, raising=False)
+    started = []
+
+    def runner(cmd, env, log_path, timeout, on_start=None):
+        started.append(cmd)
+        return pilot.run_subprocess(cmd, env, log_path, timeout, grace=1.0, term_grace=1.0)
+
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env,
+                                                    languages=["python", "go"]))
+    assert len(started) == 1  # the second language never started
+    assert "close broke" in str(err.value) + "\n".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_failed_print_keeps_a_good_batch_good_and_is_kept_in_the_summary(tmp_path, monkeypatch):
+    other = guard_entry(NOW - 60, max_seconds=11160.0, ident="other")
+    write_guard(tmp_path, other)
+    clock = {"t": NOW}
+
+    def sleep(seconds):
+        clock["t"] += seconds
+        write_guard(tmp_path, {**other, "ended_at": NOW, "agent_seconds": 60.0})  # the other pilot finishes
+
+    monkeypatch.setattr(sys, "stderr", BrokenStream())  # the waiting message cannot be printed
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                                now=lambda: clock["t"]))
+    assert summary["runs"][0]["status"] == "ok"
+    saved = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert any("waiting until" in m["message"] and "messages broke" in m["error"] for m in saved["unprinted_messages"])
+
+
+
+# --- the description, sentence by sentence ---------------------------------------------------------------------------
+
+def test_every_pilot_of_this_user_shares_one_guard_whatever_its_token_file(tmp_path):
+    first_keys, second_keys = tmp_path / "a", tmp_path / "b"
+    first_keys.mkdir()
+    second_keys.mkdir()
+    first = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, token_file=token_file(first_keys),
+                                                              max_agent_minutes_per_5h=3))
+    assert first["runs"][0]["status"] == "ok"
+    runner = FakeRunner()
+    second = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=token_file(second_keys),
+                                                         out_root=tmp_path / "elsewhere", max_agent_minutes_per_5h=3))
+    assert second["runs"][0]["status"] == "not-started" and "guard" in second["runs"][0]["reason"]
+    assert runner.calls == []
+
+
+def test_leftovers_of_a_task_with_a_long_id_keep_a_run_from_starting(tmp_path, monkeypatch):
+    long_id = "web-signup-with-a-much-longer-task-id"
+    real_load = pilot.load_task
+
+    def load_with_a_long_id(path):
+        task = real_load(path)
+        task.meta["id"] = long_id
+        return task
+
+    monkeypatch.setattr(pilot, "load_task", load_with_a_long_id)
+    trial = f"{long_id}__go"[:32].rstrip("_-") + "__old1234"  # Harbor's own rule for a trial's name
+    docker = FakeDocker(leftovers=[f"{trial}__env"])
+    runner = FakeRunner()
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+    assert f"{trial}__env" in summary["runs"][0]["reason"]
+
+
+def test_a_token_file_inside_the_repository_is_refused(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "bench").mkdir(parents=True)
+    monkeypatch.setattr(pilot, "REPO", repo, raising=False)
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.read_token(token_file(repo / "bench"))
+    assert "repository" in str(err.value) and FAKE_TOKEN not in str(err.value)
