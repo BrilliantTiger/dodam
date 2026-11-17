@@ -2302,6 +2302,7 @@ def test_a_watch_stop_is_the_runners_own_stop_and_is_reported_like_any_other_fai
     assert len(list(tmp_path.glob("sigint-*"))) == 1
     watch = read_record(tmp_path)["process_watch"]
     assert watch["harbor"] == "stopped" and "SIGINT" in watch["stop_signals"]
+    assert watch.get("stopped_by") == "the watch"
     runs = pilot.Guard(pilot.guard_path()).read()
     assert runs and all(pilot._end(run) is not None for run in runs)  # the run is closed in the five-hour guard
 
@@ -2319,3 +2320,145 @@ def test_a_stop_signal_during_a_watch_stop_is_held_so_harbors_group_is_stopped_o
     with pytest.raises(pilot.TokenLeak):
         run_counted(tmp_path)
     assert len(list(tmp_path.glob("sigint-*"))) == 1  # one stop of the group, not a second one on top
+
+
+# --- every stop of Harbor's group reaches the watch's record ------------------------------------------------------------
+# The places the group can be stopped: the time limit, a stop signal, an error, the watch, the leftover step, and a
+# group that is dead or refuses signals. Each adds the signals it sent to the watch's list and records what began it.
+
+class AfterTheFirstSigint:
+    """Clean readings until the stand-in Harbor got the runner's SIGINT; then a reading that fails."""
+
+    def __init__(self, tmp_path):
+        self.sigint = tmp_path / "sigint-1"
+
+    def __call__(self) -> bytes:
+        if self.sigint.exists():
+            raise OSError("ps could not run")
+        return clean_table()
+
+
+def test_a_watch_request_during_the_stop_after_a_stop_signal_records_that_stop(tmp_path):
+    def poke_once_harbor_runs():
+        end = time.monotonic() + 20
+        while not (tmp_path / "ready").exists():
+            if time.monotonic() > end:
+                return
+            time.sleep(0.01)
+        time.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=poke_once_harbor_runs, daemon=True).start()
+    with pytest.raises((pilot.PilotError, KeyboardInterrupt)) as err:
+        pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+            tmp_path, harbor=counting_harbor(tmp_path), timeout=30.0, process_sampler=AfterTheFirstSigint(tmp_path),
+            process_interval=0.05))
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stop_signals"][:1] == ["SIGINT"]
+    assert watch.get("stopped_by") == "a stop signal"
+    assert "stop signal" in str(err.value)
+    assert len(list(tmp_path.glob("sigint-*"))) == 1
+
+
+def test_a_watch_request_during_the_stop_at_the_time_limit_records_that_stop(tmp_path):
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+            tmp_path, harbor=counting_harbor(tmp_path), timeout=1.0, process_sampler=AfterTheFirstSigint(tmp_path),
+            process_interval=0.05))
+    record = read_record(tmp_path)
+    assert record["harbor_returncode"] == pilot.TIMEOUT_RETURNCODE
+    watch = record["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stop_signals"][:1] == ["SIGINT"]
+    assert watch.get("stopped_by") == "the time limit"
+    assert "time limit" in str(err.value)
+
+
+def test_an_error_while_harbor_runs_stops_its_group_and_lists_the_signals(tmp_path, monkeypatch):
+    harbor = counting_harbor(tmp_path)
+    request = pilot.StopRequest()
+    request.sent = []
+
+    def broken_wait(proc, timeout, stop_request):
+        assert wait_for_file(tmp_path / "ready")
+        raise RuntimeError("a fault in the runner")
+
+    monkeypatch.setattr(pilot, "_wait_for", broken_wait)
+    with pytest.raises(RuntimeError):
+        pilot.run_subprocess([str(harbor)], dict(os.environ), tmp_path / "h.log", 30.0, grace=5.0, term_grace=1.0,
+                             on_start=lambda proc: request)
+    assert request.sent[:1] == ["SIGINT"]
+    assert request.by == "an error"
+
+
+LEAVING_HARBOR = """#!{python}
+import subprocess, sys
+out = {out!r}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+"""  # exits at once, leaving its child running in its group
+
+
+def test_the_leftover_step_lists_its_signals_and_does_not_call_harbor_stopped(tmp_path):
+    harbor = tmp_path / "bin" / "harbor"
+    harbor.parent.mkdir(parents=True)
+    harbor.write_text(LEAVING_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    harbor.chmod(0o755)
+    try:
+        pilot.run_pilot(runner=functools.partial(pilot.run_subprocess, term_grace=2.0),
+                        **pilot_args(tmp_path, harbor=harbor, timeout=30.0))
+    except pilot.PilotError:
+        pass
+    watch = read_record(tmp_path)["process_watch"]
+    assert "SIGTERM to what Harbor left" in watch["stop_signals"]
+    assert watch["harbor"] == "not-stopped"  # Harbor itself ended on its own
+    assert gone(int((tmp_path / "child.pid").read_text()))
+
+
+def test_a_dead_uncollected_group_met_by_the_runners_stop_counts_as_gone(tmp_path, monkeypatch):
+    # macOS answers a group signal to ended, uncollected processes with "Operation not permitted".
+    real_kill = os.kill
+
+    def dead_group(pgid, sig):
+        real_kill(pgid, signal.SIGKILL)  # the group's only process ends now (or is already gone)...
+        time.sleep(0.2)
+        raise PermissionError(1, "Operation not permitted")  # ...and is not collected yet
+
+    monkeypatch.setattr(os, "killpg", dead_group)
+    with pytest.raises(pilot.TokenLeak) as err:
+        run_counted(tmp_path)
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["stop_error"] is None and "not permitted" not in json.dumps(watch)
+    assert watch["harbor"] == "ended-before-stop" and watch["stop_signals"] == []
+    assert pilot.harbor_groups_left() == []
+    assert "may still be running" not in str(err.value) + " ".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_stop_signal_right_after_the_watch_stop_is_raised_is_held(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    gate, previous = pilot.SignalGate(), getattr(pilot._gates, "current", None)
+    request = pilot.StopRequest()
+    request.asked.set()
+    pilot._gates.current = gate
+    gate.install()
+    interrupted = False
+    try:
+        with pytest.raises(pilot.WatchStop):
+            pilot._wait_for(proc, 10.0, request)
+        try:
+            os.kill(os.getpid(), signal.SIGINT)  # before the stop path's first line could mark the stop as begun
+            time.sleep(0.2)
+        except KeyboardInterrupt:
+            interrupted = True
+    finally:
+        gate.restore()
+        pilot._gates.current = previous
+        proc.kill()
+        proc.wait()
+    assert not interrupted and gate.held == [signal.SIGINT]
+
+
+def wait_for_file(path, within=10.0):
+    end = time.monotonic() + within
+    while not path.exists() and time.monotonic() < end:
+        time.sleep(0.01)
+    return path.exists()
