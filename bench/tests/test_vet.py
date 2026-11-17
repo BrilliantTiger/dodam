@@ -245,7 +245,8 @@ def test_image_judge_runs_the_verifier_judge_without_network():
     assert "DODAM_APP_USER=agent" in cmd
     script = " ".join(cmd[cmd.index("dodam-bench/python:dev") + 1:])
     assert "cp -R /solution/. /app/" in script
-    assert "/opt/judge/bin/python /tests/lib/dodam_judge.py" in script and "--step change-1" in script
+    # the judge is started by the verifier's own script, told which step to judge
+    assert "DODAM_STEP=%s\\n' change-1 > /tests/step.env" in script and script.endswith("exec sh /tests/test.sh")
 
 
 def _image_ready(image: str) -> bool:

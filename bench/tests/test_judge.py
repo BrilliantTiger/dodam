@@ -109,6 +109,68 @@ def test_pristine_dependencies_replace_whatever_the_app_brought(tmp_path: Path):
     assert not (link / "extra").exists()
 
 
+def test_dependencies_the_app_brought_are_dropped_whatever_shape_they_have(tmp_path: Path):
+    """3,000 folders inside each other where a dependency folder goes, and a named pipe where another goes."""
+    from dodambench.judge import remove_tree
+    deps, app = tmp_path / "deps", tmp_path / "app"
+    for name in ("node_modules", "vendor"):
+        (deps / name).mkdir(parents=True)
+    (app / "node_modules").mkdir(parents=True)
+    os.mkfifo(app / "vendor")
+    here = os.open(app / "node_modules", os.O_RDONLY)
+    for _ in range(3000):
+        os.mkdir("d", dir_fd=here)
+        below = os.open("d", os.O_RDONLY, dir_fd=here)
+        os.close(here)
+        here = below
+    os.close(os.open("below.txt", os.O_WRONLY | os.O_CREAT, dir_fd=here))
+    os.close(here)
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (100, hard))   # far fewer open files than folders
+            restore_deps(app, deps, ["node_modules", "vendor"])
+            ended = None
+        except Exception as error:
+            ended = error
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        assert ended is None, f"dropping what the app brought ended the judge: {ended!r}"
+        assert (app / "node_modules").is_symlink() and (app / "vendor").is_symlink()
+    finally:
+        if (app / "node_modules").is_dir() and not (app / "node_modules").is_symlink():
+            remove_tree(app / "node_modules")
+
+
+def test_whatever_sits_where_the_results_go_is_replaced_before_anything_runs(tmp_path: Path):
+    """A folder where the reward goes, a link where the text reward goes, and an earlier fault."""
+    tests = tmp_path / "tests"
+    write(tests, "manifest.toml", """
+        [[test]]
+        file = "functional/test_health.py"
+        kind = "functional"
+        step = "build"
+    """)
+    write(tests, "functional/test_health.py", "def test_health():\n    assert True\n")
+    app, out = tmp_path / "app", tmp_path / "out"
+    write(app, "main.py", "raise SystemExit(3)\n")
+    write(out, "reward.json/inside.txt", "a folder where the reward goes\n")
+    write(out, "judge-fault.json", '{"judge_fault": "from an earlier judging"}\n')
+    write(tmp_path, "elsewhere.txt", "1.0\n")
+    (out / "reward.txt").symlink_to(tmp_path / "elsewhere.txt")
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    try:
+        judge(tests, app, "build", out, lang_env=env, **unseparated(judge))
+        ended = None
+    except Exception as error:
+        ended = error
+    assert ended is None, f"what sat where the results go ended the judge: {ended!r}"
+    assert (out / "reward.json").is_file() and json.loads((out / "reward.json").read_text())["reward"] == 0.0
+    assert not (out / "judge-fault.json").exists(), "an earlier fault still lies beside the new result"
+    assert not (out / "reward.txt").is_symlink() and (tmp_path / "elsewhere.txt").read_text() == "1.0\n"
+
+
 def test_dependency_link_is_made_when_the_app_has_none_or_a_file_there(tmp_path: Path):
     deps = tmp_path / "deps"
     (deps / "node_modules").mkdir(parents=True)

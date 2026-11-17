@@ -678,7 +678,106 @@ def test_the_judge_reads_its_containers_caps_and_refuses_when_one_is_missing(tmp
     assert refusal(str(1024 * 2**20), "100000")["key"] == "processes"  # a cap that bounds nothing
     if judge_module.refusing_filter() is not None:
         assert refusal(str(1024 * 2**20), "512") == {}
-        assert caps(None, group=group, machine_info=info) == {"memory_mb": 1024, "processes": 512}
+        assert caps(None, group=group, machine_info=info) == {"memory_mb": 1024, "processes": 512, "swap_mb": 0}
+
+
+def attempt(function, *args, **kwargs):
+    """What the function gave, or the error it ended with: behaviour that is missing fails an assertion."""
+    try:
+        return function(*args, **kwargs)
+    except Exception as error:
+        return error
+
+
+def test_the_judge_says_how_much_its_container_may_swap(tmp_path, monkeypatch):
+    monkeypatch.setattr(judge_module.platform, "machine", lambda: "x86_64")   # a machine the judge has a filter for
+    group, info = tmp_path / "group", tmp_path / "meminfo"
+    group.mkdir()
+    (group / "memory.max").write_text(f"{1024 * 2**20}\n")
+    (group / "pids.max").write_text("512\n")
+
+    def swap(allowed: str | None, machine_kb: int):
+        info.write_text(f"MemTotal:        2000000 kB\nSwapTotal:       {machine_kb} kB\n")
+        (group / "memory.swap.max").unlink(missing_ok=True)
+        if allowed is not None:
+            (group / "memory.swap.max").write_text(allowed + "\n")
+        caps = attempt(judge_module.container_caps, None, group=group, machine_info=info)
+        return caps.get("swap_mb") if isinstance(caps, dict) else caps
+
+    assert swap(str(512 * 2**20), 1024 * 1024) == 512        # an allowance, on a machine with more swap than that
+    assert swap("max", 1024 * 1024) == 1024                  # no allowance of its own: all the machine has
+    assert swap("0", 1024 * 1024) == 0                       # the allowance taken away
+    assert swap(str(512 * 2**20), 0) == 0                    # a machine without swap
+    assert swap(None, 1024 * 1024) == 0                      # a kernel that does not count swap per container
+
+
+def test_memory_moved_out_to_swap_is_counted_as_memory(tmp_path):
+    group = tmp_path / "group"
+    group.mkdir()
+    (group / "memory.current").write_text(f"{300 * 2**20}\n")
+    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n")
+    (group / "memory.max").write_text(f"{1024 * 2**20}\n")
+    (group / "memory.swap.current").write_text(f"{50 * 2**20}\n")
+    counted = attempt(judge_module.container_memory, group=group)
+    assert isinstance(counted, dict), f"the judge cannot be shown a container's counters: {counted!r}"
+    assert counted["taken"] == (300 - 100 + 10 + 50) * 2**20 and counted["cap"] == 1024 * 2**20
+    (group / "memory.swap.current").unlink()
+    assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
+
+
+def test_a_new_high_above_the_limit_fails_the_case_even_when_no_measurement_saw_it():
+    from dodambench import dodam_cli as runner
+    unseen = getattr(runner, "_passed_unseen", None)
+    assert unseen is not None, "the case runner does not read the highest memory use the kernel kept"
+    mb = 2**20
+    assert unseen(100 * mb, 500 * mb, 80 * mb, 288 * mb) is True       # a new high, 420 MB above the start
+    assert unseen(100 * mb, 300 * mb, 80 * mb, 288 * mb) is False      # a new high within what the case may take
+    assert unseen(600 * mb, 600 * mb, 80 * mb, 288 * mb) is False      # no new high: an earlier one hides this run
+    assert unseen(0, 0, 80 * mb, 288 * mb) is False                    # a kernel that keeps no high
+
+
+ENDED_TESTS = {"functional/test_ended.py": '''
+def test_before():
+    with case() as c:
+        assert c.run([]).out == "ok\\n"
+
+
+def test_the_one_that_is_ended():
+    with case(files={"left.txt": "x"}) as c:
+        assert c.run([]).out == "ok\\n"
+        os.kill(os.getpid(), 9)
+
+
+def test_after():
+    with case() as c:
+        assert c.run([]).out == "ok\\n" and c.files() == []
+''', "boundary/test_other.py": '''
+def test_in_another_file():
+    with case() as c:
+        assert c.run([]).out == "ok\\n"
+'''}
+
+
+def test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running(tmp_path, capsys):
+    """Whatever ends the process that runs the cases, the case that was running fails with that
+    reason, the cases before it keep their outcome and the cases after it are still run."""
+    code, out = judge_command(tmp_path, "print('ok')\n", ENDED_TESTS)
+    assert code == 0 and (out / "reward.json").is_file(), capsys.readouterr()
+    report = json.loads((out / "details.json").read_text())
+    assert {t["name"]: t["outcome"] for t in report["tests"]} == {
+        "test_before": "passed", "test_the_one_that_is_ended": "failed", "test_after": "passed",
+        "test_in_another_file": "passed"}
+    ended = next(t for t in report["tests"] if t["name"] == "test_the_one_that_is_ended")
+    assert ended["message"] == "the case runner was ended by signal 9"
+    assert json.loads((out / "reward.json").read_text())["functional_pass_rate"] == round(2 / 3, 4)
+
+
+def test_a_runner_that_keeps_ending_before_any_case_runs_still_ends_in_a_judgement(tmp_path, capsys):
+    """A file of tests whose runner is ended before it can list a case, every time."""
+    code, out = judge_command(tmp_path, "print('ok')\n",
+                              {"functional/test_never.py": "os.kill(os.getpid(), 9)\n\n\ndef test_never():\n    pass\n"})
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert "signal 9" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
 
 
 def test_the_filter_refuses_the_calls_that_make_what_outlives_a_process():
@@ -694,6 +793,117 @@ def test_the_filter_refuses_the_calls_that_make_what_outlives_a_process():
         for call in (shmget, msgget, semget, mq_open):
             at = next(i for i, line in enumerate(lines) if line[0] == 0x15 and line[3] == call and i > 3)
             assert at + 1 + lines[at][1] == len(lines) - 1, "the check must jump to the refusal"
+        if machine == "x86_64":
+            # the other way of calling this kernel knows, whose numbers mean something else: refused too
+            other = [i for i, line in enumerate(lines) if line[0] == 0x35 and line[3] == 0x40000000]
+            assert other and other[0] + 1 + lines[other[0]][1] == len(lines) - 1
+
+
+def test_the_judge_refuses_a_machine_it_has_no_call_filter_for(tmp_path, monkeypatch):
+    group, info = tmp_path / "group", tmp_path / "meminfo"
+    group.mkdir()
+    info.write_text("MemTotal:        2000000 kB\n")
+    (group / "memory.max").write_text(f"{1024 * 2**20}\n")
+    (group / "pids.max").write_text("512\n")
+    monkeypatch.setattr(judge_module.platform, "machine", lambda: "riscv64")
+    with pytest.raises(judge_module.JudgeFault) as refused:
+        judge_module.container_caps(None, group=group, machine_info=info)
+    assert json.loads(str(refused.value))["key"] == "machine"
+
+
+def test_processes_are_ended_even_when_no_new_process_can_be_made(monkeypatch):
+    """The container is at its cap on processes, so the judge cannot make one to end the others with."""
+    import signal
+    import subprocess
+    running = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"]) for _ in range(3)]
+    side = judge_module.Side(os.getuid(), os.getgid())
+    monkeypatch.setattr(side, "alive", lambda: [p.pid for p in running if p.poll() is None])
+
+    def no_process(*args):
+        raise OSError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(judge_module.os, "fork", no_process)
+    try:
+        assert side.end() is True
+        assert all(p.poll() == -signal.SIGKILL for p in running)
+    finally:
+        monkeypatch.undo()
+        for p in running:
+            p.kill()
+            p.wait()
+
+
+def test_each_judging_draws_a_user_number_of_its_own():
+    drawn = {judge_module.free_user_id() for _ in range(20)}
+    assert len(drawn) == 20 and all(number >= 200_000 for number in drawn)
+
+
+def many_files(folder: Path, count: int) -> Path:
+    folder.mkdir(parents=True)
+    for i in range(count):
+        (folder / f"file-{i}").write_text("x")
+    return folder
+
+
+def test_a_tree_with_more_entries_than_the_judge_handles_is_given_up_on(tmp_path):
+    much = getattr(judge_module, "TooMuchLeft", None)
+    assert much is not None, "the judge handles a tree of any size, for as long as it takes"
+    with pytest.raises(much):
+        judge_module.remove_tree(many_files(tmp_path / "remove", 10), most=5)
+    with pytest.raises(much):
+        judge_module.walk_tree(many_files(tmp_path / "walk", 10), lambda folder, name, info: None, most=5)
+    assert judge_module.walk_tree(tmp_path / "walk", lambda folder, name, info: None, most=10) == 10
+
+
+def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):
+    """What the working phase left where the pinned dependencies go holds more than the judge handles."""
+    monkeypatch.setattr(judge_module, "TREE_ENTRIES", 5, raising=False)
+    deps = tmp_path / "deps"
+    (deps / "node_modules").mkdir(parents=True)
+    many_files(tmp_path / "app/node_modules", 10)
+    (tmp_path / "app/main.py").write_text("print('ok')\n")
+    tests_dir = tmp_path / "tests"
+    (tests_dir / "functional").mkdir(parents=True)
+    (tests_dir / "functional/test_ok.py").write_text(HEAD + "def test_ok():\n    with case() as c:\n        assert c.run([]).out == 'ok\\n'\n")
+    (tests_dir / "manifest.toml").write_text('[[test]]\nfile = "functional/test_ok.py"\nkind = "functional"\nstep = "build"\n')
+    env = lang_env(DEPS_DIR=str(deps), DEPS_LINKS="node_modules")
+    try:
+        result = judge(tests_dir, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    except Exception as error:
+        result = error
+    assert isinstance(result, dict), f"too many entries ended the judge: {result!r}"
+    assert result["reward"]["build_ok"] == 0.0 and result["reward"]["reward"] == 0.0
+    assert "more than 5 entries" in result["report"]["build_ended"]
+    assert (tmp_path / "out/reward.json").is_file()
+
+
+def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the program's")
+    outside.chmod(0o600)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "closed.py").write_text("print('ok')\n")
+    (app / "closed.py").chmod(0o600)
+    (app / "link").symlink_to(outside)
+    if hasattr(os, "lchmod"):
+        os.lchmod(app / "link", 0o777)      # as a link is on the machines that judge
+    judge_module.open_for_reading(app)
+    assert (app / "closed.py").stat().st_mode & 0o777 == 0o604
+    assert outside.stat().st_mode & 0o777 == 0o600, "a link in the program's folder was followed out of it"
+
+
+def test_a_build_that_leaves_too_many_places_any_user_may_write_is_given_up_on(tmp_path, monkeypatch):
+    much = getattr(judge_module, "TooMuchLeft", None)
+    assert much is not None, "the judge lists every place any user may write, however many"
+    monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 3, raising=False)
+    for i in range(6):
+        (tmp_path / f"open-{i}").write_text("x")
+        (tmp_path / f"open-{i}").chmod(0o666)
+    mounts = tmp_path / "mounts"
+    mounts.write_text(f"none {tmp_path} tmpfs rw 0 0\n")
+    with pytest.raises(much):
+        list(judge_module.writable_by_others(mounts))
 
 
 def test_a_run_during_which_the_kernel_ended_a_process_for_memory_is_told():

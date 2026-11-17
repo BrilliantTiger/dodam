@@ -29,7 +29,7 @@ test_exists.__test__ = False
 
 def test_every_attack_on_the_list_is_a_test():
     attacks = listed("attacks.toml", "attack")
-    assert len(attacks) >= 40
+    assert len(attacks) >= 60
     for attack in attacks:
         assert attack["class"] and attack["tries"] and attack["must"], attack["name"]
         assert attack["tests"], f"{attack['name']} is no test"
@@ -37,13 +37,13 @@ def test_every_attack_on_the_list_is_a_test():
             assert test_exists(node), f"{attack['name']}: there is no test {node}"
     classes = {attack["class"] for attack in attacks}
     for needed in ("learning the judging", "memory", "files", "processes", "the judge's own clean-up",
-                   "passing as unjudged", "a container without bounds"):
+                   "passing as unjudged", "a container without bounds", "a kill while a case runs"):
         assert needed in classes, needed
 
 
 def test_every_protection_has_a_broken_variant_that_names_a_test():
     protections = listed("protections.toml", "protection")
-    assert len(protections) >= 40
+    assert len(protections) >= 80
     assert len({p["what"] for p in protections}) == len(protections)
     for protection in protections:
         text = (BENCH / protection["file"]).read_text(encoding="utf-8")
@@ -52,6 +52,8 @@ def test_every_protection_has_a_broken_variant_that_names_a_test():
             assert change["find"] in text, f"{protection['what']}: its variant no longer fits the code"
             assert change["find"] != change["put"]
         assert protection["tests"] and all(test_exists(node) for node in protection["tests"]), protection["what"]
+        # a second line of defence says which other protections already stop the attack
+        assert protection.get("second_line", "x").strip(), protection["what"]
 
 
 def test_the_document_names_exactly_the_protections_that_have_a_variant():
@@ -66,6 +68,10 @@ def test_the_document_names_exactly_the_protections_that_have_a_variant():
                                              if line.startswith("|")) if cells[0].strip() not in ("Protection", "")
              and not set(cells[0].strip()) <= {"-", " "}}
     assert named == protections, (sorted(named - protections), sorted(protections - named))
+    for protection in listed("protections.toml", "protection"):
+        if protection.get("second_line"):
+            row = next(line for line in section.splitlines() if line.startswith(f"| {protection['what']} |"))
+            assert "second line" in row.lower(), f"the document does not say that this is a second line: {protection['what']}"
     korean = (DOCS / "command-line-tasks.ko.md").read_text(encoding="utf-8")
     assert "## 보호 장치 하나하나와" in korean, "the Korean document does not list the protections"
     rows = [line for line in korean[korean.index("## 보호 장치 하나하나와"):].split("\n## ")[0].splitlines()

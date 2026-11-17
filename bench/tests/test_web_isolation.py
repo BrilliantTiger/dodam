@@ -11,7 +11,7 @@ import shutil
 import pytest
 
 from conftest import CANARY
-from test_cli_isolation import BENCH, IMAGE, _image_ready, found_by, in_the_image, outcomes
+from test_cli_isolation import BENCH, IMAGE, _image_ready, found_by, in_the_image, lost, message, outcomes
 
 pytestmark = pytest.mark.skipif(not _image_ready(), reason="needs Docker and the Python image")
 
@@ -128,3 +128,208 @@ def test_the_served_program_learns_nothing_about_the_test_being_run(looked):
 def test_the_build_and_the_served_program_run_confined(looked):
     assert looked["no new privileges"] == ["1"] and looked["seen by the build"]["no new privileges"] == ["1"]
     assert looked["first to go"] == "1000" and looked["shared memory"] is False
+
+
+# ---------------------------------------------------------------------------------------------
+# The web judge under the same rules as the command-line judge: caps on its container, a judgement
+# after a kill, and nothing of one start of the program left for the next.
+# ---------------------------------------------------------------------------------------------
+
+ASK = f"""# {CANARY}
+import json, os, time, urllib.request
+
+
+def ask(path):
+    with urllib.request.urlopen(os.environ["BASE_URL"] + path, timeout=20) as response:
+        return response.read().decode()
+
+
+"""
+SERVES = r"""
+import http.server, json, os, sys, time
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = answer(self.path).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def serve():
+    http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
+
+
+"""
+
+
+def judge_web(tmp_path, program: str, tests: dict[str, str], **room) -> dict:
+    """Judge a served Python program in the image; hidden tests are {"<kind>/<file>": source}."""
+    tests_dir, solution = tmp_path / "tests", tmp_path / "solution"
+    (tests_dir / "lib").mkdir(parents=True)
+    solution.mkdir()
+    (solution / "main.py").write_text(SERVES + program, encoding="utf-8")
+    shutil.copy(BENCH / "dodambench/judge.py", tests_dir / "lib/dodam_judge.py")
+    manifest = []
+    for file, source in tests.items():
+        kind = file.split("/")[0]
+        (tests_dir / file).parent.mkdir(parents=True, exist_ok=True)
+        (tests_dir / file).write_text(ASK + source, encoding="utf-8")
+        manifest.append(f'[[test]]\nfile = "{file}"\nkind = "{kind}"\nstep = "build"\n'
+                        + ('weakness = "path-traversal"\n' if kind == "security" else ""))
+    (tests_dir / "manifest.toml").write_text("\n".join(manifest), encoding="utf-8")
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": "python3 main.py", "PORT": "8080", "DEPS_DIR": "",
+           "DEPS_LINKS": ""}
+    (tests_dir / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+    without = tuple(room.pop("without", ())) + ("cases",)
+    return in_the_image(tests_dir, solution, tmp_path / "out", without=without, **room)
+
+
+PLAIN_SERVER = """
+def answer(path):
+    return "ok"
+
+
+serve()
+"""
+ONE_TEST = {"functional/test_one.py": """
+def test_the_program_answers():
+    assert ask("/") == "ok"
+"""}
+IN_THE_MIDDLE = """
+def test_before():
+    assert ask("/") == "ok"
+
+
+def test_the_one_that_is_ended():
+    MIDDLE
+
+
+def test_after():
+    assert ask("/") == "ok"
+"""
+OTHER = {"boundary/test_other.py": """
+def test_in_another_file():
+    assert ask("/") == "ok"
+"""}
+ENDED = {"test_before": "passed", "test_the_one_that_is_ended": "failed", "test_after": "passed",
+         "test_in_another_file": "passed"}
+
+
+@pytest.mark.parametrize("room, key", [
+    ({"without": ("processes",)}, "processes"),
+    ({"memory_mb": 65536}, "memory"),
+])
+def test_the_web_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold(tmp_path, room, key):
+    """The caps are checked for every kind of task: a served program and its build are the agent's code too."""
+    result = judge_web(tmp_path, PLAIN_SERVER, ONE_TEST, **room)
+    assert result["exit_code"] == 3 and result["reward"] is None, lost(result, tmp_path / "out")
+    assert result["fault"] is not None, "the judge ran a served program in a container without caps that hold"
+    refusal = json.loads(json.loads(result["fault"])["judge_fault"])
+    assert refusal["severity"] == "error" and refusal["key"] == key and refusal["message"], refusal
+
+
+def test_the_web_judges_result_names_the_caps_of_its_container_and_whether_it_may_swap(tmp_path):
+    result = judge_web(tmp_path, PLAIN_SERVER, ONE_TEST)
+    assert outcomes(result) == {"test_the_program_answers": "passed"}, lost(result, tmp_path / "out")
+    assert result["report"].get("caps") == {"memory_mb": 1024, "processes": 512, "swap_mb": 0}, result["report"].get("caps")
+
+
+def test_a_served_program_the_kernel_ends_fails_that_case_and_the_rest_meet_a_fresh_program(tmp_path):
+    """Really out of memory: the served program takes memory until the kernel ends it. The hidden
+    test that asked for it would pass by itself; it fails because the kernel ended a process while
+    it ran, and the cases after it are judged against a program started afresh."""
+    program = """
+held = []
+
+
+def answer(path):
+    while path == "/eat":
+        held.append(bytearray(b"x") * (16 * 2**20))
+    return "ok"
+
+
+serve()
+"""
+    middle = 'try:\n        ask("/eat")\n    except OSError:\n        pass'
+    result = judge_web(tmp_path, program, {"functional/test_ended.py": IN_THE_MIDDLE.replace("MIDDLE", middle), **OTHER},
+                       memory_mb=640)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == ENDED, lost(result, tmp_path / "out")
+    assert "ran out of memory" in message(result, "test_the_one_that_is_ended"), lost(result, tmp_path / "out")
+
+
+def test_a_web_case_runner_that_is_ended_costs_only_the_case_that_was_running(tmp_path):
+    result = judge_web(tmp_path, PLAIN_SERVER,
+                       {"functional/test_ended.py": IN_THE_MIDDLE.replace("MIDDLE", "os.kill(os.getpid(), 9)"), **OTHER})
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == ENDED, lost(result, tmp_path / "out")
+    assert "case runner" in message(result, "test_the_one_that_is_ended")
+
+
+def test_a_web_judge_that_is_ended_leaves_nothing_that_reads_as_a_judgement(tmp_path):
+    middle = "os.kill(os.getppid(), 9)\n    time.sleep(30)"
+    result = judge_web(tmp_path, PLAIN_SERVER, {"functional/test_ended.py": IN_THE_MIDDLE.replace("MIDDLE", middle)})
+    out = tmp_path / "out"
+    assert result["exit_code"] != 0 and result["reward"] is None and not (out / "reward.json").exists()
+    assert result["fault"] is not None, "the judging ended without a result and nothing says so"
+    said = json.loads(json.loads(result["fault"])["judge_fault"])
+    assert said["severity"] == "error" and said["key"] == "ended", said
+
+
+LEAVES = r"""
+note, data = "/app/last-data-folder", os.path.dirname(os.environ["DB_PATH"])
+earlier = open(note).read() if os.path.exists(note) else ""
+seen = {"earlier data folder": earlier, "it is still there": bool(earlier) and os.path.exists(earlier)}
+open(note, "w").write(data)
+os.chdir(data)
+for _ in range(3000):            # the data folder is the program's to fill
+    os.mkdir("d")
+    os.chdir("d")
+os.chdir("/app")
+
+
+def answer(path):
+    return json.dumps(seen)
+
+
+if os.fork() == 0:
+    os.setsid()                  # the server leaves the process group the judge started
+    serve()
+time.sleep(600)
+"""
+LOOKS = """
+def test_NAME():
+    seen = ask("/")
+    with open("/logs/verifier/NAME.json", "w") as f:
+        f.write(seen)
+"""
+
+
+@pytest.fixture(scope="module")
+def left_behind(tmp_path_factory) -> dict:
+    """A served program that is started twice. Each start leaves the group of processes the judge
+    started and fills its data folder 3,000 folders deep; the second start says what it finds."""
+    tmp_path = tmp_path_factory.mktemp("left")
+    result = judge_web(tmp_path, LEAVES, {"security/test_first.py": LOOKS.replace("NAME", "first"),
+                                          "security/test_second.py": LOOKS.replace("NAME", "second")})
+    return {"result": result, "out": tmp_path / "out"}
+
+
+def test_a_served_program_that_left_its_process_group_is_ended_before_the_next_start(left_behind):
+    result, out = left_behind["result"], left_behind["out"]
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, out)
+    # a server that was still running would hold the port, and the second start would not come up
+    assert outcomes(result) == {"test_first": "passed", "test_second": "passed"}, lost(result, out)
+
+
+def test_what_one_start_of_a_served_program_wrote_is_gone_before_the_next(left_behind):
+    result, out = left_behind["result"], left_behind["out"]
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, out)
+    seen = found_by(out, "second.json")
+    assert seen["earlier data folder"] and seen["it is still there"] is False, seen
