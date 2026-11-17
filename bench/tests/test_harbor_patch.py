@@ -48,13 +48,14 @@ def flags(argv: list[str]) -> list[str]:
 # --- Harbor itself -------------------------------------------------------------------------------------------
 
 @needs_harbor
-def test_a_listed_credential_stays_off_the_command_line_and_reaches_the_container():
+def test_a_listed_credential_stays_off_the_command_line_and_reaches_the_docker_cli_environment():
     out = probe()
     assert [a for a in out["argv"] if FAKE_SECRET in a] == []
     assert out["harbor_version"] == "0.25.0"
     assert "CLAUDE_CODE_OAUTH_TOKEN" in flags(out["argv"]) and "ANTHROPIC_API_KEY" in flags(out["argv"])
     assert "ANTHROPIC_AUTH_TOKEN" in flags(out["argv"])
-    # docker compose reads the value of a bare `-e NAME` from its own environment and gives it to the container
+    # the value is in the docker CLI's own environment, from which docker compose reads a bare `-e NAME`
+    # (that it then arrives in the container was checked with Docker Compose 5.5.1 and the real run)
     assert out["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == FAKE_SECRET
     assert out["env"]["ANTHROPIC_AUTH_TOKEN"] == FAKE_SECRET
     assert out["env"]["ANTHROPIC_API_KEY"] == ""
@@ -373,3 +374,24 @@ def test_the_patch_passes_by_name_exactly_the_pilots_credential_names():
         assert f'"{name}"' in added
     for name in ("PATH", "HTTPS_PROXY", "DOCKER_", "OTEL_"):  # no list of names kept out any more
         assert f'"{name}"' not in added
+
+
+# --- installs the guard refuses say what is wrong and what to do --------------------------------------------------------
+
+SH_LAUNCHER = "#!/bin/sh\n'''exec' \"/a very long path/venv/bin/python\" \"$0\" \"$@\"\n' '''\n"
+
+
+def test_an_entry_script_that_starts_through_bin_sh_is_refused_with_what_to_do(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    harbor.write_text(SH_LAUNCHER + harbor.read_text().split("\n", 1)[1])
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    assert "/bin/sh" in str(err.value) and "shorter path" in str(err.value)
+
+
+def test_a_virtual_environment_with_setuptools_is_refused_with_what_to_do(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    (site_of(tmp_path) / "distutils-precedence.pth").write_text("import os; var = 'SETUPTOOLS_USE_DISTUTILS'\n")
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    assert "setuptools" in str(err.value) and "requirements.txt" in str(err.value)

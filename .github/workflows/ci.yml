@@ -37,7 +37,7 @@ jobs:
         working-directory: bench
         run: |
           set +e
-          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_a_listed_credential_stays_off_the_command_line_and_reaches_the_container" 2>&1)
+          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_a_listed_credential_stays_off_the_command_line_and_reaches_the_docker_cli_environment" 2>&1)
           code=$?
           set -e
           if [ "$code" -ne 1 ] || ! printf '%s' "$out" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-PROBE"; then

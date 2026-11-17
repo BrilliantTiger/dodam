@@ -2259,3 +2259,63 @@ def test_a_token_file_inside_the_repository_is_refused(tmp_path, monkeypatch):
     with pytest.raises(pilot.PilotError) as err:
         pilot.read_token(token_file(repo / "bench"))
     assert "repository" in str(err.value) and FAKE_TOKEN not in str(err.value)
+
+
+# --- a stop the process-table watch asks for is the runner's own stop -------------------------------------------------
+# One stop owns Harbor's process group: the runner's, with signals held, the group stopped first, every later step
+# through the step helper, the run closed in the five-hour guard and the failure reported like any other.
+
+COUNTING_HARBOR = """#!{python}
+import os, signal, sys, time
+out = {out!r}
+def on_int(*_):
+    n = len([p for p in os.listdir(out) if p.startswith("sigint-")]) + 1
+    open(out + "/sigint-" + str(n), "w").write("1")
+    time.sleep(1.5)  # a stop that takes a moment: Harbor removing its containers
+    sys.exit(0)
+signal.signal(signal.SIGINT, on_int)
+open(out + "/ready", "w").write("1")
+time.sleep(30)
+"""
+
+
+def counting_harbor(tmp_path) -> Path:
+    path = tmp_path / "bin" / "harbor"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(COUNTING_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    path.chmod(0o755)
+    return path
+
+
+def run_counted(tmp_path):
+    return pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+        tmp_path, harbor=counting_harbor(tmp_path), timeout=30.0, process_sampler=ReadyTables(tmp_path, "token"),
+        process_interval=0.05))
+
+
+def test_a_watch_stop_is_the_runners_own_stop_and_is_reported_like_any_other_failure(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        run_counted(tmp_path)
+    assert FAKE_TOKEN not in str(err.value)
+    log = (tmp_path / "out" / "20261117T070000Z" / "python" / "harbor.log").read_text()
+    assert "process-table watch" in log  # the runner's stop path wrote its line, through the step helper
+    assert len(list(tmp_path.glob("sigint-*"))) == 1
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and "SIGINT" in watch["stop_signals"]
+    runs = pilot.Guard(pilot.guard_path()).read()
+    assert runs and all(pilot._end(run) is not None for run in runs)  # the run is closed in the five-hour guard
+
+
+def test_a_stop_signal_during_a_watch_stop_is_held_so_harbors_group_is_stopped_once(tmp_path):
+    def poke_once_the_stop_has_begun():
+        end = time.monotonic() + 20
+        while not (tmp_path / "sigint-1").exists():
+            if time.monotonic() > end:
+                return
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGINT)  # Harbor is still removing its containers for 1.5 s
+
+    threading.Thread(target=poke_once_the_stop_has_begun, daemon=True).start()
+    with pytest.raises(pilot.TokenLeak):
+        run_counted(tmp_path)
+    assert len(list(tmp_path.glob("sigint-*"))) == 1  # one stop of the group, not a second one on top

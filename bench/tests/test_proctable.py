@@ -226,3 +226,21 @@ def test_a_sighted_process_of_harbors_group_is_killed_at_once_before_harbor_is_a
         assert watch.record()["harbor"] == "stopped"
     finally:
         end_group(proc)
+
+
+def test_a_group_of_ended_but_uncollected_processes_counts_as_gone_not_as_a_failed_stop(monkeypatch):
+    # On macOS a group whose members have all ended but are not yet collected answers a group signal with
+    # "Operation not permitted" instead of "No such process".
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    assert wait_for(lambda: os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT) is not None)  # ended, uncollected
+
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    with proctable.ProcessTableWatch(FAKE_TOKEN, Sampler(hit_from=2), interval=0.01) as watch:
+        watch.track(proc)
+        assert wait_for(lambda: watch.harbor != "not-stopped")
+    record = watch.record()
+    assert record["stop_error"] is None
+    assert record["harbor"] == "ended-before-stop" and record["stop_signals"] == []
