@@ -1,7 +1,10 @@
 """A command-line task as a Harbor task: what the agent is told, what only the verifier gets."""
 import hashlib
+import json
 import tomllib
 from pathlib import Path
+
+import pytest
 
 from conftest import CANARY
 from dodambench.convert import to_harbor, verifier_env
@@ -46,7 +49,11 @@ def test_hidden_tests_and_the_case_runner_go_to_the_verifier_only(cli_task_dir, 
         seen = (out / "steps" / step / "instruction.md").read_text(encoding="utf-8")
         for hidden in (CANARY, "test_upper", "planted.txt", "copies-anywhere", "def test_"):
             assert hidden not in seen, hidden
-    assert not (out / "environment").exists()
+    # the environment folder goes into both containers: it may hold the caps and nothing else
+    assert [p.name for p in (out / "environment").iterdir()] in ([], ["docker-compose.yaml"]) if (out / "environment").exists() else True
+    for path in (out / "environment").glob("*"):
+        for hidden in (CANARY, "test_upper", "planted.txt", "copies-anywhere", "def test_"):
+            assert hidden not in path.read_text(encoding="utf-8"), hidden
 
 
 def test_the_verifier_learns_the_command_and_the_limits_of_a_case(cli_task_dir):
@@ -103,13 +110,44 @@ def test_nothing_changes_in_what_the_web_task_becomes(tmp_path):
         assert digest.hexdigest() == before, lang
 
 
-def test_a_web_task_is_vetted_in_a_container_made_exactly_as_before():
-    from dodambench.vet import docker_create_cmd
-    script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && exec /opt/judge/bin/python "
-              "/tests/lib/dodam_judge.py --tests /tests --app /app --step build --out /logs/verifier")
-    assert docker_create_cmd("name", "dodam-bench/go:dev", "build") == [
-        "docker", "create", "--name", "name", "--network", "none", "--user", "0",
-        "-e", "DODAM_APP_USER=agent", "dodam-bench/go:dev", "sh", "-c", script]
-    env = verifier_env(load_task(WEB), "go")
+def test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container():
+    import dodambench.vet as vetting
+    room_of = getattr(vetting, "container_room", None)
+    assert room_of is not None, "vetting has no way to say what caps a container gets"
+    task = load_task(WEB)
+    room = room_of(task, 2048)
+    # the task asks for more memory than this machine has: the cap is lowered so that it holds, and said
+    assert room["memory_mb"] == 1536 and room["adjusted"]["asked_mb"] == 4096 and room["adjusted"]["message"]
+    assert room_of(task, 65536)["memory_mb"] == 4096 and "adjusted" not in room_of(task, 65536)
+    assert room["processes"] >= 256 and "cases" not in room
+    cmd = vetting.docker_create_cmd("name", "dodam-bench/go:dev", "build", room)
+    assert cmd[:8] == ["docker", "create", "--name", "name", "--network", "none", "--user", "0"]
+    assert cmd[cmd.index("--memory") + 1] == "1536m" and cmd[cmd.index("--memory-swap") + 1] == "1536m"
+    assert cmd[cmd.index("--pids-limit") + 1] == str(room["processes"]) and "--tmpfs" not in cmd
+    env = verifier_env(task, "go")
     assert set(env) == {"STEPS", "BUILD_CMD", "START_CMD", "PORT", "APP_DB", "APP_SECRET_NEEDED", "DEPS_DIR", "DEPS_LINKS"}
-    assert not (to_harbor(load_task(WEB), "go", Path(__import__("tempfile").mkdtemp())) / "tests/lib/dodam_cli.py").exists()
+    made = to_harbor(task, "go", Path(__import__("tempfile").mkdtemp()))
+    assert not (made / "tests/lib/dodam_cli.py").exists() and not (made / "environment").exists()
+
+
+def test_a_command_line_task_carries_its_caps_onto_the_path_the_measurement_uses(cli_task_dir, tmp_path):
+    """Harbor's task settings can cap memory and processors. The cap on processes and the capped folder
+    of the cases travel in a file Harbor merges into the container it makes."""
+    import dodambench.vet as vetting
+    task = load_task(cli_task_dir)
+    made = to_harbor(task, "python", tmp_path / "out")
+    compose = made / "environment/docker-compose.yaml"
+    assert compose.is_file(), "nothing tells Harbor to cap the processes or to give the cases their folder"
+    text = compose.read_text()
+    assert "pids_limit:" in text and "/dodam-cases:" in text and "size=8m" in text and "nr_inodes=20000" in text
+    assert CANARY not in text
+    room_of = getattr(vetting, "container_room", None)
+    assert room_of is not None
+    room = room_of(task, 65536)
+    cmd = vetting.docker_create_cmd("name", "dodam-bench/python:dev", "build", room)
+    assert cmd[cmd.index("--tmpfs") + 1] in text, "vetting and the measurement must give the cases the same folder"
+    assert f"pids_limit: {room['processes']}" in text
+    # a machine that cannot give the cases their room is refused, with a diagnostic that is JSON first
+    with pytest.raises(vetting.VetError) as refused:
+        room_of(task, 400)
+    assert json.loads(str(refused.value))["key"] == "limits.memory_mb"

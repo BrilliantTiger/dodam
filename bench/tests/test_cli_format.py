@@ -65,9 +65,12 @@ def test_a_missing_limit_and_an_unknown_one_are_reported(cli_task_dir):
     assert any("case_processes" in e for e in errors) and any("case_threads" in e for e in errors)
 
 
-def test_a_case_may_not_take_all_the_memory_the_judge_lives_in(cli_task_dir):
-    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 2048")
-    assert any("case_memory_mb" in e and "memory_mb" in e for e in errors_of(cli_task_dir))
+def test_the_containers_memory_must_hold_the_case_its_files_and_the_judge(cli_task_dir):
+    """The case's files live in memory, so the container's memory is the case's memory, its files and the judge."""
+    assert errors_of(cli_task_dir) == []
+    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 1785")   # 1785 + 8 + 256 > 2048
+    errors = errors_of(cli_task_dir)
+    assert any("memory_mb must be at least 2049" in e for e in errors), errors
 
 
 def test_a_command_line_task_takes_no_server_settings(cli_task_dir):

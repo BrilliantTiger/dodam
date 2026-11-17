@@ -2,11 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from conftest import CANARY, write
+from conftest import CANARY, unseparated, write
 from dodambench.task import load_task
 import subprocess
 
-from dodambench.judge import close_to_others
 from dodambench.vet import docker_create_cmd, judgement_problems, vet
 
 
@@ -183,7 +182,7 @@ def small_task(tmp_path: Path) -> Path:
 
 def test_vet_judges_every_solution_and_flags_the_one_that_misses(small_task, tmp_path):
     task = load_task(small_task)
-    results = {r["solution"]: r for r in vet(task, "python", tmp_path / "vet")}
+    results = {r["solution"]: r for r in vet(task, "python", tmp_path / "vet", **unseparated(vet))}
     assert set(results) == {"secure", "vulnerable-open-private", "vulnerable-harmless", "broken-bad-health"}
     for name in ("secure", "vulnerable-open-private", "broken-bad-health"):
         assert results[name]["ok"], results[name]
@@ -238,7 +237,8 @@ def test_scaffold_is_prepared_once_per_content(tmp_path):
 
 
 def test_image_judge_runs_the_verifier_judge_without_network():
-    cmd = docker_create_cmd("dodam-vet-1", "dodam-bench/python:dev", "change-1")
+    cmd = docker_create_cmd("dodam-vet-1", "dodam-bench/python:dev", "change-1",
+                            {"memory_mb": 1024, "cpus": 2, "processes": 512})
     assert cmd[:4] == ["docker", "create", "--name", "dodam-vet-1"]
     assert cmd[cmd.index("--network") + 1] == "none"
     assert cmd[cmd.index("--user") + 1] == "0"
@@ -246,14 +246,6 @@ def test_image_judge_runs_the_verifier_judge_without_network():
     script = " ".join(cmd[cmd.index("dodam-bench/python:dev") + 1:])
     assert "cp -R /solution/. /app/" in script
     assert "/opt/judge/bin/python /tests/lib/dodam_judge.py" in script and "--step change-1" in script
-
-
-def test_closing_a_read_only_folder_is_not_an_error(tmp_path, monkeypatch):
-    write(tmp_path, "tests/manifest.toml", "")
-    def read_only(path, mode):
-        raise OSError(30, "Read-only file system", str(path))
-    monkeypatch.setattr("os.chmod", read_only)
-    close_to_others(tmp_path / "tests")
 
 
 def _image_ready(image: str) -> bool:

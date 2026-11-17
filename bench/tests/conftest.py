@@ -242,3 +242,10 @@ def cli_task_dir(tmp_path: Path) -> Path:
         new = "sys.exit(2)  # nothing changes"
     ''')
     return root
+
+
+def unseparated(function) -> dict:
+    """How a test asks for judging without separation, which only the project's own programs may get.
+    A judge that does not know the request yet is called without it."""
+    import inspect
+    return {"unseparated": True} if "unseparated" in inspect.signature(function).parameters else {}

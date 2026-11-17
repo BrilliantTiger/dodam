@@ -1,0 +1,385 @@
+# Every protection of the judging, with one broken variant of the code and the test that must then fail.
+#
+# `python experiments/check_protections.py` makes each variant in a copy of this folder, runs the named
+# tests there and fails when a variant leaves them all passing: then nothing pins that protection. A
+# test also checks that the protections the document names and the ones listed here are the same.
+
+[[protection]]
+what = "Only root may enter the tests, from before the build"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_build_is_held_as_the_program_is"]
+[[protection.change]]
+find = '''        keep_private(tests_dir)
+'''
+put = ''''''
+
+[[protection]]
+what = "Only root may enter the results"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_cannot_read_the_tests_or_the_judges_settings"]
+[[protection.change]]
+find = '''        keep_private(out_dir)
+'''
+put = ''''''
+
+[[protection]]
+what = "The command line of a test run names no test and no report"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging"]
+[[protection.change]]
+find = '''subprocess.run([sys.executable, "-m", "pytest"], env=env,'''
+put = '''subprocess.run([sys.executable, "-m", "pytest", *options], env=env,'''
+
+[[protection]]
+what = "The judge's own command line says nothing"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging"]
+[[protection.change]]
+find = '''    if argv is None and len(sys.argv) > 1:'''
+put = '''    if False:'''
+[[protection.change]]
+find = '''        argv = json.loads(os.environ.pop(ARGS_ENV, "[]"))'''
+put = '''        argv = sys.argv[1:]'''
+
+[[protection]]
+what = "The program's environment carries nothing of the judge's"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging"]
+[[protection.change]]
+find = '''if not k.startswith(("DODAM_", "PYTEST_")) and'''
+put = '''if True and'''
+
+[[protection]]
+what = "The program runs as a user of its own, not the build's"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_runs_as_an_ordinary_user_who_cannot_become_root"]
+[[protection.change]]
+find = '''            self.uid = free_user_id()'''
+put = '''            self.uid = pwd.getpwnam(run_as).pw_uid'''
+
+[[protection]]
+what = "The program's side can gain no rights"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_runs_as_an_ordinary_user_who_cannot_become_root"]
+[[protection.change]]
+find = '''    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        os._exit(126)
+'''
+put = ''''''
+
+[[protection]]
+what = "The program is in no group"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_runs_as_an_ordinary_user_who_cannot_become_root"]
+[[protection.change]]
+find = '''    os.setgroups(groups)'''
+put = '''    os.setgroups(groups or [0])'''
+
+[[protection]]
+what = "No place any user could write stays writable"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_program_can_write_nowhere_but_in_its_own_case"]
+[[protection.change]]
+find = '''            self.closed = close_writable_places()'''
+put = '''            self.closed = 0'''
+
+[[protection]]
+what = "What the build left running is ended"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_build_cannot_prepare_the_ground_for_the_program"]
+[[protection.change]]
+find = '''    if side:
+        side.end()
+    try:
+        proc.wait(timeout=30)'''
+put = '''    try:
+        proc.wait(timeout=30)'''
+
+[[protection]]
+what = "The build runs confined, as the program does"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_build_is_held_as_the_program_is"]
+[[protection.change]]
+find = '''        proc = subprocess.Popen(["/bin/sh", "-c", command], cwd=app_dir, stdin=subprocess.DEVNULL,'''
+put = '''        proc = subprocess.Popen(["su", "-s", "/bin/sh", side.name, "-c", command] if side else ["/bin/sh", "-c", command], cwd=app_dir, stdin=subprocess.DEVNULL,'''
+[[protection.change]]
+find = '''                                preexec_fn=side.entering() if side else None, start_new_session=side is None)'''
+put = '''                                start_new_session=True)'''
+
+[[protection]]
+what = "The served web program runs confined"
+file = "dodambench/judge.py"
+tests = ["tests/test_web_isolation.py::test_the_build_and_the_served_program_run_confined"]
+[[protection.change]]
+find = '''            self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
+                                         env=side.environment(self.env), preexec_fn=side.entering(),'''
+put = '''            self.proc = subprocess.Popen(["su", "-s", "/bin/sh", self.run_as, "-c", self.start_cmd], cwd=self.app_dir,
+                                         env=self.env, start_new_session=True,'''
+
+[[protection]]
+what = "What the build prints is dropped but for its end"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_build_that_misbehaves_never_takes_the_judge_down"]
+[[protection.change]]
+find = '''        tail = (tail + data)[-4000:]'''
+put = '''        tail = tail + data'''
+
+[[protection]]
+what = "The calls for what outlives a process are refused"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[memory that would outlive its processes]"]
+[[protection.change]]
+find = '''    if filter_bytes is not None:'''
+put = '''    if False:'''
+
+[[protection]]
+what = "The program's side is the first to go when memory runs out"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_kernel_holds_the_program_to_its_limits"]
+[[protection.change]]
+find = '''        f.write("1000")'''
+put = '''        f.write("0")'''
+
+[[protection]]
+what = "The kernel refuses a process or thread beyond the limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[processes until no more can be made]"]
+[[protection.change]]
+find = '''{**kernel_limits, "RLIMIT_NPROC": limits["processes"]}'''
+put = '''{**kernel_limits}'''
+
+[[protection]]
+what = "The kernel refuses a file larger than the limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[a sparse file larger than a file may be]"]
+[[protection.change]]
+find = '''kernel_limits = {"RLIMIT_CORE": 0, "RLIMIT_FSIZE": file_bytes}'''
+put = '''kernel_limits = {"RLIMIT_CORE": 0}'''
+
+[[protection]]
+what = "A crashing program writes no dump of its memory"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_the_kernel_holds_the_program_to_its_limits"]
+[[protection.change]]
+find = '''kernel_limits = {"RLIMIT_CORE": 0, "RLIMIT_FSIZE": file_bytes}'''
+put = '''kernel_limits = {"RLIMIT_FSIZE": file_bytes}'''
+
+[[protection]]
+what = "The cases live in the folder the container caps"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[files deleted while they are open]"]
+[[protection.change]]
+find = '''            self.work_root = CASES_DIR
+            remove_tree(self.work_root, keep_top=True)
+'''
+put = '''            self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
+'''
+
+[[protection]]
+what = "The judge refuses a container without a memory cap"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_judge_reads_its_containers_caps_and_refuses_when_one_is_missing"]
+[[protection.change]]
+find = '''    if memory is None:'''
+put = '''    if False:'''
+
+[[protection]]
+what = "The judge refuses a memory cap that cannot hold on the machine"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold"]
+[[protection.change]]
+find = '''    if memory > machine:'''
+put = '''    if False:'''
+
+[[protection]]
+what = "The judge refuses a container without a cap on processes"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold"]
+[[protection.change]]
+find = '''    if processes is None:'''
+put = '''    if False:'''
+
+[[protection]]
+what = "The judge refuses a container without the cases' capped folder"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold"]
+[[protection.change]]
+find = '''        if not mounted or size != disk_mb or room.f_files > CASE_ENTRIES:'''
+put = '''        if False:'''
+
+[[protection]]
+what = "The judge measures all memory of the container and ends the program above the limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory]"]
+[[protection.change]]
+find = '''                if self._side is not None and memory_taken() - memory_before > max_memory:'''
+put = '''                if False:'''
+
+[[protection]]
+what = "A program the kernel ended for memory fails its case"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[more memory than the whole container has]"]
+[[protection.change]]
+find = '''        if self._side is not None and _judge.killed_for_memory() > killed_before:'''
+put = '''        if False:'''
+
+[[protection]]
+what = "The program is ended at the case's time limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_program_that_hangs_fails_its_case_only_and_never_hangs_the_judge"]
+[[protection.change]]
+find = '''            if now >= deadline:'''
+put = '''            if False:'''
+
+[[protection]]
+what = "The judge stops reading output at the limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[flood of output]"]
+[[protection.change]]
+find = '''            if seen > max_out:
+                limit = "output"'''
+put = '''            if False:
+                pass'''
+
+[[protection]]
+what = "A program that leaves a process behind fails its case"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[leaves a daemon in a session of its own]"]
+[[protection.change]]
+find = '''                result.limit = "left processes"'''
+put = '''                pass'''
+
+[[protection]]
+what = "After a run and after a case nothing of the program runs"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[leaves a daemon in a session of its own]"]
+[[protection.change]]
+find = '''        if self._side is not None and not self._side.end():
+            raise fault("processes of the program could not be ended")
+'''
+put = ''''''
+
+[[protection]]
+what = "The case's folder is removed when the case ends"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[many files]"]
+[[protection.change]]
+find = '''            _judge.remove_tree(self.root)
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "Before a case anything left in the cases' folder is removed"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge"]
+[[protection.change]]
+find = '''            _judge.remove_tree(cfg["work_root"], keep_top=True)
+'''
+put = ''''''
+
+[[protection]]
+what = "Removing is bounded for any depth and follows no link"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_removing_what_a_case_left_follows_no_link_and_needs_no_depth"]
+[[protection.change]]
+find = '''    top = str(top)
+    here = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+'''
+put = '''    top = str(top)
+    if not keep_top:
+        return shutil.rmtree(top)
+    here = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+'''
+
+[[protection]]
+what = "What cannot be removed fails the case and is no fault of the judge"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge"]
+[[protection.change]]
+find = '''            self._broken.append(f"left what cannot be removed ({exc.strerror})")'''
+put = '''            raise fault(f"cannot remove the case's folder: {exc}") from None'''
+
+[[protection]]
+what = "A broken limit fails the case even when the test would be left unjudged"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_limit_broken_before_a_test_is_left_unjudged_fails_it"]
+[[protection.change]]
+find = '''        if c._broken:
+            raise c.broken() from None
+        raise
+'''
+put = '''        raise
+'''
+
+[[protection]]
+what = "An unjudged check lowers the pass rate"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_check_that_was_not_judged_never_reads_as_passed"]
+[[protection.change]]
+find = '''round(passed / asked, 4) if asked else 1.0'''
+put = '''round(passed / len(cases), 4) if cases else 1.0'''
+
+[[protection]]
+what = "A fault the case runner records is the judge's, and no result is written"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_fault_of_the_judge_in_the_container_leaves_no_result"]
+[[protection.change]]
+find = '''        if self.fault_file.exists():'''
+put = '''        if False:'''
+
+[[protection]]
+what = "Judging without separation must be asked for"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_judging_without_separation_must_be_asked_for_and_marks_its_result"]
+[[protection.change]]
+find = '''        if not unseparated:'''
+put = '''        if False:'''
+
+[[protection]]
+what = "Root never judges without separation"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_root_never_judges_without_separation"]
+[[protection.change]]
+find = '''        if hasattr(os, "geteuid") and os.geteuid() == 0:'''
+put = '''        if False:'''
+
+[[protection]]
+what = "A result without separation says so"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_judging_without_separation_must_be_asked_for_and_marks_its_result"]
+[[protection.change]]
+find = '''"separated": 1.0 if run_as else 0.0,'''
+put = '''"separated": 1.0,'''
+
+[[protection]]
+what = "Vetting without an image must be asked for"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_judge.py::test_vetting_without_an_image_must_be_asked_for_and_says_so_in_every_result"]
+[[protection.change]]
+find = '''    if image is None and not unseparated:'''
+put = '''    if False:'''
+
+[[protection]]
+what = "Every vetting container is capped in memory and processes"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
+[[protection.change]]
+find = '''"--cpus", str(room["cpus"]), "--pids-limit", str(room["processes"])]'''
+put = '''"--cpus", str(room["cpus"])]'''
+
+[[protection]]
+what = "A memory cap the Docker machine cannot hold is lowered and reported"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
+[[protection.change]]
+find = '''    memory = asked if machine_mb is None else min(asked, int(machine_mb * MACHINE_SHARE))'''
+put = '''    memory = asked'''
+
+[[protection]]
+what = "Vetting containers have no network"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_image_judge_runs_the_verifier_judge_without_network"]
+[[protection.change]]
+find = '''"--network", "none", '''
+put = ''''''

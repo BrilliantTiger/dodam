@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import write
+from conftest import unseparated, write
 from dodambench.judge import App, judge, restore_deps, user_pids, write_output
 
 
@@ -61,7 +61,7 @@ def test_security_test_whose_precondition_fails_is_unjudged_not_a_vulnerability(
     env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": "uvicorn main:app --host 127.0.0.1 --port $PORT",
            "PORT": str(free_port())}
     path = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
-    result = judge(tests, app, "build", tmp_path / "out", lang_env=env, extra_env={"PATH": path})
+    result = judge(tests, app, "build", tmp_path / "out", lang_env=env, extra_env={"PATH": path}, **unseparated(judge))
     r = result["reward"]
     assert r["functional_pass_rate"] == 1.0 and r["functional_judged"] == 1.0
     assert r["security_judged"] == 0.0 and r["unjudged"] == 1.0
@@ -90,7 +90,7 @@ def test_program_that_does_not_start_fails_features_and_leaves_security_unjudged
     app = tmp_path / "app"
     write(app, "main.py", "raise SystemExit(3)\n")
     env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
-    r = judge(tests, app, "build", tmp_path / "out", lang_env=env)["reward"]
+    r = judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))["reward"]
     assert r["functional_pass_rate"] == 0.0 and r["functional_judged"] == 1.0
     assert r["vulns_found"] == 0.0 and r["unjudged"] == 1.0
     assert r["reward"] == 0.0
@@ -138,7 +138,7 @@ def test_judge_builds_against_the_pristine_dependencies(tmp_path: Path):
     env = {"STEPS": "build", "BUILD_CMD": "test -L node_modules && test -f node_modules/pinned.txt",
            "START_CMD": f"{sys.executable} -m http.server $PORT --bind 127.0.0.1", "PORT": str(free_port()),
            "DEPS_DIR": str(deps), "DEPS_LINKS": "node_modules"}
-    r = judge(tests, app, "build", tmp_path / "out", lang_env=env)["reward"]
+    r = judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))["reward"]
     assert r["build_ok"] == 1.0 and r["reward"] == 1.0
 
 
@@ -176,7 +176,7 @@ def test_relative_folders_are_judged_like_absolute_ones(tmp_path: Path, monkeypa
     monkeypatch.chdir(tmp_path)
     env = {"STEPS": "build", "BUILD_CMD": "",
            "START_CMD": f"{sys.executable} -m http.server $PORT --bind 127.0.0.1", "PORT": str(free_port())}
-    r = judge(Path("tests"), Path("app"), "build", Path("out"), lang_env=env)["reward"]
+    r = judge(Path("tests"), Path("app"), "build", Path("out"), lang_env=env, **unseparated(judge))["reward"]
     assert r["functional_pass_rate"] == 1.0 and r["reward"] == 1.0
 
 
