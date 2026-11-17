@@ -34,7 +34,11 @@ def main() -> None:
         raise Captured
 
     docker_module.asyncio.create_subprocess_exec = fake_exec
-    requested = {"DODAM_PROBE_SECRET_VALUE": secret, "DODAM_PROBE_EMPTY": "", "PATH": "/container/bin"}
+    requested = {"DODAM_PROBE_SECRET_VALUE": secret, "DODAM_PROBE_EMPTY": "", "PATH": "/container/bin",
+                 # names the docker CLI reads for itself
+                 "HTTPS_PROXY": "http://container-proxy:3128", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://container:4318",
+                 "XDG_CONFIG_HOME": "/container/config", "TMPDIR": "/container/tmp", "GODEBUG": "container=1",
+                 "BUILDKIT_PROGRESS": "container"}
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "environment").mkdir()

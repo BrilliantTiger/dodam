@@ -27,10 +27,16 @@ needs_harbor = pytest.mark.skipif(not (HARBOR_VENV / "bin" / "python").exists(),
                                   reason=f"no Harbor install at {HARBOR_VENV}")
 
 
+# Host values of names the docker CLI reads for itself; the probe asks Harbor to set other values in the container.
+HOST_CLI_ENV = {"HTTPS_PROXY": "http://host-proxy:3128", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://host:4318",
+                "XDG_CONFIG_HOME": "/host/config", "TMPDIR": "/host/tmp", "GODEBUG": "host=1",
+                "BUILDKIT_PROGRESS": "host"}
+
+
 def probe() -> dict:
     out = subprocess.run([str(HARBOR_VENV / "bin" / "python"), "-I", str(PROBE)], capture_output=True, text=True,
                          timeout=120, env={"DODAM_PROBE_SECRET": FAKE_SECRET, "PATH": HOST_PATH,
-                                           "HOME": os.environ.get("HOME", "/tmp")})
+                                           "HOME": os.environ.get("HOME", "/tmp"), **HOST_CLI_ENV})
     assert out.returncode == 0, out.stderr[-2000:]
     return json.loads(out.stdout.strip().splitlines()[-1])
 
@@ -57,6 +63,14 @@ def test_names_the_docker_cli_reads_itself_keep_the_host_value():
     out = probe()
     assert "PATH=/container/bin" in flags(out["argv"])
     assert out["env"]["PATH"] == HOST_PATH
+
+
+@needs_harbor
+@pytest.mark.parametrize("name", sorted(HOST_CLI_ENV))
+def test_the_container_value_of_a_name_the_docker_cli_reads_never_steers_the_host_cli(name):
+    out = probe()
+    assert out["env"][name] == HOST_CLI_ENV[name]  # the docker CLI keeps the host's value
+    assert any(f.startswith(name + "=") for f in flags(out["argv"]))  # the container's value goes as before
 
 
 @needs_harbor
@@ -98,18 +112,45 @@ def sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def fake_install(root: Path, version: str = "0.25.0", content: str = PATCHED, dist_infos: int = 1) -> Path:
-    """A virtual environment with a `harbor` entry script; returns that script."""
+ENTRY_BODY = "import sys\nfrom harbor.cli.main import app\nif __name__ == '__main__':\n    sys.exit(app())\n"
+
+
+def rest_digest(site: Path) -> str:
+    """sha256 over "<path> <sha256>" lines, sorted by path, of every file of the harbor package but the patched one
+    (paths relative to site-packages, __pycache__ left out)."""
+    lines = []
+    for path in (site / "harbor").rglob("*"):
+        rel = path.relative_to(site).as_posix()
+        if path.is_file() and "__pycache__" not in path.parts and rel != harbor_patch.TARGET.as_posix():
+            lines.append(f"{rel} {hashlib.sha256(path.read_bytes()).hexdigest()}\n")
+    return hashlib.sha256("".join(sorted(lines)).encode()).hexdigest()
+
+
+def site_of(root: Path) -> Path:
+    return root / "venv" / "lib" / "python3.13" / "site-packages"
+
+
+def fake_install(monkeypatch, root: Path, version: str = "0.25.0", content: str = PATCHED, dist_infos: int = 1) -> Path:
+    """A virtual environment with a `harbor` entry script and a small harbor package, and the pins that fit it;
+    returns the entry script."""
     venv = root / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
     (venv / "bin" / "python").write_text("")
     harbor = venv / "bin" / "harbor"
-    harbor.write_text(f"#!{venv / 'bin' / 'python'}\nimport sys\n")
-    site = venv / "lib" / "python3.13" / "site-packages"
+    harbor.write_text(f"#!{venv / 'bin' / 'python'}\n{ENTRY_BODY}")
+    site = site_of(root)
     target = site / "harbor" / "environments" / "docker" / "docker.py"
     target.parent.mkdir(parents=True)
     target.write_text(content)
+    (site / "harbor" / "__init__.py").write_text("")
+    (site / "harbor" / "agents").mkdir()
+    (site / "harbor" / "agents" / "claude_code.py").write_text("def run(env):\n    return env\n")
+    (site / "harbor" / "agents" / "__pycache__").mkdir()
+    (site / "harbor" / "agents" / "__pycache__" / "claude_code.cpython-313.pyc").write_bytes(b"compiled")
+    monkeypatch.setattr(harbor_patch, "PACKAGE_REST_SHA256", rest_digest(site), raising=False)
+    monkeypatch.setattr(harbor_patch, "ENTRY_SCRIPT_BODIES", {sha(ENTRY_BODY)}, raising=False)
+    monkeypatch.setattr(harbor_patch, "STARTUP_FILES", {}, raising=False)
     for i in range(dist_infos):
         info = site / f"harbor-{version if i == 0 else '0.24.0'}.dist-info"
         info.mkdir()
@@ -121,37 +162,37 @@ def check(harbor: Path):
     return harbor_patch.check(harbor, version="0.25.0", original_sha256=sha(ORIGINAL), patched_sha256=sha(PATCHED))
 
 
-def test_the_pinned_patched_install_passes(tmp_path):
-    installed = check(fake_install(tmp_path))
+def test_the_pinned_patched_install_passes(tmp_path, monkeypatch):
+    installed = check(fake_install(monkeypatch, tmp_path))
     assert installed.version == "0.25.0" and installed.sha256 == sha(PATCHED)
     assert installed.venv == tmp_path / "venv"
 
 
-def test_another_harbor_version_is_refused(tmp_path):
+def test_another_harbor_version_is_refused(tmp_path, monkeypatch):
     with pytest.raises(harbor_patch.HarborSetupError) as err:
-        check(fake_install(tmp_path, version="0.25.1"))
+        check(fake_install(monkeypatch, tmp_path, version="0.25.1"))
     assert "0.25.1" in str(err.value) and "0.25.0" in str(err.value)
 
 
-def test_the_released_file_without_the_patch_is_refused_with_the_way_to_patch_it(tmp_path):
+def test_the_released_file_without_the_patch_is_refused_with_the_way_to_patch_it(tmp_path, monkeypatch):
     with pytest.raises(harbor_patch.HarborSetupError) as err:
-        check(fake_install(tmp_path, content=ORIGINAL))
+        check(fake_install(monkeypatch, tmp_path, content=ORIGINAL))
     assert "not patched" in str(err.value) and "harbor_patch apply" in str(err.value)
 
 
-def test_a_file_that_is_neither_released_nor_patched_is_refused(tmp_path):
+def test_a_file_that_is_neither_released_nor_patched_is_refused(tmp_path, monkeypatch):
     with pytest.raises(harbor_patch.HarborSetupError) as err:
-        check(fake_install(tmp_path, content=PATCHED + "# changed\n"))
+        check(fake_install(monkeypatch, tmp_path, content=PATCHED + "# changed\n"))
     assert "neither" in str(err.value)
 
 
-def test_two_installed_harbors_are_refused(tmp_path):
+def test_two_installed_harbors_are_refused(tmp_path, monkeypatch):
     with pytest.raises(harbor_patch.HarborSetupError):
-        check(fake_install(tmp_path, dist_infos=2))
+        check(fake_install(monkeypatch, tmp_path, dist_infos=2))
 
 
-def test_a_harbor_that_does_not_run_from_a_virtual_environment_is_refused(tmp_path):
-    harbor = fake_install(tmp_path)
+def test_a_harbor_that_does_not_run_from_a_virtual_environment_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
     (tmp_path / "venv" / "pyvenv.cfg").unlink()
     with pytest.raises(harbor_patch.HarborSetupError):
         check(harbor)
@@ -174,8 +215,8 @@ def target_of(venv: Path) -> Path:
     return venv / "lib" / "python3.13" / "site-packages" / "harbor" / "environments" / "docker" / "docker.py"
 
 
-def test_apply_patches_the_released_file_once(tmp_path):
-    fake_install(tmp_path, content=ORIGINAL)
+def test_apply_patches_the_released_file_once(tmp_path, monkeypatch):
+    fake_install(monkeypatch, tmp_path, content=ORIGINAL)
     venv = tmp_path / "venv"
     assert apply(venv) == "applied"
     assert target_of(venv).read_text() == PATCHED
@@ -184,24 +225,66 @@ def test_apply_patches_the_released_file_once(tmp_path):
     check(venv / "bin" / "harbor")
 
 
-def test_apply_refuses_an_unknown_file_and_leaves_it_alone(tmp_path):
-    fake_install(tmp_path, content=ORIGINAL + "# local change\n")
+def test_apply_refuses_an_unknown_file_and_leaves_it_alone(tmp_path, monkeypatch):
+    fake_install(monkeypatch, tmp_path, content=ORIGINAL + "# local change\n")
     venv = tmp_path / "venv"
     with pytest.raises(harbor_patch.HarborSetupError):
         apply(venv)
     assert target_of(venv).read_text() == ORIGINAL + "# local change\n"
 
 
-def test_apply_refuses_another_version(tmp_path):
-    fake_install(tmp_path, version="0.24.0", content=ORIGINAL)
+def test_apply_refuses_another_version(tmp_path, monkeypatch):
+    fake_install(monkeypatch, tmp_path, version="0.24.0", content=ORIGINAL)
     with pytest.raises(harbor_patch.HarborSetupError):
         apply(tmp_path / "venv")
     assert target_of(tmp_path / "venv").read_text() == ORIGINAL
 
 
-def test_apply_restores_the_file_when_the_result_is_not_the_pinned_one(tmp_path):
-    fake_install(tmp_path, content=ORIGINAL)
+def test_apply_restores_the_file_when_the_result_is_not_the_pinned_one(tmp_path, monkeypatch):
+    fake_install(monkeypatch, tmp_path, content=ORIGINAL)
     venv = tmp_path / "venv"
     with pytest.raises(harbor_patch.HarborSetupError):
         apply(venv, patched=PATCHED + "# expected something else\n")
     assert target_of(venv).read_text() == ORIGINAL
+
+
+# --- the whole Harbor install, not only the patched file --------------------------------------------------------------
+
+def test_a_changed_harbor_module_besides_the_patched_file_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    module = site_of(tmp_path) / "harbor" / "agents" / "claude_code.py"
+    module.write_text(module.read_text() + "print(env)\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+def test_a_module_added_to_the_harbor_package_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    (site_of(tmp_path) / "harbor" / "agents" / "extra.py").write_text("import os\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+def test_a_changed_entry_script_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    harbor.write_text(harbor.read_text() + "import os\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+@pytest.mark.parametrize("name,text", [("extra.pth", "import os\n"), ("sitecustomize.py", "import os\n"),
+                                       ("usercustomize.py", "import os\n")])
+def test_a_file_that_runs_code_whenever_harbors_python_starts_is_refused(tmp_path, monkeypatch, name, text):
+    harbor = fake_install(monkeypatch, tmp_path)
+    (site_of(tmp_path) / name).write_text(text)
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+def test_apply_refuses_when_another_harbor_module_differs_from_the_release(tmp_path, monkeypatch):
+    fake_install(monkeypatch, tmp_path, content=ORIGINAL)
+    module = site_of(tmp_path) / "harbor" / "agents" / "claude_code.py"
+    module.write_text(module.read_text() + "print(env)\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        apply(tmp_path / "venv")
+    assert target_of(tmp_path / "venv").read_text() == ORIGINAL

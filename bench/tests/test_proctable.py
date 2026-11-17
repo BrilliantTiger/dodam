@@ -40,7 +40,7 @@ class Stop:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self):
+    def __call__(self, proc=None):
         self.calls += 1
         return [303]
 
@@ -59,6 +59,15 @@ def test_the_processes_whose_command_line_holds_the_token_are_found():
         + f"103 docker-compose compose exec -e T={FAKE_TOKEN} main\n".encode()
     assert proctable.token_pids(table, FAKE_TOKEN) == [101, 103]
     assert proctable.token_pids(CLEAN, FAKE_TOKEN) == []
+
+
+def test_the_table_is_read_with_the_systems_ps_not_one_found_on_path(tmp_path, monkeypatch):
+    fake = tmp_path / "ps"
+    fake.write_text("#!/bin/sh\necho '    1 a made-up table'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    pids = [line.split()[0] for line in proctable.process_table().splitlines() if line.split()]
+    assert str(os.getpid()).encode() in pids
 
 
 def test_the_real_process_table_shows_the_command_lines_of_this_users_processes():
@@ -83,14 +92,15 @@ def test_a_watch_samples_before_during_and_after_the_run():
     assert record["interval_seconds"] == 0.01
 
 
-def test_the_token_in_a_command_line_stops_harbor_and_the_record_keeps_no_token():
+def test_a_watch_given_no_harbor_process_never_claims_to_have_stopped_one():
     sampler, stop = Sampler(hit_from=3), Stop()
     with proctable.ProcessTableWatch(FAKE_TOKEN, sampler, interval=0.01, stop=stop) as watch:
-        assert wait_for(lambda: stop.calls == 1)
+        assert wait_for(lambda: sampler.calls >= 4)
     record = watch.record()
     assert not watch.clean and not record["clean"]
-    assert record["hit_samples"] >= 1 and record["hit_pids"] == [303] and record["stopped_harbor"]
-    assert stop.calls == 1
+    assert record["hit_samples"] >= 1 and record["hit_pids"] == [303]
+    assert record["stopped_harbor"] is False  # nothing was handed to it, so nothing was stopped
+    assert stop.calls == 0
     assert FAKE_TOKEN not in json.dumps(record)
 
 
