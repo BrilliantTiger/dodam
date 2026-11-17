@@ -218,3 +218,101 @@ def test_the_committed_data_is_what_the_script_writes(data):
     """Every number has a plain type and the file is in the script's own layout, so a hand edit shows."""
     assert DATA_FILE.read_text(encoding="utf-8") == pilot_record.to_text(data)
     assert data["schema"] == pilot_record.SCHEMA
+
+
+# --- the starts of the day that are not counted -----------------------------------------------------------------
+
+
+def older(lang="python", **changes):
+    """A record as the runner wrote it before it watched the process table and before it had the guard."""
+    rec = record(lang, **changes)
+    for key in ("process_watch", "five_hour_guard", "containers_left", "agent_errors", "missing_steps"):
+        rec.pop(key)
+    rec["leak_scan"] = {"clean": True, "hits": []}
+    rec["rate_limits"] = {"before": weekly(25), "first": weekly(25), "after": weekly(25)}
+    return rec
+
+
+def write_script_output(tmp_path, counted, not_counted):
+    out = tmp_path / "out.json"
+    argv = [*map(str, counted), "--not-counted", *map(str, not_counted), "--out", str(out)]
+    try:
+        code = pilot_record.main(argv)
+    except SystemExit as stop:
+        code = stop.code
+    assert code == 0, "the script does not take the starts that are not counted"
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_starts_that_are_not_counted_are_kept_apart_from_the_runs(tmp_path):
+    counted = write_batch(tmp_path, "20261117T114041Z", [record("go")])
+    early = write_batch(tmp_path, "20261117T073138Z", [older("python")])
+    data = write_script_output(tmp_path, [counted], [early])
+    assert [r["language"] for r in data["runs"]] == ["go"]
+    assert [r["batch_started_utc"] for r in data["starts_not_counted"]] == ["2026-11-17T07:31:38Z"]
+    start = data["starts_not_counted"][0]
+    assert start["process_watch"] is None and start["guard"] is None       # nothing watched; said, not guessed
+    assert start["leak_scan"] == {"clean": True, "hits": 0, "unchecked": None}
+    assert start["containers_left"] is None
+    assert [b["started_utc"] for b in data["batches_not_counted"]] == ["2026-11-17T07:31:38Z"]
+    assert pilot_record.problems(data) == []
+
+
+def test_a_step_that_ended_with_an_error_keeps_the_kind_of_the_error_and_not_its_text(tmp_path):
+    failed = older("python")
+    for step in failed["steps"]:
+        step["error"] = f"UnknownApiError: Command failed: claude --token {FAKE_TOKEN} in {HOME}"
+    counted = write_batch(tmp_path, "20261117T114041Z", [record("go")])
+    early = write_batch(tmp_path, "20261117T072023Z", [failed])
+    data = write_script_output(tmp_path, [counted], [early])
+    assert [s["error"] for s in data["starts_not_counted"][0]["steps"]] == ["UnknownApiError", "UnknownApiError"]
+    assert [s["error"] for s in data["runs"][0]["steps"]] == [None, None]
+    text = json.dumps(data)
+    assert FAKE_TOKEN not in text and "Command failed" not in text and "somebody-local" not in text
+
+
+def test_where_in_a_step_the_limits_were_read_is_counted_in_replies(tmp_path):
+    counted = write_batch(tmp_path, "20261117T114041Z", [record("go")])
+    lines = [{"type": "system"}, {"type": "assistant"}, {"type": "rate_limit_event"}, {"type": "user"},
+             {"type": "assistant"}, {"type": "assistant"}, {"type": "result"}]
+    folder = counted / "go" / "jobs" / "pilot-go-20261117T114041Z" / "web-demo__go__jZJqJA6" / "steps" / "build" / "agent"
+    folder.mkdir(parents=True)
+    (folder / "claude-code.txt").write_text(
+        "not json\n" + "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+    data = write_script_output(tmp_path, [counted], [])
+    build, change = data["runs"][0]["steps"]
+    assert build["limit_readings"] == {"replies": 3, "replies_before_each_reading": [1]}
+    assert change["limit_readings"] is None                                 # that step's output is not there
+
+
+def test_a_batch_cannot_be_both_counted_and_not_counted(tmp_path):
+    batch = write_batch(tmp_path, "20261117T114041Z", [record("go")])
+    out = tmp_path / "out.json"
+    try:
+        code = pilot_record.main([str(batch), "--not-counted", str(batch), "--out", str(out)])
+    except SystemExit as stop:
+        code = stop.code
+    assert code not in (0, 2) and not out.exists()     # refused by the script itself, not as an unknown option
+
+
+def test_the_committed_data_tells_every_start_of_the_day_that_left_a_record(data):
+    others = data.get("starts_not_counted")
+    assert others is not None, "the data file does not hold the starts that are not counted"
+    assert [(r["language"], r["batch_started_utc"]) for r in others] == [
+        ("python", "2026-11-17T07:20:23Z"), ("python", "2026-11-17T07:31:38Z")]
+    never_worked, complete = others
+    assert all(s["error"] is not None for s in never_worked["steps"]) and never_worked["reward"] == 0.0
+    assert sum(v or 0 for v in never_worked["tokens"].values()) == 0
+    assert all(s["error"] is None and s["reward"] == 1.0 for s in complete["steps"])
+    assert all(r["process_watch"] is None for r in others)                  # neither start was watched
+    assert all(r["process_watch"] is not None for r in data["runs"])        # every counted run was
+    assert all(r["batch_started_utc"] < data["runs"][0]["batch_started_utc"] for r in others)
+
+
+def test_the_committed_data_says_where_the_weekly_readings_fell(data):
+    for run in data["runs"]:
+        for step in run["steps"]:
+            where = step.get("limit_readings")
+            assert where is not None, "the data file does not say where in a step the limits were read"
+            assert len(where["replies_before_each_reading"]) == 1
+            assert 0 < where["replies_before_each_reading"][0] <= where["replies"]
