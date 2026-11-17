@@ -1,5 +1,5 @@
 {
- "schema": 1,
+ "schema": 2,
  "what": "measured values of pilot runs, copied field by field from the pilot's records",
  "task": "web-signup",
  "date_utc": "2026-11-17",
@@ -58,6 +58,13 @@
      "reward": 1.0,
      "agent_seconds": 45.00503,
      "judge_seconds": 34.570408,
+     "error": null,
+     "limit_readings": {
+      "replies": 4,
+      "replies_before_each_reading": [
+       3
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -77,6 +84,13 @@
      "reward": 1.0,
      "agent_seconds": 29.708311,
      "judge_seconds": 37.805269,
+     "error": null,
+     "limit_readings": {
+      "replies": 6,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -168,6 +182,13 @@
      "reward": 1.0,
      "agent_seconds": 53.895477,
      "judge_seconds": 26.955847,
+     "error": null,
+     "limit_readings": {
+      "replies": 11,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -187,6 +208,13 @@
      "reward": 1.0,
      "agent_seconds": 19.609276,
      "judge_seconds": 29.450411,
+     "error": null,
+     "limit_readings": {
+      "replies": 6,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -278,6 +306,13 @@
      "reward": 1.0,
      "agent_seconds": 47.233113,
      "judge_seconds": 37.351454,
+     "error": null,
+     "limit_readings": {
+      "replies": 4,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -297,6 +332,13 @@
      "reward": 1.0,
      "agent_seconds": 61.78508,
      "judge_seconds": 42.448757,
+     "error": null,
+     "limit_readings": {
+      "replies": 11,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -388,6 +430,13 @@
      "reward": 1.0,
      "agent_seconds": 40.631315,
      "judge_seconds": 29.168742,
+     "error": null,
+     "limit_readings": {
+      "replies": 4,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -407,6 +456,13 @@
      "reward": 1.0,
      "agent_seconds": 22.783725,
      "judge_seconds": 32.103723,
+     "error": null,
+     "limit_readings": {
+      "replies": 4,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -498,6 +554,13 @@
      "reward": 1.0,
      "agent_seconds": 39.302574,
      "judge_seconds": 30.080612,
+     "error": null,
+     "limit_readings": {
+      "replies": 5,
+      "replies_before_each_reading": [
+       2
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -517,6 +580,13 @@
      "reward": 1.0,
      "agent_seconds": 31.32318,
      "judge_seconds": 32.367435,
+     "error": null,
+     "limit_readings": {
+      "replies": 7,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -608,6 +678,13 @@
      "reward": 1.0,
      "agent_seconds": 43.501328,
      "judge_seconds": 27.85105,
+     "error": null,
+     "limit_readings": {
+      "replies": 6,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -627,6 +704,13 @@
      "reward": 1.0,
      "agent_seconds": 23.473134,
      "judge_seconds": 30.172791,
+     "error": null,
+     "limit_readings": {
+      "replies": 5,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -718,6 +802,13 @@
      "reward": 0.0,
      "agent_seconds": 53.011474,
      "judge_seconds": 29.579119,
+     "error": null,
+     "limit_readings": {
+      "replies": 6,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 25.0,
       "boundary_pass_rate": 1.0,
@@ -737,6 +828,13 @@
      "reward": 0.0,
      "agent_seconds": 42.841955,
      "judge_seconds": 31.944274,
+     "error": null,
+     "limit_readings": {
+      "replies": 8,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
      "judgement": {
       "boundary_judged": 31.0,
       "boundary_pass_rate": 1.0,
@@ -833,6 +931,440 @@
    "judge_environment_problems": 0,
    "agent_errors": 0,
    "missing_steps": 0,
+   "run_error": false
+  }
+ ],
+ "batches_not_counted": [
+  {
+   "started_utc": "2026-11-17T07:20:23Z",
+   "task": "web-signup",
+   "languages": [
+    "python"
+   ],
+   "claude_code_pinned": "2.1.326",
+   "model_asked_for": "agent default",
+   "stop_at_weekly_percent": 50.0,
+   "stop_at_five_hour_percent": 50.0,
+   "guard_agent_minutes_per_five_hours": null
+  },
+  {
+   "started_utc": "2026-11-17T07:31:38Z",
+   "task": "web-signup",
+   "languages": [
+    "python"
+   ],
+   "claude_code_pinned": "2.1.326",
+   "model_asked_for": "agent default",
+   "stop_at_weekly_percent": 50.0,
+   "stop_at_five_hour_percent": 50.0,
+   "guard_agent_minutes_per_five_hours": null
+  }
+ ],
+ "starts_not_counted": [
+  {
+   "language": "python",
+   "batch_started_utc": "2026-11-17T07:20:23Z",
+   "status": "ok",
+   "reward": 0.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 0.0,
+     "agent_seconds": 202.242313,
+     "judge_seconds": 19.782933,
+     "error": "UnknownApiError",
+     "limit_readings": {
+      "replies": 1,
+      "replies_before_each_reading": []
+     },
+     "judgement": {
+      "boundary_judged": 1.0,
+      "boundary_pass_rate": 0.0,
+      "build_ok": 1.0,
+      "functional_judged": 2.0,
+      "functional_pass_rate": 0.0,
+      "regression_broken": 0.0,
+      "reward": 0.0,
+      "security_judged": 0.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 7.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 0.0,
+     "agent_seconds": 210.383344,
+     "judge_seconds": 21.080253,
+     "error": "UnknownApiError",
+     "limit_readings": {
+      "replies": 1,
+      "replies_before_each_reading": []
+     },
+     "judgement": {
+      "boundary_judged": 2.0,
+      "boundary_pass_rate": 0.0,
+      "build_ok": 1.0,
+      "functional_judged": 3.0,
+      "functional_pass_rate": 0.0,
+      "regression_broken": 3.0,
+      "reward": 0.0,
+      "security_judged": 0.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 8.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [
+    {
+     "judged_at": "build",
+     "name": "test_accounts.py",
+     "kind": "functional",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_register_rules.py",
+     "kind": "boundary",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_concurrent_use.py",
+     "kind": "functional",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_sql_injection.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "sql-injection",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_sql_text_in_data.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "sql-injection",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_password_storage.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "plaintext-credentials",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_token_forgery.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "token-forgery",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_access_control.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "broken-access-control",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_large_body.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "resource-exhaustion",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "build",
+     "name": "test_program_files_not_served.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "file-exposure",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_accounts.py",
+     "kind": "functional",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_register_rules.py",
+     "kind": "boundary",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_concurrent_use.py",
+     "kind": "functional",
+     "from_step": "build",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_sql_injection.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "sql-injection",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_sql_text_in_data.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "sql-injection",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_password_storage.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "plaintext-credentials",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_token_forgery.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "token-forgery",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_access_control.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "broken-access-control",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_large_body.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "resource-exhaustion",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_program_files_not_served.py",
+     "kind": "security",
+     "from_step": "build",
+     "weakness": "file-exposure",
+     "outcome": "skipped",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_logout_and_profile.py",
+     "kind": "functional",
+     "from_step": "change-1",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_profile_rules.py",
+     "kind": "boundary",
+     "from_step": "change-1",
+     "weakness": null,
+     "outcome": "failed",
+     "judge_said": null
+    },
+    {
+     "judged_at": "change-1",
+     "name": "test_logout_token_reuse.py",
+     "kind": "security",
+     "from_step": "change-1",
+     "weakness": "broken-authentication",
+     "outcome": "skipped",
+     "judge_said": null
+    }
+   ],
+   "wall_seconds": 507.4,
+   "harbor_wall_seconds": 504.721457,
+   "time_limit_seconds": null,
+   "turns": 2,
+   "tokens": {
+    "input": 0,
+    "cache_read": 0,
+    "cache_creation": 0,
+    "output": 0
+   },
+   "cost_usd_as_the_cli_counts_it": 0.0,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": null,
+    "first": null,
+    "after": null
+   },
+   "windows_not_reported": null,
+   "limit_events": 0,
+   "limit_events_using_extra_usage": 0,
+   "guard": null,
+   "process_watch": null,
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": null
+   },
+   "containers_left": null,
+   "judge_environment_problems": 0,
+   "agent_errors": null,
+   "missing_steps": null,
+   "run_error": false
+  },
+  {
+   "language": "python",
+   "batch_started_utc": "2026-11-17T07:31:38Z",
+   "status": "ok",
+   "reward": 1.0,
+   "harbor_returncode": 0,
+   "steps": [
+    {
+     "step": "build",
+     "reward": 1.0,
+     "agent_seconds": 39.449296,
+     "judge_seconds": 33.428533,
+     "error": null,
+     "limit_readings": {
+      "replies": 4,
+      "replies_before_each_reading": [
+       3
+      ]
+     },
+     "judgement": {
+      "boundary_judged": 25.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 6.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 8.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    },
+    {
+     "step": "change-1",
+     "reward": 1.0,
+     "agent_seconds": 32.669666,
+     "judge_seconds": 37.690848,
+     "error": null,
+     "limit_readings": {
+      "replies": 6,
+      "replies_before_each_reading": [
+       1
+      ]
+     },
+     "judgement": {
+      "boundary_judged": 31.0,
+      "boundary_pass_rate": 1.0,
+      "build_ok": 1.0,
+      "functional_judged": 8.0,
+      "functional_pass_rate": 1.0,
+      "regression_broken": 0.0,
+      "reward": 1.0,
+      "security_judged": 9.0,
+      "security_pass_rate": 1.0,
+      "unjudged": 0.0,
+      "vulns_found": 0.0
+     }
+    }
+   ],
+   "failed_checks": [],
+   "wall_seconds": 198.7,
+   "harbor_wall_seconds": 196.08845,
+   "time_limit_seconds": null,
+   "turns": 7,
+   "tokens": {
+    "input": 12,
+    "cache_read": 101041,
+    "cache_creation": 21934,
+    "output": 8353
+   },
+   "cost_usd_as_the_cli_counts_it": 0.1813941,
+   "claude_code": {
+    "pinned": "2.1.326",
+    "observed": "2.1.326"
+   },
+   "model": "claude-sonnet-5-5",
+   "weekly": {
+    "before": null,
+    "first": {
+     "percent": null,
+     "status": "allowed"
+    },
+    "after": {
+     "percent": 25.0,
+     "status": "allowed"
+    }
+   },
+   "windows_not_reported": null,
+   "limit_events": 2,
+   "limit_events_using_extra_usage": 0,
+   "guard": null,
+   "process_watch": null,
+   "leak_scan": {
+    "clean": true,
+    "hits": 0,
+    "unchecked": null
+   },
+   "containers_left": null,
+   "judge_environment_problems": 0,
+   "agent_errors": null,
+   "missing_steps": null,
    "run_error": false
   }
  ]
