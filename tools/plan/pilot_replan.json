@@ -201,6 +201,9 @@
     "runs": 46,
     "whole_rounds_of_the_languages": 6,
     "runs_beyond_whole_rounds": 4,
+    "languages_run_once_more": 4,
+    "runs_of_those_languages": 7,
+    "languages_run_in_whole_rounds_only": 3,
     "agent_minutes": 60.7,
     "runs_wholly_between_first_and_last_reading": 45,
     "one_run_below_points_if_unmoved": 0.022,
@@ -2748,6 +2751,97 @@
     "latest": "2036-10-15",
     "days_apart": 147,
     "weeks_apart": 21,
+    "seeds_at_the_last_day": 0
+   },
+   "last_day_of_the_simulation": "2042-10-25"
+  },
+  "double_capacity": {
+   "working_days_a_week": 30,
+   "sims_per_seed": 1200,
+   "tasks": 140,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-02-03",
+      "p80": "2027-02-17"
+     },
+     "rel_10": {
+      "p50": "2030-12-18",
+      "p80": "2031-11-19"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-02-03",
+      "p80": "2027-02-17"
+     },
+     "rel_10": {
+      "p50": "2031-01-01",
+      "p80": "2031-12-03"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-02-03",
+      "p80": "2027-02-24"
+     },
+     "rel_10": {
+      "p50": "2030-12-11",
+      "p80": "2031-12-17"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-02-03",
+      "p80": "2027-02-24"
+     },
+     "rel_10": {
+      "p50": "2030-12-18",
+      "p80": "2032-01-07"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-02-03",
+      "p80": "2027-02-24"
+     },
+     "rel_10": {
+      "p50": "2030-12-25",
+      "p80": "2031-11-26"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-02-03",
+    "latest": "2027-02-03",
+    "days_apart": 0,
+    "weeks_apart": 0,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2027-02-17",
+    "latest": "2027-02-24",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2030-12-11",
+    "latest": "2031-01-01",
+    "days_apart": 21,
+    "weeks_apart": 3,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2031-11-19",
+    "latest": "2032-01-07",
+    "days_apart": 49,
+    "weeks_apart": 7,
     "seeds_at_the_last_day": 0
    },
    "last_day_of_the_simulation": "2042-10-25"

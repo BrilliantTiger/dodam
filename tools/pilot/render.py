@@ -18,6 +18,8 @@ ROOT = HERE.parent.parent
 DATA = ROOT / "bench" / "records" / "pilot-2026-11-17.json"
 REPLAN = ROOT / "tools" / "plan" / "pilot_replan.json"
 EARLIER = ROOT / "tools" / "plan" / "claude_only.json"  # the single-seed dates of charter version 0.7
+ANCHORS = ROOT / "tools" / "plan" / "anchors.json"     # the plan's milestone dates, which the charter keeps
+PART = " @part"   # a template line that ends so must stand inside a line of the document, not be a whole line
 LANGS = ("ko", "en")
 NAMES = {"python": "Python", "typescript": "TypeScript", "java": "Java", "csharp": "C#", "go": "Go",
          "rust": "Rust", "cpp": "C++"}
@@ -64,6 +66,26 @@ def short_date(iso: str, lang: str) -> str:
 def month_of(iso: str, lang: str) -> str:
     y, m, _ = (int(x) for x in iso.split("-"))
     return f"{y}년 {m}월" if lang == "ko" else f"{MONTHS[m - 1]} {y}"
+
+
+def us_date(iso: str, lang: str) -> str:
+    """A date as the charter's schedule table writes it."""
+    y, m, d = (int(x) for x in iso.split("-"))
+    return f"{y}년 {m}월 {d}일" if lang == "ko" else f"{MONTHS[m - 1]} {d}, {y}"
+
+
+def anchor_facts(anchors: dict, replan: dict, lang: str) -> dict:
+    """The milestone dates of the plan at the plan's capacity, as one command gives them."""
+    first = replan["forecast"]["planning"]["seeds"][0]
+    if first["seed"] != replan["forecast"]["plan_seed"] or \
+            first["rel_10"] != {q: anchors["rel_10"][q] for q in ("p50", "p80")}:
+        raise RenderError("the milestone dates are not the dates the forecast gives for the plan's own seed")
+    f = {}
+    for name, found in anchors.items():
+        for q in ("p50", "p80"):
+            f[f"anchor.{name}.{q}"] = us_date(found[q], lang)
+            f[f"anchor.{name}.{q}_month"] = month_of(found[q], lang)
+    return f
 
 
 def percent(share: float) -> str:
@@ -257,6 +279,8 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
                 raise RenderError(f"the estimates do not say {which}.{key}, which the document states")
             f[f"next.{short}.{key}"] = f"{value:.3f}" if key == "one_run_below_points_if_unmoved" and which == \
                 "same_model" else num(value)
+    if not cap["next_measurements"]["same_model"]["languages_run_once_more"]:
+        raise RenderError("the document says some languages are run once more than the others in the first night")
     if not cap["next_measurements"]["same_model"]["unmoved_shows_the_baseline_fits_that_room"]:
         raise RenderError("the document says an unmoved figure after the first night shows the baseline fits the room")
 
@@ -307,7 +331,8 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
     fc = replan["forecast"]
     put("fc.n_seeds", len(fc["seeds"]))
     f["fc.plan_seed"] = str(fc["plan_seed"])
-    for name in ("planning", "planning_with_every_task", "two_companies", "claude_dedicated", "claude_shared"):
+    for name in ("planning", "planning_with_every_task", "two_companies", "double_capacity", "claude_dedicated",
+                 "claude_shared"):
         case = fc[name]
         put(f"fc.{name}.sims", case["sims_per_seed"])
         put(f"fc.{name}.tasks", case["tasks"])
@@ -319,10 +344,18 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
                 f[f"fc.{name}.{key}.{end}_month"] = month_of(found[end], lang)
             put(f"fc.{name}.{key}.weeks_apart", found["weeks_apart"])
             put(f"fc.{name}.{key}.days_apart", found["days_apart"])
+            if found["earliest"] == found["latest"]:    # only then may a document say "with every seed"
+                f[f"fc.{name}.{key}.every_seed"] = found["earliest"]
+        if case["seeds"][0]["seed"] != fc["plan_seed"]:
+            raise RenderError("the first seed of a forecast is not the plan's seed")
+        f[f"fc.{name}.plan_seed.rel_10_p50_month"] = month_of(case["seeds"][0]["rel_10"]["p50"], lang)
     put_date("fc.plan.rel_10_p50", fc["planning"]["seeds"][0]["rel_10"]["p50"])
     put_date("fc.plan.rel_10_p80", fc["planning"]["seeds"][0]["rel_10"]["p80"])
     put_date("fc.plan.g_dir_p50", fc["planning"]["seeds"][0]["g_dir"]["p50"])
     f["fc.plan.rel_10_p50_month"] = month_of(fc["planning"]["seeds"][0]["rel_10"]["p50"], lang)
+    f["fc.plan.rel_10_p80_month"] = month_of(fc["planning"]["seeds"][0]["rel_10"]["p80"], lang)
+    if fc["double_capacity"]["working_days_a_week"] != 2 * fc["planning"]["working_days_a_week"]:
+        raise RenderError("the document calls this case twice the plan's capacity")
     f["fc.last_month"] = month_of(fc["claude_shared"]["last_day_of_the_simulation"], lang)
     for name in ("claude_dedicated", "claude_shared"):
         if fc[name]["rel_10_p80"]["seeds_at_the_last_day"] != len(fc["seeds"]):
@@ -344,6 +377,8 @@ def render(lang: str, data: dict | None = None, replan: dict | None = None, text
     if "{{v07." in text:  # only the lines that set an earlier charter's dates beside today's need them
         earlier = json.loads(EARLIER.read_text(encoding="utf-8")) if earlier is None else earlier
         known.update(earlier_facts(earlier, replan, lang))
+    if "{{anchor." in text:
+        known.update(anchor_facts(json.loads(ANCHORS.read_text(encoding="utf-8")), replan, lang))
 
     def fill(line: str, values: dict) -> str:
         def value(m):
@@ -375,7 +410,9 @@ def render(lang: str, data: dict | None = None, replan: dict | None = None, text
     return "\n".join(out) + "\n"
 
 
-# Templates whose rendered lines must stand word for word, each as a whole line, in a document kept by hand.
+# Templates whose rendered lines must stand word for word in a document kept by hand: each as a whole line, or,
+# when the template line ends with " @part", inside a line (a table cell or the sentences of a paragraph whose
+# other figures are decisions or findings of research and have no computation here).
 QUOTES = {
     "charter": {"ko": "docs/charter.ko.md", "en": "docs/charter.en.md"},
     "readme": {"ko": "README.ko.md", "en": "README.md"},
@@ -397,8 +434,13 @@ def quoted(name: str, lang: str, data: dict | None = None, replan: dict | None =
 
 def missing_quotes(name: str, lang: str, data: dict | None = None, replan: dict | None = None) -> list[str]:
     """Rendered lines that the hand-kept document does not carry as they are."""
-    have = set((ROOT / QUOTES[name][lang]).read_text(encoding="utf-8").splitlines())
-    return [line for line in quoted(name, lang, data, replan) if line not in have]
+    return absent(quoted(name, lang, data, replan), (ROOT / QUOTES[name][lang]).read_text(encoding="utf-8"))
+
+
+def absent(lines: list[str], document_text: str) -> list[str]:
+    have = set(document_text.splitlines())
+    return [line for line in lines
+            if (line[:-len(PART)] not in document_text if line.endswith(PART) else line not in have)]
 
 
 def own_digits(lang: str, path: Path | None = None) -> list[str]:

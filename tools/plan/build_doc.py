@@ -115,7 +115,10 @@ def pilot_figures():
         raise SystemExit("the forecast's own seed no longer gives the milestone dates the plan prints")
     if plan["tasks"] != sched["tasks_rolled"] or plan["tasks"] + sched["tasks_added_later_and_left_out"] != len(ITEMS):
         raise SystemExit("the tasks the forecast rolled and the tasks added later do not add up to the work breakdown")
-    span = lambda case, key, show: f"{show(fc[case][key]['earliest'])}~{show(fc[case][key]['latest'])}"
+    def span(case, key, show):
+        """A range over the seeds; where every seed gives the same date, that date and the words that say so."""
+        first, last = fc[case][key]["earliest"], fc[case][key]["latest"]
+        return f"{show(first)}(어느 씨앗에서나 같다)" if first == last else f"{show(first)}~{show(last)}"
     today, alone = (sched["capacities"][name]["after_x1"] for name in ("claude_shared", "claude_dedicated"))
     days = sched["working_days_a_week"]
     return {
@@ -126,6 +129,9 @@ def pilot_figures():
         "fc_rel_p50_weeks": plan["rel_10_p50"]["weeks_apart"], "fc_rel_p80_weeks": plan["rel_10_p80"]["weeks_apart"],
         "fc_gate_p50": span("planning", "g_dir_p50", kdate), "fc_gate_p80": span("planning", "g_dir_p80", kdate),
         "fc_shared_p50": span("claude_shared", "rel_10_p50", kmonth),
+        "fc_two_p50": span("two_companies", "rel_10_p50", kmonth),
+        "fc_double_p50": span("double_capacity", "rel_10_p50", kmonth),
+        "fc_double_p80": span("double_capacity", "rel_10_p80", kmonth),
         "fc_alone_p50": span("claude_dedicated", "rel_10_p50", kmonth),
         "fc_last": kmonth(fc["claude_shared"]["last_day_of_the_simulation"]),
         "days_plan": days["planning"], "days_shared": days["claude_shared"], "days_alone": days["claude_dedicated"],

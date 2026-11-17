@@ -13,11 +13,15 @@ differs between the columns; neither side has the pilot's numbers or the finishe
 
 Usage: python3 claude_only.py           (rewrites claude_only.json and prints the dates; a few minutes)
        python3 claude_only.py --check   (computes everything again and says whether the file is what it gives)
+
+The comparison's cases are run side by side, one process each; every one starts from its seed afresh.
 """
 import json
+import os
 import random
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -57,31 +61,60 @@ SEEDS = (11, 2029, 1, 2, 3, 4, 5, 6, 7, 8)
 PLAN_DAYS = 15
 
 
+def _modules(sims: int = SIMS):
+    """The simulation, with the two single-account scenarios added to it."""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    argv, sys.argv = sys.argv, [sys.argv[0], str(sims)]
+    try:
+        import montecarlo as M
+        import montecarlo2 as MC
+    finally:
+        sys.argv = argv
+    for label, capacity in ADDED.values():
+        M.SCEN[label] = capacity
+    return M, MC
+
+
+def _middle(job) -> str:
+    """The middle date of 1.0 for one case drawn first from one seed. Each call starts from its seed afresh,
+    so the calls can be run side by side and give what they give one after another."""
+    seed, scen, n, kw = job
+    M, MC = _modules()
+    light = dict(M.MEASURE, b_ref27=85, b_full28=75, b_final=140)
+    random.seed(seed)
+    days = sorted(r if r is not None else MC.HORIZON
+                  for r in (MC.run(scen, True, measure=light, **kw)["rel_10"] for _ in range(n)))
+    return str(MC.date_of(days[int(0.5 * len(days))]))
+
+
 def compare(seeds=SEEDS, sims: int = SIMS, more_sims: int = 2000) -> dict:
     """The middle date of 1.0 for each single-account case, drawn first from each seed."""
-    import montecarlo as M
-    import montecarlo2 as MC
+    M, _ = _modules()
     plan = list(M.SCEN)[0]
-    light = dict(M.MEASURE, b_ref27=85, b_full28=75, b_final=140)
-
-    def middle(seed, scen, n, **kw):
-        random.seed(seed)
-        days = sorted(r if r is not None else MC.HORIZON
-                      for r in (MC.run(scen, True, measure=light, **kw)["rel_10"] for _ in range(n)))
-        return str(MC.date_of(days[int(0.5 * len(days))]))
 
     def spread(values):
         return {"earliest": min(values), "latest": max(values)}
 
-    out = {"seeds": list(seeds), "sims": sims, "more_sims": more_sims}
+    jobs = {}
     for name, (label, capacity) in ADDED.items():
-        own = [middle(s, label, sims) for s in seeds]
-        scaled = [middle(s, plan, sims, cap_scale=capacity[0] / PLAN_DAYS) for s in seeds]
+        jobs[name, "own"] = [(s, label, sims, {}) for s in seeds]
+        jobs[name, "scaled"] = [(s, plan, sims, {"cap_scale": capacity[0] / PLAN_DAYS}) for s in seeds]
+        if name == "claude_alone":
+            jobs[name, "more"] = [(s, label, more_sims, {}) for s in seeds]
+    every = [job for group in jobs.values() for job in group]
+    with ProcessPoolExecutor(max_workers=min(len(every), os.cpu_count() or 1)) as pool:
+        found = iter(list(pool.map(_middle, every)))
+    dates = {key: [next(found) for _ in group] for key, group in jobs.items()}
+
+    out = {"seeds": list(seeds), "sims": sims, "more_sims": more_sims}
+    for name in ADDED:
+        own, scaled = dates[name, "own"], dates[name, "scaled"]
         out[name] = {"own_scenario": dict(spread(own), by_seed=own),
                      "plan_scenario_scaled": dict(spread(scaled), by_seed=scaled),
                      "plan_scenario_scaled_first_five_seeds": spread(scaled[1:6] or scaled)}
         if name == "claude_alone":
-            more = [middle(s, label, more_sims) for s in seeds]
+            more = dates[name, "more"]
             out[name]["own_scenario_more_runs"] = dict(spread(more), by_seed=more)
     return out
 

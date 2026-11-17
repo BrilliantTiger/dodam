@@ -24,6 +24,9 @@ WORDS = {
     "b_night": {
         "out": "같은 과제를 같은 모델로 하룻밤에 측정기의 지킴이가 허락하는 {night_runs}번, 다른 밤에 가장 큰 모델로 "
                "{large_runs}번 돌린 결과",
+        "done": "주간 사용률이 그 밤에 움직이지 않으면 기준 측정 {baseline_runs}번이 {baseline_below}%포인트보다 적게 쓴다는 것(시범 날 "
+                "남아 있던 여유는 {room}%포인트였다), 같은 실행을 되풀이했을 때의 흩어짐, 큰 모델이 이 과제에서 일하는 시간이 잰 값의 몇 "
+                "배인지 안다. 계정 하나가 한 주에 내는 양은 이 측정이 아니라 세션 기록으로 잰다",
         "start": "{day_after_the_pilot}", "end": "{pilot_row_end}",
     },
     "pm_replan_nov": {
@@ -46,6 +49,9 @@ def figures(replan: dict) -> dict:
         "window_hours": plain(used["five_hour"]["guard_window_hours"]),
         "night_runs": plain(cap["next_measurements"]["same_model"]["runs"]),
         "large_runs": plain(cap["next_measurements"]["largest_model"]["runs"]),
+        "baseline_runs": plain(cap["assumptions"]["runs"]),
+        "baseline_below": plain(cap["next_measurements"]["same_model"]["baseline_below_points_if_unmoved"]),
+        "room": plain(cap["next_measurements"]["same_model"]["room_on_the_pilot_day_points"]),
         "pilot_day": sched["pilot_day"], "pilot_day_long": f"{day.year}년 {day.month}월 {day.day}일",
         "day_after_the_pilot": str(day + dt.timedelta(days=1)), "pilot_row_end": sched["pilot_row"]["end"],
         "row_month": str(dt.date.fromisoformat(sched["baseline_row"]["start"]).month),

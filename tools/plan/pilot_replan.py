@@ -17,6 +17,10 @@ redo the arithmetic from the printed numbers.
 Usage: python3 pilot_replan.py              (rewrites pilot_replan.json; a few minutes)
        python3 pilot_replan.py --no-forecast   (keeps the committed forecast part)
        python3 pilot_replan.py --no-schedule   (keeps the committed schedule part)
+       python3 pilot_replan.py --check         (computes everything again and says whether the file is what it gives)
+
+The seeds are run side by side, one process each; every case starts from its seed afresh, so the result does
+not depend on how many run at once.
 """
 import datetime as dt
 import json
@@ -25,6 +29,7 @@ import os
 import random
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -58,8 +63,8 @@ SIMS = 2000
 # for other capacities, which run to the simulation's last day, with fewer runs.
 FORECAST_SEEDS = (2029, 1, 2, 3, 4)
 # (name, which of the simulation's capacity scenarios, working days a week, runs per seed)
-FORECAST_CASES = (("planning", 0, 15, 2000), ("two_companies", 2, 10, 1200), ("claude_dedicated", 0, 5, 1200),
-                  ("claude_shared", 0, 4, 1200))
+FORECAST_CASES = (("planning", 0, 15, 2000), ("two_companies", 2, 10, 1200), ("double_capacity", 1, 30, 1200),
+                  ("claude_dedicated", 0, 5, 1200), ("claude_shared", 0, 4, 1200))
 
 
 def day(text: str) -> dt.date:
@@ -301,6 +306,9 @@ def capacity(used: dict, row_start: str, row_end: str) -> dict:
                 "runs": n1,
                 "whole_rounds_of_the_languages": n1 // LANGUAGES,
                 "runs_beyond_whole_rounds": n1 % LANGUAGES,
+                "languages_run_once_more": n1 % LANGUAGES,
+                "runs_of_those_languages": n1 // LANGUAGES + 1,
+                "languages_run_in_whole_rounds_only": LANGUAGES - n1 % LANGUAGES,
                 "agent_minutes": round(n1 * agent / 60, 1),
                 "runs_wholly_between_first_and_last_reading": between,
                 "one_run_below_points_if_unmoved": round(step / between, 3),
@@ -327,8 +335,9 @@ def capacity(used: dict, row_start: str, row_end: str) -> dict:
     }
 
 
-def _simulation():
-    subprocess.run([sys.executable, str(HERE / "build.py")], check=True, capture_output=True)  # writes wbs.json
+def _simulation(build: bool = True):
+    if build:
+        subprocess.run([sys.executable, str(HERE / "build.py")], check=True, capture_output=True)  # writes wbs.json
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
     argv, sys.argv = sys.argv, [sys.argv[0], "1"]
@@ -344,22 +353,15 @@ def _spread(values: list[str]) -> int:
     return (day(max(values)) - day(min(values))).days
 
 
-def schedule(cap: dict, seeds=SEEDS) -> dict:
-    """The December rows, for each capacity and each case, once per seed. A case's figures are those of all
-    its runs taken together; `seeds` beside them is what each seed alone gives, which shows the noise."""
-    M, MC = _simulation()
-    scen = list(M.SCEN)[0]
-    if M.SCEN[scen][0] != PLAN_DAYS_A_WEEK:
-        raise SystemExit("the plan's capacity is no longer 15 working days a week")
+def _cases(cap: dict, M) -> dict:
+    """What each case of the schedule gives the simulation."""
     light = dict(M.MEASURE, b_ref27=85, b_full28=75, b_final=140)  # the planning scenario of the charter's dates
-    items = {it["id"]: it for it in MC.ITEMS}
-    row_end, gate_day = cap["row"]["end"], items["g_dir"]["start"]
     finished = {i: PILOT_DAY for i in FINISHED}
     measured = {f"x{c['factor']}": dict(measure=dict(light, b_baseline=c["working_days"], b_pilot=0),
                                          min_days={"b_baseline": c["nights"]}) for c in cap["cases"]}
     # The pilot has two effects. One is counting what is finished as finished on the pilot's day. The other is
     # the pilot's numbers: the agent time the baseline measurement uses and the fewest nights it can take.
-    cases = {
+    return {
         "before": dict(measure=light),
         "finished_only": dict(measure=light, finished=finished),
         "numbers_only": dict(measure=dict(light, b_baseline=cap["cases"][0]["working_days"]),
@@ -368,6 +370,40 @@ def schedule(cap: dict, seeds=SEEDS) -> dict:
         "after_x2": dict(finished=finished, **measured["x2"]),
         "after_x4": dict(finished=finished, **measured["x4"]),
     }
+
+
+def _one_seed(job) -> dict:
+    """Every capacity and case with one seed: the day each watched task ended in each run. Each case starts
+    from the seed afresh, so the seeds can be run side by side and give what they give one after another."""
+    cap, seed, sims = job
+    M, MC = _simulation(build=False)
+    scen = list(M.SCEN)[0]
+    out = {}
+    for name, days in CAPACITIES:
+        out[name] = {}
+        for case, kw in _cases(cap, M).items():
+            random.seed(seed)
+            seen = {i: [] for i in WATCHED}
+            for _ in range(sims):
+                r = MC.run(scen, True, cap_scale=days / PLAN_DAYS_A_WEEK, until="g_dir", **kw)
+                for i in WATCHED:
+                    seen[i].append(r[i] if r[i] is not None else MC.HORIZON)
+            out[name][case] = seen
+    return out
+
+
+def schedule(cap: dict, seeds=SEEDS, sims: int = SIMS) -> dict:
+    """The December rows, for each capacity and each case, once per seed. A case's figures are those of all
+    its runs taken together; `seeds` beside them is what each seed alone gives, which shows the noise."""
+    M, MC = _simulation()
+    scen = list(M.SCEN)[0]
+    if M.SCEN[scen][0] != PLAN_DAYS_A_WEEK:
+        raise SystemExit("the plan's capacity is no longer 15 working days a week")
+    items = {it["id"]: it for it in MC.ITEMS}
+    row_end, gate_day = cap["row"]["end"], items["g_dir"]["start"]
+    cases = _cases(cap, M)
+    with ProcessPoolExecutor(max_workers=min(len(seeds), os.cpu_count() or 1)) as pool:
+        by_seed = list(pool.map(_one_seed, [(cap, seed, sims) for seed in seeds]))
 
     def stats(seen: dict, n: int) -> dict:
         out = {}
@@ -378,23 +414,18 @@ def schedule(cap: dict, seeds=SEEDS) -> dict:
         out["p_gate_by_its_date"] = round(sum(1 for x in seen["g_dir"] if x <= MC.off(gate_day)) / n, 2)
         return out
 
-    def one(days_a_week: float, kw: dict) -> dict:
+    def one(name: str, case: str) -> dict:
         pooled, per_seed = {i: [] for i in WATCHED}, []
-        for seed in seeds:
-            random.seed(seed)
-            seen = {i: [] for i in WATCHED}
-            for _ in range(SIMS):
-                r = MC.run(scen, True, cap_scale=days_a_week / PLAN_DAYS_A_WEEK, until="g_dir", **kw)
-                for i in WATCHED:
-                    seen[i].append(r[i] if r[i] is not None else MC.HORIZON)
-            per_seed.append(dict(stats(seen, SIMS), seed=seed))
+        for seed, found in zip(seeds, by_seed):
+            seen = found[name][case]
+            per_seed.append(dict(stats(seen, sims), seed=seed))
             for i in WATCHED:
                 pooled[i].extend(seen[i])
-        out = stats(pooled, SIMS * len(seeds))
+        out = stats(pooled, sims * len(seeds))
         out["seeds"] = per_seed
         return out
 
-    result = {"sims_per_seed": SIMS, "seeds": list(seeds), "runs_per_case": SIMS * len(seeds), "upper_percent": 80,
+    result = {"sims_per_seed": sims, "seeds": list(seeds), "runs_per_case": sims * len(seeds), "upper_percent": 80,
               "pilot_day": PILOT_DAY, "finished_tasks": len(FINISHED),
               "tasks_rolled": len(MC.ITEMS), "tasks_added_later_and_left_out": len(M.ADDED_LATER),
               "pilot_row": {"start": PILOT_ROW[0], "end": PILOT_ROW[1],
@@ -404,7 +435,7 @@ def schedule(cap: dict, seeds=SEEDS) -> dict:
               "baseline_row": {"start": cap["row"]["start"], "end": row_end},
               "gate_day": gate_day,
               "working_days_a_week": dict(CAPACITIES),
-              "capacities": {name: {case: one(days, kw) for case, kw in cases.items()} for name, days in CAPACITIES}}
+              "capacities": {name: {case: one(name, case) for case in cases} for name, _ in CAPACITIES}}
     # How far a figure moves from seed to seed, at the most, over all cases.
     middle, upper, chance = 0, 0, 0
     for per_capacity in result["capacities"].values():
@@ -469,9 +500,11 @@ def forecast() -> dict:
         return out
 
     result = {"seeds": list(FORECAST_SEEDS), "plan_seed": FORECAST_SEEDS[0]}
-    for name, scen, days, sims in FORECAST_CASES:
-        result[name] = run(scen, days, sims)
-    result["planning_with_every_task"] = run(0, PLAN_DAYS_A_WEEK, FORECAST_CASES[0][3], all_tasks=True)
+    jobs = [(name, (scen, days, sims, False)) for name, scen, days, sims in FORECAST_CASES]
+    jobs.append(("planning_with_every_task", (0, PLAN_DAYS_A_WEEK, FORECAST_CASES[0][3], True)))
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:   # each case is a process of its own
+        for (name, _), found in zip(jobs, pool.map(lambda job: run(*job[1]), jobs)):
+            result[name] = found
     return result
 
 
@@ -498,6 +531,10 @@ def to_text(result: dict) -> str:
 
 
 if __name__ == "__main__":
+    if "--check" in sys.argv:
+        same = OUT.is_file() and OUT.read_text(encoding="utf-8") == to_text(build())
+        print(f"{OUT.name} is what the script gives" if same else f"{OUT.name} differs from what the script gives")
+        sys.exit(0 if same else 1)
     OUT.write_text(to_text(build(with_forecast="--no-forecast" not in sys.argv,
                                  with_schedule="--no-schedule" not in sys.argv)), encoding="utf-8")
     print(f"wrote {OUT.name}")
