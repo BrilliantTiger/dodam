@@ -1,0 +1,329 @@
+{
+ "what": "derived from the pilot's measured values; every assumption is named",
+ "usage": {
+  "runs": 7,
+  "agent_seconds_total": 554.1,
+  "agent_minutes_total": 9.2,
+  "agent_seconds_mean": 79.2,
+  "agent_seconds_min": 63.4,
+  "agent_seconds_max": 109.0,
+  "judge_seconds_mean": 64.5,
+  "wall_seconds_total": 1567.5,
+  "wall_minutes_total": 26.1,
+  "wall_seconds_mean": 223.9,
+  "wall_seconds_min": 160.2,
+  "wall_seconds_max": 314.1,
+  "turns_total": 60,
+  "tokens_total": {
+   "input": 116,
+   "cache_read": 1068528,
+   "cache_creation": 151078,
+   "output": 68106
+  },
+  "cost_usd_as_the_cli_counts_it_total": 1.39,
+  "weekly": {
+   "display_step_points": 1,
+   "first_batch_runs": 1,
+   "first_batch_before": 25.0,
+   "first_batch_first": 27.0,
+   "first_batch_after": 27.0,
+   "hours_between_first_and_later_runs": 3.5,
+   "later_runs": 6,
+   "later_stored_before": 27.0,
+   "later_first_reading": 35.0,
+   "later_last_reading": 35.0,
+   "rise_between_the_batches_points": 8.0,
+   "moved_during_later_runs_points": 0.0,
+   "one_run_below_points": 0.17,
+   "baseline_below_points": 107.1,
+   "runner_stops_at_percent": 50.0,
+   "room_to_the_stop_points": 15.0,
+   "runs_in_that_room_at_the_bound": 88,
+   "runs_whose_readings_moved_between_first_and_after": 0
+  },
+  "five_hour": {
+   "runs_that_reported_it": 0,
+   "guard_window_hours": 5,
+   "guard_limit_minutes": 30.0,
+   "guard_minutes_before_later_runs": 0.0,
+   "guard_minutes_after_later_runs": 8.0,
+   "guard_minutes_after_first_batch": 1.2
+  },
+  "safety": {
+   "readings": 2820,
+   "readings_later_runs": 2439,
+   "readings_while_the_agent_worked": 984,
+   "readings_with_the_token": 0,
+   "reading_interval_seconds": 0.5,
+   "clean_leak_scans": 7,
+   "leak_hits": 0,
+   "files_the_scan_could_not_read": 0,
+   "containers_left": 0,
+   "runs_where_harbor_was_stopped": 0,
+   "judge_environment_problems": 0,
+   "agent_errors": 0,
+   "limit_events_using_extra_usage": 0
+  }
+ },
+ "capacity": {
+  "assumptions": {
+   "models": 3,
+   "tasks": 10,
+   "languages": 7,
+   "repeats": 3,
+   "runs": 630,
+   "runs_per_model": 210,
+   "night_hours": 8,
+   "guard_limit_minutes": 30.0,
+   "guard_window_hours": 5,
+   "agent_hours_per_working_day": 16,
+   "measured_factor": 1,
+   "plan_hours_per_run": 0.5,
+   "plan_working_days": 19.7
+  },
+  "row": {
+   "start": "2026-12-12",
+   "end": "2027-01-01",
+   "nights": 21,
+   "runs_per_night_needed": 30
+  },
+  "cases": [
+   {
+    "factor": 1,
+    "agent_seconds_per_run": 79.2,
+    "agent_minutes_per_run": 1.32,
+    "wall_seconds_per_run": 223.9,
+    "starts_per_window": 23,
+    "minutes_for_those_starts": 85.8,
+    "runs_per_night": 46,
+    "nights": 14,
+    "fits_the_row": true,
+    "agent_hours_total": 13.9,
+    "working_days": 0.87
+   },
+   {
+    "factor": 2,
+    "agent_seconds_per_run": 158.4,
+    "agent_minutes_per_run": 2.64,
+    "wall_seconds_per_run": 303.1,
+    "starts_per_window": 12,
+    "minutes_for_those_starts": 60.6,
+    "runs_per_night": 24,
+    "nights": 27,
+    "fits_the_row": false,
+    "agent_hours_total": 27.7,
+    "working_days": 1.73
+   },
+   {
+    "factor": 4,
+    "agent_seconds_per_run": 316.8,
+    "agent_minutes_per_run": 5.28,
+    "wall_seconds_per_run": 461.5,
+    "starts_per_window": 6,
+    "minutes_for_those_starts": 46.1,
+    "runs_per_night": 12,
+    "nights": 53,
+    "fits_the_row": false,
+    "agent_hours_total": 55.4,
+    "working_days": 3.46
+   }
+  ],
+  "largest_factor_that_fits_the_row": 1.62,
+  "agent_minutes_per_run_at_that_factor": 2.14,
+  "next_measurement": {
+   "same_model_runs": 21,
+   "agent_minutes": 27.7,
+   "wall_minutes": 78.4,
+   "weekly_points_per_run_it_can_tell": 0.05,
+   "larger_model_runs": 7
+  }
+ },
+ "schedule": {
+  "sims": 2000,
+  "upper_percent": 80,
+  "pilot_day": "2026-11-17",
+  "finished_tasks": 5,
+  "pilot_row": {
+   "start": "2026-11-29",
+   "end": "2026-12-06",
+   "days_before_its_start": 12,
+   "days_before_its_end": 19
+  },
+  "baseline_working_days_in_the_plan": 20,
+  "baseline_row": {
+   "start": "2026-12-12",
+   "end": "2027-01-01"
+  },
+  "gate_day": "2027-02-24",
+  "working_days_a_week": {
+   "planning": 15,
+   "claude_only": 5
+  },
+  "capacities": {
+   "planning": {
+    "before": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2027-01-06"
+     },
+     "b_runner": {
+      "p50": "2026-12-02",
+      "p80": "2026-12-23"
+     },
+     "b_baseline": {
+      "p50": "2027-01-13",
+      "p80": "2027-02-17"
+     },
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "p_baseline_by_row_end": 0.37,
+     "p_gate_by_its_date": 0.49
+    },
+    "after_x1": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_runner": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_baseline": {
+      "p50": "2026-12-30",
+      "p80": "2027-01-20"
+     },
+     "g_dir": {
+      "p50": "2027-02-10",
+      "p80": "2027-03-17"
+     },
+     "p_baseline_by_row_end": 0.53,
+     "p_gate_by_its_date": 0.61
+    },
+    "after_x2": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_runner": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_baseline": {
+      "p50": "2027-01-13",
+      "p80": "2027-01-27"
+     },
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-03-24"
+     },
+     "p_baseline_by_row_end": 0.18,
+     "p_gate_by_its_date": 0.46
+    },
+    "after_x4": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_runner": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_baseline": {
+      "p50": "2027-02-10",
+      "p80": "2027-02-24"
+     },
+     "g_dir": {
+      "p50": "2027-03-24",
+      "p80": "2027-04-14"
+     },
+     "p_baseline_by_row_end": 0.0,
+     "p_gate_by_its_date": 0.0
+    }
+   },
+   "claude_only": {
+    "before": {
+     "b_tasks10": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-01-27",
+      "p80": "2027-03-17"
+     },
+     "b_baseline": {
+      "p50": "2027-04-28",
+      "p80": "2027-08-18"
+     },
+     "g_dir": {
+      "p50": "2027-07-14",
+      "p80": "2027-11-24"
+     },
+     "p_baseline_by_row_end": 0.02,
+     "p_gate_by_its_date": 0.04
+    },
+    "after_x1": {
+     "b_tasks10": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_runner": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_baseline": {
+      "p50": "2027-03-10",
+      "p80": "2027-05-26"
+     },
+     "g_dir": {
+      "p50": "2027-05-19",
+      "p80": "2027-09-01"
+     },
+     "p_baseline_by_row_end": 0.05,
+     "p_gate_by_its_date": 0.09
+    },
+    "after_x2": {
+     "b_tasks10": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_runner": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_baseline": {
+      "p50": "2027-03-10",
+      "p80": "2027-05-26"
+     },
+     "g_dir": {
+      "p50": "2027-05-19",
+      "p80": "2027-09-08"
+     },
+     "p_baseline_by_row_end": 0.01,
+     "p_gate_by_its_date": 0.05
+    },
+    "after_x4": {
+     "b_tasks10": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_runner": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_baseline": {
+      "p50": "2027-03-31",
+      "p80": "2027-06-02"
+     },
+     "g_dir": {
+      "p50": "2027-06-09",
+      "p80": "2027-09-15"
+     },
+     "p_baseline_by_row_end": 0.0,
+     "p_gate_by_its_date": 0.0
+    }
+   }
+  }
+ }
+}

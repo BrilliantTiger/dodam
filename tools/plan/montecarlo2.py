@@ -33,7 +33,14 @@ HORIZON = 365 * 16
 HUMAN_ITEMS = ["pm_budget", "pm_infra", "rel_names", "q_audit01_pick", "q_audit_pick", "rel_fund", "rel_gov"]
 
 
-def run(scen, outcome, cap_scale=1.0, risk_scale=1.0, over_scale=1.0, measure=None, loop_week=None, defer=()):
+def run(scen, outcome, cap_scale=1.0, risk_scale=1.0, over_scale=1.0, measure=None, loop_week=None, defer=(),
+        finished=None, min_days=None, until="rel_10"):
+    """One run of the plan. `finished` maps tasks that are already done to the day they ended: they take no
+    capacity and nothing waits for them any longer. `min_days` maps tasks to the fewest calendar days they can
+    take, whatever the capacity (a measurement that runs only so many times a night). The run ends when the
+    task `until` is done; tasks that end later are then not dated."""
+    finished = finished or {}
+    min_days = min_days or {}
     MEAS = M.MEASURE if measure is None else measure
     LOOPW = M.LOOP_PER_WEEK if loop_week is None else loop_week
     med, p10, p90 = M.SCEN[scen]
@@ -61,6 +68,9 @@ def run(scen, outcome, cap_scale=1.0, risk_scale=1.0, over_scale=1.0, measure=No
     for k, it in enumerate(ITEMS):
         if it.get("milestone"):
             continue
+        if it["id"] in finished:
+            done[k] = off(finished[it["id"]])
+            continue
         dur = off(BE(it)) - off(BS(it)) + 1
         a = it.get("ai_days", 0) + MEAS.get(it["id"], 0)
         if it["id"] in ("l_run1", "l_run2", "l_run3"):
@@ -75,9 +85,9 @@ def run(scen, outcome, cap_scale=1.0, risk_scale=1.0, over_scale=1.0, measure=No
         med_m, p90_m = M.CATS[M.cat(it)]
         m = 1 + (M.lognorm(med_m, p90_m) - 1) * over_scale
         work[k] = a * m + extra_work[it["id"]]
-        cal[k] = dur * m * (0.8 if a else 1.0) + extra_cal[it["id"]]
+        cal[k] = max(dur * m * (0.8 if a else 1.0) + extra_cal[it["id"]], min_days.get(it["id"], 0))
     elapsed = [0.0] * n
-    pending = set(range(n))
+    pending = {k for k in range(n) if done[k] is None}
     active = set()
 
     def try_start(t):
@@ -109,7 +119,7 @@ def run(scen, outcome, cap_scale=1.0, risk_scale=1.0, over_scale=1.0, measure=No
                     changed = True
 
     t = 0
-    target_k = IDX["rel_10"]
+    target_k = IDX[until]
     while done[target_k] is None and t < HORIZON:
         try_start(t)
         # pace each running task needs to finish inside its remaining calendar
