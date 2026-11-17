@@ -16,7 +16,7 @@ concurrency:
 jobs:
   bench:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,6 +49,12 @@ jobs:
       - name: Apply Dodam's patch to Harbor
         working-directory: bench
         run: python -m dodambench.harbor_patch apply
+      # The tests of what a judged command-line program can reach run the judge as root in a container
+      # of this image, without network, as the verifier does. The other six images are checked on the
+      # project's own machine, where they are already built.
+      - name: Build the Python language image
+        working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
       - name: Run the tests
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider

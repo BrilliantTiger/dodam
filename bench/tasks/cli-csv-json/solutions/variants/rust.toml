@@ -1,0 +1,114 @@
+# Variants of the Rust secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+    if !place.starts_with(folder) {
+        return refuse(3, format!("{} is outside the working folder", name.display()));
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''    fs::canonicalize(name).or_else('''
+new = '''    std::path::absolute(name).or_else('''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''.create_new(true)'''
+new = '''.create(true).truncate(true)'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''    source.take(MAX_INPUT + 1).read_to_end(&mut data)?;'''
+new = '''    source.read_to_end(&mut data)?;'''
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+    if data.len() as u64 > MAX_INPUT {
+        return refuse(2, "the input is larger than 1048576 bytes");
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+    if !record.is_empty() || !at_start {
+        record.push(text(&field));
+        records.push(record);
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+        if !file_name(value) {
+            return refuse(2, "a value of the column cannot be a file name");
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''    match fs::create_dir(&place) {'''
+new = '''    match fs::create_dir_all(&place) {'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.rs"
+old = '''
+        } else if c == b'\r' && i + 1 < n && input[i + 1] == b'\n' {
+            2
+        } else {'''
+new = '''        } else {'''

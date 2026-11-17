@@ -1,0 +1,120 @@
+# Variants of the TypeScript secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''
+  if (!inside(folder, place)) {
+    throw new Refused(3, `${name} is outside the working folder`);
+  }
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''    return fs.realpathSync(name);'''
+new = '''    return path.resolve(name);'''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''{ flag: "wx" }'''
+new = '''{ flag: "w" }'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''
+  const buffer = Buffer.alloc(MAX_INPUT + 1);
+  let size = 0;
+  while (size < buffer.length) {
+    const got = fs.readSync(fd, buffer, size, buffer.length - size, null);
+    if (got === 0) break;
+    size += got;
+  }
+  return buffer.subarray(0, size);
+'''
+new = '''
+  return fs.readFileSync(fd);
+'''
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''
+  if (data.length > MAX_INPUT) {
+    throw new Refused(2, "the input is larger than 1048576 bytes");
+  }
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''
+  if (record.length > 0 || !atStart) {
+    record.push(field);
+    records.push(record);
+  }
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''
+    if (!FILE_NAME.test(row[column])) throw new Refused(2, "a value of the column cannot be a file name");
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''    fs.mkdirSync(place);'''
+new = '''    fs.mkdirSync(place, { recursive: true });'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.ts"
+old = '''    const lineEnd = c === "\n" ? 1 : c === "\r" && i + 1 < n && text[i + 1] === "\n" ? 2 : 0;'''
+new = '''    const lineEnd = c === "\n" ? 1 : 0;'''
