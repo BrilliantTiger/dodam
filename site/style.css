@@ -1,4 +1,4 @@
-/* Dodam introduction page. One stylesheet for both languages. */
+/* Dodam introduction page. One stylesheet for all four languages. */
 
 :root {
   color-scheme: light;
@@ -108,14 +108,14 @@ body {
   line-height: 1.8;
 }
 
-:lang(ja) :is(h1, h2, h3, .lede, .btn, .status) {
+:lang(ja) :is(h1, h2, h3, .btn, .status) {
   word-break: auto-phrase;
 }
 
 .sr {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  width: 0.0625rem;
+  height: 0.0625rem;
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
@@ -151,7 +151,8 @@ a {
   width: 100%;
   max-width: 70rem;
   margin-inline: auto;
-  padding-inline: var(--gutter);
+  padding-left: max(var(--gutter), env(safe-area-inset-left));
+  padding-right: max(var(--gutter), env(safe-area-inset-right));
 }
 
 .skip {
@@ -189,6 +190,7 @@ a {
   position: sticky;
   top: 0;
   z-index: 40;
+  padding-top: env(safe-area-inset-top);
   background: color-mix(in srgb, var(--bg) 82%, transparent);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
@@ -198,14 +200,16 @@ a {
 .top .wrap {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.25rem 1rem;
   min-height: 3.75rem;
 }
 
 .brand {
   display: inline-flex;
   align-items: center;
+  min-height: 2.75rem;
   gap: 0.55rem;
   font-weight: 700;
   font-size: 1.125rem;
@@ -221,42 +225,65 @@ a {
   transition: transform 0.4s var(--ease);
 }
 
-.brand:hover i {
-  transform: scaleY(1.25);
-}
-
 .nav {
   display: flex;
   align-items: center;
-  gap: clamp(0.5rem, 2.5vw, 1.25rem);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem clamp(0.5rem, 2.5vw, 1.25rem);
   font-size: 0.9375rem;
 }
 
-.nav a,
+.nav > a,
 .link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
   text-decoration: none;
-  background: linear-gradient(currentColor, currentColor) 0 100% / 0 1.5px no-repeat;
-  transition: background-size 0.35s var(--ease), color 0.2s ease;
-  padding-block: 0.15rem;
 }
 
-.nav a:hover,
-.nav a:focus-visible,
-.link:hover,
-.link:focus-visible {
-  background-size: 100% 1.5px;
+.nav > a::after,
+.link::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.6rem;
+  height: 0.09375rem;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  transition: transform 0.35s var(--ease), opacity 0.25s ease;
 }
 
 .link {
+  justify-content: flex-start;
   color: var(--accent);
   font-weight: 600;
-  background-size: 100% 1.5px;
-  background-position: 100% 100%;
 }
 
-.link:hover,
-.link:focus-visible {
-  background-size: 0 1.5px;
+.link::after {
+  opacity: 0.35;
+  transform: none;
+}
+
+.nav > a:focus-visible::after,
+.nav > a:active::after {
+  transform: none;
+}
+
+.link:focus-visible::after,
+.link:active::after {
+  opacity: 1;
+}
+
+.rules .link {
+  display: flex;
+  width: fit-content;
 }
 
 .langs {
@@ -267,7 +294,8 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.3rem 0.8rem;
+  min-height: 2.75rem;
+  padding: 0.3rem 0.9rem;
   border: 1px solid var(--line);
   border-radius: 99rem;
   cursor: pointer;
@@ -296,15 +324,10 @@ a {
   transform: rotate(225deg);
 }
 
-.langs summary:hover,
 .langs summary:focus-visible,
 .langs[open] summary {
   border-color: var(--accent);
   background-color: var(--accent-soft);
-}
-
-.langs summary:hover {
-  transform: translateY(-1px);
 }
 
 .langs ul {
@@ -314,6 +337,9 @@ a {
   z-index: 45;
   display: grid;
   min-width: 9.5rem;
+  max-height: calc(100vh - 5rem);
+  max-height: calc(100dvh - 5rem);
+  overflow-y: auto;
   padding: 0.4rem;
   border: 1px solid var(--line);
   border-radius: 0.9rem;
@@ -322,14 +348,15 @@ a {
 }
 
 .langs li a {
-  display: block;
-  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.75rem;
   border-radius: 0.55rem;
   background-image: none;
   transition: background-color 0.2s ease, color 0.2s ease, transform 0.25s var(--ease);
 }
 
-.langs li a:hover,
 .langs li a:focus-visible {
   background-color: var(--accent-soft);
   transform: translateX(3px);
@@ -343,8 +370,9 @@ a {
 .theme {
   display: inline-grid;
   place-items: center;
-  width: 2.25rem;
-  height: 2.25rem;
+  flex: none;
+  width: 2.75rem;
+  height: 2.75rem;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 50%;
@@ -358,7 +386,6 @@ a {
   display: none;
 }
 
-.theme:hover,
 .theme:focus-visible {
   border-color: var(--accent);
   background-color: var(--accent-soft);
@@ -391,8 +418,8 @@ a {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 3.75rem);
-  min-height: calc(100svh - 3.75rem);
+  min-height: calc(100vh - 3.75rem - env(safe-area-inset-top));
+  min-height: calc(100svh - 3.75rem - env(safe-area-inset-top));
   overflow: hidden;
   overflow: clip;
 }
@@ -403,7 +430,7 @@ a {
   flex: 1;
   flex-direction: column;
   justify-content: center;
-  padding-block: clamp(2.5rem, 8vh, 6rem) 6.5rem;
+  padding-block: clamp(1.25rem, 6vh, 6rem) calc(4.5rem + env(safe-area-inset-bottom));
 }
 
 .blobs {
@@ -444,7 +471,8 @@ a {
   align-items: center;
   align-self: flex-start;
   gap: 0.55rem;
-  margin-bottom: clamp(1.25rem, 3vh, 2rem);
+  max-width: 100%;
+  margin-bottom: clamp(0.9rem, 3vh, 2rem);
   padding: 0.35rem 0.85rem;
   border: 1px solid var(--line);
   border-radius: 99rem;
@@ -455,6 +483,7 @@ a {
 
 .status i {
   position: relative;
+  flex: none;
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
@@ -470,8 +499,10 @@ a {
 }
 
 h1 {
+  --h1-scale: 1;
   max-width: 15ch;
-  font-size: clamp(2.5rem, 8.4vw, 5.75rem);
+  font-size: calc(clamp(min(2.5rem, 11.5vw), min(8.4vw, 13vh), 5.75rem) * var(--h1-scale));
+  font-size: calc(clamp(min(2.5rem, 11.5vw), min(8.4vw, 13svh), 5.75rem) * var(--h1-scale));
   font-weight: 750;
   line-height: 1.03;
   letter-spacing: -0.04em;
@@ -479,22 +510,22 @@ h1 {
 }
 
 :lang(ko) h1 {
+  --h1-scale: 0.88;
   max-width: 12em;
-  font-size: clamp(2.25rem, 7.4vw, 5rem);
   line-height: 1.16;
   letter-spacing: -0.035em;
 }
 
 :lang(ja) h1 {
+  --h1-scale: 0.82;
   max-width: 11em;
-  font-size: clamp(2.125rem, 6.8vw, 4.75rem);
   line-height: 1.22;
   letter-spacing: -0.02em;
 }
 
 :lang(es) h1 {
+  --h1-scale: 0.9;
   max-width: 17ch;
-  font-size: clamp(2.25rem, 7.4vw, 5.25rem);
 }
 
 h1 .w {
@@ -529,8 +560,12 @@ h1 em {
 .btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 0.5rem;
-  padding: 0.8rem 1.35rem;
+  max-width: 100%;
+  min-height: 3rem;
+  padding: 0.6rem min(1.35rem, 6vw);
+  text-align: center;
   border: 1px solid var(--accent);
   border-radius: 99rem;
   background: var(--accent);
@@ -547,13 +582,11 @@ h1 em {
   color: var(--ink);
 }
 
-.btn:hover,
 .btn:focus-visible {
   transform: translateY(-2px);
   box-shadow: var(--shadow);
 }
 
-.btn.ghost:hover,
 .btn.ghost:focus-visible {
   border-color: var(--accent);
   background: var(--accent-soft);
@@ -564,17 +597,17 @@ h1 em {
   transition: transform 0.3s var(--ease);
 }
 
-a:hover > .arr,
 a:focus-visible > .arr {
   transform: translateX(4px);
 }
 
 .cue {
   position: absolute;
-  left: var(--gutter);
-  bottom: 1.5rem;
+  left: max(var(--gutter), env(safe-area-inset-left));
+  bottom: calc(0.75rem + env(safe-area-inset-bottom));
   display: inline-flex;
   align-items: center;
+  min-height: 2.75rem;
   gap: 0.75rem;
   color: var(--muted);
   font-size: 0.8125rem;
@@ -585,8 +618,8 @@ a:focus-visible > .arr {
 
 .cue i {
   position: relative;
-  width: 1px;
-  height: 2.75rem;
+  width: 0.0625rem;
+  height: 2.5rem;
   background: var(--line);
   overflow: hidden;
 }
@@ -599,7 +632,6 @@ a:focus-visible > .arr {
   transform: translateY(-100%);
 }
 
-.cue:hover,
 .cue:focus-visible {
   color: var(--ink);
 }
@@ -621,7 +653,7 @@ section {
 
 h2 {
   max-width: 20ch;
-  font-size: clamp(1.875rem, 5vw, 3.25rem);
+  font-size: clamp(min(1.875rem, 8.5vw), 5vw, 3.25rem);
   font-weight: 720;
   line-height: 1.1;
   letter-spacing: -0.03em;
@@ -676,6 +708,8 @@ h2 {
 /* The dam: code flows in, unsafe pieces stop at the wall, a report comes out */
 
 .dam {
+  max-width: max(17rem, calc((100vh - 7rem) * 2.02));
+  max-width: max(17rem, calc((100svh - 7rem) * 2.02));
   margin-top: clamp(2.5rem, 6vh, 4rem);
   padding: clamp(1rem, 3vw, 2rem);
   border: 1px solid var(--line);
@@ -684,20 +718,25 @@ h2 {
 }
 
 .dam-labels {
-  position: relative;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 0.5rem;
   margin-bottom: 0.5rem;
   color: var(--muted);
-  font-size: clamp(0.75rem, 1.6vw, 0.875rem);
+  font-size: min(0.875rem, 3.4vw);
   font-weight: 600;
+  line-height: 1.25;
 }
 
 .dam-labels span:nth-child(2) {
-  position: absolute;
-  left: 48.75%;
-  transform: translateX(-50%);
   color: var(--accent);
+  text-align: center;
+  transform: translateX(-0.4em);
+}
+
+.dam-labels span:nth-child(3) {
+  text-align: right;
 }
 
 .dam svg {
@@ -784,6 +823,12 @@ h2 {
   stroke-width: 1.5;
   stroke-dasharray: 3 6;
   stroke-linecap: round;
+  opacity: 0.6;
+}
+
+.dam .drip {
+  fill: var(--accent);
+  opacity: 0;
 }
 
 .dam .rl {
@@ -844,7 +889,7 @@ h2 {
 .num {
   display: block;
   color: var(--accent);
-  font-size: clamp(3.5rem, 11vw, 6rem);
+  font-size: clamp(min(3.5rem, 20vw), 11vw, 6rem);
   font-weight: 750;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -879,7 +924,6 @@ h2 {
   transition: transform 0.35s var(--ease), border-color 0.25s ease, box-shadow 0.35s var(--ease);
 }
 
-.card:hover,
 .card:focus-within {
   transform: translateY(-4px);
   border-color: var(--accent);
@@ -934,7 +978,7 @@ h2 {
   left: 0;
   top: 0.7em;
   width: 0.5rem;
-  height: 2px;
+  height: 0.125rem;
   background: var(--accent);
 }
 
@@ -1010,6 +1054,7 @@ code {
 .marquee {
   --gap: clamp(2rem, 6vw, 4.5rem);
   display: flex;
+  touch-action: pan-y;
   gap: var(--gap);
   margin-top: clamp(2.5rem, 6vh, 4rem);
   padding-block: 1.25rem;
@@ -1114,7 +1159,7 @@ code {
 /* Footer */
 
 footer {
-  padding-block: clamp(3.5rem, 9vh, 6rem) 3rem;
+  padding-block: clamp(3.5rem, 9vh, 6rem) calc(3rem + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
 }
 
@@ -1140,37 +1185,273 @@ footer h2 {
   background-size: 0 1.5px;
 }
 
-/* Wider screens */
+/* Columns: as many as fit at the reader's text size, never narrower than the text needs. */
 
-@media (min-width: 40rem) {
-  .steps {
-    grid-template-columns: 1fr 1fr;
+.steps,
+.stats {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+}
+
+.grid,
+.rules {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+}
+
+.grid.three {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+}
+
+.grid.four {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+}
+
+.card.big ul,
+.plain,
+.timeline {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.grid > *,
+.stats > *,
+.rules > *,
+.steps > * {
+  min-width: 0;
+}
+
+/* Hover effects only where a pointer can hover. Touch gets the :active and focus states above. */
+
+@media (hover: hover) {
+  .brand:hover i {
+    transform: scaleY(1.25);
   }
 
-  .stats {
-    grid-template-columns: repeat(3, 1fr);
+  .langs summary:hover {
+    border-color: var(--accent);
+    background-color: var(--accent-soft);
   }
 
-  .grid {
-    grid-template-columns: repeat(2, 1fr);
+  .langs summary:hover {
+    transform: translateY(-1px);
   }
 
-  .rules {
-    grid-template-columns: 1fr 1fr;
+  .langs li a:hover {
+    background-color: var(--accent-soft);
+    transform: translateX(3px);
+  }
+
+  .theme:hover {
+    border-color: var(--accent);
+    background-color: var(--accent-soft);
+    transform: rotate(40deg);
+  }
+
+  .btn:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+  }
+
+  .btn.ghost:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  a:hover > .arr {
+    transform: translateX(4px);
+  }
+
+  .cue:hover {
+    color: var(--ink);
+  }
+
+  .card:hover {
+    transform: translateY(-4px);
+    border-color: var(--accent);
+    box-shadow: var(--shadow);
+  }
+
+  .marquee:hover .track {
+    animation-play-state: paused;
+  }
+
+  .nav > a:hover::after {
+    transform: none;
+  }
+
+  .link:hover::after {
+    opacity: 1;
   }
 }
 
-@media (min-width: 62rem) {
-  .grid.three {
-    grid-template-columns: repeat(3, 1fr);
+.btn:active,
+.card:active,
+.theme:active,
+.langs summary:active {
+  transform: scale(0.98);
+}
+
+/* The narrowest screens: the header keeps the language menu and the theme switch.
+   The repository link stays in the hero and in the footer. */
+
+@media (max-width: 23rem) {
+  .nav > a {
+    display: none;
+  }
+}
+
+/* Wide but not tall (an unfolded phone, a laptop): the hero uses two columns so the headline,
+   the summary and the buttons all fit the height that is really there. */
+
+@media (min-width: 44rem) and (max-height: 56rem) {
+  .hero .wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    grid-template-rows: auto auto auto;
+    align-content: center;
+    column-gap: clamp(2rem, 5vw, 4rem);
   }
 
-  .grid.four {
-    grid-template-columns: repeat(4, 1fr);
+  .status {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
-  .steps {
-    grid-template-columns: repeat(4, 1fr);
+  .hero h1 {
+    grid-column: 1;
+    grid-row: 2 / span 2;
+    align-self: center;
+    max-width: none;
+    font-size: calc(clamp(1.75rem, min(5.4vw, 10vh), 5rem) * var(--h1-scale));
+    font-size: calc(clamp(1.75rem, min(5.4vw, 10svh), 5rem) * var(--h1-scale));
+  }
+
+  .lede {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: end;
+    margin-top: 0;
+  }
+
+  .cta {
+    grid-column: 2;
+    grid-row: 3;
+    align-self: start;
+  }
+}
+
+/* A short screen (a phone on its side): the header scrolls away instead of covering the page. */
+
+@media (max-height: 30rem) {
+  .top {
+    position: static;
+  }
+
+  .hero .wrap {
+    padding-top: 0.5rem;
+  }
+
+  .hero .status {
+    margin-bottom: 0.5rem;
+  }
+
+  .hero h1 {
+    align-self: start;
+    font-size: calc(clamp(1.5rem, min(5vw, 9.5vh), 3rem) * var(--h1-scale));
+    font-size: calc(clamp(1.5rem, min(5vw, 9.5svh), 3rem) * var(--h1-scale));
+  }
+
+  html {
+    scroll-padding-top: 0.5rem;
+  }
+}
+
+/* A screen that folds down the middle: each half is a column, and nothing sits on the hinge.
+   Browsers that do not report the two halves keep the fluid layout above. */
+
+@media (horizontal-viewport-segments: 2) {
+  .wrap {
+    display: grid;
+    grid-template-columns: env(viewport-segment-width 0 0, 50vw) env(viewport-segment-width 1 0, 50vw);
+    column-gap: calc(env(viewport-segment-left 1 0, 50vw) - env(viewport-segment-right 0 0, 50vw));
+    align-content: start;
+    max-width: none;
+    padding-inline: 0;
+  }
+
+  .wrap > * {
+    grid-column: 2;
+    min-width: 0;
+    max-width: none;
+    margin-inline: max(var(--gutter), env(safe-area-inset-left)) max(var(--gutter), env(safe-area-inset-right));
+  }
+
+  .wrap > header,
+  .wrap > .brand,
+  .wrap > .status,
+  .wrap > h1,
+  footer .wrap > .reveal {
+    grid-column: 1;
+  }
+
+  section .wrap > header,
+  footer .wrap > .reveal {
+    grid-row: 1 / span 8;
+    align-self: start;
+  }
+
+  section .wrap > :not(header):nth-child(2),
+  footer .wrap > .foot:nth-child(2) {
+    margin-top: 0;
+  }
+
+  .top .wrap > .nav {
+    justify-self: end;
+  }
+
+  .hero .wrap {
+    grid-template-rows: auto auto auto;
+    align-content: center;
+  }
+
+  .hero .wrap > .status {
+    grid-row: 1;
+    justify-self: start;
+  }
+
+  .hero .wrap > h1 {
+    grid-row: 2 / span 2;
+    align-self: center;
+    font-size: calc(clamp(1.75rem, min(5vw, 11svh), 4.5rem) * var(--h1-scale));
+  }
+
+  .hero .wrap > .lede {
+    grid-row: 2;
+    align-self: end;
+    margin-top: 0;
+  }
+
+  .hero .wrap > .cta {
+    grid-row: 3;
+    align-self: start;
+  }
+
+  .hero .wrap > .cue {
+    margin: 0;
+  }
+}
+
+/* A screen that folds across the middle: the hero fills the top half and the page goes on below the hinge. */
+
+@media (vertical-viewport-segments: 2) {
+  .top {
+    position: static;
+  }
+
+  .hero {
+    min-height: calc(env(viewport-segment-height 0 0, 50vh) - 3.75rem - env(safe-area-inset-top));
+  }
+
+  #what {
+    margin-top: calc(env(viewport-segment-top 0 1, 0px) - env(viewport-segment-bottom 0 0, 0px));
   }
 }
 
@@ -1186,6 +1467,8 @@ footer h2 {
     navigation: auto;
   }
 
+  .tab-hidden *,
+  .tab-hidden *::after,
   .is-paused,
   .is-paused *,
   .is-paused *::after {
@@ -1248,8 +1531,9 @@ footer h2 {
     animation: flow-no 9s linear var(--d) infinite;
   }
 
-  .dam .pipe {
-    animation: pipe 1.2s linear infinite;
+  .dam .drip {
+    animation: drip 2.4s linear infinite;
+    animation-delay: calc(var(--k) * -1.2s);
   }
 
   .dam .rl {
@@ -1275,10 +1559,6 @@ footer h2 {
 
   .track + .track {
     display: flex;
-  }
-
-  .marquee:hover .track {
-    animation-play-state: paused;
   }
 
   .js .timeline li {
@@ -1427,9 +1707,21 @@ footer h2 {
   }
 }
 
-@keyframes pipe {
-  to {
-    stroke-dashoffset: -9;
+@keyframes drip {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0);
+  }
+  10%,
+  88% {
+    opacity: 1;
+  }
+  22% {
+    transform: translate(0, 22px);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(166px, 22px);
   }
 }
 

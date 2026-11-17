@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Dodam — un lenguaje que la IA escribe bien, seguro y rápido</title>
   <meta name="description" content="Dodam es un lenguaje de propósito general que la IA escribe de forma correcta y robusta: seguro y rápido. El compilador impone las reglas de seguridad, las personas leen un informe de seguridad en lugar del código y los propios agentes de IA construyen el lenguaje. Está en fase de diseño y abierto a personas y a agentes de IA.">
   <meta name="color-scheme" content="light dark">
@@ -69,30 +69,21 @@
         <figure class="dam reveal" data-loop>
           <div class="dam-labels" aria-hidden="true"><span>Código escrito por IA</span><span>Compilador</span><span>Programa e informe</span></div>
         <svg viewBox="0 0 640 316" role="img" aria-label="Diagrama animado: fragmentos de código escrito por IA fluyen hacia el compilador, dibujado como un muro. Los fragmentos inseguros se detienen en el muro. Los seguros lo atraviesan y llegan a un programa en ejecución, y debajo se va completando un informe de seguridad.">
-          <defs>
-            <g id="ok">
-              <rect class="ok-box" width="60" height="26" rx="7"/>
-              <path class="ok-line" d="M12 10h30M12 17h20"/>
-            </g>
-            <g id="no">
-              <rect class="no-box" width="60" height="26" rx="7"/>
-              <path class="no-line" d="M12 10h20M12 17h12"/>
-              <path class="no-x" d="M42 8l10 10M52 8l-10 10"/>
-            </g>
-          </defs>
           <path class="guide" d="M0 50h300M0 105h300M0 160h300M324 50h150M324 105h150M324 160h150"/>
-          <use href="#ok" y="37" class="pc ok" style="--d:0s;--sx:40px"/>
-          <use href="#no" y="37" class="pc no" style="--d:-3s;--sx:236px"/>
-          <use href="#ok" y="37" class="pc ok" style="--d:-6s;--sx:400px"/>
-          <use href="#ok" y="92" class="pc ok" style="--d:-1s;--sx:130px"/>
-          <use href="#ok" y="92" class="pc ok" style="--d:-4s;--sx:384px"/>
-          <use href="#no" y="92" class="pc no" style="--d:-7s;--sx:236px"/>
-          <use href="#no" y="147" class="pc no" style="--d:-2s;--sx:236px"/>
-          <use href="#ok" y="147" class="pc ok" style="--d:-5s;--sx:64px"/>
-          <use href="#ok" y="147" class="pc ok" style="--d:-8s;--sx:408px"/>
+          <g class="pc ok" style="--d:0s;--sx:40px"><g transform="translate(0 37)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc no" style="--d:-3s;--sx:236px"><g transform="translate(0 37)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc ok" style="--d:-6s;--sx:400px"><g transform="translate(0 37)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-1s;--sx:130px"><g transform="translate(0 92)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-4s;--sx:384px"><g transform="translate(0 92)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc no" style="--d:-7s;--sx:236px"><g transform="translate(0 92)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc no" style="--d:-2s;--sx:236px"><g transform="translate(0 147)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc ok" style="--d:-5s;--sx:64px"><g transform="translate(0 147)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-8s;--sx:408px"><g transform="translate(0 147)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
           <rect class="wall" x="300" y="14" width="24" height="226" rx="6"/>
           <path class="brick" d="M300 52h24M300 90h24M300 128h24M300 166h24M300 204h24"/>
           <path class="pipe" d="M312 240v22h168"/>
+          <circle class="drip" style="--k:0" cx="312" cy="240" r="3.5"/>
+          <circle class="drip" style="--k:1" cx="312" cy="240" r="3.5"/>
           <rect class="frame" x="480" y="22" width="140" height="166" rx="10"/>
           <circle class="dot" cx="495" cy="37" r="3"/>
           <circle class="dot" cx="506" cy="37" r="3"/>

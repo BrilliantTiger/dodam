@@ -1,6 +1,7 @@
 /* Dodam introduction page: motion that CSS alone cannot do.
    The page is complete without this file. It only reveals sections as they scroll in,
-   counts numbers up, draws the timeline, fills the progress bar where CSS cannot,
+   counts numbers up, draws the timeline (again whenever the screen changes size, as when a
+   phone is folded or unfolded), fills the progress bar where CSS cannot, rests in a hidden tab,
    pauses loops that are off screen, switches the color theme and closes the language
    menu on an outside click. Languages are plain links and are never chosen for the reader. */
 (function () {
@@ -135,7 +136,52 @@
 
     window.addEventListener("scroll", request, { passive: true });
     window.addEventListener("resize", request, { passive: true });
+    window.addEventListener("orientationchange", request, { passive: true });
+    // Folding or unfolding a phone changes the size of the page without a reload.
+    if ("ResizeObserver" in window) new ResizeObserver(request).observe(root);
     update();
+  }
+
+  // When the screen changes width (a phone is folded, unfolded or turned), keep the reader
+  // at the same place in the same block instead of at the same number of pixels.
+  function anchoring() {
+    var blocks = all("main > .hero, section header, .dam, .stats, .grid, .plain, .marquee, .timeline, .rules, .note, footer");
+    var width = window.innerWidth;
+    var anchor = null;
+    var into = 0;
+
+    function remember() {
+      anchor = null;
+      for (var i = 0; i < blocks.length; i++) {
+        var box = blocks[i].getBoundingClientRect();
+        if (box.bottom > 1) {
+          anchor = blocks[i];
+          into = box.top < 0 ? -box.top / box.height : -box.top;
+          return;
+        }
+      }
+    }
+
+    function restore() {
+      if (window.innerWidth === width) return;
+      width = window.innerWidth;
+      if (!anchor || window.scrollY < 1) return;
+      var box = anchor.getBoundingClientRect();
+      var top = into > 0 ? -into * box.height : -into;
+      window.scrollBy({ top: box.top - top, behavior: "instant" });
+    }
+
+    window.addEventListener("scroll", remember, { passive: true });
+    window.addEventListener("resize", restore);
+    remember();
+  }
+
+  function resting() {
+    function set() {
+      root.classList.toggle("tab-hidden", document.hidden);
+    }
+    document.addEventListener("visibilitychange", set);
+    set();
   }
 
   function start() {
@@ -149,6 +195,8 @@
       reveals();
       counts();
       loops();
+      resting();
+      anchoring();
       scrolling();
     } catch (e) {
       root.classList.remove("js");

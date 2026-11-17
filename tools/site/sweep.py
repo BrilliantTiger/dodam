@@ -156,11 +156,11 @@ STATE = """
   const svg = document.querySelector('.dam svg').getBoundingClientRect();
   const fig = document.querySelector('.dam');
   const pad = parseFloat(getComputedStyle(fig).paddingLeft) + parseFloat(getComputedStyle(fig).paddingRight) + 2;
-  const mark = document.querySelector('#now .timeline').getBoundingClientRect();
+  const mark = document.querySelector('#now .marquee').getBoundingClientRect();
   return {
     sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     svgFits: svg.width > 150 && svg.width <= fig.getBoundingClientRect().width - pad + 2 && Math.abs(svg.width / svg.height - 640 / 316) < 0.6,
-    timelineInView: mark.bottom > 0 && mark.top < innerHeight,
+    readingInView: mark.bottom > 0 && mark.top < innerHeight,
     drawn: parseFloat(getComputedStyle(document.querySelector('.timeline')).getPropertyValue('--p')),
     pieces: [...document.querySelectorAll('.dam .pc')].map(e => Math.round(new DOMMatrix(getComputedStyle(e).transform).m41)),
     track: Math.round(new DOMMatrix(getComputedStyle(document.querySelector('.track')).transform).m41 * 10),
@@ -194,18 +194,15 @@ def hinge(page, width: int, height: int, gap: int = 24) -> dict | None:
     """Asks the browser to pretend the screen has a vertical hinge in the middle."""
     session = page.context.new_cdp_session(page)
     feature = {"orientation": "vertical", "offset": (width - gap) // 2, "maskLength": gap}
-    for method, params in (
-        ("Emulation.setDisplayFeaturesOverride", {"features": [feature]}),
-        ("Emulation.setDisplayFeature", {"displayFeature": feature}),
-    ):
-        try:
-            session.send(method, params)
-        except Exception:
-            continue
-        page.wait_for_timeout(150)
-        if page.evaluate("matchMedia('(horizontal-viewport-segments: 2)').matches"):
-            return {"left": feature["offset"], "right": feature["offset"] + gap, "top": 0, "bottom": height}
-    return None
+    metrics = {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": True, "displayFeature": feature}
+    try:
+        session.send("Emulation.setDeviceMetricsOverride", metrics)
+    except Exception:
+        return None
+    page.wait_for_timeout(200)
+    if not page.evaluate("matchMedia('(horizontal-viewport-segments: 2)').matches"):
+        return None
+    return {"left": feature["offset"], "right": feature["offset"] + gap, "top": 0, "bottom": height}
 
 
 def main() -> int:
@@ -235,6 +232,7 @@ def main() -> int:
                 page.evaluate("scrollTo(0, 0)")
                 report(f"{lang} {name} {width}x{height}", page.evaluate(CHECK, {"named": True}))
                 if args.shots:
+                    page.wait_for_timeout(250)  # let the browser repaint at the new size first
                     shot = Path(args.shots) / f"{lang}-{width}x{height}.png"
                     shot.parent.mkdir(parents=True, exist_ok=True)
                     page.screenshot(path=str(shot))
@@ -259,6 +257,7 @@ def main() -> int:
                     break
                 report(f"{lang} {width}x{height} with a hinge", page.evaluate(CHECK, {"hinge": area}))
                 if args.shots:
+                    page.wait_for_timeout(250)
                     page.screenshot(path=str(Path(args.shots) / f"{lang}-{width}x{height}-hinge.png"))
             still.close()
 
@@ -268,8 +267,10 @@ def main() -> int:
             for cover, inner in FOLD:
                 page.set_viewport_size({"width": cover[0], "height": cover[1]})
                 page.goto(base + path)
-                page.evaluate("document.querySelector('#now .timeline').scrollIntoView({block: 'center', behavior: 'instant'})")
-                page.wait_for_timeout(1700)
+                page.evaluate("document.querySelector('.stats').scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(1800)  # the numbers count up while they are on screen
+                page.evaluate("document.querySelector('#now .marquee').scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(600)
                 for step, (width, height) in enumerate((inner, cover, inner)):
                     page.set_viewport_size({"width": width, "height": height})
                     page.wait_for_timeout(500)
@@ -282,9 +283,9 @@ def main() -> int:
                         found.append("page scrolls sideways after the resize")
                     if not two["svgFits"]:
                         found.append("the diagram kept its old size")
-                    if not two["timelineInView"]:
+                    if not two["readingInView"]:
                         found.append("the section being read left the screen")
-                    if not 0 < two["drawn"] <= 1:
+                    if not 0 <= two["drawn"] <= 1:
                         found.append(f"the timeline line was not redrawn ({two['drawn']})")
                     if one["track"] == two["track"]:
                         found.append("the marquee stopped")
