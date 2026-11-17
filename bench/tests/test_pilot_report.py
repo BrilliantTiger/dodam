@@ -900,12 +900,19 @@ def test_the_document_says_when_other_work_can_only_raise_the_weekly_figure(lang
     if lang == "ko":
         assert "올리기만 하므로" not in text
         assert "한 주가 두 읽기 사이에 새로 시작하지 않는 한, 같은 계정의 다른 작업은 숫자를 올리기만 한다" in text
-        assert "새로 시작하는 시각이 그 밤에 들지 않는 날에 재고, 마지막 읽기가 첫 읽기보다 작으면 그 밤의 결과는 쓰지 않는다" in text
+        assert "그 시각이 그 밤에 들지 않는 날에 재고, 마지막 읽기가 첫 읽기보다 작으면 그 밤의 결과는 쓰지 않는다" in text
+        # what the pilot did not observe is not given as a fact
+        assert "사용량 화면에 나오는, 주간 한도가 새로 시작하는" not in text and "숫자가 내려가므로" not in text
+        assert "시범에서는 한 주가 새로 시작하는 것을 보지 못했다" in text
+        assert "읽기에 든 시각으로 밤을 고르는 일은 아직 해 보지 않았다" in text
     else:
         assert "can only raise the figure, so" not in text
         assert "Unless the week of the weekly limit starts anew between the two readings, other work on the same " \
                "account can only raise the figure" in text
         assert "a night whose last reading is lower than its first is not used" in text
+        assert "which the usage screen of the account shows" not in text and "the figure drops" not in text
+        assert "The pilot did not see a week start anew" in text
+        assert "Choosing a night by the time in the readings has not been tried yet" in text
 
 
 SAME_ENDS = re.compile(r"(\d{4}-\d{2}-\d{2})~\1|between (\d{4}-\d{2}-\d{2}) and \2\b|(\d{4}년 \d+월 \d+일)~\3")
@@ -950,12 +957,19 @@ def test_the_readme_gives_the_80_percent_dates_beside_the_middle_dates(lang):
     upper = month(fc["planning"]["seeds"][0]["rel_10"]["p80"], lang)
     stops = month(fc["claude_shared"]["last_day_of_the_simulation"], lang)
     assert fc["claude_shared"]["rel_10_p80"]["seeds_at_the_last_day"] == len(fc["seeds"])
+    middle, top = fc["planning"]["rel_10_p50"], fc["planning"]["rel_10_p80"]
+    ends = [month(found[end], lang) for found in (middle, top) for end in ("earliest", "latest")]
     if lang == "ko":
         assert f"80% 확률로는 {upper}까지다" in text
         assert f"80% 날짜는 일정 시뮬레이션이 멈추는 {stops}보다 늦다" in text
+        # the plan's two dates are one seed's; the README says so and gives the ranges over the seeds beside them
+        assert f"둘 다 씨앗 하나로 낸 값이고, 씨앗 {len(fc['seeds'])}개로는 가운데 날짜가 {ends[0]}~{ends[1]}, " \
+               f"80% 날짜가 {ends[2]}~{ends[3]} 사이에서 움직인다" in text
     else:
         assert f"with 80% probability by {upper}" in text
         assert f"the 80% date would lie beyond {stops}, where the schedule simulation stops" in text
+        assert f"Both dates come from one seed of the schedule simulation; over {len(fc['seeds'])} seeds the median " \
+               f"moves between {ends[0]} and {ends[1]} and the 80% date between {ends[2]} and {ends[3]}" in text
 
 
 def test_the_plan_s_row_for_the_one_night_measurement_says_what_the_charter_says():
@@ -982,4 +996,109 @@ def test_the_seeds_run_side_by_side_give_what_each_gives_alone():
         for case, found in cases.items():
             assert found["seeds"][1] == alone["capacities"][name][case]["seeds"][0], (name, case)
     assert both["capacities"]["planning"]["before"]["seeds"][0] != both["capacities"]["planning"]["before"]["seeds"][1]
+
+
+# --- the parts of a full check are the whole check ---------------------------------------------------------------
+
+
+def changed(text: str, change) -> str:
+    """A recorded file with one thing changed, written the way the scripts write it."""
+    data = json.loads(text)
+    change(data)
+    return json.dumps(data, ensure_ascii=False, indent=1) + "\n"
+
+
+def cut_to_the_first_seed(data: dict) -> None:
+    """The comparison with one seed only and the ranges to match, as the review tried it."""
+    found = data["comparison"]
+    found["seeds"] = found["seeds"][:1]
+    for name in ("claude_alone", "claude_shared"):
+        for way in found[name].values():
+            if "by_seed" in way:
+                way["by_seed"] = way["by_seed"][:1]
+                way["earliest"] = way["latest"] = way["by_seed"][0]
+        found[name]["plan_scenario_scaled_first_five_seeds"] = dict.fromkeys(
+            ("earliest", "latest"), found[name]["plan_scenario_scaled"]["by_seed"][0])
+
+
+def other_date(way: dict) -> None:
+    way["by_seed"][3] = way["earliest"]     # another date for one seed, inside the range, so the range still fits
+
+
+EARLIER_CHANGES = {
+    "the comparison cut down to its first seed": cut_to_the_first_seed,
+    "another seed in the comparison's list": lambda d: d["comparison"]["seeds"].__setitem__(-1, 9),
+    "one seed more": lambda d: [d["comparison"]["seeds"].append(9)] + [
+        way["by_seed"].append(way["latest"]) for name in ("claude_alone", "claude_shared")
+        for way in d["comparison"][name].values() if "by_seed" in way],
+    "another number of runs": lambda d: d["comparison"].update(sims=1000),
+    "another larger number of runs": lambda d: d["comparison"].update(more_sims=3000),
+    "a case of the comparison left out": lambda d: d["comparison"]["claude_alone"].pop("own_scenario_more_runs"),
+    "a case of the comparison added": lambda d: d["comparison"].update(two_companies=d["comparison"]["claude_shared"]),
+    "another date for one seed": lambda d: other_date(d["comparison"]["claude_shared"]["plan_scenario_scaled"]),
+    "another single-seed date": lambda d: d["cases"]["two_companies"]["rel_10"].update(p50="2033-09-07"),
+    "another seed for the single-seed dates": lambda d: d.update(seed=12),
+    "another delay for each month": lambda d: d["later_for_each_month"].update(days_for_each_month=14),
+    "a field more": lambda d: d.update(note="by hand"),
+}
+ESTIMATES_CHANGES = {
+    "a seed of the schedule left out": lambda d: d["schedule"]["seeds"].pop(),
+    "another number of runs of the schedule": lambda d: d["schedule"].update(sims_per_seed=1000),
+    "another chance for the fourth seed": lambda d: d["schedule"]["capacities"]["planning"]["after_x1"]["seeds"][3].update(
+        p_baseline_by_row_end=0.5),
+    "a case of the schedule left out": lambda d: d["schedule"]["capacities"]["planning"].pop("after_x4"),
+    "another measured value": lambda d: d["usage"].update(agent_seconds_mean=80.0),
+    "a seed of the forecast left out": lambda d: d["forecast"]["seeds"].pop(),
+    "a case of the forecast left out": lambda d: d["forecast"].pop("double_capacity"),
+    "another number of runs of the forecast": lambda d: d["forecast"]["two_companies"].update(sims_per_seed=1000),
+    "another capacity in the forecast": lambda d: d["forecast"]["double_capacity"].update(working_days_a_week=20),
+    "another date for one seed of the forecast": lambda d: d["forecast"]["planning"]["seeds"][2]["rel_10"].update(p50="2032-03-10"),
+    "a field more": lambda d: d.update(note="by hand"),
+}
+
+
+def test_the_parts_of_a_full_check_reject_whatever_the_whole_check_rejects():
+    """CI works the recorded outputs out again in parts. Here the long computation is replaced by one that
+    gives the committed figures, so the test asks only this: the committed file passes every part, a file
+    changed in its seeds, cases, numbers of runs or figures fails at least one part, and a part that would
+    work out nothing fails. What defines the computation is the script's, never the file's."""
+    import claude_only
+    text = read(EARLIER)
+    good = json.loads(text)
+    try:
+        jobs = claude_only._jobs(claude_only.SEEDS, claude_only.SIMS, claude_only.MORE_SIMS)
+    except AttributeError:
+        jobs = None
+    assert jobs is not None, "the script does not name the comparison's cases from its own seeds and numbers of runs"
+    name_of = lambda job: (job[0], job[1], job[2], tuple(sorted(job[3].items())))
+    dates = {name_of(job): good["comparison"][key[0]][key[1]]["by_seed"][n]
+             for key, group in jobs.items() for n, job in enumerate(group)}
+    run = lambda some: [dates[name_of(job)] for job in some]
+    single = lambda: copy.deepcopy({k: v for k, v in good.items() if k not in ("comparison", "later_for_each_month")})
+    part = lambda k, n, t: claude_only.check_part(k, n, t, run=run, single=single)
+    assert all(part(k, 3, text) for k in (1, 2, 3)), "the committed file does not pass its own parts"
+    for what, change in EARLIER_CHANGES.items():
+        other = changed(text, change)
+        assert other != text, what
+        assert not all(part(k, 3, other) for k in (1, 2, 3)), f"every part accepts the earlier dates with {what}"
+    cases = sum(len(group) for group in jobs.values())
+    for k, n in ((0, 3), (4, 3), (cases + 1, cases + 5), (1, 0)):
+        assert not part(k, n, text), f"part {k} of {n} works out nothing and passes"
+    assert not part(1, 3, text.replace("\n ", "\n  ")), "a file not written the way the script writes it passes"
+
+    text = read(REPLAN)
+    good = json.loads(text)
+    pieces = {"schedule": {k: v for k, v in good.items() if k != "forecast"}, "forecast": good["forecast"]}
+    check = getattr(pilot_replan, "check", None)
+    assert check is not None, "the estimates cannot be checked in parts without the long computation"
+    part = lambda name, t: check(name, t, work_out=lambda piece: copy.deepcopy(pieces[piece]))
+    assert pilot_replan.PARTS == ("schedule", "forecast") and all(part(name, text) for name in pilot_replan.PARTS)
+    for what, change in ESTIMATES_CHANGES.items():
+        other = changed(text, change)
+        assert other != text, what
+        assert not part("all", other), what
+        assert not all(part(name, other) for name in pilot_replan.PARTS), f"every part accepts the estimates with {what}"
+    for name in ("", "nothing", "schedule,forecast"):
+        assert not part(name, text), f"the part {name!r} does not exist and passes"
+    assert not part("schedule", "") and not part("forecast", "not a file")
 

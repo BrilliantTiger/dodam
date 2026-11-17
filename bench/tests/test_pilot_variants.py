@@ -264,6 +264,12 @@ VARIANTS = [
     (REPORT, "test_the_seeds_run_side_by_side_give_what_each_gives_alone",
      "the seed a run starts from depends on the seeds that run beside it",
      [(ESTIMATES, "[(cap, seed, sims) for seed in seeds]", "[(cap, seeds[0] * (n + 1), sims) for n, seed in enumerate(seeds)]")]),
+    (REPORT, "test_the_parts_of_a_full_check_reject_whatever_the_whole_check_rejects",
+     "the parts of the check take the comparison's seeds and numbers of runs from the recorded file again",
+     [("tools/plan/claude_only.py", '    jobs = _jobs(SEEDS, SIMS, MORE_SIMS)\n    found = recorded.get("comparison")',
+       '    found = recorded.get("comparison")\n    jobs = _jobs(found["seeds"], found["sims"], found["more_sims"])'),
+      ("tools/plan/claude_only.py", "_assemble(kept, SEEDS, SIMS, MORE_SIMS)",
+       '_assemble(kept, found["seeds"], found["sims"], found["more_sims"])')]),
 ]
 
 COPIED = ("bench/dodambench", "bench/records", "bench/pyproject.toml", f"bench/tests/{RECORD}", f"bench/tests/{REPORT}",
