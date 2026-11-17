@@ -29,7 +29,8 @@ TERM_GRACE_SECONDS = 60.0
 KILL_WAIT_SECONDS = 30.0
 # The entries of the signal list that are a stop of Harbor itself. The others (a sighted process killed, what Harbor
 # left behind ended after it exited on its own) are listed too but do not make Harbor "stopped".
-GROUP_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGKILL", "SIGKILL to Harbor alone")
+HARBOR_SIGHTED = "SIGKILL to Harbor, a sighted process"  # the watch killed Harbor's own process: its stop of Harbor
+GROUP_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGKILL", "SIGKILL to Harbor alone", HARBOR_SIGHTED)
 
 
 def process_table() -> bytes:
@@ -96,10 +97,13 @@ class ProcessTableWatch:
         self.hit_pids: list[int] = []
         self._sighted: list[int] = []  # the processes of the latest reading that held the token
         self.error: str | None = None
-        # not-started: the reading before the start was not clean; not-stopped: the watch never stopped Harbor
-        # (a clean run, no Harbor process was handed over, or the token was only seen after Harbor ended);
-        # ended-before-stop: Harbor had ended by itself when the watch went to stop it, and no stop signal was sent;
-        # stopped: the watch sent signals and Harbor ended; stop-failed: Harbor was still running after the stop.
+        # Harbor's outcome, settled from the signals sent (see _settle). not-started: the reading before the start
+        # was not clean. not-stopped: nothing stopped Harbor (no Harbor process was handed over, or nothing was
+        # sent to stop it). ended-before-stop: the watch went to stop Harbor, and no stop went out because Harbor
+        # had already ended. stopped: a stop of Harbor went out, by the watch (a sighted kill of Harbor's own
+        # process included) or by the runner for any reason, and Harbor ended; stopped_by says what began it, so
+        # stopped_harbor is true for a run stopped at the time limit or by a stop signal too. stop-failed: Harbor
+        # was still running after the stop.
         self.harbor = "not-stopped"
         self.stop_signals: list[str] = []
         self.stop_error: str | None = None
@@ -164,7 +168,7 @@ class ProcessTableWatch:
             try:
                 if pid > 0 and os.getpgid(pid) == proc.pid:
                     os.kill(pid, signal.SIGKILL)
-                    sent.append(f"SIGKILL to sighted process {pid}")
+                    sent.append(HARBOR_SIGHTED if pid == proc.pid else f"SIGKILL to sighted process {pid}")
             except ProcessLookupError:
                 pass
             except Exception as err:
