@@ -59,6 +59,7 @@ def compute(seed: int = SEED, sims: int = SIMS) -> dict:
 
 
 SEEDS = (11, 2029, 1, 2, 3, 4, 5, 6, 7, 8)
+MORE_SIMS = 2000
 PLAN_DAYS = 15
 
 
@@ -121,7 +122,7 @@ def _assemble(dates: dict, seeds, sims: int, more_sims: int) -> dict:
     return out
 
 
-def compare(seeds=SEEDS, sims: int = SIMS, more_sims: int = 2000) -> dict:
+def compare(seeds=SEEDS, sims: int = SIMS, more_sims: int = MORE_SIMS) -> dict:
     """The middle date of 1.0 for each single-account case, drawn first from each seed."""
     jobs = _jobs(seeds, sims, more_sims)
     found = iter(_side_by_side([job for group in jobs.values() for job in group]))
@@ -145,23 +146,45 @@ def build() -> dict:
     return result
 
 
-def check_part(part: int, parts: int, recorded: dict) -> bool:
+def check_part(part: int, parts: int, text: str, run=None, single=None) -> bool:
     """One part of the full check, so that it can be spread over machines: every `parts`-th case of the
     comparison is run again and set against the recorded date. The first part also runs the single-seed dates
-    again and works out again everything the file derives from the dates."""
+    again. Everything that defines the computation (the seeds, the numbers of runs, the cases) is the
+    script's and never the file's, every part sets the file's own account of them against the script's, and
+    a part that would work out nothing fails. So whatever the whole check rejects, a part rejects.
+
+    `run` and `single` stand in for the computation in a test: `run` gives the dates of a list of cases,
+    `single` the single-seed dates."""
+    run, single = run or _side_by_side, single or compute
+    try:
+        recorded = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(recorded, dict) or to_text(recorded) != text:
+        return False
     subprocess.run([sys.executable, str(HERE / "build.py")], check=True, capture_output=True)  # writes wbs.json
-    found = recorded["comparison"]
-    jobs = _jobs(found["seeds"], found["sims"], found["more_sims"])
-    kept = {key: found[key[0]][key[1]]["by_seed"] for key in jobs}
+    jobs = _jobs(SEEDS, SIMS, MORE_SIMS)
+    found = recorded.get("comparison")
+    try:
+        kept = {key: list(found[key[0]][key[1]]["by_seed"]) for key in jobs}
+    except (KeyError, TypeError):
+        return False
+    if any(len(kept[key]) != len(group) for key, group in jobs.items()):
+        return False
+    if _assemble(kept, SEEDS, SIMS, MORE_SIMS) != found:     # the file's seeds, runs, cases and ranges are the script's
+        return False
     every = [(key, n, job) for key, group in jobs.items() for n, job in enumerate(group)]
-    mine = every[part - 1::parts]
-    same = all(date == kept[key][n] for (key, n, _), date in zip(mine, _side_by_side([job for _, _, job in mine])))
+    mine = every[part - 1::parts] if isinstance(part, int) and isinstance(parts, int) and 1 <= part <= parts else []
+    if not mine:
+        return False
+    if any(date != kept[key][n] for (key, n, _), date in zip(mine, run([job for _, _, job in mine]))):
+        return False
     if part == 1:
-        again = compute()
-        again["comparison"] = _assemble(kept, found["seeds"], found["sims"], found["more_sims"])
+        again = single()
+        again["comparison"] = _assemble(kept, SEEDS, SIMS, MORE_SIMS)
         again["later_for_each_month"] = later_for_each_month(again["cases"])
-        same = same and again == recorded
-    return same
+        return to_text(again) == text
+    return True
 
 
 def to_text(result: dict) -> str:
@@ -171,9 +194,11 @@ def to_text(result: dict) -> str:
 if __name__ == "__main__":
     out = HERE / "claude_only.json"
     if "--check" in sys.argv and "--part" in sys.argv:
-        part, parts = (int(x) for x in sys.argv[sys.argv.index("--part") + 1].split("/"))
-        same = out.is_file() and 1 <= part <= parts and \
-            check_part(part, parts, json.loads(out.read_text(encoding="utf-8")))
+        try:
+            part, parts = (int(x) for x in sys.argv[sys.argv.index("--part") + 1].split("/"))
+        except (ValueError, IndexError):
+            part, parts = 0, 0      # not a part: fails
+        same = out.is_file() and check_part(part, parts, out.read_text(encoding="utf-8"))
         print(f"part {part} of {parts}: claude_only.json is what the script gives" if same else
               f"part {part} of {parts}: claude_only.json differs from what the script gives")
         sys.exit(0 if same else 1)
