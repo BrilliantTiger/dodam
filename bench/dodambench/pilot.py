@@ -105,14 +105,13 @@ def _window(info: dict) -> dict:
     return entry
 
 
-def latest_windows(infos: Iterable[dict], keep_first: bool = False) -> dict[str, dict]:
-    """The last known values of each window (five_hour, seven_day, ...) after reading the events in order,
-    or with keep_first the values each window had in the first event that named it."""
+def latest_windows(infos: Iterable[dict]) -> dict[str, dict]:
+    """The last known values of each window (five_hour, seven_day, ...) after reading the events in order.
+    An event names its representative window (often without a utilization) and lists the windows it knows
+    in unifiedWindows; both are merged, later values over earlier ones."""
     windows: dict[str, dict] = {}
 
     def put(name: str, entry: dict) -> None:
-        if keep_first and name in windows:
-            return
         merged = dict(windows.get(name, {}))
         merged.update({k: v for k, v in entry.items() if v is not None})
         merged.setdefault("utilization", None)
@@ -132,8 +131,22 @@ def latest_windows(infos: Iterable[dict], keep_first: bool = False) -> dict[str,
 
 
 def first_windows(infos: Iterable[dict]) -> dict[str, dict]:
-    """The values each window had when the run first reported it: the closest thing to the start."""
-    return latest_windows(infos, keep_first=True)
+    """The values each window had in the first event that reported it: the closest thing to the start."""
+    first: dict[str, dict] = {}
+    for info in infos:
+        for name, entry in latest_windows([info]).items():
+            first.setdefault(name, entry)
+    return first
+
+
+REGULATED_WINDOWS = ("five_hour", "seven_day")
+
+
+def unreported_windows(windows: dict[str, dict]) -> list[str]:
+    """The regulated windows with no known utilization: their limit cannot be checked."""
+    return [name for name in REGULATED_WINDOWS
+            if (windows.get(name) or {}).get("utilization_pct") is None
+            and normalize_percent((windows.get(name) or {}).get("utilization")) is None]
 
 
 def utc_text(seconds: float) -> str:
@@ -436,7 +449,8 @@ def _summary_entry(record: dict) -> dict:
     keys = ("language", "status", "reason", "reward", "steps", "wall_seconds", "rate_limits", "record")
     entry = {k: record.get(k) for k in keys if k in record}
     entry["steps"] = [{"step": s["step"], "reward": s["reward"]} for s in record.get("steps", [])]
-    entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "first", "after") if k in record["rate_limits"]}
+    entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "first", "after", "unreported")
+                            if k in record["rate_limits"]}
     return entry
 
 
@@ -523,7 +537,8 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                     "model": model, "usage": None, "steps": [], "reward": None, "error": None,
                     "leak_scan": {"clean": not hits, "hits": hits},
                     "verifier_env_problems": verifier_env_problems(task_dir, job_dir) if job_dir.is_dir() else [],
-                    "rate_limits": {"before": before, "first": {}, "after": {}, "events": []}}
+                    "rate_limits": {"before": before, "first": {}, "after": {}, "unreported": list(REGULATED_WINDOWS),
+                                    "events": []}}
     status = "ok" if returncode == 0 else "harbor-failed"
     try:
         trial = read_trial(job_dir)
@@ -538,6 +553,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         record["claude_code_version"]["observed"] = agent["claude_code_version"]
         record["rate_limits"] = {"before": before, "first": first_windows(agent["rate_limit_infos"]),
                                  "after": latest_windows(agent["rate_limit_infos"]),
+                                 "unreported": unreported_windows(latest_windows(agent["rate_limit_infos"])),
                                  "events": agent["rate_limit_infos"]}
         if status == "ok" and (not trial["steps"] or any(s["reward"] is None for s in trial["steps"])):
             status = "incomplete"
@@ -588,6 +604,10 @@ def main(argv: list[str] | None = None) -> int:
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
         print(f"{run['language']}: {run['status']}" + (f" ({steps})" if steps else "") + (f" - {run['reason']}" if run.get("reason") else ""))
+        unreported = (run.get("rate_limits") or {}).get("unreported")
+        if run["status"] != "not-started" and unreported:
+            print(f"  note: the agent reported no utilization for {', '.join(unreported)}; only a rejected status "
+                  "can stop the next run on that window")
     return 0 if all(r["status"] == "ok" for r in summary["runs"]) else 1
 
 
