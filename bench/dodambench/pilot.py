@@ -298,7 +298,7 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
         proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         try:
-            return proc.wait(timeout=timeout)
+            code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
             log.flush()
@@ -309,6 +309,30 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
             log.flush()
             stop_process_group(proc, grace, term_grace)
             raise
+        end_leftover_processes(proc.pid, term_grace)
+        return code
+
+
+def _signal_pgid(pgid: int, sig: int) -> bool:
+    """Send sig to the process group; False when the group no longer exists."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def end_leftover_processes(pgid: int, term_grace: float) -> None:
+    """End what a Harbor that exited on its own left running in its process group: SIGTERM, then SIGKILL."""
+    if not _signal_pgid(pgid, 0):
+        return
+    _signal_pgid(pgid, signal.SIGTERM)
+    end = time.monotonic() + term_grace
+    while _signal_pgid(pgid, 0) and time.monotonic() < end:
+        time.sleep(0.05)
+    _signal_pgid(pgid, signal.SIGKILL)
 
 
 def image_present(image: str) -> None:
@@ -322,6 +346,24 @@ def compose_prefix(task_folder_name: str) -> str:
     a random id, in lower case, with a suffix for the agent's or the verifier's environment. Every project
     of a run of this task folder starts with this."""
     return re.sub(r"[^a-z0-9_-]", "-", task_folder_name.lower()) + "__"
+
+
+def run_trials(job_dir: Path) -> list[str]:
+    """The trial folders Harbor created for this run. Harbor writes a trial's folder before it starts any of
+    its environments, and names every compose project of the trial after it."""
+    try:
+        return sorted(p.name for p in Path(job_dir).iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def remove_run_containers(docker, job_dir: Path) -> list[str]:
+    """Remove the containers and networks of this run's trials only; nothing when Harbor created no trial.
+    Returns the projects that still have containers."""
+    left: list[str] = []
+    for trial in run_trials(job_dir):
+        left += docker.remove(compose_prefix(trial))
+    return left
 
 
 class DockerContainers:
@@ -597,42 +639,59 @@ def read_agent_output(job_dir: Path, step_order: list[str] | None = None) -> dic
 
 FIVE_HOURS = 5 * 3600
 DEFAULT_GUARD_MINUTES = 30.0
+# The guard protects the account, not one output folder, so its state lives beside the account's token:
+# batches with different --out folders share one allowance.
+GUARD_FILE = "pilot-guard.json"
 GUARD_NOTE = ("a guard on this runner's own agent time per rolling five hours, not a measurement of the "
               "account's five-hour usage: the agent does not report that window, and the owner's own use "
               "of the account is not counted")
 
 
 def agent_minutes(runs: Iterable[dict], now: float) -> float:
-    """This runner's agent minutes in the five hours before now."""
+    """This runner's agent minutes that may lie in the five hours before now (never fewer)."""
     return sum(float(r.get("agent_seconds") or 0) for r in _inside(runs, now)) / 60.0
 
 
+def _end(run: dict) -> float | None:
+    try:
+        return float(run["ended_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _inside(runs: Iterable[dict], now: float) -> list[dict]:
+    """The runs whose agent time may lie in the last five hours. A run counts in full until its end leaves
+    the window, so recent work of a run that started earlier is never dropped; a run with no end time
+    counts as still going."""
     out = []
     for r in runs:
-        try:
-            started = float(r["started_at"])
-        except (KeyError, TypeError, ValueError):
+        if not isinstance(r, dict):
             continue
-        if now - FIVE_HOURS < started <= now:
+        end = _end(r)
+        if end is None or end > now - FIVE_HOURS:
             out.append(r)
     return out
 
 
 def guard_decision(runs: Iterable[dict], limit_minutes: float, now: float) -> Decision:
-    """Start only while this runner's agents worked less than the limit in the last five hours."""
-    inside = sorted(_inside(runs, now), key=lambda r: float(r["started_at"]))
+    """Start only while this runner's agents worked less than the limit in runs that ended in the last five
+    hours or have no end time."""
+    inside = sorted(_inside(runs, now), key=lambda r: (_end(r) is None, _end(r) or 0.0))
     used = sum(float(r.get("agent_seconds") or 0) for r in inside) / 60.0
     if used < limit_minutes:
         return Decision(True)
     remaining, wait = used, None
-    for r in inside:  # the time when enough of the oldest runs have left the window
+    for r in inside:  # the time when the ends of enough of the earliest runs have left the window
+        if _end(r) is None:
+            wait = None  # a run with no end time never leaves the window by itself
+            break
         remaining -= float(r.get("agent_seconds") or 0) / 60.0
-        wait = float(r["started_at"]) + FIVE_HOURS
+        wait = _end(r) + FIVE_HOURS
         if remaining < limit_minutes:
             break
-    return Decision(False, f"five-hour guard: this runner's agents worked {used:.1f} minutes in the last five "
-                           f"hours, at or above the {limit_minutes:g}-minute limit ({GUARD_NOTE})", wait)
+    return Decision(False, f"five-hour guard: this runner's agents worked {used:.1f} minutes in runs that ended "
+                           f"in the last five hours or are not known to have ended, at or above the "
+                           f"{limit_minutes:g}-minute limit ({GUARD_NOTE})", wait)
 
 
 def start_decision(windows: dict[str, dict], runs: list[dict], max_five_hour: float, max_weekly: float,
@@ -660,17 +719,27 @@ def load_state(out_root: Path) -> dict[str, dict]:
     return windows if isinstance(windows, dict) else {}
 
 
-def load_runs(out_root: Path) -> list[dict]:
-    runs = _read_state(out_root).get("runs")
+def guard_path(token_file: Path) -> Path:
+    return Path(token_file).expanduser().parent / GUARD_FILE
+
+
+def load_runs(guard_file: Path) -> list[dict]:
+    try:
+        runs = json.loads(Path(guard_file).read_text(encoding="utf-8")).get("runs")
+    except (OSError, ValueError, AttributeError):
+        return []
     return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
 
 
-def save_state(out_root: Path, windows: dict[str, dict], timestamp: str, runs: list[dict] | None = None,
-               now: float | None = None) -> None:
+def save_guard(guard_file: Path, runs: list[dict], now: float) -> None:
+    Path(guard_file).write_text(json.dumps({"note": GUARD_NOTE, "runs": _inside(runs, now)}, indent=2),
+                                encoding="utf-8")
+
+
+def save_state(out_root: Path, windows: dict[str, dict], timestamp: str) -> None:
     Path(out_root).mkdir(parents=True, exist_ok=True)
-    kept = _inside(runs or [], now) if now is not None else list(runs or [])
     (Path(out_root) / STATE_FILE).write_text(
-        json.dumps({"updated_by_batch": timestamp, "windows": windows, "runs": kept}, indent=2), encoding="utf-8")
+        json.dumps({"updated_by_batch": timestamp, "windows": windows}, indent=2), encoding="utf-8")
 
 
 def _write_json(path: Path, obj) -> None:
@@ -693,9 +762,12 @@ def _summary_entry(record: dict) -> dict:
 
 
 def _run_agent_seconds(record: dict) -> float:
-    """The agent time a run used, for the guard: the steps' agent time when known, else the whole run."""
-    known = [s["agent_seconds"] for s in record.get("steps", []) if s.get("agent_seconds") is not None]
-    return float(sum(known)) if known else float(record.get("wall_seconds") or 0.0)
+    """The agent time a run used, for the guard, never less than it was: the steps' agent time only when
+    the run is ok and every step has one; otherwise the whole run, since a step cut short has no time."""
+    times = [s.get("agent_seconds") for s in record.get("steps", [])]
+    if record.get("status") == "ok" and times and all(t is not None for t in times):
+        return float(sum(times))
+    return float(max(sum(t for t in times if t is not None), record.get("wall_seconds") or 0.0))
 
 
 def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file: Path, harbor: Path,
@@ -724,7 +796,8 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     batch = out_root / timestamp
     batch.mkdir(parents=True, exist_ok=True)
     windows = load_state(out_root)
-    runs = load_runs(out_root)
+    guard_file = guard_path(token_file)
+    runs = load_runs(guard_file)
     summary = {"timestamp": timestamp, "task": task.id, "languages": languages, "claude_code_pinned": claude_version,
                "model": model or "agent default", "agent_hosts": list(allow_hosts), "time_limit_seconds": timeout,
                "limits": {"max_five_hour_percent": max_five_hour, "max_weekly_percent": max_weekly,
@@ -749,9 +822,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                     stopped = (decision.reason + when + "; not started (run again after the reset, "
                                "or pass --wait-for-reset to wait for it)")
             if stopped is None:
-                left = docker.leftovers(compose_prefix(f"{task.id}__{lang}"))
+                left = docker.leftovers(compose_prefix(task.id))  # every language of the task
                 if left:
-                    stopped = ("containers of an earlier run of this task and language are still in Docker ("
+                    stopped = ("containers of an earlier run of this task are still in Docker ("
                                + ", ".join(left) + "); not started until they are removed")
             if stopped is not None:
                 record = {"language": lang, "status": "not-started", "reason": stopped, "reward": None, "steps": [],
@@ -765,19 +838,16 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                                  image_check, timeout, now, allow_hosts, docker)
             except BaseException:
                 # whatever stopped the run, its time still counts for the guard and its record is listed
-                runs.append({"batch": timestamp, "language": lang, "started_at": started_at,
+                runs.append({"batch": timestamp, "language": lang, "started_at": started_at, "ended_at": now(),
                              "agent_seconds": round(time.monotonic() - t0, 1)})
-                save_state(out_root, windows, timestamp, runs, now())
-                try:
-                    summary["runs"].append(_summary_entry(
-                        json.loads((batch / lang / "record.json").read_text(encoding="utf-8"))))
-                except (OSError, ValueError, KeyError):
-                    pass
+                save_guard(guard_file, runs, now())
+                report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
                 raise
-            runs.append({"batch": timestamp, "language": lang, "started_at": started_at,
+            runs.append({"batch": timestamp, "language": lang, "started_at": started_at, "ended_at": now(),
                          "agent_seconds": _run_agent_seconds(record)})
             windows = {**windows, **record["rate_limits"]["after"]}
-            save_state(out_root, windows, timestamp, runs, now())
+            save_state(out_root, windows, timestamp)
+            save_guard(guard_file, runs, now())
             record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
                                          "limit_minutes": max_agent_minutes_per_5h,
                                          "minutes_before": round(minutes_before, 1),
@@ -788,12 +858,46 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             if record["status"] == "timeout":
                 stopped = (f"the {lang} run hit the time limit of {timeout:g} s; Harbor was stopped and its "
                            "containers removed; later languages were not started")
+    except BaseException as err:
+        in_flight = err
+        raise
+    else:
+        in_flight = None
     finally:
-        _write_json(batch / "summary.json", summary)
+        try:
+            _write_json(batch / "summary.json", summary)
+        except OSError as err:  # the scans below must run all the same
+            summary_error: OSError | None = err
+        else:
+            summary_error = None
         # Last, whatever happened: everything the batch left behind, the records, the summary and the state.
         assert_no_leak(batch, token, "in the batch folder")
         assert_no_leak(out_root / STATE_FILE, token, "in the state file")
+        assert_no_leak(guard_file, token, "in the five-hour guard file")
+        report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: clean")
+        if summary_error is not None and in_flight is None:
+            raise PilotError(f"could not write the batch summary: {summary_error}")
     return summary
+
+
+def report_to(err: BaseException | None, note: str) -> None:
+    """Attach what happened to an interrupt, so the command line reports it instead of assuming it."""
+    if isinstance(err, KeyboardInterrupt):
+        err.add_note(note)
+
+
+def _record_note(batch: Path, lang: str, summary: dict) -> str:
+    """What the record of a run that did not finish says, and list it in the summary."""
+    path = batch / lang / "record.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        summary["runs"].append(_summary_entry(record))
+    except (OSError, ValueError, KeyError):
+        return f"{lang}: no record was written"
+    scan = record.get("leak_scan") or {}
+    return (f"{lang}: {record.get('status')}; containers left: {', '.join(record.get('containers_left') or []) or 'none'}"
+            f"; run folder scan: {'clean' if scan.get('clean') else 'not clean, see the record'}"
+            f"; record: {path.relative_to(batch.parent)}")
 
 
 def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbor: Path, claude_version: str,
@@ -826,11 +930,11 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         finished = True
     finally:
         record["wall_seconds"] = round(time.monotonic() - started, 1)
-        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE:
-            # Harbor was cut short and may have left its containers running: remove them first, so nothing
-            # keeps writing into the output or using the subscription, and the scan sees the final output.
+        if job_dir.is_dir():
+            # Harbor may have left this run's containers running, cut short or not: remove them first, so
+            # nothing keeps writing into the output or using the subscription, and the scan sees the final output.
             try:
-                record["containers_left"] = docker.remove(compose_prefix(task_dir.name))
+                record["containers_left"] = remove_run_containers(docker, job_dir)
             except Exception as err:
                 record["containers_left"] = [mask(f"could not check: {type(err).__name__}: {err}", token)]
         scan = check_for_token(run_dir, token)
@@ -893,7 +997,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="the same for the weekly windows (default 50)")
     p.add_argument("--max-agent-minutes-per-5h", type=float, default=DEFAULT_GUARD_MINUTES,
                    help="five-hour guard: do not start when this runner's agents worked this many minutes or more "
-                        "in the last five hours (default 30); a guard, not a measurement of the account")
+                        "in runs that ended in the last five hours (default 30); a guard, not a measurement of the "
+                        "account; its state is kept beside the token file, shared by every --out folder")
     p.add_argument("--wait-for-reset", action="store_true", help="wait for the window to reset instead of stopping")
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -917,9 +1022,10 @@ def main(argv: list[str] | None = None) -> int:
     except PilotError as err:
         print(f"pilot: {err}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
-        print("pilot: interrupted; a running Harbor was stopped, its containers removed and the output scanned",
-              file=sys.stderr)
+    except KeyboardInterrupt as err:
+        print("pilot: interrupted", file=sys.stderr)
+        for note in getattr(err, "__notes__", []) or ["nothing more is known; look at the batch folder"]:
+            print(f"  {note}", file=sys.stderr)
         return 130
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
