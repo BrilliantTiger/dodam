@@ -224,6 +224,17 @@ def test_harbor_command_never_carries_the_token_or_an_api_key(tmp_path):
     assert "--yes" in cmd
 
 
+def test_harbor_command_lets_the_agent_reach_the_model_host(tmp_path):
+    # With the subscription token Harbor cannot guess the agent's endpoint and adds no host to the
+    # agent's network allowlist, so every request was dropped (ECONNRESET) until the host was named.
+    cmd = pilot.harbor_command(Path("harbor"), tmp_path, tmp_path, "j", "2.1.326")
+    assert cmd[cmd.index("--allow-agent-host") + 1] == "api.anthropic.com"
+    cmd = pilot.harbor_command(Path("harbor"), tmp_path, tmp_path, "j", "2.1.326", allow_hosts=["a.example", "b.example"])
+    hosts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--allow-agent-host"]
+    assert hosts == ["a.example", "b.example"]
+    assert "--allow-environment-host" not in cmd  # the verifier and the setup get no extra host
+
+
 def test_harbor_command_passes_a_model_only_when_asked(tmp_path):
     cmd = pilot.harbor_command(Path("harbor"), tmp_path, tmp_path, "j", "2.1.326", model="claude-sonnet-5-5")
     assert cmd[cmd.index("-m") + 1] == "claude-sonnet-5-5"
@@ -374,16 +385,25 @@ def test_read_agent_output_orders_steps_by_the_task_not_by_name(tmp_path):
 # --- one pilot run, with a fake Harbor ---------------------------------------------------------------------------
 
 class FakeRunner:
-    def __init__(self, leak=False, returncode=0, rewards=(1.0, 1.0)):
+    def __init__(self, leak=False, returncode=0, rewards=(1.0, 1.0), stray_leak=False, agent_error=False):
         self.calls, self.leak, self.returncode, self.rewards = [], leak, returncode, rewards
+        self.stray_leak, self.agent_error = stray_leak, agent_error
 
     def __call__(self, cmd, env, log_path, timeout):
         self.calls.append((list(cmd), dict(env)))
         jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
         jobs.mkdir(parents=True)
         make_trial(jobs, rewards=self.rewards)
+        if self.agent_error:
+            path = next(jobs.glob("*/result.json"))
+            data = json.loads(path.read_text())
+            for step in data["step_results"]:
+                step["exception_info"] = {"exception_type": "UnknownApiError", "exception_message": "Command failed"}
+            path.write_text(json.dumps(data))
         if self.leak:
             (jobs / "oops.log").write_text(env["CLAUDE_CODE_OAUTH_TOKEN"])
+        if self.stray_leak:  # a file outside the run's own folder but inside the batch
+            (Path(log_path).parents[1] / "stray.log").write_text(env["CLAUDE_CODE_OAUTH_TOKEN"])
         Path(log_path).write_text("harbor output\n")
         return self.returncode
 
@@ -444,6 +464,48 @@ def test_a_leak_is_reported_loudly_and_recorded_without_the_token(tmp_path):
     record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
     assert record["leak_scan"]["clean"] is False and record["status"] == "token-leak"
     assert pilot.scan_for_token(tmp_path / "out" / "20261117T070000Z" / "python" / "record.json", FAKE_TOKEN) == []
+
+
+def test_the_whole_batch_is_scanned_after_the_records_are_written(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(stray_leak=True), **pilot_args(tmp_path))
+    assert FAKE_TOKEN not in str(err.value) and "stray.log" in str(err.value)
+
+
+def test_a_step_the_agent_failed_is_not_recorded_as_ok(tmp_path):
+    # Harbor still judges the step and gives a reward when the agent's command failed (an API error),
+    # so a reward alone does not mean the agent ran.
+    summary = pilot.run_pilot(runner=FakeRunner(agent_error=True), **pilot_args(tmp_path))
+    run = summary["runs"][0]
+    assert run["status"] == "agent-error"
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["steps"][0]["error"] == "UnknownApiError: Command failed"
+
+
+def test_the_record_keeps_the_values_seen_at_the_start_of_the_run(tmp_path):
+    # Nothing is known before the very first run, so the first event of the run stands for the start.
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["rate_limits"]["first"]["five_hour"]["utilization"] == 0.3
+    assert record["rate_limits"]["after"]["five_hour"]["utilization"] == 0.4
+    summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert summary["runs"][0]["rate_limits"]["first"]["five_hour"]["utilization"] == 0.3
+
+
+def test_the_first_values_of_each_window_come_from_its_first_event():
+    first = pilot.first_windows(pilot.parse_rate_limit_events(lines(
+        event("five_hour", 0.1), event("seven_day", 0.2), event("five_hour", 0.35))))
+    assert first["five_hour"]["utilization"] == 0.1 and first["seven_day"]["utilization"] == 0.2
+
+
+def test_the_stop_message_says_when_the_window_resets(tmp_path):
+    state = tmp_path / "out" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"windows": win(0.55, 0.1)}))
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    reason = summary["runs"][0]["reason"]
+    assert "2026-09-21T15:13:20Z" in reason  # NOW + 3600 in UTC
+    assert "--wait-for-reset" in reason
 
 
 def test_a_failed_harbor_command_is_recorded_as_failed(tmp_path):
