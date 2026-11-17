@@ -13,6 +13,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The check that breaks the pilot's files once per test runs in the job "variants", beside the other tests.
+env:
+  DODAM_PILOT_VARIANTS: skip
+
 jobs:
   bench:
     runs-on: ubuntu-24.04
@@ -52,3 +56,31 @@ jobs:
       - name: Run the tests
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider
+
+  # For every test about the pilot, one broken variant of the files; each test must fail on its variant.
+  # It needs only the test runner, and it runs beside the job above so that neither comes near its time limit.
+  variants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DODAM_PILOT_VARIANTS: run
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install the judge's pinned packages
+        working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: Check that every pilot test fails on its broken variant
+        working-directory: bench
+        run: |
+          out=$(python -m pytest -q -p no:cacheprovider -rs tests/test_pilot_variants.py 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          if printf '%s' "$out" | grep -q "skipped"; then
+            echo "A part of the variants check was skipped in the job that is there to run it."
+            exit 1
+          fi

@@ -7,10 +7,13 @@ that does not test what its name says.
 
 The table for people: python tests/test_pilot_variants.py
 """
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -244,14 +247,42 @@ def break_it(folder: Path, edits: list) -> None:
         target.write_text(now.replace(text, replacement), encoding="utf-8")
 
 
+def try_a_variant(variant) -> tuple[int, str]:
+    """Break a fresh copy the one way the variant names and run its test there."""
+    file, test, what, edits = variant
+    with tempfile.TemporaryDirectory() as folder:
+        folder = copy_of_the_files(Path(folder))
+        try:
+            break_it(folder, edits)
+        except AssertionError as cannot:
+            return -1, str(cannot)
+        return run_the_test(folder, file, test)
+
+
+@pytest.fixture(scope="session")
+def outcomes() -> dict:
+    """What every variant gave. The variants do not depend on each other, so they run side by side."""
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 2) as pool:
+        return dict(zip((v[1] for v in VARIANTS), pool.map(try_a_variant, VARIANTS)))
+
+
+# The workflow runs this check in a job of its own, beside the other tests; there the job that runs every
+# other test sets this to "skip". Everywhere else the check runs with the rest.
+IN_ANOTHER_JOB = os.environ.get("DODAM_PILOT_VARIANTS") == "skip"
+OWN_ASSERTION = re.compile(r"(?m)^E +(AssertionError|assert |Failed: )")
+OTHER_ERROR = re.compile(r"(?m)^E +(?!AssertionError)[A-Za-z.]*(Error|Exception)\b")
+
+
+@pytest.mark.skipif(IN_ANOTHER_JOB, reason="this check runs in a job of its own")
 @pytest.mark.parametrize("file,test,what,edits", VARIANTS, ids=[v[1] for v in VARIANTS])
-def test_a_test_fails_on_its_broken_variant(tmp_path, file, test, what, edits):
-    folder = copy_of_the_files(tmp_path)
-    break_it(folder, edits)
-    code, output = run_the_test(folder, file, test)
+def test_a_test_fails_on_its_broken_variant(outcomes, file, test, what, edits):
+    code, output = outcomes[test]
+    assert code != -1, output
     last = output.strip().splitlines()[-1] if output.strip() else ""
     assert code == 1 and re.search(r"\d+ failed", last) and "error" not in last, \
         f"{test} did not fail when {what}:\n{output[-1500:]}"
+    assert OWN_ASSERTION.search(output) and not OTHER_ERROR.search(output), \
+        f"{test} failed when {what}, but not on an assertion of its own:\n{output[-1500:]}"
 
 
 def test_every_test_about_the_pilot_has_a_broken_variant():
