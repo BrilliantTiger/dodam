@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 
 from .convert import to_harbor, verifier_env
-from .judge import judge
+from .judge import JudgeFault, judge
 from .languages import LANGUAGES, Language
 from .task import Task, load_task, materialize, validate
 
@@ -126,41 +126,52 @@ def _free_port() -> int:
 
 def _missing_tools(lang_env: dict[str, str], path: str, deps_cmd: str = "") -> list[str]:
     missing = []
-    for cmd in (lang_env.get("BUILD_CMD", ""), lang_env.get("START_CMD", ""), deps_cmd):
+    for cmd in (lang_env.get("BUILD_CMD", ""), lang_env.get("START_CMD", ""), lang_env.get("RUN_CMD", ""), deps_cmd):
         cmd = cmd.strip()
         tool = shlex.split(cmd)[0] if cmd else ""
-        if tool and not tool.startswith(("./", "/")) and not shutil.which(tool, path=path) and tool not in missing:
+        if tool and not tool.startswith(("./", "/", "{app}")) and not shutil.which(tool, path=path) and tool not in missing:
             missing.append(tool)
     return missing
 
 
-def docker_create_cmd(name: str, image: str, step: str) -> list[str]:
-    """A stopped container that, once /tests and /solution are copied in, judges the solution like the verifier."""
+def docker_create_cmd(name: str, image: str, step: str, room: dict | None = None) -> list[str]:
+    """A stopped container that, once /tests and /solution are copied in, judges the solution like the verifier.
+
+    For a command-line task the container gets the memory and processors the task gives the verifier,
+    as Harbor gives them, because the program's own limits are measured against that room."""
     script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && exec /opt/judge/bin/python "
               f"/tests/lib/dodam_judge.py --tests /tests --app /app --step {shlex.quote(step)} --out /logs/verifier")
-    return ["docker", "create", "--name", name, "--network", "none", "--user", "0",
+    sized = []
+    if room:
+        sized = ["--memory", f"{room['memory_mb']}m", "--memory-swap", f"{room['memory_mb']}m",
+                 "--cpus", str(room["cpus"])]
+    return ["docker", "create", "--name", name, "--network", "none", "--user", "0", *sized,
             "-e", "DODAM_APP_USER=agent", image, "sh", "-c", script]
 
 
 def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Path, step: str,
-                   timeout: float = 1800) -> dict:
+                   timeout: float = 1800, room: dict | None = None) -> dict:
     """Judge one solution in a fresh container of the image; the judge's files land in out_dir."""
     name = f"dodam-vet-{uuid.uuid4().hex[:12]}"
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(docker_create_cmd(name, image, step), check=True, capture_output=True, text=True)
+        subprocess.run(docker_create_cmd(name, image, step, room), check=True, capture_output=True, text=True)
         subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{solution_dir}/.", f"{name}:/solution"], check=True, capture_output=True)
         subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=timeout)
         subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out_dir)], check=True, capture_output=True)
     finally:
         subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+    fault = out_dir / "judge-fault.json"
+    if fault.is_file():
+        raise JudgeFault(json.loads(fault.read_text(encoding="utf-8")).get("judge_fault", "unknown"))
     return {"reward": json.loads((out_dir / "reward.json").read_text(encoding="utf-8")),
             "report": json.loads((out_dir / "details.json").read_text(encoding="utf-8"))}
 
 
 def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]:
     results = []
+    room = task.limits if task.meta.get("interface") == "cli" else None
     with tempfile.TemporaryDirectory(prefix="dodam-vet-") as work:
         harbor = to_harbor(task, lang, Path(work), image)
         for step in task.steps:
@@ -171,7 +182,9 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                 try:
                     judged = judge_in_image(image, harbor / "tests",
                                             harbor / "steps" / step.name / "solution" / "variants" / variant.label,
-                                            out_dir / step.name / variant.label, step.name)
+                                            out_dir / step.name / variant.label, step.name, room=room)
+                except JudgeFault as exc:
+                    result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
                 except (subprocess.SubprocessError, OSError, ValueError) as exc:
                     result.update(ok=False, problems=[f"could not judge in {image}: {exc}"])
                 else:
@@ -199,7 +212,9 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
         return results
     language = LANGUAGES[lang]
     extra_env = {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")}
-    lang_env = {**verifier_env(task, lang), "PORT": str(_free_port())}
+    lang_env = verifier_env(task, lang)
+    if "PORT" in lang_env:
+        lang_env["PORT"] = str(_free_port())
     missing = _missing_tools(lang_env, extra_env["PATH"], language.deps_cmd)
     scaffold = None if missing else scaffold_cache(language, cache_root)
     # on this machine the pinned dependency folders are the prepared scaffold's, not the image's
@@ -220,11 +235,15 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
                 app_dir = assemble_app(scaffold, language.deps_links, solution,
                                        Path(work) / "apps" / step.name / variant.label)
                 started = time.monotonic()
-                judged = judge(tests_dir, app_dir, step.name, out_dir / step.name / variant.label,
-                               lang_env=lang_env, extra_env=extra_env)
-                found = judgement_problems(variant.expect, variant.weakness, judged["report"])
-                result.update(ok=not found, problems=found, reward=judged["reward"],
-                              seconds=round(time.monotonic() - started, 1))
+                try:
+                    judged = judge(tests_dir, app_dir, step.name, out_dir / step.name / variant.label,
+                                   lang_env=lang_env, extra_env=extra_env)
+                except JudgeFault as exc:
+                    result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
+                else:
+                    found = judgement_problems(variant.expect, variant.weakness, judged["report"])
+                    result.update(ok=not found, problems=found, reward=judged["reward"])
+                result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "vet.json").write_text(json.dumps({"task": task.id, "lang": lang, "results": results}, indent=1),

@@ -15,17 +15,28 @@ In the verifier the judge runs as root and builds and starts the program as a pl
 (--run-as, or DODAM_APP_USER). That code is the agent's, so before the build the judge hands /app
 to that user and relinks the dependency folders to the image's pinned copies; afterwards it kills
 every process of that user and replaces, never follows, whatever sits where the results go.
+
+A command-line task has no program to keep running. After the build the judge runs each hidden test
+file, and the tests run the program once per case through dodam_cli.py, which sits next to this
+file. In the verifier the program then runs as a user of its own that owns nothing: the judge closes
+the tests and the results to everyone but root, takes write access away from every place others
+could write, and leaves the program only its case's folder. When the judge itself cannot do its
+work it writes judge-fault.json instead of a result and ends with exit code 3, so a fault of the
+judge never looks like a failure of the program.
 """
 from __future__ import annotations
 
 import argparse
+import grp
 import json
 import os
 import pwd
+import re
 import secrets
 import shlex
 import shutil
 import signal
+import stat
 import socket
 import subprocess
 import sys
@@ -155,6 +166,177 @@ def write_output(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+class JudgeFault(Exception):
+    """The judge could not do its own work; no result is written."""
+
+
+CLI_LIMITS = {"timeout_sec": "CASE_TIMEOUT_SEC", "memory_mb": "CASE_MEMORY_MB", "output_kb": "CASE_OUTPUT_KB",
+              "processes": "CASE_PROCESSES", "disk_mb": "CASE_DISK_MB"}
+FIRST_CASE_USER_ID, LAST_CASE_USER_ID = 200_000, 2_000_000_000
+NO_FILES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "securityfs", "debugfs", "tracefs", "pstore", "bpf"}
+# What a file of hidden tests may take besides the time of its cases: starting Python and the judge's own work.
+FILE_SECONDS, CASE_SECONDS = 30, 2
+
+
+def free_user_id() -> int:
+    """A user and group number nobody in this container has, so the user owns nothing and is in no group.
+
+    It is drawn at random from a wide range: the kernel counts a user's processes over the whole
+    machine, so two judges running side by side must not share the number."""
+    users = {u.pw_uid for u in pwd.getpwall()} | {u.pw_gid for u in pwd.getpwall()}
+    groups = {g.gr_gid for g in grp.getgrall()}
+    while True:
+        number = FIRST_CASE_USER_ID + secrets.randbelow(LAST_CASE_USER_ID - FIRST_CASE_USER_ID)
+        if number not in users and number not in groups:
+            return number
+
+
+def writable_by_others(mounts: Path = Path("/proc/self/mounts")) -> list[str]:
+    """Every folder and file any user may write, on every file system mounted here."""
+    tops = []
+    for line in mounts.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] not in NO_FILES:
+            tops.append(parts[1].replace("\\040", " "))
+    found: list[str] = []
+    for top in tops:
+        res = subprocess.run(["find", top, "-xdev", "(", "-type", "d", "-o", "-type", "f", ")", "-perm", "-0002",
+                              "-print0"], capture_output=True)
+        found += [p.decode("utf-8", errors="surrogateescape") for p in res.stdout.split(b"\0") if p]
+    return sorted(set(found))
+
+
+def close_writable_places() -> int:
+    """Take write access away from every place any user could write; says how many places it closed."""
+    closed = 0
+    for path in writable_by_others():
+        try:
+            os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o002)
+            closed += 1
+        except OSError as exc:
+            if exc.errno != 30:  # a read-only file system cannot be written anyway
+                raise JudgeFault(f"cannot close {path} to the program: {exc}") from None
+    return closed
+
+
+def open_for_reading(app_dir: Path) -> None:
+    """After the build: everyone may read and run the program, nobody but its owner may change it,
+    and no file of it lends its owner's rights to whoever runs it."""
+    for root, dirs, files in os.walk(app_dir):
+        for name in [""] + dirs + files:
+            path = os.path.join(root, name) if name else root
+            try:
+                if os.path.islink(path):
+                    continue
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+                mode = (mode | 0o004 | (0o001 if mode & 0o100 or os.path.isdir(path) else 0)) & ~0o6022
+                os.chmod(path, mode)
+            except OSError:
+                pass
+
+
+def keep_private(folder: Path) -> None:
+    """Only root may enter the folder, and no user may rename or replace it from the folder above."""
+    os.chown(folder, 0, 0)
+    os.chmod(folder, 0o700)
+    for parent in folder.parents:
+        info = os.stat(parent)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            try:
+                os.chown(parent, 0, -1)
+                os.chmod(parent, stat.S_IMODE(info.st_mode) & ~0o022)
+            except OSError as exc:
+                if exc.errno != 30:
+                    raise JudgeFault(f"cannot protect {parent}: {exc}") from None
+
+
+class CliRun:
+    """How the hidden tests of a command-line task reach the program: settings for dodam_cli.py."""
+
+    def __init__(self, app_dir: Path, tests_dir: Path, out_dir: Path, lang_env: dict[str, str], run_as: str,
+                 extra_env: dict[str, str]):
+        self.run_as = run_as
+        self.uid: int | None = None
+        try:
+            limits = {name: int(lang_env[key]) for name, key in CLI_LIMITS.items()}
+            command = [part.replace("{app}", str(app_dir)) for part in shlex.split(lang_env["RUN_CMD"])]
+        except (KeyError, ValueError) as exc:
+            raise JudgeFault(f"the task's settings for a command-line program are incomplete: {exc}") from None
+        if not command:
+            raise JudgeFault("the task's settings name no command to run the program")
+        self.limits = limits
+        if run_as:
+            kill_user(run_as)  # whatever the build left running
+            open_for_reading(app_dir)
+            self.uid = free_user_id()
+            keep_private(tests_dir)
+            keep_private(out_dir)
+            self.closed = close_writable_places()
+        self.private = Path(tempfile.mkdtemp(prefix="dodam-judge-"))
+        self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
+        os.chmod(self.work_root, 0o711)
+        self.fault_file = self.private / "faults.jsonl"
+        env = {k: v for k, v in {**os.environ, **extra_env}.items()
+               if not k.startswith(("DODAM_", "PYTEST_")) and k not in ("PYTHONPATH", "HOME", "TMPDIR", "PWD", "OLDPWD")}
+        settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
+                    "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env}
+        self.settings_file = self.private / "settings.json"
+        self.settings_file.write_text(json.dumps(settings), encoding="utf-8")
+        # the tests get nothing that differs from one language to the next but the settings file itself
+        self.test_env = {"PATH": extra_env.get("PATH", os.environ.get("PATH", "")),
+                         "PYTHONPATH": str(Path(__file__).resolve().parent),
+                         "PYTHONDONTWRITEBYTECODE": "1", "DODAM_CLI_CONFIG": str(self.settings_file)}
+
+    def run_file(self, path: Path, junit: Path) -> list[dict]:
+        tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
+        timeout = FILE_SECONDS + tests * (self.limits["timeout_sec"] + CASE_SECONDS)
+        cases = run_pytest(path, self.test_env, junit, timeout)
+        if self.fault_file.exists():
+            raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
+        self.sweep()
+        whole = [c for c in cases if c["name"] == path.name]
+        if whole:
+            # a program cannot make a file of tests run out of time or end without a report: its cases are limited
+            raise JudgeFault(f"{path.name}: {whole[0]['message']}")
+        return cases
+
+    def sweep(self) -> None:
+        """Between two files of tests nothing of the program is left: no process, no case folder."""
+        if self.uid is not None:
+            for _ in range(200):
+                pids = user_pids(self.uid)
+                if not pids:
+                    break
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                time.sleep(0.01)
+        if not self.work_root.is_dir():
+            raise JudgeFault("the folder the cases live in is gone")
+        for entry in self.work_root.iterdir():
+            shutil.rmtree(entry, ignore_errors=True)
+
+    def close(self) -> None:
+        try:
+            self.sweep()
+        except JudgeFault:
+            pass
+        shutil.rmtree(self.work_root, ignore_errors=True)
+        shutil.rmtree(self.private, ignore_errors=True)
+
+
+def write_fault(out_dir: Path, text: str) -> None:
+    """Say that the judge failed, and leave no result that could be read as a judgement of the program."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("reward.json", "reward.txt"):
+        path = out_dir / name
+        if path.is_symlink() or path.exists():
+            path.unlink()
+    write_output(out_dir / "judge-fault.json", json.dumps({"judge_fault": text}, indent=1, ensure_ascii=False))
+
+
 class App:
     def __init__(self, app_dir: Path, start_cmd: str, port: int, run_as: str, extra_env: dict[str, str]):
         self.app_dir, self.start_cmd, self.port, self.run_as = app_dir, start_cmd, port, run_as
@@ -259,6 +441,9 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         report["build_ok"] = True
     report["build_sec"] = round(time.monotonic() - started, 2)
 
+    cli = None
+    if lang_env.get("INTERFACE") == "cli" and report["build_ok"]:
+        cli = CliRun(app_dir, tests_dir, out_dir, lang_env, run_as, extra_env or {})
     app = App(app_dir, lang_env.get("START_CMD", ""), port, run_as, extra_env or {})
     shared_up = False
     for t in selected:
@@ -268,6 +453,12 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         cases: list[dict]
         if not report["build_ok"]:
             cases = [{"name": path.name, "outcome": not_run, "message": "build failed"}]
+        elif cli is not None:
+            try:
+                cases = cli.run_file(path, out_dir / ("junit-" + t["file"].replace("/", "-") + ".xml"))
+            except JudgeFault:
+                cli.close()
+                raise
         else:
             fresh = t.get("fresh_app")
             if fresh or not shared_up or not app.alive():
@@ -287,6 +478,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             report["tests"].append({**c, "file": t["file"], "kind": t.get("kind"), "step": t.get("step"),
                                     "weakness": t.get("weakness")})
     app.stop()
+    if cli is not None:
+        cli.close()
     if run_as:
         kill_user(run_as)
 
@@ -318,7 +511,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--run-as", default=os.environ.get("DODAM_APP_USER", ""))
     a = p.parse_args(argv)
-    result = judge(a.tests, a.app, a.step, a.out, run_as=a.run_as)
+    try:
+        result = judge(a.tests, a.app, a.step, a.out, run_as=a.run_as)
+    except JudgeFault as exc:
+        write_fault(a.out.resolve(), str(exc))
+        print(json.dumps({"judge_fault": str(exc)}), file=sys.stderr)
+        return 3
     print(json.dumps(result["reward"]))
     return 0
 

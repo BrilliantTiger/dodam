@@ -1,12 +1,16 @@
 """Source task format: load a language-neutral task folder and check it against the format rules."""
 from __future__ import annotations
 
+import argparse
+import json
 import re
 import shutil
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .judge import CASE_SECONDS, FILE_SECONDS
 from .languages import LANGUAGES
 
 DOMAINS = {"web", "cli", "data", "net", "sys"}
@@ -20,6 +24,18 @@ WEAKNESSES = {
     "broken-access-control", "broken-authentication", "token-forgery", "plaintext-credentials",
     "secret-exposure", "log-injection", "resource-exhaustion", "unsafe-upload", "weak-crypto",
     "missing-rate-limit", "input-validation", "error-handling", "race-condition", "file-exposure",
+    "file-overwrite",
+}
+# The limits of one case of a command-line task, with the largest value each may take.
+CLI_LIMIT_KEYS = {"case_timeout_sec": 600, "case_memory_mb": 65536, "case_output_kb": 1048576,
+                  "case_processes": 1024, "case_disk_mb": 65536}
+BUILD_SECONDS = 900  # what the judge gives the build
+# A hidden test of a command-line task reaches the program only through the judge's case runner, and
+# learns nothing about the language: these would start the program another way or read the settings.
+CLI_TEST_FORBIDDEN = {
+    "subprocess": r"\bsubprocess\b", "os.system": r"\bos\.system\b", "os.popen": r"\bos\.popen\b",
+    "os.exec": r"\bos\.exec", "os.spawn": r"\bos\.(posix_)?spawn", "os.fork": r"\bos\.fork", "pty": r"\bpty\b",
+    "DODAM_CLI_CONFIG": r"DODAM_CLI_CONFIG", "lang.env": r"lang\.env", "parametrize": r"\bparametrize\b",
 }
 SLUG = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 CANARY_PREFIX = "dodam-bench-canary-"
@@ -97,6 +113,10 @@ class Task:
     @property
     def limits(self) -> dict:
         return self.meta.get("limits", {})
+
+    @property
+    def cli(self) -> dict:
+        return self.meta.get("cli", {})
 
     def step_index(self, name: str) -> int:
         return [s.name for s in self.steps].index(name)
@@ -213,6 +233,7 @@ def validate(task: Task) -> list[str]:
             errors.append("task.toml: an http task needs an [app] section")
         elif not isinstance(app.get("port"), int):
             errors.append("task.toml: [app] port must be a number")
+    errors += [f"{d['file']}: {d['message']}" for d in cli_problems(task)]
     limits = task.limits
     for key in ("agent_timeout_sec", "verifier_timeout_sec", "cpus", "memory_mb"):
         if not isinstance(limits.get(key), int) or limits.get(key) <= 0:
@@ -316,3 +337,119 @@ def _variant_errors(task: Task, step_names: list[str]) -> list[str]:
             elif count > 1:
                 errors.append(f"{where}: variant {v.name}: text to replace occurs more than once in {r.file}")
     return errors
+
+
+def _whole(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def judging_seconds(task: Task) -> int:
+    """The longest the judge can take over one step of a command-line task, whatever the program does:
+    the build, and for every file of tests its own allowance plus every test's full time limit."""
+    timeout = task.cli.get("case_timeout_sec")
+    if not _whole(timeout) or task.manifest_problem:
+        return 0
+    longest = 0
+    for step in task.steps:
+        total = BUILD_SECONDS
+        for t in task.tests_for(step.name):
+            path = task.root / "tests" / t.file
+            text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+            total += FILE_SECONDS + len(re.findall(r"^def test_", text, flags=re.M)) * (timeout + CASE_SECONDS)
+        longest = max(longest, total)
+    return longest
+
+
+def cli_problems(task: Task) -> list[dict]:
+    """What is wrong with the command-line part of a task, as data: the file, the key and the message."""
+    def problem(file: str, key: str, message: str) -> dict:
+        return {"file": file, "key": key, "message": message}
+
+    found: list[dict] = []
+    cli = task.meta.get("cli")
+    if task.meta.get("interface") != "cli":
+        if cli is not None:
+            found.append(problem("task.toml", "cli", "a [cli] section belongs to a task whose interface is cli"))
+        return found
+    if "app" in task.meta:
+        found.append(problem("task.toml", "app", "a cli task starts no server, so it takes no [app] section"))
+    if not isinstance(cli, dict):
+        found.append(problem("task.toml", "cli", "a cli task needs a [cli] section with the limits of one case"))
+        return found
+    for key, most in CLI_LIMIT_KEYS.items():
+        value = cli.get(key)
+        if not _whole(value) or value <= 0:
+            found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} must be a positive whole number"))
+        elif value > most:
+            found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} must be at most {most}"))
+    for key in cli:
+        if key not in CLI_LIMIT_KEYS:
+            found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} is not a limit of a case"))
+    memory, room = cli.get("case_memory_mb"), task.limits.get("memory_mb")
+    if _whole(memory) and _whole(room) and 0 < room <= memory:
+        found.append(problem("task.toml", "cli.case_memory_mb",
+                             f"[cli] case_memory_mb must be below [limits] memory_mb ({room}), "
+                             "which the judge shares with the program"))
+    needed, given = judging_seconds(task), task.limits.get("verifier_timeout_sec")
+    if needed and _whole(given) and given < needed:
+        found.append(problem("task.toml", "limits.verifier_timeout_sec",
+                             f"[limits] verifier_timeout_sec must be at least {needed}: the build and every "
+                             "test at its full time limit, so a program that hangs in every case still gets a result"))
+    tests = task.root / "tests"
+    for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
+        rel = f"tests/{path.relative_to(tests).as_posix()}"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for word, pattern in CLI_TEST_FORBIDDEN.items():
+            if re.search(pattern, text):
+                found.append(problem(rel, word, f"a test of a cli task must not use {word}: it runs the program "
+                                                "only through dodam_cli and knows nothing about the language"))
+        if path.name.startswith("test_") and "dodam_cli" not in text:
+            found.append(problem(rel, "dodam_cli", "a test of a cli task runs the program through dodam_cli"))
+    return found
+
+
+def diagnostics(task: Task) -> list[dict]:
+    """Every problem of a task as data. The text a person reads is made from this."""
+    structured = {f"{d['file']}: {d['message']}": d for d in cli_problems(task)}
+    found = []
+    for text in validate(task):
+        if text in structured:
+            found.append({"severity": "error", **structured[text]})
+            continue
+        head, sep, rest = text.partition(": ")
+        if sep and " " not in head:
+            found.append({"severity": "error", "file": head, "message": rest})
+        else:
+            first = text.split(" ", 1)[0]
+            found.append({"severity": "error", "file": first if "/" in first or "." in first else "", "message": text})
+    return found
+
+
+def render(problems: list[dict]) -> str:
+    """The lines a person reads, made from the diagnostics."""
+    return "".join(f"{d['file']}: {d['message']}\n" if d.get("file") and not d["message"].startswith(d["file"])
+                   else f"{d['message']}\n" for d in problems)
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Check a source task against the format rules. Prints JSON.")
+    p.add_argument("task", type=Path)
+    p.add_argument("--text", action="store_true", help="print the lines a person reads instead of JSON")
+    a = p.parse_args(argv)
+    try:
+        task = load_task(a.task)
+    except TaskError as exc:
+        report, code = {"task": "", "ok": False,
+                        "problems": [{"severity": "error", "file": "task.toml", "message": str(exc)}]}, 2
+    else:
+        problems = diagnostics(task)
+        report, code = {"task": task.id, "ok": not problems, "problems": problems}, 1 if problems else 0
+    if a.text:
+        sys.stdout.write(render(report["problems"]) or "ok\n")
+    else:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

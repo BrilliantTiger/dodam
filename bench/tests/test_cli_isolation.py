@@ -404,6 +404,13 @@ for target in (1, os.getppid(), -1):
         pass
 print("still here")
 '''),
+    "more memory than the whole container has": ("ended by the kernel", r'''
+blocks = []
+while True:
+    blocks.append(bytearray(16 * 1024 * 1024))
+    for i in range(0, len(blocks[-1]), 4096):
+        blocks[-1][i] = 1
+'''),
     "leaves a daemon in a session of its own": ("left processes", r'''
 import time
 if os.fork() == 0:
@@ -423,9 +430,16 @@ print("gone to the background")
 def test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge(tmp_path, attack):
     limit, body = ATTACKS[attack]
     started = time.monotonic()
-    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS})
+    # one attack gets a memory limit the container cannot give: then the kernel must end the program, not the judge
+    changes = {"CASE_MEMORY_MB": "100000"} if limit == "ended by the kernel" else {}
+    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS}, **changes)
     seconds = time.monotonic() - started
     seen = found_by(tmp_path / "out", "attack.json")
+    if limit == "ended by the kernel":
+        assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, (seen, result["report"])
+        assert seen["exit_code"] is None and seen["limit"] is None, seen
+        assert result["exit_code"] == 0 and seconds < 90
+        return
     if limit == "survives":
         # the program could signal nobody but itself: it ends well, and so does everything around it
         assert set(outcomes(result).values()) == {"passed"} and seen["out"] == "still here\n", (seen, result["report"])
