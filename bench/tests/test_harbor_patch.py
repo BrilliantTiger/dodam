@@ -48,14 +48,23 @@ def flags(argv: list[str]) -> list[str]:
 # --- Harbor itself -------------------------------------------------------------------------------------------
 
 @needs_harbor
-def test_harbor_passes_exec_variables_by_name_and_keeps_their_values_off_the_command_line():
+def test_a_listed_credential_stays_off_the_command_line_and_reaches_the_container():
     out = probe()
     assert [a for a in out["argv"] if FAKE_SECRET in a] == []
     assert out["harbor_version"] == "0.25.0"
-    assert "DODAM_PROBE_SECRET_VALUE" in flags(out["argv"]) and "DODAM_PROBE_EMPTY" in flags(out["argv"])
-    # docker compose reads the value of a bare `-e NAME` from its own environment
-    assert out["env"]["DODAM_PROBE_SECRET_VALUE"] == FAKE_SECRET
-    assert out["env"]["DODAM_PROBE_EMPTY"] == ""
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in flags(out["argv"]) and "ANTHROPIC_API_KEY" in flags(out["argv"])
+    assert "ANTHROPIC_AUTH_TOKEN" in flags(out["argv"])
+    # docker compose reads the value of a bare `-e NAME` from its own environment and gives it to the container
+    assert out["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == FAKE_SECRET
+    assert out["env"]["ANTHROPIC_AUTH_TOKEN"] == FAKE_SECRET
+    assert out["env"]["ANTHROPIC_API_KEY"] == ""
+
+
+@needs_harbor
+def test_an_unlisted_variable_is_passed_exactly_as_the_released_harbor_passes_it():
+    out = probe()
+    assert "DODAM_PROBE_PLAIN=plain value" in flags(out["argv"])  # on the command line, as released
+    assert out["env"]["DODAM_PROBE_PLAIN"] is None  # and not in the docker CLI's own environment
 
 
 @needs_harbor
@@ -310,3 +319,57 @@ def test_the_entry_scripts_installers_write_are_accepted(tmp_path, monkeypatch, 
     harbor = fake_install(monkeypatch, tmp_path)
     harbor.write_text(harbor.read_text().split("\n", 1)[0] + "\n" + INSTALLER_ENTRY_BODIES[installer])
     check(harbor)
+
+
+# --- the guard's cheap gaps: it is there against a wrong or unpatched Harbor used by accident -----------------------
+
+@pytest.mark.parametrize("extra", [
+    "sys.argv[9] = 'podman'\n",             # changes what Harbor is asked to do
+    "app = sys.exit\n",                     # rebinds what is run
+])
+def test_an_entry_script_that_changes_what_harbor_runs_is_refused(tmp_path, monkeypatch, extra):
+    harbor = fake_install(monkeypatch, tmp_path)
+    head, body = harbor.read_text().split("\n", 1)
+    body = body.replace("if __name__", extra + "if __name__", 1)
+    harbor.write_text(head + "\n" + body)
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+def test_words_after_the_interpreter_on_the_first_line_are_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    head, body = harbor.read_text().split("\n", 1)
+    harbor.write_text(head + " -E\n" + body)
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+@pytest.mark.parametrize("name", ["sitecustomize/__init__.py", "usercustomize/__init__.py",
+                                  "sitecustomize.cpython-313-darwin.so", "sitecustomize.abi3.so"])
+def test_sitecustomize_or_usercustomize_in_any_form_is_refused(tmp_path, monkeypatch, name):
+    harbor = fake_install(monkeypatch, tmp_path)
+    path = site_of(tmp_path) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("import os\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+def test_a_virtual_environment_that_also_loads_the_system_site_packages_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    (tmp_path / "venv" / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = true\n")
+    with pytest.raises(harbor_patch.HarborSetupError):
+        check(harbor)
+
+
+# --- the patch passes by name only the credential names, everything else as the released Harbor --------------------
+
+def test_the_patch_passes_by_name_exactly_the_pilots_credential_names():
+    from dodambench.pilot import CREDENTIAL_NAMES
+
+    added = "\n".join(line for line in harbor_patch.PATCH_FILE.read_text(encoding="utf-8").splitlines()
+                      if line.startswith("+") and not line.startswith("+++"))
+    for name in CREDENTIAL_NAMES:
+        assert f'"{name}"' in added
+    for name in ("PATH", "HTTPS_PROXY", "DOCKER_", "OTEL_"):  # no list of names kept out any more
+        assert f'"{name}"' not in added

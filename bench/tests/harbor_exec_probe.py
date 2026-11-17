@@ -5,7 +5,7 @@ Run it with the Python of the Harbor install under test, never with the test sui
     <harbor venv>/bin/python -I harbor_exec_probe.py
 
 It reads a made-up secret from DODAM_PROBE_SECRET, asks a real Harbor DockerEnvironment to run a command with that
-secret (and two other variables) in its environment, stops where Harbor would start the docker CLI, and prints as
+secret under the credential names (and other variables) in its environment, stops where Harbor would start the docker CLI, and prints as
 JSON the argument list and the environment that process would have been given.
 """
 import asyncio
@@ -34,7 +34,8 @@ def main() -> None:
         raise Captured
 
     docker_module.asyncio.create_subprocess_exec = fake_exec
-    requested = {"DODAM_PROBE_SECRET_VALUE": secret, "DODAM_PROBE_EMPTY": "", "PATH": "/container/bin",
+    requested = {"CLAUDE_CODE_OAUTH_TOKEN": secret, "ANTHROPIC_AUTH_TOKEN": secret, "ANTHROPIC_API_KEY": "",
+                 "DODAM_PROBE_PLAIN": "plain value", "PATH": "/container/bin",
                  # names the docker CLI reads for itself
                  "HTTPS_PROXY": "http://container-proxy:3128", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://container:4318",
                  "XDG_CONFIG_HOME": "/container/config", "TMPDIR": "/container/tmp", "GODEBUG": "container=1",

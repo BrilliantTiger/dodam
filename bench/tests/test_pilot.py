@@ -1261,3 +1261,16 @@ def test_an_error_while_recording_the_watch_never_skips_the_leak_scan(tmp_path, 
     with pytest.raises(pilot.TokenLeak):
         pilot.run_pilot(runner=FakeRunner(leak=True), **pilot_args(tmp_path))
     assert read_record(tmp_path)["status"] == "token-leak"
+
+
+def test_the_token_is_never_handed_over_under_a_name_the_patched_harbor_would_put_on_the_command_line(
+        tmp_path, monkeypatch):
+    from dodambench import harbor_patch
+
+    # as if the patch passed only the API key by name: the OAuth token would go as NAME=VALUE
+    monkeypatch.setattr(harbor_patch, "CREDENTIALS_BY_NAME", ("ANTHROPIC_API_KEY",), raising=False)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tmp_path / "missing"))
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in str(err.value) and "token file" not in str(err.value)
+    assert runner.calls == []

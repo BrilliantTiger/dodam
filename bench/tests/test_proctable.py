@@ -126,3 +126,103 @@ def test_samples_are_counted_inside_time_windows():
     assert watch.count_within([(15.0, 35.0)]) == 2
     assert watch.count_within([(0.0, 12.0), (39.0, 41.0)]) == 2
     assert watch.count_within([]) == 0
+
+
+# --- the record of a stop, and the order of a stop after a sighting ---------------------------------------------------
+
+def test_harbor_that_ended_by_itself_before_the_stop_is_not_recorded_as_stopped():
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    proc.wait()  # Harbor is gone before the watch goes to stop it
+    with proctable.ProcessTableWatch(FAKE_TOKEN, Sampler(hit_from=2), interval=0.01) as watch:
+        watch.track(proc)
+        assert wait_for(lambda: watch.harbor != "not-stopped")
+    record = watch.record()
+    assert record["harbor"] == "ended-before-stop" and record["stopped_harbor"] is False
+    assert record["stop_signals"] == []
+    assert "already ended" in watch.outcome()
+
+
+STUBBORN = """
+import signal, subprocess, sys, time
+out = sys.argv[1]
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                          "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+open(out + "/ready", "w").write("1")
+child.wait()  # reaps the child as soon as it ends
+time.sleep(60)
+"""
+
+
+def start_stubborn(tmp_path, popen=subprocess.Popen):
+    """A stand-in Harbor in its own process group that ignores SIGINT and SIGTERM, with one child that does too."""
+    script = tmp_path / "stubborn.py"
+    script.write_text(STUBBORN)
+    proc = popen([sys.executable, str(script), str(tmp_path)], start_new_session=True)
+    assert wait_for(lambda: (tmp_path / "ready").exists())
+    return proc, int((tmp_path / "child.pid").read_text())
+
+
+def gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def end_group(proc):
+    try:
+        os.killpg(proc.pid, 9)
+    except (ProcessLookupError, PermissionError):  # macOS refuses a group of zombies with EPERM
+        pass
+    try:
+        os.waitpid(proc.pid, 0)
+    except ChildProcessError:
+        pass
+
+
+class NoWait(subprocess.Popen):
+    """A Harbor process whose every wait times out, so the stop raises after it has sent its signals."""
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired(self.args, timeout)
+
+
+def test_signals_already_sent_stay_in_the_record_when_the_stop_then_fails(tmp_path):
+    proc, _ = start_stubborn(tmp_path, popen=NoWait)
+    try:
+        with proctable.ProcessTableWatch(FAKE_TOKEN, Sampler(hit_from=2), interval=0.01) as watch:
+            watch.track(proc)
+            assert wait_for(lambda: watch.harbor != "not-stopped")
+        record = watch.record()
+        assert record["stop_signals"][:3] == ["SIGINT", "SIGTERM", "SIGKILL"]
+        assert "TimeoutExpired" in record["stop_error"]
+    finally:
+        end_group(proc)
+
+
+def test_a_sighted_process_of_harbors_group_is_killed_at_once_before_harbor_is_asked_to_stop(tmp_path):
+    import functools
+
+    proc, child = start_stubborn(tmp_path)
+    sighted = {}
+
+    def tables() -> bytes:
+        sighted.setdefault("at", time.monotonic())
+        return CLEAN + f"{child} docker compose exec -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN} main\n".encode()
+
+    calls = iter([CLEAN])
+    try:
+        stop = functools.partial(proctable.stop_group, grace=3.0, term_grace=1.0)
+        with proctable.ProcessTableWatch(FAKE_TOKEN, lambda: next(calls, None) or tables(), interval=0.01,
+                                         stop=stop) as watch:
+            watch.track(proc)
+            assert wait_for(lambda: gone(child), seconds=10.0)
+            ended = time.monotonic()
+        assert ended - sighted["at"] < 1.5  # not after Harbor's grace periods (4 s here, 6 min by default)
+        assert watch.record()["harbor"] == "stopped"
+    finally:
+        end_group(proc)

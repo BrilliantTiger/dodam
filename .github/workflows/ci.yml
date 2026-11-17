@@ -37,10 +37,10 @@ jobs:
         working-directory: bench
         run: |
           set +e
-          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_harbor_passes_exec_variables_by_name_and_keeps_their_values_off_the_command_line" 2>&1)
+          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_a_listed_credential_stays_off_the_command_line_and_reaches_the_container" 2>&1)
           code=$?
           set -e
-          if [ "$code" -ne 1 ] || ! printf '%s' "$out" | grep -q "DODAM_PROBE_SECRET_VALUE=sk-ant-oat01-PROBE"; then
+          if [ "$code" -ne 1 ] || ! printf '%s' "$out" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-PROBE"; then
             printf '%s\n' "$out"
             echo "The leak test did not find the made-up secret on the command line of the released Harbor."
             exit 1
