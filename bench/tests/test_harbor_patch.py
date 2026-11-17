@@ -288,3 +288,26 @@ def test_apply_refuses_when_another_harbor_module_differs_from_the_release(tmp_p
     with pytest.raises(harbor_patch.HarborSetupError):
         apply(tmp_path / "venv")
     assert target_of(tmp_path / "venv").read_text() == ORIGINAL
+
+
+# The entry scripts installers write for `harbor = harbor.cli.main:app`, after the #! line: uv, pip 25.2, pip 26.2.2
+# (CI), and the older template that strips the suffix with re.sub.
+INSTALLER_ENTRY_BODIES = {
+    "uv": ('# -*- coding: utf-8 -*-\nimport sys\nfrom harbor.cli.main import app\nif __name__ == "__main__":\n'
+           '    if sys.argv[0].endswith("-script.pyw"):\n        sys.argv[0] = sys.argv[0][:-11]\n'
+           '    elif sys.argv[0].endswith(".exe"):\n        sys.argv[0] = sys.argv[0][:-4]\n    sys.exit(app())\n'),
+    "pip-25": ("import sys\nfrom harbor.cli.main import app\nif __name__ == '__main__':\n"
+               "    if sys.argv[0].endswith('.exe'):\n        sys.argv[0] = sys.argv[0][:-4]\n    sys.exit(app())\n"),
+    "pip-26": ("import sys\nfrom harbor.cli.main import app\nif __name__ == '__main__':\n"
+               "    sys.argv[0] = sys.argv[0].removesuffix('.exe')\n    sys.exit(app())\n"),
+    "re-sub": ("# -*- coding: utf-8 -*-\nimport re\nimport sys\nfrom harbor.cli.main import app\n"
+               "if __name__ == '__main__':\n    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+               "    sys.exit(app())\n"),
+}
+
+
+@pytest.mark.parametrize("installer", sorted(INSTALLER_ENTRY_BODIES))
+def test_the_entry_scripts_installers_write_are_accepted(tmp_path, monkeypatch, installer):
+    harbor = fake_install(monkeypatch, tmp_path)
+    harbor.write_text(harbor.read_text().split("\n", 1)[0] + "\n" + INSTALLER_ENTRY_BODIES[installer])
+    check(harbor)
