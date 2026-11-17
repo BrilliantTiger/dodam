@@ -2379,7 +2379,7 @@ def test_an_error_while_harbor_runs_stops_its_group_and_lists_the_signals(tmp_pa
     request.sent = []
 
     def broken_wait(proc, timeout, stop_request):
-        assert wait_for_file(tmp_path / "ready")
+        assert appears(tmp_path / "ready")
         raise RuntimeError("a fault in the runner")
 
     monkeypatch.setattr(pilot, "_wait_for", broken_wait)
@@ -2457,7 +2457,7 @@ def test_a_stop_signal_right_after_the_watch_stop_is_raised_is_held(tmp_path):
     assert not interrupted and gate.held == [signal.SIGINT]
 
 
-def wait_for_file(path, within=10.0):
+def appears(path, within=10.0):
     end = time.monotonic() + within
     while not path.exists() and time.monotonic() < end:
         time.sleep(0.01)

@@ -27,6 +27,9 @@ PS_ARGS = ("/bin/ps", "-A", "-ww", "-o", "pid=,args=")
 STOP_GRACE_SECONDS = 300.0
 TERM_GRACE_SECONDS = 60.0
 KILL_WAIT_SECONDS = 30.0
+# The entries of the signal list that are a stop of Harbor itself. The others (a sighted process killed, what Harbor
+# left behind ended after it exited on its own) are listed too but do not make Harbor "stopped".
+GROUP_STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGKILL", "SIGKILL to Harbor alone")
 
 
 def process_table() -> bytes:
@@ -95,11 +98,12 @@ class ProcessTableWatch:
         self.error: str | None = None
         # not-started: the reading before the start was not clean; not-stopped: the watch never stopped Harbor
         # (a clean run, no Harbor process was handed over, or the token was only seen after Harbor ended);
-        # ended-before-stop: Harbor had ended by itself when the watch went to stop it, and no signal was sent;
+        # ended-before-stop: Harbor had ended by itself when the watch went to stop it, and no stop signal was sent;
         # stopped: the watch sent signals and Harbor ended; stop-failed: Harbor was still running after the stop.
         self.harbor = "not-stopped"
         self.stop_signals: list[str] = []
         self.stop_error: str | None = None
+        self.stopped_by: str | None = None  # what began the stop: the watch, or the runner's time limit, stop signal...
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._must_stop = False
@@ -165,8 +169,9 @@ class ProcessTableWatch:
                 pass
             except Exception as err:
                 errors.append(f"killing sighted process {pid} failed: {type(err).__name__}: {err}")
+        by = None
         try:
-            self._stop(proc, sent)
+            by = self._stop(proc, sent)
         except Exception as err:
             errors.append(f"stopping Harbor's process group failed: {type(err).__name__}: {err}")
         if proc.poll() is None:
@@ -180,11 +185,36 @@ class ProcessTableWatch:
                 errors.append("processes Harbor started may still be running")
         if errors:
             self.stop_error = self._mask("; ".join(errors))
+        if self.stopped_by is None:
+            self.stopped_by = by if isinstance(by, str) else "the watch" if self._stopped_harbor_group() else None
+        self._settle()
+
+    def _stopped_harbor_group(self) -> bool:
+        return any(s in GROUP_STOP_SIGNALS for s in self.stop_signals)
+
+    def _settle(self) -> None:
+        """Harbor's outcome from what was sent: stopped when a stop of Harbor's group went out (by the watch or by
+        the runner, for whatever reason) and Harbor ended; ended-before-stop when the watch went to stop it and no
+        stop went out because Harbor had already ended; not-stopped when nothing stopped it."""
+        proc = self._proc
+        if self.harbor == "not-started" or proc is None:
+            return
         ended = proc.poll() is not None
-        if not sent:
+        if self._stopped_harbor_group():
+            self.harbor = "stopped" if ended else "stop-failed"
+        elif self._stopping:
             self.harbor = "ended-before-stop" if ended else "stop-failed"
         else:
-            self.harbor = "stopped" if ended else "stop-failed"
+            self.harbor = "not-stopped"
+
+    def note_runner_stop(self, by: str | None, errors: list[str]) -> None:
+        """What began a stop of Harbor's group that the runner made (its signals are already in the list), and the
+        refusals it met. Called once the run is over."""
+        if self.stopped_by is None and by is not None and self._stopped_harbor_group():
+            self.stopped_by = by
+        if errors:
+            text = self._mask("; ".join(errors))
+            self.stop_error = text if not self.stop_error else f"{self.stop_error}; {text}"
 
     def _run(self) -> None:
         while not self._done.wait(self.interval):
@@ -209,6 +239,7 @@ class ProcessTableWatch:
             self._thread.join()
             self._ended = True
             self.sample()
+        self._settle()
 
     def count_within(self, windows: Iterable[tuple[float, float]]) -> int:
         windows = list(windows)
@@ -219,7 +250,9 @@ class ProcessTableWatch:
         if self.harbor == "not-started":
             return "Harbor was not started"
         if self.harbor == "stopped":
-            return "Harbor was stopped" + (f" ({self.stop_error})" if self.stop_error else "")
+            why = ("" if self.stopped_by in (None, "the watch")
+                   else f" by the runner, which was already stopping it after {self.stopped_by}")
+            return "Harbor was stopped" + why + (f" ({self.stop_error})" if self.stop_error else "")
         if self.harbor == "stop-failed":
             return f"Harbor could not be stopped ({self.stop_error})"
         if self.harbor == "ended-before-stop":
@@ -232,5 +265,5 @@ class ProcessTableWatch:
         return {"command": " ".join(PS_ARGS), "interval_seconds": self.interval, "samples": len(self.times),
                 "hit_samples": self.hit_samples, "hits_after_end": self.hits_after_end, "hit_pids": self.hit_pids,
                 "error": self.error, "clean": self.clean, "harbor": self.harbor,
-                "stopped_harbor": self.stopped_harbor, "stop_signals": self.stop_signals,
+                "stopped_harbor": self.stopped_harbor, "stop_signals": self.stop_signals, "stopped_by": self.stopped_by,
                 "stop_error": self.stop_error}
