@@ -196,7 +196,7 @@ what = "The judge refuses a container without a cap on processes"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold"]
 [[protection.change]]
-find = '''    if processes is None:'''
+find = '''    if processes is None or processes > PROCESS_CEILING:'''
 put = '''    if False:'''
 
 [[protection]]

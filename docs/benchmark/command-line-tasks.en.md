@@ -187,7 +187,7 @@ The judge checks four things about its container, and without any one of them it
 |---|---|
 | There is a memory cap | nothing bounds the memory the program's side takes |
 | That cap is not above the memory of the machine the container runs on | the cap does not hold |
-| There is a cap on processes | nothing bounds a build that forks without end |
+| There is a cap on processes, and it is not above 4,096 | nothing bounds a build that forks without end |
 | The memory-backed folder for the cases is there, at the size of the task's file limit and with 20,000 entries | nothing bounds what is written |
 
 Before it makes a container, the tool that checks prepared solutions asks Docker how much memory its machine has. When a task asks for more, the cap is lowered to three quarters of the machine's memory, and every result says so. A command-line task whose cases do not fit under the lowered cap is refused with a JSON diagnostic. On this repository's measuring machine the Docker machine has about 2 GB, so the web task, which asks for 4,096 MB, was judged under a cap of 1,469 MB.

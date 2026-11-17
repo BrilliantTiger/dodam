@@ -80,7 +80,10 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     caps = {"memory": ["--memory", f"{memory}m", "--memory-swap", f"{memory}m"],
             "processes": ["--pids-limit", str(ROOM["processes"])],
             "cases": ["--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={disk_mb}m,nr_inodes=20000,mode=0711"]}
-    flags = [flag for key, value in caps.items() if key not in without for flag in value]
+    # where Docker gives every container a cap of its own, leaving the flag out would leave that one:
+    # a cap far above anything that protects the machine stands in for none
+    loose = {"processes": ["--pids-limit", "100000"]}
+    flags = [flag for key, value in caps.items() for flag in (loose.get(key, []) if key in without else value)]
     try:
         subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0", *flags,
                         "--cpus", str(ROOM["cpus"]), "-e", f"DODAM_APP_USER={user}", IMAGE, "sh", "-c", script],

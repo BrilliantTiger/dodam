@@ -195,7 +195,8 @@ OUTLIVING_CALLS = {
     "aarch64": (0xC00000B7, tuple(range(180, 198))),
 }
 CASES_DIR = Path("/dodam-cases")   # the memory-backed, size-capped folder the verifier's container gives the cases
-JUDGE_ROOM_MB = 256                # what the judge and the language's runtime need beside the case's own limits
+JUDGE_ROOM_MB = 256
+PROCESS_CEILING = 4096      # a cap on processes above this bounds nothing on a small machine                # what the judge and the language's runtime need beside the case's own limits
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
 
 
@@ -317,9 +318,9 @@ def container_caps(disk_mb: int | None = None, group: Path = Path("/sys/fs/cgrou
     if memory > machine:
         raise refuse("memory", f"the container's memory cap of {memory // 2**20} MB cannot hold: the machine it "
                                f"runs on has {machine // 2**20} MB")
-    if processes is None:
-        raise refuse("processes", "the container has no cap on processes, so a build that forks without end "
-                                  "is not bounded")
+    if processes is None or processes > PROCESS_CEILING:
+        raise refuse("processes", "the container has no cap on processes, or one above "
+                                  f"{PROCESS_CEILING}, so a build that forks without end is not bounded")
     if refusing_filter() is None:
         raise refuse("machine", f"no call filter is known for a {platform.machine()} machine")
     caps = {"memory_mb": memory // 2**20, "processes": processes}

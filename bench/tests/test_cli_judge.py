@@ -675,6 +675,7 @@ def test_the_judge_reads_its_containers_caps_and_refuses_when_one_is_missing(tmp
     assert refusal("max", "512")["key"] == "memory"
     assert refusal(str(4000 * 2**20), "512")["key"] == "memory"      # a cap above what the machine has
     assert refusal(str(1024 * 2**20), "max")["key"] == "processes"
+    assert refusal(str(1024 * 2**20), "100000")["key"] == "processes"  # a cap that bounds nothing
     if judge_module.refusing_filter() is not None:
         assert refusal(str(1024 * 2**20), "512") == {}
         assert caps(None, group=group, machine_info=info) == {"memory_mb": 1024, "processes": 512}
