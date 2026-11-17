@@ -2462,3 +2462,36 @@ def appears(path, within=10.0):
     while not path.exists() and time.monotonic() < end:
         time.sleep(0.01)
     return path.exists()
+
+
+SIGHTED_HARBOR = """#!{python}
+import os, subprocess, sys, time
+out = {out!r}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+open(out + "/harbor.pid", "w").write(str(os.getpid()))
+open(out + "/ready", "w").write("1")
+time.sleep(30)
+"""
+
+
+def test_the_watch_killing_harbor_itself_as_a_sighted_process_is_recorded_as_the_watchs_stop(tmp_path):
+    harbor = tmp_path / "bin" / "harbor"
+    harbor.parent.mkdir(parents=True)
+    harbor.write_text(SIGHTED_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    harbor.chmod(0o755)
+
+    def tables() -> bytes:  # Harbor's own command line shows the token
+        if not (tmp_path / "ready").exists():
+            return clean_table()
+        pid = int((tmp_path / "harbor.pid").read_text())
+        return clean_table() + f"{pid} {harbor} run -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN}\n".encode()
+
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=functools.partial(pilot.run_subprocess, term_grace=2.0), **pilot_args(
+            tmp_path, harbor=harbor, timeout=30.0, process_sampler=tables, process_interval=0.05))
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stopped_harbor"] is True
+    assert watch["stopped_by"] == "the watch"
+    assert "already ended" not in str(err.value) and FAKE_TOKEN not in str(err.value)
+    assert gone(int((tmp_path / "child.pid").read_text()))  # the runner ended what Harbor left
