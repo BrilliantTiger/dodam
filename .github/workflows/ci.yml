@@ -93,7 +93,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        script: [pilot_replan.py, claude_only.py]
+        # The check of claude_only.py is spread over two machines so that each ends well inside the limit.
+        check:
+          - pilot_replan.py --check
+          - claude_only.py --check --part 1/2
+          - claude_only.py --check --part 2/2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -103,4 +107,4 @@ jobs:
           python-version: "3.13"
       - name: Check that the recorded output is what the script gives
         working-directory: tools/plan
-        run: python ${{ matrix.script }} --check
+        run: python ${{ matrix.check }}
