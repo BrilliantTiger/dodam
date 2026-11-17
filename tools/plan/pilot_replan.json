@@ -21,6 +21,57 @@
    "output": 68106
   },
   "cost_usd_as_the_cli_counts_it_total": 1.39,
+  "day": {
+   "starts_with_a_record": 9,
+   "counted": 7,
+   "not_counted": 2,
+   "not_counted_starts": [
+    {
+     "started_utc": "2026-11-17T07:20:23Z",
+     "started_hhmm_utc": "07:20",
+     "language": "python",
+     "turns": 2,
+     "tokens": 0,
+     "steps_that_ended_with_an_error": 2,
+     "steps": 2,
+     "agent_seconds_counted": 412.6,
+     "wall_seconds": 507.4,
+     "rewards": [
+      0.0,
+      0.0
+     ],
+     "weekly_percent_at_its_end": null,
+     "process_table_watched": false,
+     "leak_scan_clean": true,
+     "leak_hits": 0,
+     "minutes_before_the_fix_was_first_committed": 36
+    },
+    {
+     "started_utc": "2026-11-17T07:31:38Z",
+     "started_hhmm_utc": "07:31",
+     "language": "python",
+     "turns": 7,
+     "tokens": 131340,
+     "steps_that_ended_with_an_error": 0,
+     "steps": 2,
+     "agent_seconds_counted": 72.1,
+     "wall_seconds": 198.7,
+     "rewards": [
+      1.0,
+      1.0
+     ],
+     "weekly_percent_at_its_end": 25.0,
+     "process_table_watched": false,
+     "leak_scan_clean": true,
+     "leak_hits": 0,
+     "minutes_before_the_fix_was_first_committed": 25
+    }
+   ],
+   "fix_first_committed_hhmm_utc": "07:56",
+   "fix_merged_hhmm_utc": "11:10",
+   "counted_runs_started_before_the_fix_was_merged": 1,
+   "counted_runs_started_after_the_fix_was_merged": 6
+  },
   "weekly": {
    "display_step_points": 1,
    "first_batch_runs": 1,
@@ -33,12 +84,21 @@
    "later_first_reading": 35.0,
    "later_last_reading": 35.0,
    "rise_between_the_batches_points": 8.0,
-   "moved_during_later_runs_points": 0.0,
-   "one_run_below_points": 0.17,
-   "baseline_below_points": 107.1,
+   "moved_between_the_two_readings_points": 0.0,
+   "readings_per_step": 1,
+   "first_reading_after_replies": 1,
+   "first_reading_step_replies": 11,
+   "last_reading_after_replies": 1,
+   "last_reading_step_replies": 8,
+   "steps_of_the_later_runs": 12,
+   "steps_wholly_between_the_readings": 10,
+   "agent_seconds_wholly_between_the_readings": 382.7,
+   "agent_seconds_of_the_later_runs": 479.4,
+   "one_run_below_points": 0.21,
+   "baseline_below_points": 132.3,
    "runner_stops_at_percent": 50.0,
    "room_to_the_stop_points": 15.0,
-   "runs_in_that_room_at_the_bound": 88,
+   "runs_in_that_room_at_the_bound": 71,
    "runs_whose_readings_moved_between_first_and_after": 0
   },
   "five_hour": {
@@ -50,14 +110,20 @@
    "guard_minutes_after_first_batch": 1.2
   },
   "safety": {
+   "watched_runs": 7,
+   "starts_without_a_watch": 2,
    "readings": 2820,
    "readings_later_runs": 2439,
    "readings_while_the_agent_worked": 984,
    "readings_with_the_token": 0,
+   "runs_also_watched_after_their_end": 6,
    "reading_interval_seconds": 0.5,
-   "clean_leak_scans": 7,
+   "leak_scans": 9,
+   "clean_leak_scans": 9,
    "leak_hits": 0,
+   "runs_whose_scan_says_what_it_could_not_read": 7,
    "files_the_scan_could_not_read": 0,
+   "runs_that_recorded_containers": 7,
    "containers_left": 0,
    "runs_where_harbor_was_stopped": 0,
    "judge_environment_problems": 0,
@@ -130,19 +196,54 @@
   ],
   "largest_factor_that_fits_the_row": 1.62,
   "agent_minutes_per_run_at_that_factor": 2.14,
-  "next_measurement": {
-   "same_model_runs": 21,
-   "agent_minutes": 27.7,
-   "wall_minutes": 78.4,
-   "weekly_points_per_run_it_can_tell": 0.05,
-   "larger_model_runs": 7
+  "next_measurements": {
+   "same_model": {
+    "runs": 46,
+    "whole_rounds_of_the_languages": 6,
+    "runs_beyond_whole_rounds": 4,
+    "agent_minutes": 60.7,
+    "runs_wholly_between_first_and_last_reading": 45,
+    "one_run_below_points_if_unmoved": 0.022,
+    "baseline_below_points_if_unmoved": 14.0,
+    "room_on_the_pilot_day_points": 15.0,
+    "unmoved_shows_the_baseline_fits_that_room": true,
+    "baseline_points_if_moved_one_step_at_most": 28.0,
+    "models_covered": 1,
+    "tasks_covered": 1,
+    "models_left": 2,
+    "tasks_left": 9
+   },
+   "largest_model": {
+    "runs": 7,
+    "all_start_in_one_window_up_to_factor": 3.78,
+    "agent_minutes_at_that_factor": 5.0,
+    "all_end_in_one_night_up_to_factor": 7.57,
+    "agent_minutes_at_the_night_factor": 10.0,
+    "starts_in_the_first_window_at_factor_4": 6,
+    "runs_in_the_night_at_factor_4": 7,
+    "models_covered_with_the_first_night": 2,
+    "tasks_covered": 1,
+    "models_left": 1,
+    "tasks_left": 9,
+    "one_run_below_points_if_unmoved": 0.17
+   }
   }
  },
  "schedule": {
-  "sims": 2000,
+  "sims_per_seed": 2000,
+  "seeds": [
+   20261117,
+   1,
+   2,
+   3,
+   4
+  ],
+  "runs_per_case": 10000,
   "upper_percent": 80,
   "pilot_day": "2026-11-17",
   "finished_tasks": 5,
+  "tasks_rolled": 140,
+  "tasks_added_later_and_left_out": 1,
   "pilot_row": {
    "start": "2026-11-29",
    "end": "2026-12-06",
@@ -157,7 +258,8 @@
   "gate_day": "2027-02-24",
   "working_days_a_week": {
    "planning": 15,
-   "claude_only": 5
+   "claude_dedicated": 5,
+   "claude_shared": 4
   },
   "capacities": {
    "planning": {
@@ -178,8 +280,369 @@
       "p50": "2027-02-24",
       "p80": "2027-04-07"
      },
-     "p_baseline_by_row_end": 0.37,
-     "p_gate_by_its_date": 0.49
+     "p_baseline_by_row_end": 0.36,
+     "p_gate_by_its_date": 0.48,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-17"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-07"
+       },
+       "p_baseline_by_row_end": 0.37,
+       "p_gate_by_its_date": 0.49,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-13"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.33,
+       "p_gate_by_its_date": 0.46,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-07"
+       },
+       "p_baseline_by_row_end": 0.36,
+       "p_gate_by_its_date": 0.49,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-17"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-07"
+       },
+       "p_baseline_by_row_end": 0.37,
+       "p_gate_by_its_date": 0.48,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-17"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.35,
+       "p_gate_by_its_date": 0.47,
+       "seed": 4
+      }
+     ]
+    },
+    "finished_only": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_runner": {
+      "p50": "2026-12-16",
+      "p80": "2026-12-30"
+     },
+     "b_baseline": {
+      "p50": "2027-01-13",
+      "p80": "2027-02-10"
+     },
+     "g_dir": {
+      "p50": "2027-02-17",
+      "p80": "2027-03-31"
+     },
+     "p_baseline_by_row_end": 0.36,
+     "p_gate_by_its_date": 0.5,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-31"
+       },
+       "p_baseline_by_row_end": 0.36,
+       "p_gate_by_its_date": 0.49,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-31"
+       },
+       "p_baseline_by_row_end": 0.35,
+       "p_gate_by_its_date": 0.5,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-09",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-06",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-17",
+        "p80": "2027-03-31"
+       },
+       "p_baseline_by_row_end": 0.36,
+       "p_gate_by_its_date": 0.52,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-07"
+       },
+       "p_baseline_by_row_end": 0.37,
+       "p_gate_by_its_date": 0.5,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-02-10"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-07"
+       },
+       "p_baseline_by_row_end": 0.34,
+       "p_gate_by_its_date": 0.5,
+       "seed": 4
+      }
+     ]
+    },
+    "numbers_only": {
+     "b_tasks10": {
+      "p50": "2026-12-16",
+      "p80": "2027-01-06"
+     },
+     "b_runner": {
+      "p50": "2026-12-02",
+      "p80": "2026-12-23"
+     },
+     "b_baseline": {
+      "p50": "2026-12-30",
+      "p80": "2027-01-27"
+     },
+     "g_dir": {
+      "p50": "2027-02-17",
+      "p80": "2027-03-17"
+     },
+     "p_baseline_by_row_end": 0.51,
+     "p_gate_by_its_date": 0.59,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.53,
+       "p_gate_by_its_date": 0.61,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-13"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-06",
+        "p80": "2027-02-03"
+       },
+       "g_dir": {
+        "p50": "2027-02-17",
+        "p80": "2027-03-24"
+       },
+       "p_baseline_by_row_end": 0.48,
+       "p_gate_by_its_date": 0.57,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.51,
+       "p_gate_by_its_date": 0.61,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-17",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.51,
+       "p_gate_by_its_date": 0.59,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2027-01-06"
+       },
+       "b_runner": {
+        "p50": "2026-12-02",
+        "p80": "2026-12-23"
+       },
+       "b_baseline": {
+        "p50": "2027-01-06",
+        "p80": "2027-02-03"
+       },
+       "g_dir": {
+        "p50": "2027-02-17",
+        "p80": "2027-03-24"
+       },
+       "p_baseline_by_row_end": 0.49,
+       "p_gate_by_its_date": 0.59,
+       "seed": 4
+      }
+     ]
     },
     "after_x1": {
      "b_tasks10": {
@@ -199,7 +662,114 @@
       "p80": "2027-03-17"
      },
      "p_baseline_by_row_end": 0.53,
-     "p_gate_by_its_date": 0.61
+     "p_gate_by_its_date": 0.62,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-20"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.53,
+       "p_gate_by_its_date": 0.61,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-20"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.54,
+       "p_gate_by_its_date": 0.62,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-09",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-20"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-10"
+       },
+       "p_baseline_by_row_end": 0.54,
+       "p_gate_by_its_date": 0.63,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-20"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.52,
+       "p_gate_by_its_date": 0.63,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2026-12-30",
+        "p80": "2027-01-20"
+       },
+       "g_dir": {
+        "p50": "2027-02-10",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.53,
+       "p_gate_by_its_date": 0.63,
+       "seed": 4
+      }
+     ]
     },
     "after_x2": {
      "b_tasks10": {
@@ -219,7 +789,114 @@
       "p80": "2027-03-24"
      },
      "p_baseline_by_row_end": 0.18,
-     "p_gate_by_its_date": 0.46
+     "p_gate_by_its_date": 0.47,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-24"
+       },
+       "p_baseline_by_row_end": 0.18,
+       "p_gate_by_its_date": 0.46,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.18,
+       "p_gate_by_its_date": 0.46,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-09",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-17"
+       },
+       "p_baseline_by_row_end": 0.18,
+       "p_gate_by_its_date": 0.48,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-24"
+       },
+       "p_baseline_by_row_end": 0.17,
+       "p_gate_by_its_date": 0.46,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-01-13",
+        "p80": "2027-01-27"
+       },
+       "g_dir": {
+        "p50": "2027-02-24",
+        "p80": "2027-03-24"
+       },
+       "p_baseline_by_row_end": 0.17,
+       "p_gate_by_its_date": 0.47,
+       "seed": 4
+      }
+     ]
     },
     "after_x4": {
      "b_tasks10": {
@@ -239,29 +916,497 @@
       "p80": "2027-04-14"
      },
      "p_baseline_by_row_end": 0.0,
-     "p_gate_by_its_date": 0.0
+     "p_gate_by_its_date": 0.0,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-02-10",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-03-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-02-10",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-03-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-09",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-02-10",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-03-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.01,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-02-10",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-03-24",
+        "p80": "2027-04-14"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_runner": {
+        "p50": "2026-12-16",
+        "p80": "2026-12-30"
+       },
+       "b_baseline": {
+        "p50": "2027-02-10",
+        "p80": "2027-02-24"
+       },
+       "g_dir": {
+        "p50": "2027-03-24",
+        "p80": "2027-04-21"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 4
+      }
+     ]
     }
    },
-   "claude_only": {
+   "claude_dedicated": {
     "before": {
      "b_tasks10": {
-      "p50": "2027-02-17",
+      "p50": "2027-02-24",
       "p80": "2027-04-28"
      },
      "b_runner": {
       "p50": "2027-01-27",
-      "p80": "2027-03-17"
+      "p80": "2027-03-24"
      },
      "b_baseline": {
-      "p50": "2027-04-28",
-      "p80": "2027-08-18"
+      "p50": "2027-05-05",
+      "p80": "2027-08-25"
      },
      "g_dir": {
       "p50": "2027-07-14",
-      "p80": "2027-11-24"
+      "p80": "2027-12-08"
      },
      "p_baseline_by_row_end": 0.02,
-     "p_gate_by_its_date": 0.04
+     "p_gate_by_its_date": 0.04,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-17"
+       },
+       "b_baseline": {
+        "p50": "2027-04-28",
+        "p80": "2027-08-18"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-11-24"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-05-05",
+        "p80": "2027-09-08"
+       },
+       "g_dir": {
+        "p50": "2027-07-21",
+        "p80": "2027-12-22"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.03,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-17"
+       },
+       "b_baseline": {
+        "p50": "2027-04-28",
+        "p80": "2027-08-18"
+       },
+       "g_dir": {
+        "p50": "2027-07-07",
+        "p80": "2027-11-24"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.05,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-04-28",
+        "p80": "2027-08-25"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-12-01"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-05-05",
+        "p80": "2027-09-01"
+       },
+       "g_dir": {
+        "p50": "2027-07-21",
+        "p80": "2027-12-22"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 4
+      }
+     ]
+    },
+    "finished_only": {
+     "b_tasks10": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_runner": {
+      "p50": "2027-02-03",
+      "p80": "2027-03-24"
+     },
+     "b_baseline": {
+      "p50": "2027-04-14",
+      "p80": "2027-07-21"
+     },
+     "g_dir": {
+      "p50": "2027-06-23",
+      "p80": "2027-11-03"
+     },
+     "p_baseline_by_row_end": 0.02,
+     "p_gate_by_its_date": 0.05,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-04-14",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-03"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.05,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-04-14",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-10-27"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-04-14",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-06-16",
+        "p80": "2027-10-27"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.05,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-04-14",
+        "p80": "2027-07-28"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-03"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.05,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-04-14",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 4
+      }
+     ]
+    },
+    "numbers_only": {
+     "b_tasks10": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-01-27",
+      "p80": "2027-03-24"
+     },
+     "b_baseline": {
+      "p50": "2027-03-31",
+      "p80": "2027-06-30"
+     },
+     "g_dir": {
+      "p50": "2027-06-09",
+      "p80": "2027-10-13"
+     },
+     "p_baseline_by_row_end": 0.04,
+     "p_gate_by_its_date": 0.07,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-17"
+       },
+       "b_baseline": {
+        "p50": "2027-03-24",
+        "p80": "2027-06-16"
+       },
+       "g_dir": {
+        "p50": "2027-06-02",
+        "p80": "2027-09-29"
+       },
+       "p_baseline_by_row_end": 0.05,
+       "p_gate_by_its_date": 0.08,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-07-07"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-10-20"
+       },
+       "p_baseline_by_row_end": 0.04,
+       "p_gate_by_its_date": 0.06,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-17"
+       },
+       "b_baseline": {
+        "p50": "2027-03-24",
+        "p80": "2027-06-23"
+       },
+       "g_dir": {
+        "p50": "2027-06-02",
+        "p80": "2027-09-29"
+       },
+       "p_baseline_by_row_end": 0.05,
+       "p_gate_by_its_date": 0.07,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-30"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-10-06"
+       },
+       "p_baseline_by_row_end": 0.04,
+       "p_gate_by_its_date": 0.07,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-01-27",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-30"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-10-20"
+       },
+       "p_baseline_by_row_end": 0.04,
+       "p_gate_by_its_date": 0.07,
+       "seed": 4
+      }
+     ]
     },
     "after_x1": {
      "b_tasks10": {
@@ -281,7 +1426,114 @@
       "p80": "2027-09-01"
      },
      "p_baseline_by_row_end": 0.05,
-     "p_gate_by_its_date": 0.09
+     "p_gate_by_its_date": 0.09,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-01"
+       },
+       "p_baseline_by_row_end": 0.05,
+       "p_gate_by_its_date": 0.09,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-19"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-01"
+       },
+       "p_baseline_by_row_end": 0.05,
+       "p_gate_by_its_date": 0.08,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-12",
+        "p80": "2027-09-01"
+       },
+       "p_baseline_by_row_end": 0.06,
+       "p_gate_by_its_date": 0.09,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-08"
+       },
+       "p_baseline_by_row_end": 0.06,
+       "p_gate_by_its_date": 0.08,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-15"
+       },
+       "p_baseline_by_row_end": 0.04,
+       "p_gate_by_its_date": 0.08,
+       "seed": 4
+      }
+     ]
     },
     "after_x2": {
      "b_tasks10": {
@@ -301,7 +1553,114 @@
       "p80": "2027-09-08"
      },
      "p_baseline_by_row_end": 0.01,
-     "p_gate_by_its_date": 0.05
+     "p_gate_by_its_date": 0.05,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-08"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.05,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-26",
+        "p80": "2027-09-01"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.05,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-01"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.06,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-10",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-08"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.05,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-17",
+        "p80": "2027-05-26"
+       },
+       "g_dir": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-15"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.05,
+       "seed": 4
+      }
+     ]
     },
     "after_x4": {
      "b_tasks10": {
@@ -321,9 +1680,1350 @@
       "p80": "2027-09-15"
      },
      "p_baseline_by_row_end": 0.0,
-     "p_gate_by_its_date": 0.0
+     "p_gate_by_its_date": 0.0,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-02"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-09-15"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-02"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-09-15"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-24"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-02"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-09-08"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-02"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-09-15"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_runner": {
+        "p50": "2027-02-03",
+        "p80": "2027-03-31"
+       },
+       "b_baseline": {
+        "p50": "2027-03-31",
+        "p80": "2027-06-02"
+       },
+       "g_dir": {
+        "p50": "2027-06-09",
+        "p80": "2027-09-22"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 4
+      }
+     ]
+    }
+   },
+   "claude_shared": {
+    "before": {
+     "b_tasks10": {
+      "p50": "2027-03-17",
+      "p80": "2027-06-09"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-06-16",
+      "p80": "2027-11-03"
+     },
+     "g_dir": {
+      "p50": "2027-09-08",
+      "p80": "2028-03-08"
+     },
+     "p_baseline_by_row_end": 0.01,
+     "p_gate_by_its_date": 0.02,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-06-09",
+        "p80": "2027-10-20"
+       },
+       "g_dir": {
+        "p50": "2027-09-01",
+        "p80": "2028-02-16"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-24",
+        "p80": "2027-06-23"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-24"
+       },
+       "g_dir": {
+        "p50": "2027-09-15",
+        "p80": "2028-03-29"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.02,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-06-09",
+        "p80": "2027-10-20"
+       },
+       "g_dir": {
+        "p50": "2027-08-25",
+        "p80": "2028-02-23"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-06-16",
+        "p80": "2027-11-03"
+       },
+       "g_dir": {
+        "p50": "2027-09-01",
+        "p80": "2028-03-01"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-16"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "g_dir": {
+        "p50": "2027-09-15",
+        "p80": "2028-03-22"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 4
+      }
+     ]
+    },
+    "finished_only": {
+     "b_tasks10": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-05-19",
+      "p80": "2027-09-22"
+     },
+     "g_dir": {
+      "p50": "2027-08-04",
+      "p80": "2028-01-26"
+     },
+     "p_baseline_by_row_end": 0.01,
+     "p_gate_by_its_date": 0.02,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-22"
+       },
+       "g_dir": {
+        "p50": "2027-08-11",
+        "p80": "2028-01-26"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-15"
+       },
+       "g_dir": {
+        "p50": "2027-08-11",
+        "p80": "2028-01-12"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-05-12",
+        "p80": "2027-09-22"
+       },
+       "g_dir": {
+        "p50": "2027-08-04",
+        "p80": "2028-01-19"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-22"
+       },
+       "g_dir": {
+        "p50": "2027-08-04",
+        "p80": "2028-01-26"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-05-19",
+        "p80": "2027-09-22"
+       },
+       "g_dir": {
+        "p50": "2027-08-11",
+        "p80": "2028-02-02"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 4
+      }
+     ]
+    },
+    "numbers_only": {
+     "b_tasks10": {
+      "p50": "2027-03-17",
+      "p80": "2027-06-09"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-05-05",
+      "p80": "2027-08-25"
+     },
+     "g_dir": {
+      "p50": "2027-07-28",
+      "p80": "2027-12-22"
+     },
+     "p_baseline_by_row_end": 0.02,
+     "p_gate_by_its_date": 0.04,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-04-28",
+        "p80": "2027-08-11"
+       },
+       "g_dir": {
+        "p50": "2027-07-21",
+        "p80": "2027-12-08"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-24",
+        "p80": "2027-06-23"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-05-12",
+        "p80": "2027-09-01"
+       },
+       "g_dir": {
+        "p50": "2027-07-28",
+        "p80": "2028-01-12"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.03,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-05-05",
+        "p80": "2027-08-18"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-12-15"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-09"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-21"
+       },
+       "b_baseline": {
+        "p50": "2027-05-05",
+        "p80": "2027-08-18"
+       },
+       "g_dir": {
+        "p50": "2027-07-21",
+        "p80": "2027-12-22"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.03,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-03-17",
+        "p80": "2027-06-16"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-05-05",
+        "p80": "2027-08-25"
+       },
+       "g_dir": {
+        "p50": "2027-07-28",
+        "p80": "2028-01-12"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.03,
+       "seed": 4
+      }
+     ]
+    },
+    "after_x1": {
+     "b_tasks10": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-04-07",
+      "p80": "2027-07-07"
+     },
+     "g_dir": {
+      "p50": "2027-06-23",
+      "p80": "2027-11-10"
+     },
+     "p_baseline_by_row_end": 0.02,
+     "p_gate_by_its_date": 0.04,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-07"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.05,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-07"
+       },
+       "g_dir": {
+        "p50": "2027-06-30",
+        "p80": "2027-11-03"
+       },
+       "p_baseline_by_row_end": 0.03,
+       "p_gate_by_its_date": 0.05,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-07"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.03,
+       "p_gate_by_its_date": 0.04,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-30",
+        "p80": "2027-11-24"
+       },
+       "p_baseline_by_row_end": 0.02,
+       "p_gate_by_its_date": 0.04,
+       "seed": 4
+      }
+     ]
+    },
+    "after_x2": {
+     "b_tasks10": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-04-07",
+      "p80": "2027-07-14"
+     },
+     "g_dir": {
+      "p50": "2027-06-30",
+      "p80": "2027-11-17"
+     },
+     "p_baseline_by_row_end": 0.01,
+     "p_gate_by_its_date": 0.02,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-30",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.03,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-07"
+       },
+       "g_dir": {
+        "p50": "2027-06-30",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.03,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-10"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-23",
+        "p80": "2027-11-17"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.02,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-04-07",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-06-30",
+        "p80": "2027-11-24"
+       },
+       "p_baseline_by_row_end": 0.01,
+       "p_gate_by_its_date": 0.02,
+       "seed": 4
+      }
+     ]
+    },
+    "after_x4": {
+     "b_tasks10": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_runner": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-28"
+     },
+     "b_baseline": {
+      "p50": "2027-04-21",
+      "p80": "2027-07-21"
+     },
+     "g_dir": {
+      "p50": "2027-07-14",
+      "p80": "2027-11-24"
+     },
+     "p_baseline_by_row_end": 0.0,
+     "p_gate_by_its_date": 0.0,
+     "seeds": [
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-21",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-11-17"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 20261117
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-21",
+        "p80": "2027-07-14"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-11-17"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 1
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-21",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-07-07",
+        "p80": "2027-11-17"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 2
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_runner": {
+        "p50": "2027-02-17",
+        "p80": "2027-04-28"
+       },
+       "b_baseline": {
+        "p50": "2027-04-21",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-07-07",
+        "p80": "2027-11-24"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 3
+      },
+      {
+       "b_tasks10": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_runner": {
+        "p50": "2027-02-24",
+        "p80": "2027-05-05"
+       },
+       "b_baseline": {
+        "p50": "2027-04-21",
+        "p80": "2027-07-21"
+       },
+       "g_dir": {
+        "p50": "2027-07-14",
+        "p80": "2027-12-01"
+       },
+       "p_baseline_by_row_end": 0.0,
+       "p_gate_by_its_date": 0.0,
+       "seed": 4
+      }
+     ]
     }
    }
+  },
+  "noise": {
+   "middle_dates_move_up_to_days": 21,
+   "upper_dates_move_up_to_days": 42,
+   "chances_move_up_to_points": 5
+  }
+ },
+ "forecast": {
+  "seeds": [
+   2029,
+   1,
+   2,
+   3,
+   4
+  ],
+  "plan_seed": 2029,
+  "planning": {
+   "working_days_a_week": 15,
+   "sims_per_seed": 2000,
+   "tasks": 140,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-02-25",
+      "p80": "2034-01-18"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-02-11",
+      "p80": "2034-02-22"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-14"
+     },
+     "rel_10": {
+      "p50": "2032-03-03",
+      "p80": "2034-04-19"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-03-24",
+      "p80": "2034-02-22"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-03-10",
+      "p80": "2034-03-15"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-02-24",
+    "latest": "2027-02-24",
+    "days_apart": 0,
+    "weeks_apart": 0,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2027-04-07",
+    "latest": "2027-04-14",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2032-02-11",
+    "latest": "2032-03-24",
+    "days_apart": 42,
+    "weeks_apart": 6,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2034-01-18",
+    "latest": "2034-04-19",
+    "days_apart": 91,
+    "weeks_apart": 13,
+    "seeds_at_the_last_day": 0
+   },
+   "last_day_of_the_simulation": "2042-10-25"
+  },
+  "two_companies": {
+   "working_days_a_week": 10,
+   "sims_per_seed": 1200,
+   "tasks": 140,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-03-31",
+      "p80": "2027-06-09"
+     },
+     "rel_10": {
+      "p50": "2033-09-21",
+      "p80": "2036-08-27"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-03-24",
+      "p80": "2027-06-02"
+     },
+     "rel_10": {
+      "p50": "2033-08-03",
+      "p80": "2036-09-03"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-03-24",
+      "p80": "2027-06-02"
+     },
+     "rel_10": {
+      "p50": "2033-08-10",
+      "p80": "2036-07-02"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-03-24",
+      "p80": "2027-06-09"
+     },
+     "rel_10": {
+      "p50": "2033-07-27",
+      "p80": "2036-10-15"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-03-24",
+      "p80": "2027-05-26"
+     },
+     "rel_10": {
+      "p50": "2033-09-07",
+      "p80": "2036-05-21"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-03-24",
+    "latest": "2027-03-31",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2027-05-26",
+    "latest": "2027-06-09",
+    "days_apart": 14,
+    "weeks_apart": 2,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2033-07-27",
+    "latest": "2033-09-21",
+    "days_apart": 56,
+    "weeks_apart": 8,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2036-05-21",
+    "latest": "2036-10-15",
+    "days_apart": 147,
+    "weeks_apart": 21,
+    "seeds_at_the_last_day": 0
+   },
+   "last_day_of_the_simulation": "2042-10-25"
+  },
+  "claude_dedicated": {
+   "working_days_a_week": 5,
+   "sims_per_seed": 1200,
+   "tasks": 140,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-07-14",
+      "p80": "2027-12-01"
+     },
+     "rel_10": {
+      "p50": "2038-04-21",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-07-14",
+      "p80": "2027-12-08"
+     },
+     "rel_10": {
+      "p50": "2038-06-09",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-07-21",
+      "p80": "2027-12-15"
+     },
+     "rel_10": {
+      "p50": "2038-08-11",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-07-21",
+      "p80": "2027-12-29"
+     },
+     "rel_10": {
+      "p50": "2038-09-22",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-07-14",
+      "p80": "2027-12-15"
+     },
+     "rel_10": {
+      "p50": "2038-08-25",
+      "p80": "2042-10-25"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-07-14",
+    "latest": "2027-07-21",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2027-12-01",
+    "latest": "2027-12-29",
+    "days_apart": 28,
+    "weeks_apart": 4,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2038-04-21",
+    "latest": "2038-09-22",
+    "days_apart": 154,
+    "weeks_apart": 22,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2042-10-25",
+    "latest": "2042-10-25",
+    "days_apart": 0,
+    "weeks_apart": 0,
+    "seeds_at_the_last_day": 5
+   },
+   "last_day_of_the_simulation": "2042-10-25"
+  },
+  "claude_shared": {
+   "working_days_a_week": 4,
+   "sims_per_seed": 1200,
+   "tasks": 140,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-09-08",
+      "p80": "2028-03-15"
+     },
+     "rel_10": {
+      "p50": "2041-01-09",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-09-15",
+      "p80": "2028-03-08"
+     },
+     "rel_10": {
+      "p50": "2040-12-26",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-09-01",
+      "p80": "2028-03-01"
+     },
+     "rel_10": {
+      "p50": "2040-08-29",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-08-25",
+      "p80": "2028-02-23"
+     },
+     "rel_10": {
+      "p50": "2040-05-23",
+      "p80": "2042-10-25"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-09-01",
+      "p80": "2028-03-01"
+     },
+     "rel_10": {
+      "p50": "2040-11-14",
+      "p80": "2042-10-25"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-08-25",
+    "latest": "2027-09-15",
+    "days_apart": 21,
+    "weeks_apart": 3,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2028-02-23",
+    "latest": "2028-03-15",
+    "days_apart": 21,
+    "weeks_apart": 3,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2040-05-23",
+    "latest": "2041-01-09",
+    "days_apart": 231,
+    "weeks_apart": 33,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2042-10-25",
+    "latest": "2042-10-25",
+    "days_apart": 0,
+    "weeks_apart": 0,
+    "seeds_at_the_last_day": 5
+   },
+   "last_day_of_the_simulation": "2042-10-25"
+  },
+  "planning_with_every_task": {
+   "working_days_a_week": 15,
+   "sims_per_seed": 2000,
+   "tasks": 141,
+   "seeds": [
+    {
+     "seed": 2029,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-14"
+     },
+     "rel_10": {
+      "p50": "2032-03-10",
+      "p80": "2034-05-31"
+     }
+    },
+    {
+     "seed": 1,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-02-25",
+      "p80": "2034-03-15"
+     }
+    },
+    {
+     "seed": 2,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-02-18",
+      "p80": "2034-01-04"
+     }
+    },
+    {
+     "seed": 3,
+     "g_dir": {
+      "p50": "2027-02-17",
+      "p80": "2027-04-07"
+     },
+     "rel_10": {
+      "p50": "2032-01-14",
+      "p80": "2034-01-18"
+     }
+    },
+    {
+     "seed": 4,
+     "g_dir": {
+      "p50": "2027-02-24",
+      "p80": "2027-04-14"
+     },
+     "rel_10": {
+      "p50": "2032-02-18",
+      "p80": "2034-04-05"
+     }
+    }
+   ],
+   "g_dir_p50": {
+    "earliest": "2027-02-17",
+    "latest": "2027-02-24",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "g_dir_p80": {
+    "earliest": "2027-04-07",
+    "latest": "2027-04-14",
+    "days_apart": 7,
+    "weeks_apart": 1,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p50": {
+    "earliest": "2032-01-14",
+    "latest": "2032-03-10",
+    "days_apart": 56,
+    "weeks_apart": 8,
+    "seeds_at_the_last_day": 0
+   },
+   "rel_10_p80": {
+    "earliest": "2034-01-04",
+    "latest": "2034-05-31",
+    "days_apart": 147,
+    "weeks_apart": 21,
+    "seeds_at_the_last_day": 0
+   },
+   "last_day_of_the_simulation": "2042-10-25"
   }
  }
 }
