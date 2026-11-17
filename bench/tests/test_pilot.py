@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from dodambench.task import load_task
 
 TASKS = Path(__file__).resolve().parents[1] / "tasks"
 FAKE_TOKEN = "sk-ant-oat01-FAKE0123456789abcdefghijklmnopqrstuvwxyzFAKE"
+FAKE_HARBOR = Path("/opt/dodam-test/bin/harbor")  # never run: the tests' runners are fakes
 NOW = 1_790_000_000.0
 
 
@@ -212,6 +214,13 @@ def test_read_token_refuses_a_file_others_can_read(tmp_path):
 def test_read_token_names_the_missing_file_without_a_token(tmp_path):
     with pytest.raises(pilot.PilotError):
         pilot.read_token(tmp_path / "nope")
+
+
+def test_child_env_drops_the_settings_that_would_let_python_load_another_harbor():
+    env = pilot.child_env({"PATH": "/bin", "PYTHONPATH": "/elsewhere", "PYTHONHOME": "/py", "PYTHONSTARTUP": "/s.py"},
+                          FAKE_TOKEN)
+    assert not [k for k in env if k.startswith("PYTHON")]
+    assert env["PATH"] == "/bin"
 
 
 def test_child_env_has_the_token_oauth_flag_and_no_api_key():
@@ -467,7 +476,7 @@ class FakeRunner:
         self.trial_error, self.result_error, self.five_status = trial_error, result_error, five_status
         self.timeouts, self.week, self.docker, self.containers = [], week, docker, list(containers)
 
-    def __call__(self, cmd, env, log_path, timeout):
+    def __call__(self, cmd, env, log_path, timeout, on_start=None):
         self.calls.append((list(cmd), dict(env)))
         self.timeouts.append(timeout)
         jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
@@ -528,13 +537,18 @@ class FakeDocker:
 
 def pilot_args(tmp_path, **kw):
     args = dict(task_path=TASKS / "web-signup", languages=["python"], out_root=tmp_path / "out",
-                token_file=token_file(tmp_path), harbor=Path("harbor"), claude_version="2.1.326",
+                token_file=token_file(tmp_path), harbor=FAKE_HARBOR, claude_version="2.1.326",
                 max_five_hour=50.0, max_weekly=50.0, wait_for_reset=False, model=None,
                 base_env={"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-api-x"},
                 now=lambda: NOW, timestamp="20261117T070000Z", image_check=lambda image: None,
-                docker=FakeDocker())
+                docker=FakeDocker(), harbor_check=lambda harbor: None, process_sampler=clean_table,
+                process_interval=0.01)
     args.update(kw)
     return args
+
+
+def clean_table() -> bytes:
+    return b"    1 /sbin/launchd\n  202 harbor run -p task\n"
 
 
 def test_a_run_writes_one_record_and_a_summary(tmp_path):
@@ -1025,6 +1039,279 @@ def test_the_agents_own_error_line_makes_an_agent_error(tmp_path):
     summary = pilot.run_pilot(runner=FakeRunner(result_error=True), **pilot_args(tmp_path))
     assert summary["runs"][0]["status"] == "agent-error"
 
+# --- the pinned, patched Harbor ---------------------------------------------------------------------------------
+
+def test_harbor_is_checked_before_the_token_is_read(tmp_path):
+    runner = FakeRunner()
+
+    def refuse(harbor):
+        raise pilot.PilotError("refusing to use the token: Harbor in /v is not patched")
+
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor_check=refuse, token_file=tmp_path / "missing"))
+    assert "not patched" in str(err.value)
+    assert runner.calls == []
+
+
+def test_harbor_is_checked_again_right_before_each_run(tmp_path):
+    seen = []
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, languages=["python", "go"],
+                                                      harbor_check=lambda harbor: seen.append(harbor)))
+    assert seen == [FAKE_HARBOR] * 3
+
+
+def test_the_default_harbor_check_refuses_an_install_that_is_not_the_pinned_patched_one(tmp_path):
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.check_harbor(tmp_path / "missing" / "harbor")
+    assert "refusing" in str(err.value)
+
+
+# --- the process table while Harbor runs ---------------------------------------------------------------------------
+
+class Tables:
+    """Clean process tables until call number `hit_from`, then one with the token in a command line."""
+
+    def __init__(self, hit_from=None, error=None):
+        self.calls, self.hit_from, self.error = 0, hit_from, error
+
+    def __call__(self) -> bytes:
+        self.calls += 1
+        if self.error:
+            raise self.error
+        if self.hit_from is not None and self.calls >= self.hit_from:
+            return clean_table() + f"  303 docker compose exec -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN} main\n".encode()
+        return clean_table()
+
+
+def test_a_run_records_its_process_table_samples(tmp_path):
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    watch = record["process_watch"]
+    assert watch["samples"] >= 2 and watch["hit_samples"] == 0 and watch["clean"] and watch["error"] is None
+    assert isinstance(watch["agent_phase_samples"], int)
+    assert record["status"] == "ok"
+    assert summary["runs"][0]["process_watch"]["samples"] == watch["samples"]
+
+
+def test_the_token_in_a_command_line_stops_the_batch_without_showing_the_token(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, languages=["python", "go"],
+                                                          process_sampler=Tables(hit_from=2)))
+    assert FAKE_TOKEN not in str(err.value) and "303" in str(err.value)
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "token-in-process-table"
+    assert record["process_watch"]["hit_pids"] == [303]
+    assert not (tmp_path / "out" / "20261117T070000Z" / "go").exists()
+    assert pilot.scan_for_token(tmp_path / "out", FAKE_TOKEN) == []
+
+
+def test_the_token_seen_before_harbor_starts_means_harbor_never_starts(tmp_path):
+    runner = FakeRunner()
+    with pytest.raises(pilot.TokenLeak):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, process_sampler=Tables(hit_from=1)))
+    assert runner.calls == []
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "token-in-process-table" and record["harbor_returncode"] is None
+
+
+def test_a_process_table_that_cannot_be_read_stops_the_batch(tmp_path):
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, process_sampler=Tables(error=OSError("no ps"))))
+    assert not isinstance(err.value, pilot.TokenLeak) and "process-table" in str(err.value)
+    assert runner.calls == []
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "process-watch-failed"
+
+
+def test_the_agent_phase_of_each_step_is_read_from_the_trial(tmp_path):
+    make_trial(tmp_path)
+    start = datetime(2026, 11, 17, 7, 13, 20, tzinfo=timezone.utc).timestamp()
+    assert pilot.agent_windows(tmp_path) == [(start, start + 120.0), (start, start + 120.0)]
+    assert pilot.agent_windows(tmp_path / "nothing-here") == []
+
+
+# --- the watch stops a real Harbor even when ps cannot run -------------------------------------------------------------
+# A stand-in Harbor in its own process group with one child, run by the real runner; ps is made to fail for the
+# stopping side, and the readings come from a fake table that turns bad once the stand-in is up.
+
+WATCHED_HARBOR = """#!{python}
+import signal, subprocess, sys, time
+out = {out!r}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+def stop(*_):
+    open(out + "/stopped-politely", "w").write("1")
+    sys.exit(0)
+signal.signal(signal.SIGINT, stop)
+open(out + "/ready", "w").write("1")
+time.sleep(30)
+"""
+
+
+def watched_harbor(tmp_path) -> Path:
+    path = tmp_path / "bin" / "harbor"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(WATCHED_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    path.chmod(0o755)
+    return path
+
+
+class ReadyTables:
+    """Clean tables until the stand-in is up; then a table with the token, or a reading that fails."""
+
+    def __init__(self, tmp_path, then):
+        self.ready, self.then = tmp_path / "ready", then
+
+    def __call__(self) -> bytes:
+        if not self.ready.exists():
+            return clean_table()
+        if self.then == "error":
+            raise BlockingIOError(11, "Resource temporarily unavailable")
+        return clean_table() + f"  303 docker compose exec -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN} main\n".encode()
+
+
+def break_ps(monkeypatch, how):
+    """Make every `ps` this process starts fail: it cannot be started, or it exits with status 1."""
+    real = subprocess.run
+
+    def run(args, *a, **kw):
+        if args and str(args[0]).rsplit("/", 1)[-1] == "ps":
+            if how == "cannot-start":
+                raise BlockingIOError(11, "Resource temporarily unavailable")
+            return subprocess.CompletedProcess(args, 1, "" if kw.get("text") else b"", "" if kw.get("text") else b"")
+        return real(args, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def run_watched(tmp_path, then, runner=pilot.run_subprocess):
+    started = time.monotonic()
+    try:
+        pilot.run_pilot(runner=runner, **pilot_args(
+            tmp_path, harbor=watched_harbor(tmp_path), timeout=20.0, process_sampler=ReadyTables(tmp_path, then),
+            process_interval=0.05))
+    except pilot.PilotError as err:
+        return err, time.monotonic() - started
+    return None, time.monotonic() - started
+
+
+def test_a_table_that_cannot_be_read_in_the_middle_of_a_run_stops_harbor_for_certain(tmp_path, monkeypatch):
+    break_ps(monkeypatch, "cannot-start")
+    err, seconds = run_watched(tmp_path, "error")
+    assert seconds < 12  # well before the 20 s time limit
+    assert isinstance(err, pilot.PilotError) and not isinstance(err, pilot.TokenLeak)
+    assert (tmp_path / "stopped-politely").exists()  # Harbor got the chance to remove its containers
+    assert gone(int((tmp_path / "child.pid").read_text()))  # and its group was ended
+    record = read_record(tmp_path)
+    assert record["status"] == "process-watch-failed"
+    assert record["harbor_returncode"] != pilot.TIMEOUT_RETURNCODE
+    assert record["process_watch"]["harbor"] == "stopped" and record["process_watch"]["stopped_harbor"] is True
+
+
+def test_the_token_in_the_middle_of_a_run_stops_harbor_when_ps_exits_with_an_error(tmp_path, monkeypatch):
+    break_ps(monkeypatch, "fails")
+    err, seconds = run_watched(tmp_path, "token")
+    assert seconds < 12
+    assert isinstance(err, pilot.TokenLeak) and FAKE_TOKEN not in str(err)
+    assert (tmp_path / "stopped-politely").exists()
+    assert gone(int((tmp_path / "child.pid").read_text()))
+    record = read_record(tmp_path)
+    assert record["status"] == "token-in-process-table"
+    assert record["harbor_returncode"] != pilot.TIMEOUT_RETURNCODE
+    assert record["process_watch"]["harbor"] == "stopped"
+    assert "Harbor was stopped" in str(err)
+
+
+def test_a_stop_that_fails_ends_harbor_another_way_and_the_record_says_so(tmp_path, monkeypatch):
+    break_ps(monkeypatch, "cannot-start")
+
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "killpg", refuse)
+    # With the group refusing signals, the runner cannot confirm it gone: keep its waits for that short.
+    monkeypatch.setattr(pilot, "CONFIRM_SECONDS", 1.0)
+    try:
+        err, seconds = run_watched(tmp_path, "token", runner=functools.partial(pilot.run_subprocess, term_grace=1.0))
+        assert seconds < 12
+        assert isinstance(err, pilot.TokenLeak)
+        watch = read_record(tmp_path)["process_watch"]
+        assert watch["harbor"] == "stopped"  # Harbor itself was ended
+        assert "Operation not permitted" in watch["stop_error"]  # but not through its group
+    finally:
+        child = tmp_path / "child.pid"
+        if child.exists():
+            try:
+                os.kill(int(child.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+# --- the guard checks the Harbor that runs ------------------------------------------------------------------------------
+
+def test_a_bare_harbor_name_is_found_once_on_path_and_that_file_is_checked_and_run(tmp_path, monkeypatch):
+    on_path, decoy = tmp_path / "bin" / "harbor", tmp_path / "cwd" / "harbor"
+    for path in (on_path, decoy):
+        path.parent.mkdir(parents=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+    monkeypatch.chdir(decoy.parent)
+    checked, runner = [], FakeRunner()
+    pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=Path("harbor"), harbor_check=checked.append,
+                                                base_env={"PATH": str(on_path.parent)}))
+    assert checked == [on_path, on_path]
+    assert runner.calls[0][0][0] == str(on_path)
+
+
+# --- what the record and the message say ---------------------------------------------------------------------------------
+
+def test_a_token_seen_only_after_harbor_ended_is_reported_so_and_the_containers_are_removed(tmp_path):
+    import threading
+
+    docker = FakeDocker()
+    fake = FakeRunner(docker=docker, containers=["web-signup__python__abc__env"])
+    ended = threading.Event()
+
+    def runner(*args, **kw):
+        code = fake(*args, **kw)
+        ended.set()
+        return code
+
+    def tables() -> bytes:  # the token only in the reading taken on the main thread after Harbor returned
+        if ended.is_set() and threading.current_thread() is threading.main_thread():
+            return clean_table() + f"  404 leftover --token {FAKE_TOKEN}\n".encode()
+        return clean_table()
+
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker, process_sampler=tables))
+    assert "after Harbor had ended" in str(err.value) and "was stopped" not in str(err.value)
+    assert docker.removed == ["web-signup__python__abc__env"]
+    assert read_record(tmp_path)["process_watch"]["harbor"] == "not-stopped"
+
+
+def test_an_error_while_recording_the_watch_never_skips_the_leak_scan(tmp_path, monkeypatch):
+    def broken(job_dir):
+        raise RuntimeError("cannot read the agent's phases")
+
+    monkeypatch.setattr(pilot, "agent_windows", broken)
+    with pytest.raises(pilot.TokenLeak):
+        pilot.run_pilot(runner=FakeRunner(leak=True), **pilot_args(tmp_path))
+    assert read_record(tmp_path)["status"] == "token-leak"
+
+
+def test_the_token_is_never_handed_over_under_a_name_the_patched_harbor_would_put_on_the_command_line(
+        tmp_path, monkeypatch):
+    from dodambench import harbor_patch
+
+    # as if the patch passed only the API key by name: the OAuth token would go as NAME=VALUE
+    monkeypatch.setattr(harbor_patch, "CREDENTIALS_BY_NAME", ("ANTHROPIC_API_KEY",), raising=False)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tmp_path / "missing"))
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in str(err.value) and "token file" not in str(err.value)
+    assert runner.calls == []
+
 
 # --- the review of the guard and the cleanup ---------------------------------------------------------------------------
 
@@ -1051,7 +1338,7 @@ def test_the_cleanup_leaves_other_trials_of_the_same_task_and_language_alone(tmp
 def test_nothing_is_removed_when_harbor_never_started(tmp_path):
     docker = FakeDocker()
 
-    def harbor_missing(cmd, env, log_path, timeout):
+    def harbor_missing(cmd, env, log_path, timeout, on_start=None):
         docker.projects.append("web-signup__python__someoneelse__env")  # another run, started meanwhile
         raise FileNotFoundError("harbor")
 
@@ -1165,7 +1452,7 @@ def test_a_pilot_sees_the_run_of_another_pilot_that_is_still_going(tmp_path):
     inner = {}
 
     class OverlappingRunner(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             other = FakeRunner()
             inner["summary"] = pilot.run_pilot(runner=other, **pilot_args(
                 tmp_path, out_root=tmp_path / "elsewhere", timestamp="20261117T070100Z"))
@@ -1179,7 +1466,7 @@ def test_a_pilot_sees_the_run_of_another_pilot_that_is_still_going(tmp_path):
 
 def test_two_overlapping_pilots_both_keep_their_runs_in_the_guard(tmp_path):
     class OverlappingRunner(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             pilot.run_pilot(runner=FakeRunner(), **pilot_args(
                 tmp_path, out_root=tmp_path / "elsewhere", timestamp="20261117T070100Z", max_agent_minutes_per_5h=1000))
             return super().__call__(cmd, env, log_path, timeout)
@@ -1379,7 +1666,7 @@ try:
                     base_env={"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp),
                               "STAND_IN_MODE": os.environ.get("STAND_IN_MODE", "polite")},
                     image_check=lambda image: None, docker=NoContainers(), timestamp="20261117T070000Z",
-                    runner=runner)
+                    runner=runner, harbor_check=lambda harbor: None)  # the stand-in is not the pinned Harbor
 except KeyboardInterrupt as err:
     (tmp / "notes.txt").write_text("\\n".join(getattr(err, "__notes__", [])))
     sys.exit(128 + getattr(err, "signum", 2))
@@ -1456,7 +1743,7 @@ def test_a_pilot_killed_outright_leaves_its_run_counted(tmp_path):
 # --- the smaller points of the third review -------------------------------------------------------------------------------
 
 def test_every_final_scan_runs_and_every_failure_is_reported(tmp_path):
-    def leaky(cmd, env, log_path, timeout):
+    def leaky(cmd, env, log_path, timeout, on_start=None):
         token = env["CLAUDE_CODE_OAUTH_TOKEN"]
         (Path(log_path).parents[1] / "stray.log").write_text(token)
         (tmp_path / "out" / "state.json").write_text(token)
@@ -1470,7 +1757,7 @@ def test_every_final_scan_runs_and_every_failure_is_reported(tmp_path):
 
 @pytest.mark.parametrize("damage", ["step result", "agent log"])
 def test_a_run_without_every_step_of_the_task_is_not_ok(tmp_path, damage):
-    def runner(cmd, env, log_path, timeout):
+    def runner(cmd, env, log_path, timeout, on_start=None):
         code = FakeRunner()(cmd, env, log_path, timeout)
         jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
         trial = next(jobs.glob("*/result.json"))
@@ -1497,7 +1784,7 @@ def test_a_failed_save_keeps_the_finished_run_in_the_summary_and_stops_the_batch
         (tmp_path / "out" / "state.json").mkdir(parents=True)
 
     class Runner(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             code = super().__call__(cmd, env, log_path, timeout)
             if what == "guard":
                 keys.chmod(0o500)  # the guard can no longer be written when the run ends
@@ -1578,7 +1865,7 @@ def test_an_open_entry_counts_the_longest_time_harbor_could_run_without_the_pilo
     seen = {}
 
     class Peek(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             seen["entry"] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"][-1]
             return super().__call__(cmd, env, log_path, timeout)
 
@@ -1591,7 +1878,7 @@ def test_a_clock_set_back_during_a_run_keeps_the_guard_file_usable(tmp_path):
     clock = {"t": NOW}
 
     class ClockBack(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             clock["t"] = NOW - 3600
             return super().__call__(cmd, env, log_path, timeout)
 
@@ -1612,7 +1899,7 @@ def test_a_failed_guard_end_is_reported_whatever_stopped_the_run(tmp_path, monke
     docker = FakeDocker(stuck=["web-signup__python__abc__env"])
 
     class Runner(FakeRunner):
-        def __call__(self, cmd, env, log_path, timeout):
+        def __call__(self, cmd, env, log_path, timeout, on_start=None):
             code = super().__call__(cmd, env, log_path, timeout)
             keys.chmod(0o500)  # the guard can no longer be written when the run ends
             return code
@@ -1901,7 +2188,7 @@ def test_a_step_that_fails_inside_a_run_that_ended_on_its_own_stops_the_batch(tm
     monkeypatch.setattr(pilot, "open", fake_open, raising=False)
     started = []
 
-    def runner(cmd, env, log_path, timeout):
+    def runner(cmd, env, log_path, timeout, on_start=None):
         started.append(cmd)
         return pilot.run_subprocess(cmd, env, log_path, timeout, grace=1.0, term_grace=1.0)
 
@@ -1972,3 +2259,239 @@ def test_a_token_file_inside_the_repository_is_refused(tmp_path, monkeypatch):
     with pytest.raises(pilot.PilotError) as err:
         pilot.read_token(token_file(repo / "bench"))
     assert "repository" in str(err.value) and FAKE_TOKEN not in str(err.value)
+
+
+# --- a stop the process-table watch asks for is the runner's own stop -------------------------------------------------
+# One stop owns Harbor's process group: the runner's, with signals held, the group stopped first, every later step
+# through the step helper, the run closed in the five-hour guard and the failure reported like any other.
+
+COUNTING_HARBOR = """#!{python}
+import os, signal, sys, time
+out = {out!r}
+def on_int(*_):
+    n = len([p for p in os.listdir(out) if p.startswith("sigint-")]) + 1
+    open(out + "/sigint-" + str(n), "w").write("1")
+    time.sleep(1.5)  # a stop that takes a moment: Harbor removing its containers
+    sys.exit(0)
+signal.signal(signal.SIGINT, on_int)
+open(out + "/ready", "w").write("1")
+time.sleep(30)
+"""
+
+
+def counting_harbor(tmp_path) -> Path:
+    path = tmp_path / "bin" / "harbor"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(COUNTING_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    path.chmod(0o755)
+    return path
+
+
+def run_counted(tmp_path):
+    return pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+        tmp_path, harbor=counting_harbor(tmp_path), timeout=30.0, process_sampler=ReadyTables(tmp_path, "token"),
+        process_interval=0.05))
+
+
+def test_a_watch_stop_is_the_runners_own_stop_and_is_reported_like_any_other_failure(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        run_counted(tmp_path)
+    assert FAKE_TOKEN not in str(err.value)
+    log = (tmp_path / "out" / "20261117T070000Z" / "python" / "harbor.log").read_text()
+    assert "process-table watch" in log  # the runner's stop path wrote its line, through the step helper
+    assert len(list(tmp_path.glob("sigint-*"))) == 1
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and "SIGINT" in watch["stop_signals"]
+    assert watch.get("stopped_by") == "the watch"
+    runs = pilot.Guard(pilot.guard_path()).read()
+    assert runs and all(pilot._end(run) is not None for run in runs)  # the run is closed in the five-hour guard
+
+
+def test_a_stop_signal_during_a_watch_stop_is_held_so_harbors_group_is_stopped_once(tmp_path):
+    def poke_once_the_stop_has_begun():
+        end = time.monotonic() + 20
+        while not (tmp_path / "sigint-1").exists():
+            if time.monotonic() > end:
+                return
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGINT)  # Harbor is still removing its containers for 1.5 s
+
+    threading.Thread(target=poke_once_the_stop_has_begun, daemon=True).start()
+    with pytest.raises(pilot.TokenLeak):
+        run_counted(tmp_path)
+    assert len(list(tmp_path.glob("sigint-*"))) == 1  # one stop of the group, not a second one on top
+
+
+# --- every stop of Harbor's group reaches the watch's record ------------------------------------------------------------
+# The places the group can be stopped: the time limit, a stop signal, an error, the watch, the leftover step, and a
+# group that is dead or refuses signals. Each adds the signals it sent to the watch's list and records what began it.
+
+class AfterTheFirstSigint:
+    """Clean readings until the stand-in Harbor got the runner's SIGINT; then a reading that fails."""
+
+    def __init__(self, tmp_path):
+        self.sigint = tmp_path / "sigint-1"
+
+    def __call__(self) -> bytes:
+        if self.sigint.exists():
+            raise OSError("ps could not run")
+        return clean_table()
+
+
+def test_a_watch_request_during_the_stop_after_a_stop_signal_records_that_stop(tmp_path):
+    def poke_once_harbor_runs():
+        end = time.monotonic() + 20
+        while not (tmp_path / "ready").exists():
+            if time.monotonic() > end:
+                return
+            time.sleep(0.01)
+        time.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=poke_once_harbor_runs, daemon=True).start()
+    with pytest.raises((pilot.PilotError, KeyboardInterrupt)) as err:
+        pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+            tmp_path, harbor=counting_harbor(tmp_path), timeout=30.0, process_sampler=AfterTheFirstSigint(tmp_path),
+            process_interval=0.05))
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stop_signals"][:1] == ["SIGINT"]
+    assert watch.get("stopped_by") == "a stop signal"
+    assert "stop signal" in str(err.value)
+    assert len(list(tmp_path.glob("sigint-*"))) == 1
+
+
+def test_a_watch_request_during_the_stop_at_the_time_limit_records_that_stop(tmp_path):
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=pilot.run_subprocess, **pilot_args(
+            tmp_path, harbor=counting_harbor(tmp_path), timeout=1.0, process_sampler=AfterTheFirstSigint(tmp_path),
+            process_interval=0.05))
+    record = read_record(tmp_path)
+    assert record["harbor_returncode"] == pilot.TIMEOUT_RETURNCODE
+    watch = record["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stop_signals"][:1] == ["SIGINT"]
+    assert watch.get("stopped_by") == "the time limit"
+    assert "time limit" in str(err.value)
+
+
+def test_an_error_while_harbor_runs_stops_its_group_and_lists_the_signals(tmp_path, monkeypatch):
+    harbor = counting_harbor(tmp_path)
+    request = pilot.StopRequest()
+    request.sent = []
+
+    def broken_wait(proc, timeout, stop_request):
+        assert appears(tmp_path / "ready")
+        raise RuntimeError("a fault in the runner")
+
+    monkeypatch.setattr(pilot, "_wait_for", broken_wait)
+    with pytest.raises(RuntimeError):
+        pilot.run_subprocess([str(harbor)], dict(os.environ), tmp_path / "h.log", 30.0, grace=5.0, term_grace=1.0,
+                             on_start=lambda proc: request)
+    assert request.sent[:1] == ["SIGINT"]
+    assert request.by == "an error"
+
+
+LEAVING_HARBOR = """#!{python}
+import subprocess, sys
+out = {out!r}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+"""  # exits at once, leaving its child running in its group
+
+
+def test_the_leftover_step_lists_its_signals_and_does_not_call_harbor_stopped(tmp_path):
+    harbor = tmp_path / "bin" / "harbor"
+    harbor.parent.mkdir(parents=True)
+    harbor.write_text(LEAVING_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    harbor.chmod(0o755)
+    try:
+        pilot.run_pilot(runner=functools.partial(pilot.run_subprocess, term_grace=2.0),
+                        **pilot_args(tmp_path, harbor=harbor, timeout=30.0))
+    except pilot.PilotError:
+        pass
+    watch = read_record(tmp_path)["process_watch"]
+    assert "SIGTERM to what Harbor left" in watch["stop_signals"]
+    assert watch["harbor"] == "not-stopped"  # Harbor itself ended on its own
+    assert gone(int((tmp_path / "child.pid").read_text()))
+
+
+def test_a_dead_uncollected_group_met_by_the_runners_stop_counts_as_gone(tmp_path, monkeypatch):
+    # macOS answers a group signal to ended, uncollected processes with "Operation not permitted".
+    real_kill = os.kill
+
+    def dead_group(pgid, sig):
+        real_kill(pgid, signal.SIGKILL)  # the group's only process ends now (or is already gone)...
+        time.sleep(0.2)
+        raise PermissionError(1, "Operation not permitted")  # ...and is not collected yet
+
+    monkeypatch.setattr(os, "killpg", dead_group)
+    with pytest.raises(pilot.TokenLeak) as err:
+        run_counted(tmp_path)
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["stop_error"] is None and "not permitted" not in json.dumps(watch)
+    assert watch["harbor"] == "ended-before-stop" and watch["stop_signals"] == []
+    assert pilot.harbor_groups_left() == []
+    assert "may still be running" not in str(err.value) + " ".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_stop_signal_right_after_the_watch_stop_is_raised_is_held(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    gate, previous = pilot.SignalGate(), getattr(pilot._gates, "current", None)
+    request = pilot.StopRequest()
+    request.asked.set()
+    pilot._gates.current = gate
+    gate.install()
+    interrupted = False
+    try:
+        with pytest.raises(pilot.WatchStop):
+            pilot._wait_for(proc, 10.0, request)
+        try:
+            os.kill(os.getpid(), signal.SIGINT)  # before the stop path's first line could mark the stop as begun
+            time.sleep(0.2)
+        except KeyboardInterrupt:
+            interrupted = True
+    finally:
+        gate.restore()
+        pilot._gates.current = previous
+        proc.kill()
+        proc.wait()
+    assert not interrupted and gate.held == [signal.SIGINT]
+
+
+def appears(path, within=10.0):
+    end = time.monotonic() + within
+    while not path.exists() and time.monotonic() < end:
+        time.sleep(0.01)
+    return path.exists()
+
+
+SIGHTED_HARBOR = """#!{python}
+import os, subprocess, sys, time
+out = {out!r}
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+open(out + "/harbor.pid", "w").write(str(os.getpid()))
+open(out + "/ready", "w").write("1")
+time.sleep(30)
+"""
+
+
+def test_the_watch_killing_harbor_itself_as_a_sighted_process_is_recorded_as_the_watchs_stop(tmp_path):
+    harbor = tmp_path / "bin" / "harbor"
+    harbor.parent.mkdir(parents=True)
+    harbor.write_text(SIGHTED_HARBOR.format(python=sys.executable, out=str(tmp_path)))
+    harbor.chmod(0o755)
+
+    def tables() -> bytes:  # Harbor's own command line shows the token
+        if not (tmp_path / "ready").exists():
+            return clean_table()
+        pid = int((tmp_path / "harbor.pid").read_text())
+        return clean_table() + f"{pid} {harbor} run -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN}\n".encode()
+
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=functools.partial(pilot.run_subprocess, term_grace=2.0), **pilot_args(
+            tmp_path, harbor=harbor, timeout=30.0, process_sampler=tables, process_interval=0.05))
+    watch = read_record(tmp_path)["process_watch"]
+    assert watch["harbor"] == "stopped" and watch["stopped_harbor"] is True
+    assert watch["stopped_by"] == "the watch"
+    assert "already ended" not in str(err.value) and FAKE_TOKEN not in str(err.value)
+    assert gone(int((tmp_path / "child.pid").read_text()))  # the runner ended what Harbor left

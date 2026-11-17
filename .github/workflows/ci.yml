@@ -28,6 +28,27 @@ jobs:
         working-directory: bench
         run: |
           python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: Install the pinned Harbor
+        working-directory: bench
+        run: |
+          python -m venv .harbor-venv
+          .harbor-venv/bin/python -m pip install --quiet --require-hashes --only-binary=:all: -r harbor/requirements.txt
+      - name: Check that the leak test catches the released Harbor
+        working-directory: bench
+        run: |
+          set +e
+          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_a_listed_credential_stays_off_the_command_line_and_reaches_the_docker_cli_environment" 2>&1)
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ] || ! printf '%s' "$out" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-PROBE"; then
+            printf '%s\n' "$out"
+            echo "The leak test did not find the made-up secret on the command line of the released Harbor."
+            exit 1
+          fi
+          echo "As expected, the leak test fails on the released Harbor: the made-up secret is on the command line."
+      - name: Apply Dodam's patch to Harbor
+        working-directory: bench
+        run: python -m dodambench.harbor_patch apply
       - name: Run the tests
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider

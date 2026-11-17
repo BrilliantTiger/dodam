@@ -10,7 +10,9 @@ The token is read here and handed to Harbor only through the child process envir
 run, and at the end of the batch whatever happened, the output is scanned for it; a file the scan cannot
 read fails the scan, and reports never show the token. Harbor runs in its own process group: at the
 time limit or on Ctrl-C it is asked to stop, then its group is ended, its containers are removed and
-the batch stops. Results go to out/pilot/<UTC timestamp>/.
+the batch stops. The token goes only to the pinned Harbor with Dodam's patch, which keeps it off host
+command lines, and the host process table is watched for it while Harbor runs. Results go to
+out/pilot/<UTC timestamp>/.
 """
 from __future__ import annotations
 
@@ -35,7 +37,9 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .convert import to_harbor
+from .harbor_patch import HarborSetupError, check as harbor_setup_check
 from .languages import LANGUAGES
+from .proctable import ProcessTableWatch, process_table
 from .task import load_task
 
 BENCH = Path(__file__).resolve().parents[1]
@@ -44,6 +48,7 @@ DEFAULT_TOKEN_FILE = Path("~/.dodam/claude-token-dodam")
 DEFAULT_OUT = BENCH / "out" / "pilot"
 DEFAULT_HARBOR = BENCH / ".harbor-venv" / "bin" / "harbor"
 DEFAULT_MAX_PERCENT = 50.0
+DEFAULT_PROCESS_INTERVAL = 0.5
 # With the subscription token Harbor cannot tell where the agent sends its requests, so it adds no host
 # to the agent's network allowlist; the agent reaches the model only through the hosts named here.
 DEFAULT_AGENT_HOSTS = ("api.anthropic.com",)
@@ -57,7 +62,7 @@ STATE_FILE = "state.json"
 CREDENTIAL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # Host variables that could steer the agent to another credential or provider.
 DROPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_FORCE_", "OPENAI_", "CODEX_", "GEMINI_",
-                        "GOOGLE_API", "AWS_BEARER")
+                        "GOOGLE_API", "AWS_BEARER", "PYTHON")  # PYTHON*: Harbor's Python must load the checked Harbor
 
 
 class PilotError(Exception):
@@ -227,12 +232,47 @@ def read_token(path: Path) -> str:
     return token
 
 
+TOKEN_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN",)  # the names the token is handed to Harbor and its agent under
+
+
+def token_names_problem() -> str | None:
+    """A name the token would go under that the patched Harbor would put on the command line as NAME=VALUE."""
+    from . import harbor_patch
+    unlisted = [n for n in TOKEN_NAMES if n not in harbor_patch.CREDENTIALS_BY_NAME]
+    if unlisted:
+        return (f"refusing to use the token: the patched Harbor would pass {', '.join(unlisted)} with its value "
+                "on the command line")
+    return None
+
+
 def child_env(base: dict[str, str], token: str) -> dict[str, str]:
     """The environment of the Harbor process: the token and the OAuth flag, no API key of any kind."""
     env = {k: v for k, v in base.items() if not k.startswith(DROPPED_ENV_PREFIXES)}
-    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    for name in TOKEN_NAMES:
+        env[name] = token
     env["CLAUDE_FORCE_OAUTH"] = "1"
     return env
+
+
+def resolve_program(program: Path, path: str | None) -> Path:
+    """The absolute path the child process will run: a bare name is looked up in its PATH, as Popen does."""
+    text = str(program)
+    if os.sep not in text:
+        found = shutil.which(text, path=path)
+        if not found:
+            raise PilotError(f"cannot find {text} on PATH")
+        return Path(found).absolute()
+    return Path(text).absolute()
+
+
+def check_harbor(harbor: Path) -> None:
+    """Refuse to hand the token to a Harbor that is not the pinned release with Dodam's patch. This keeps the pilot
+    from using a wrong, unpatched or drifted Harbor by accident; it is no defence against a hostile process of the
+    same user, which could read the token file itself."""
+    try:
+        harbor_setup_check(Path(harbor))
+    except HarborSetupError as err:
+        raise PilotError(f"refusing to use the token: {err}") from None
 
 
 def parse_claude_version(text: str) -> str:
@@ -285,27 +325,96 @@ def harbor_time_limit(task) -> float:
     return float(per_step * len(task.steps) + SETUP_MARGIN_SECONDS)
 
 
-def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+def _signal_group(proc: subprocess.Popen, sig: int, errors: list[str] | None = None) -> bool:
+    """Send sig to Harbor's process group; False when the group is gone or refuses it. A refusal while Harbor still
+    runs is noted in errors; a group of ended, uncollected processes refuses signals on macOS and counts as gone."""
     try:
         os.killpg(proc.pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError as err:
+        if errors is not None and proc.poll() is None:
+            errors.append(f"{signal.Signals(sig).name} to Harbor's process group was refused ({err})")
+        return False
 
 
 def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float,
-                       announce: Callable[[], None] | None = None) -> None:
+                       announce: Callable[[], None] | None = None, sent: list[str] | None = None,
+                       errors: list[str] | None = None) -> None:
     """Ask Harbor to stop as Ctrl-C does, so it removes its containers; then SIGTERM, which Harbor also
     turns into a clean stop; then kill whatever is left of its process group. The group's first signal goes
-    out before anything else; what the pilot has to say is printed only after it, while it waits."""
+    out before anything else; what the pilot has to say is printed only after it, while it waits. Every signal
+    that went out is added to sent. When the group is gone or refuses signals there is nothing to wait for; if it
+    refuses them while Harbor still runs, Harbor itself is killed."""
     for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, term_grace)):
-        _signal_group(proc, sig)
+        delivered = _signal_group(proc, sig, errors)
+        if delivered and sent is not None:
+            sent.append(sig.name)
         if announce is not None:
             announce, say = None, announce
             say()
-        if _wait_saying(proc, wait):
+        if not delivered or _wait_saying(proc, wait):
             break
-    _signal_group(proc, signal.SIGKILL)  # anything Harbor left running in its group
+    if _signal_group(proc, signal.SIGKILL, errors):  # anything Harbor left running in its group
+        if sent is not None:
+            sent.append("SIGKILL")
+    elif proc.poll() is None:
+        proc.kill()
+        if sent is not None:
+            sent.append("SIGKILL to Harbor alone")
+        if errors is not None:
+            errors.append("Harbor itself was killed; processes it started may still be running")
     proc.wait()
+
+
+class WatchStop(PilotError):
+    """The process-table watch asked the runner to stop Harbor."""
+
+
+class StopRequest:
+    """The process-table watch's stop, carried out by the runner, so that one stop owns Harbor's process group.
+
+    The watch calls ask (its stop) from its own thread. The runner, which waits on Harbor in short steps, sees the
+    request within a fifth of a second and stops the group by its own stop path: further signals held, the group
+    stopped first, every later step through the step helper, the group confirmed gone. If the runner is already
+    stopping the group (at the time limit, after a stop signal or an error), that stop serves. Every stop of the
+    group in the runner, and the leftover step, add the signals they send to `sent` (the watch's own list, set
+    before Harbor starts), refusals to `errors`, and what began the stop to `by`; ask returns `by` once the runner
+    is done (None when Harbor had ended without a stop)."""
+
+    def __init__(self):
+        self.asked, self.done = threading.Event(), threading.Event()
+        self.sent: list[str] = []
+        self.errors: list[str] = []
+        self.by: str | None = None  # "the watch", "the time limit", "a stop signal" or "an error"
+
+    def ask(self, proc: subprocess.Popen, sent: list[str]) -> str | None:
+        self.asked.set()
+        self.done.wait(timeout=STOP_GRACE_SECONDS + TERM_GRACE_SECONDS + 2 * CONFIRM_SECONDS + 60)
+        return self.by
+
+    def begun_by(self, cause: str) -> None:
+        if self.by is None:
+            self.by = cause
+
+
+def _wait_for(proc: subprocess.Popen, timeout: float, stop_request: StopRequest | None) -> int:
+    """proc.wait(timeout), except that a stop the process-table watch asked for, while Harbor runs, ends it."""
+    if stop_request is None:
+        return proc.wait(timeout=timeout)
+    end = time.monotonic() + timeout
+    while True:
+        if stop_request.asked.is_set() and proc.poll() is None:
+            _gate().stop_begun()  # from here on further signals are held: no gap before the stop path's first line
+            raise WatchStop("the process-table watch found the token on a command line or could not read the table")
+        left = end - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        try:
+            return proc.wait(timeout=min(0.2, left))
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _wait_saying(proc: subprocess.Popen, wait: float) -> bool:
@@ -353,11 +462,14 @@ def harbor_groups_left() -> list[int]:
 
 
 def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout: float, *,
-                   grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS) -> int:
-    """Run Harbor in its own process group. At the time limit, or on a stop signal, stop the whole group; no
-    further signal can cut that stop short. The group stays registered until it is confirmed gone."""
+                   grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS,
+                   on_start: Callable[[subprocess.Popen], StopRequest | None] | None = None) -> int:
+    """Run Harbor in its own process group. At the time limit, on a stop signal, or when the process-table watch
+    asks, stop the whole group; no further signal can cut that stop short. The group stays registered until it is
+    confirmed gone. `on_start` gets the process once it is registered and may return the watch's StopRequest."""
     gate = _gate()
     proc: subprocess.Popen | None = None
+    stop_request: StopRequest | None = None
     log = open(log_path, "ab")  # when Harbor's log cannot be opened, nothing has started yet
     try:
         # Harbor's start, the wait, ending what it left behind and the confirmation are one try. On every way out
@@ -369,28 +481,44 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
                                         stderr=subprocess.STDOUT, start_new_session=True)
                 _live_groups.add(proc.pid)
             gate.raise_held()
+            if on_start is not None:
+                stop_request = on_start(proc)
             try:
-                code = proc.wait(timeout=timeout)
+                code = _wait_for(proc, timeout, stop_request)
             except subprocess.TimeoutExpired:
                 gate.stop_begun()
-                stop_process_group(proc, grace, term_grace, announce=lambda: _say(
-                    f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}"))
+                if stop_request is not None:
+                    stop_request.begun_by("the time limit")
+                stop_process_group(proc, grace, term_grace, sent=_sent(stop_request), errors=_errors(stop_request),
+                                   announce=lambda: _say(f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}"))
                 gate.step("the pilot's line in Harbor's log", lambda: _log_line(
                     log, b"\npilot: harbor did not finish within the time limit; it and its processes were stopped\n"))
                 code = TIMEOUT_RETURNCODE
             else:
-                end_leftover_processes(proc.pid, term_grace)
+                end_leftover_processes(proc.pid, term_grace, sent=_sent(stop_request))
             _confirm_gone(proc.pid)
             return code
-        except BaseException:
+        except BaseException as err:
             gate.stop_begun()
             if proc is not None and proc.pid in _live_groups:  # a group already confirmed gone is not stopped again
-                stop_process_group(proc, grace, term_grace, announce=gate.flush_notices)
-                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
-                    log, b"\npilot: interrupted; harbor and its processes were stopped\n"))
+                watched = isinstance(err, WatchStop)
+                if stop_request is not None:
+                    stop_request.begun_by("the watch" if watched else "a stop signal"
+                                          if isinstance(err, KeyboardInterrupt) else "an error")
+                if watched:
+                    say = lambda: (_say(f"pilot: {err}: {STOPPING}"), gate.flush_notices())  # noqa: E731
+                    line = b"\npilot: the process-table watch asked for a stop; harbor and its processes were stopped\n"
+                else:
+                    say = gate.flush_notices
+                    line = b"\npilot: interrupted; harbor and its processes were stopped\n"
+                stop_process_group(proc, grace, term_grace, announce=say, sent=_sent(stop_request),
+                                   errors=_errors(stop_request))
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(log, line))
                 _confirm_gone(proc.pid)
             raise
     finally:
+        if stop_request is not None:
+            stop_request.done.set()  # the watch's stop is over, whichever way the run ended
         gate.step("closing Harbor's log", log.close)
 
 
@@ -410,15 +538,35 @@ def _signal_pgid(pgid: int, sig: int) -> bool:
         return True
 
 
-def end_leftover_processes(pgid: int, term_grace: float) -> None:
-    """End what a Harbor that exited on its own left running in its process group: SIGTERM, then SIGKILL."""
+def end_leftover_processes(pgid: int, term_grace: float, sent: list[str] | None = None) -> None:
+    """End what a Harbor that exited on its own left running in its process group: SIGTERM, then SIGKILL. Each
+    signal the group took is added to sent, as sent to what Harbor left (Harbor itself was not stopped)."""
     if not _signal_pgid(pgid, 0):
         return
-    _signal_pgid(pgid, signal.SIGTERM)
+    if _delivered(pgid, signal.SIGTERM) and sent is not None:
+        sent.append("SIGTERM to what Harbor left")
     end = time.monotonic() + term_grace
     while _signal_pgid(pgid, 0) and time.monotonic() < end:
         time.sleep(0.05)
-    _signal_pgid(pgid, signal.SIGKILL)
+    if _delivered(pgid, signal.SIGKILL) and sent is not None:
+        sent.append("SIGKILL to what Harbor left")
+
+
+def _delivered(pgid: int, sig: int) -> bool:
+    """Send sig to the process group; True only when the group took it."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _sent(stop_request: StopRequest | None) -> list[str] | None:
+    return stop_request.sent if stop_request is not None else None
+
+
+def _errors(stop_request: StopRequest | None) -> list[str] | None:
+    return stop_request.errors if stop_request is not None else None
 
 
 def image_present(image: str) -> None:
@@ -693,6 +841,21 @@ def read_trial(job_dir: Path) -> dict:
     return {"trial": data.get("trial_name"), "trial_dir": str(path.parent), "reward": final, "steps": steps,
             "error": _error(data.get("exception_info")),
             "harbor_wall_seconds": _seconds({"started_at": data.get("started_at"), "finished_at": data.get("finished_at")})}
+
+
+def agent_windows(job_dir: Path) -> list[tuple[float, float]]:
+    """Start and end (epoch seconds) of each step's agent phase in the trial's result; empty when unreadable."""
+    try:
+        data = json.loads(_trial_result(job_dir).read_text(encoding="utf-8"))
+        windows = []
+        for sr in data.get("step_results") or [data]:
+            timing = sr.get("agent_execution") or {}
+            if timing.get("started_at") and timing.get("finished_at"):
+                start = datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00")).timestamp()
+                windows.append((start, start + _seconds(timing)))
+        return windows
+    except Exception:  # only used to count samples; Harbor's output is judged elsewhere
+        return []
 
 
 def read_agent_output(job_dir: Path, step_order: list[str] | None = None) -> dict:
@@ -1117,6 +1280,9 @@ def _summary_entry(record: dict) -> dict:
     entry["steps"] = [{"step": s["step"], "reward": s["reward"]} for s in record.get("steps", [])]
     entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "first", "after", "unreported")
                             if k in record["rate_limits"]}
+    if record.get("process_watch"):
+        entry["process_watch"] = {k: record["process_watch"][k]
+                                  for k in ("samples", "agent_phase_samples", "hit_samples", "clean")}
     return entry
 
 
@@ -1136,7 +1302,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
               image_check: Callable[[str], None] = image_present, runner: Runner = run_subprocess,
               sleep: Callable[[float], None] = time.sleep, timeout: float | None = None,
               allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS,
-              max_agent_minutes_per_5h: float = DEFAULT_GUARD_MINUTES, docker=None) -> dict:
+              max_agent_minutes_per_5h: float = DEFAULT_GUARD_MINUTES, docker=None,
+              harbor_check: Callable[[Path], None] = check_harbor, process_sampler: Callable[[], bytes] = process_table,
+              process_interval: float = DEFAULT_PROCESS_INTERVAL) -> dict:
     for name, value in (("five-hour", max_five_hour), ("weekly", max_weekly)):
         if not 0 < value <= 100:
             raise PilotError(f"the {name} limit must be a percent above 0 and at most 100, not {value:g}")
@@ -1149,8 +1317,14 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     own_limit = harbor_time_limit(task)  # a task without time limits is refused here, before anything is made
     docker = docker if docker is not None else DockerContainers()
     timeout = own_limit if timeout is None else timeout
+    base = dict(os.environ if base_env is None else base_env)
+    harbor = resolve_program(harbor, base.get("PATH"))  # the file checked is the file run
+    harbor_check(harbor)
+    problem = token_names_problem()
+    if problem:
+        raise PilotError(problem)
     token = read_token(token_file)
-    env = child_env(dict(os.environ if base_env is None else base_env), token)
+    env = child_env(base, token)
     timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_root = Path(out_root)
     batch = out_root / timestamp
@@ -1215,8 +1389,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             failures_before = len(gate.failures)  # counted from before the run: a step failing inside it counts
             t0 = time.monotonic()
             try:
+                harbor_check(harbor)
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
-                                 image_check, timeout, now, allow_hosts, docker)
+                                 image_check, timeout, now, allow_hosts, docker, process_sampler, process_interval)
             except BaseException:
                 # whatever stopped the run: nothing cuts what follows short, the guard gets the run's end (its whole
                 # wall time) only once Harbor is gone, and the record is listed
@@ -1349,7 +1524,9 @@ def _record_note(batch: Path, lang: str, summary: dict) -> str:
 
 def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbor: Path, claude_version: str,
             model: str | None, before: dict, runner: Runner, image_check: Callable[[str], None], timeout: float,
-            now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS, docker=None) -> dict:
+            now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS, docker=None,
+            process_sampler: Callable[[], bytes] = process_table,
+            process_interval: float = DEFAULT_PROCESS_INTERVAL) -> dict:
     docker = docker if docker is not None else DockerContainers()
     _gate().raise_held()  # a signal held while the start was entered stops the run before Harbor starts
     run_dir = batch / lang
@@ -1368,17 +1545,31 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                     "harbor_returncode": None, "wall_seconds": None, "time_limit_seconds": timeout,
                     "claude_code_version": {"pinned": claude_version, "observed": None},
                     "model": model, "usage": None, "steps": [], "reward": None, "error": None, "status": None,
-                    "leak_scan": None, "containers_left": [], "verifier_env_problems": [],
+                    "leak_scan": None, "process_watch": None, "containers_left": [], "verifier_env_problems": [],
                     "rate_limits": {"before": before, "first": {}, "after": {}, "unreported": list(REGULATED_WINDOWS),
                                     "events": []}}
     started = time.monotonic()
     finished = False
+    # The watch kills sighted processes of Harbor's group itself, and has the runner stop Harbor (one stop owns the
+    # group): the runner's stop path, signals held, every step through the step helper, reported like any failure.
+    request = StopRequest()
+    watch = ProcessTableWatch(token, process_sampler, process_interval, stop=request.ask)
+    request.sent = watch.stop_signals  # every stop of the group adds its signals to the watch's list, from the start
+
+    def hand_over(proc: subprocess.Popen) -> StopRequest:
+        watch.track(proc)
+        return request
+
     try:
-        record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout)
+        # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
+        with watch:
+            if watch.clean:
+                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout, on_start=hand_over)
         finished = True
     finally:
         _gate().enter()  # the containers step, the scan and the record are never cut short
         _gate().flush_notices()
+        watch.note_runner_stop(request.by, request.errors)  # what began any stop of the group, and its refusals
         record["wall_seconds"] = round(time.monotonic() - started, 1)
         if job_dir.is_dir():
             # Harbor may have left this run's containers running, cut short or not: remove them first, so
@@ -1396,14 +1587,33 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         if not scanned:  # a scan that could not run rules nothing out: it counts as a failed scan
             scan = LeakScan([], ["the whole run folder (the scan itself failed)"])
         record["leak_scan"] = scan.as_dict()
+        record["process_watch"] = watch.record()
+        try:
+            record["process_watch"]["agent_phase_samples"] = watch.count_within(agent_windows(job_dir))
+        except Exception as err:  # only a count; never in the way of the scan's verdict
+            record["process_watch"]["agent_phase_samples"] = None
+            record["process_watch"]["count_error"] = mask(f"{type(err).__name__}: {err}", token)
         if not scan.clean:
             record["status"] = "token-leak" if scan.hits else "leak-scan-failed"
+        elif watch.hit_samples:
+            record["status"] = "token-in-process-table"
+        elif not watch.clean:
+            record["status"] = "process-watch-failed"
         elif not finished:
             record["status"] = "interrupted"
         if record["status"]:
             _gate().step(f"writing the {lang} record", lambda: _write_record(run_dir, batch, record))
         if not scan.clean:
             raise TokenLeak(scan.message(f"in the {lang} run folder"))
+        left = (f"; containers still in Docker: {', '.join(record['containers_left'])}"
+                if record["containers_left"] else "")
+        if watch.hit_samples:
+            raise TokenLeak(f"the token was in the command line of process(es) {watch.hit_pids} in "
+                            f"{watch.hit_samples} of {len(watch.times)} process-table samples of the {lang} run; "
+                            f"{watch.outcome()}{left}")
+        if not watch.clean:
+            raise PilotError(f"the process-table check of the {lang} run failed ({watch.error}); "
+                             f"{watch.outcome()}{left}")
 
     returncode = record["harbor_returncode"]
     status = "ok" if returncode == 0 else "timeout" if returncode == TIMEOUT_RETURNCODE else "harbor-failed"
@@ -1499,6 +1709,10 @@ def main(argv: list[str] | None = None) -> int:
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
         print(f"{run['language']}: {run['status']}" + (f" ({steps})" if steps else "") + (f" - {run['reason']}" if run.get("reason") else ""))
+        if run.get("process_watch"):
+            w = run["process_watch"]
+            print(f"  process table: {w['samples']} samples ({w['agent_phase_samples']} while the agent worked), "
+                  f"the token in {w['hit_samples']}")
         unreported = (run.get("rate_limits") or {}).get("unreported")
         if run["status"] != "not-started" and unreported:
             print(f"  note: the agent reported no utilization for {', '.join(unreported)}; there only a rejected "
