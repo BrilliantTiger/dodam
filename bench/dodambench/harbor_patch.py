@@ -8,8 +8,8 @@ it reads the token.
 
 The check pins everything of the install that runs as Harbor's own code with the token in its environment: every
 file of the harbor package (the patched one by its patched hash, all the others by one digest of the release), the
-`harbor` entry script, and the files that run whenever that Python starts (.pth files, sitecustomize,
-usercustomize). It does not pin Harbor's dependencies or the Python interpreter: they build no command lines, and
+`harbor` entry script (by its structure, since installers write it from their own templates), and the files that
+run whenever that Python starts (.pth files, sitecustomize, usercustomize). It does not pin Harbor's dependencies or the Python interpreter: they build no command lines, and
 they are pinned by hash when installed (bench/harbor/requirements.txt).
 
 Set up the install once, from bench/ (to move from an earlier version of the patch, install again first):
@@ -22,6 +22,7 @@ Set up the install once, from bench/ (to move from an earlier version of the pat
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import re
 import sys
@@ -39,9 +40,14 @@ PATCHED_SHA256 = "93cc6fcb66ea072ba193ec352d67e77f63114ebc6ac582c5ee6b7c609f529d
 # sha256 over "<path> <sha256>" lines, sorted, of every other file of the harbor package as released in 0.25.0
 # (paths relative to site-packages, __pycache__ left out): 514 files.
 PACKAGE_REST_SHA256 = "8d83a9486ed6829982fa6a427642bb5d31d7b6eb358bc20f33452186d8ea401f"
-# sha256 of the `harbor` entry script after its #! line, as uv and as pip write it for harbor 0.25.0.
-ENTRY_SCRIPT_BODIES = {"b22e0b964edf71e8bc2cea9c1e9e3002c3de931cc3395519c1ed3b5627eecbb4",
-                       "f82ebd1f08d7e2ddf3ac1e93741867127c217065ee2221931ec10b9a23345f46"}
+# What the `harbor` entry script may contain after its #! line. Installers write it from their own templates, which
+# change between versions (uv, pip 25 and pip 26 all differ), so it is checked by structure, not by bytes: it may
+# import sys and re, import `app` from harbor.cli.main, tidy sys.argv[0] and call sys.exit(app()). Nothing else.
+ENTRY_NAMES = {"__name__", "sys", "re", "app"}
+ENTRY_ATTRIBUTES = {"argv", "exit", "endswith", "removesuffix", "sub"}
+ENTRY_NODES = (ast.Module, ast.Import, ast.ImportFrom, ast.alias, ast.If, ast.Compare, ast.Eq, ast.Name, ast.Load,
+               ast.Store, ast.Constant, ast.Attribute, ast.Subscript, ast.Slice, ast.UnaryOp, ast.USub, ast.Call,
+               ast.Assign, ast.Expr)
 # The only files allowed to run code whenever Harbor's Python starts: uv's virtual environment hook.
 STARTUP_FILES = {"_virtualenv.pth": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d",
                  "_virtualenv.py": "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"}
@@ -109,6 +115,30 @@ def package_rest_digest(site: Path) -> str:
     return hashlib.sha256("".join(sorted(lines)).encode()).hexdigest()
 
 
+def entry_script_problem(text: str) -> str | None:
+    """Why the entry script's body (after the #! line) is not one an installer writes for Harbor, or None."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return "it is not Python"
+    for node in ast.walk(tree):
+        if not isinstance(node, ENTRY_NODES):
+            return f"it contains {type(node).__name__}"
+        if isinstance(node, ast.Name) and node.id not in ENTRY_NAMES:
+            return f"it uses {node.id}"
+        if isinstance(node, ast.Attribute) and node.attr not in ENTRY_ATTRIBUTES:
+            return f"it uses .{node.attr}"
+        if isinstance(node, ast.Import) and any(a.name not in ("sys", "re") or a.asname for a in node.names):
+            return "it imports something other than sys and re"
+        if isinstance(node, ast.ImportFrom) and (node.module != "harbor.cli.main" or node.level
+                                                 or [(a.name, a.asname) for a in node.names] != [("app", None)]):
+            return "it imports something other than harbor.cli.main's app"
+    calls = [ast.dump(n) for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    if ast.dump(ast.parse("sys.exit(app())").body[0].value) not in calls:
+        return "it does not run harbor.cli.main's app"
+    return None
+
+
 def startup_problems(site: Path) -> list[str]:
     """Files in site-packages that would run code in Harbor's Python and are not the known ones."""
     site = Path(site)
@@ -141,9 +171,9 @@ def check(harbor: Path, version: str = PINNED_VERSION, original_sha256: str = OR
     if package_rest_digest(installed.site_packages) != PACKAGE_REST_SHA256:
         raise HarborSetupError(f"the harbor package in {installed.site_packages} differs from the release of "
                                f"Harbor {version} (a changed, added or missing file); reinstall harbor=={version}")
-    body = harbor.read_bytes().split(b"\n", 1)[-1]
-    if hashlib.sha256(body).hexdigest() not in ENTRY_SCRIPT_BODIES:
-        raise HarborSetupError(f"{harbor} is not the entry script an installer writes for Harbor {version}")
+    problem = entry_script_problem(harbor.read_bytes().split(b"\n", 1)[-1].decode("utf-8", "replace"))
+    if problem:
+        raise HarborSetupError(f"{harbor} is not the entry script an installer writes for Harbor {version}: {problem}")
     problems = startup_problems(installed.site_packages)
     if problems:
         raise HarborSetupError("; ".join(problems))

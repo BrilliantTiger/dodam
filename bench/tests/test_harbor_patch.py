@@ -149,7 +149,6 @@ def fake_install(monkeypatch, root: Path, version: str = "0.25.0", content: str 
     (site / "harbor" / "agents" / "__pycache__").mkdir()
     (site / "harbor" / "agents" / "__pycache__" / "claude_code.cpython-313.pyc").write_bytes(b"compiled")
     monkeypatch.setattr(harbor_patch, "PACKAGE_REST_SHA256", rest_digest(site), raising=False)
-    monkeypatch.setattr(harbor_patch, "ENTRY_SCRIPT_BODIES", {sha(ENTRY_BODY)}, raising=False)
     monkeypatch.setattr(harbor_patch, "STARTUP_FILES", {}, raising=False)
     for i in range(dist_infos):
         info = site / f"harbor-{version if i == 0 else '0.24.0'}.dist-info"
