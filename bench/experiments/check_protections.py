@@ -2,7 +2,8 @@
 
 For every entry of protections.toml this makes a copy of the bench folder, puts the entry's broken
 variant into the copy, and runs the tests the entry names there. A variant under which they all
-pass means that nothing pins that protection: the check fails and says which.
+pass means that nothing pins that protection: the check fails and says which. Before that, the
+tests named must all pass with every protection in place.
 
     python experiments/check_protections.py            # every protection
     python experiments/check_protections.py "memory"   # only those whose description holds the word
@@ -62,6 +63,16 @@ def check(protection: dict) -> dict:
 
 def main(argv: list[str]) -> int:
     chosen = [p for p in protections() if not argv or any(word.lower() in p["what"].lower() for word in argv)]
+    # a test that fails as the code is would seem to pin anything: first they must all pass unbroken
+    named = sorted({test for p in chosen for test in p["tests"]})
+    whole = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *named], cwd=BENCH,
+                           capture_output=True, text=True)
+    if whole.returncode != 0:
+        last = whole.stdout.strip().splitlines()[-1] if whole.stdout.strip() else whole.stderr.strip()[-200:]
+        print(json.dumps({"protections": len(chosen), "pinned": 0,
+                          "not_pinned": [{"what": "the tests do not pass with every protection in place", "pytest": last}]},
+                         indent=1))
+        return 1
     results = []
     for protection in chosen:
         result = check(protection)

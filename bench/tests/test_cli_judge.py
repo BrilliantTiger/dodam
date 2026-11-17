@@ -697,6 +697,7 @@ def test_the_filter_refuses_the_calls_that_make_what_outlives_a_process():
 
 
 def test_a_run_during_which_the_kernel_ended_a_process_for_memory_is_told():
-    told = getattr(dodam_cli, "_ended_by_the_kernel", None)
+    from dodambench import dodam_cli as runner
+    told = getattr(runner, "_ended_by_the_kernel", None)
     assert told is not None, "the case runner does not look whether the kernel ended something"
     assert told(3, 4) is True and told(3, 3) is False

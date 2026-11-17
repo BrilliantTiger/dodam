@@ -59,7 +59,10 @@ from pathlib import Path
 try:
     import dodam_judge as _judge   # in the verifier the judge sits next to this file under that name
 except ImportError:
-    import judge as _judge
+    try:
+        import judge as _judge
+    except ImportError:
+        from dodambench import judge as _judge   # imported as part of the package
 
 resource = _judge.resource
 CONFIG_ENV = "DODAM_CLI_CONFIG"
