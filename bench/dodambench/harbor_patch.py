@@ -89,6 +89,11 @@ def venv_of(harbor: Path) -> Path:
     words = first[2:].split() if first.startswith(b"#!") else []
     if not words:
         raise HarborSetupError(f"{harbor} is not a Python entry script")
+    if Path(words[0].decode("utf-8", "replace")).name in ("sh", "bash"):
+        raise HarborSetupError(f"{harbor} starts its Python through {words[0].decode('utf-8', 'replace')}, which "
+                               "installers do when the interpreter's path is long or has a space in it; the check "
+                               "needs the interpreter on the #! line, so make the virtual environment at a shorter "
+                               "path without spaces and install Harbor into it again")
     if len(words) > 1:
         raise HarborSetupError(f"{harbor} gives its interpreter more than a path on its #! line")
     venv = Path(words[0].decode("utf-8", "replace")).parent.parent
@@ -171,7 +176,11 @@ def startup_problems(site: Path) -> list[str]:
     problems = []
     for name in sorted(names):
         want = STARTUP_FILES.get(name)
-        if want is None:
+        if name == "distutils-precedence.pth":
+            problems.append(f"{site / name} comes from setuptools, which Harbor's pinned install does not include; "
+                            "make a fresh virtual environment and install Harbor into it from "
+                            "bench/harbor/requirements.txt")
+        elif want is None:
             problems.append(f"{site / name} would run code whenever Harbor's Python starts")
         elif hashlib.sha256((site / name).read_bytes()).hexdigest() != want:
             problems.append(f"{site / name} is not the known virtual environment hook")

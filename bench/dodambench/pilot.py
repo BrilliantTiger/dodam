@@ -325,27 +325,89 @@ def harbor_time_limit(task) -> float:
     return float(per_step * len(task.steps) + SETUP_MARGIN_SECONDS)
 
 
-def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+def _signal_group(proc: subprocess.Popen, sig: int, errors: list[str] | None = None) -> bool:
+    """Send sig to Harbor's process group; False when the group is gone or refuses it. A refusal while Harbor still
+    runs is noted in errors; a group of ended, uncollected processes refuses signals on macOS and counts as gone."""
     try:
         os.killpg(proc.pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError as err:
+        if errors is not None and proc.poll() is None:
+            errors.append(f"{signal.Signals(sig).name} to Harbor's process group was refused ({err})")
+        return False
 
 
 def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float,
-                       announce: Callable[[], None] | None = None) -> None:
+                       announce: Callable[[], None] | None = None, sent: list[str] | None = None,
+                       errors: list[str] | None = None) -> None:
     """Ask Harbor to stop as Ctrl-C does, so it removes its containers; then SIGTERM, which Harbor also
     turns into a clean stop; then kill whatever is left of its process group. The group's first signal goes
-    out before anything else; what the pilot has to say is printed only after it, while it waits."""
+    out before anything else; what the pilot has to say is printed only after it, while it waits. Every signal
+    that went out is added to sent. When the group is gone or refuses signals there is nothing to wait for; if it
+    refuses them while Harbor still runs, Harbor itself is killed."""
     for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, term_grace)):
-        _signal_group(proc, sig)
+        delivered = _signal_group(proc, sig, errors)
+        if delivered and sent is not None:
+            sent.append(sig.name)
         if announce is not None:
             announce, say = None, announce
             say()
-        if _wait_saying(proc, wait):
+        if not delivered or _wait_saying(proc, wait):
             break
-    _signal_group(proc, signal.SIGKILL)  # anything Harbor left running in its group
+    if _signal_group(proc, signal.SIGKILL, errors):  # anything Harbor left running in its group
+        if sent is not None:
+            sent.append("SIGKILL")
+    elif proc.poll() is None:
+        proc.kill()
+        if sent is not None:
+            sent.append("SIGKILL to Harbor alone")
+        if errors is not None:
+            errors.append("Harbor itself was killed; processes it started may still be running")
     proc.wait()
+
+
+class WatchStop(PilotError):
+    """The process-table watch asked the runner to stop Harbor."""
+
+
+class StopRequest:
+    """The process-table watch's stop, carried out by the runner, so that one stop owns Harbor's process group.
+
+    The watch calls ask (its stop) from its own thread. The runner, which waits on Harbor in short steps, sees the
+    request within a fifth of a second and stops the group by its own stop path: further signals held, the group
+    stopped first, every later step through the step helper, the group confirmed gone. Each signal that path sends
+    goes into the watch's list, and ask returns once the runner is done (or Harbor had ended without a stop)."""
+
+    def __init__(self):
+        self.asked, self.done = threading.Event(), threading.Event()
+        self.sent: list[str] | None = None
+        self.errors: list[str] = []
+
+    def ask(self, proc: subprocess.Popen, sent: list[str]) -> None:
+        self.sent = sent
+        self.asked.set()
+        self.done.wait(timeout=STOP_GRACE_SECONDS + TERM_GRACE_SECONDS + 2 * CONFIRM_SECONDS + 60)
+        if self.errors:
+            raise OSError("; ".join(self.errors))
+
+
+def _wait_for(proc: subprocess.Popen, timeout: float, stop_request: StopRequest | None) -> int:
+    """proc.wait(timeout), except that a stop the process-table watch asked for, while Harbor runs, ends it."""
+    if stop_request is None:
+        return proc.wait(timeout=timeout)
+    end = time.monotonic() + timeout
+    while True:
+        if stop_request.asked.is_set() and proc.poll() is None:
+            raise WatchStop("the process-table watch found the token on a command line or could not read the table")
+        left = end - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        try:
+            return proc.wait(timeout=min(0.2, left))
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _wait_saying(proc: subprocess.Popen, wait: float) -> bool:
@@ -394,12 +456,13 @@ def harbor_groups_left() -> list[int]:
 
 def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout: float, *,
                    grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS,
-                   on_start: Callable[[subprocess.Popen], None] | None = None) -> int:
-    """Run Harbor in its own process group. At the time limit, or on a stop signal, stop the whole group; no
-    further signal can cut that stop short. The group stays registered until it is confirmed gone.
-    `on_start` gets the process once it is registered (the process-table watch stops it through it)."""
+                   on_start: Callable[[subprocess.Popen], StopRequest | None] | None = None) -> int:
+    """Run Harbor in its own process group. At the time limit, on a stop signal, or when the process-table watch
+    asks, stop the whole group; no further signal can cut that stop short. The group stays registered until it is
+    confirmed gone. `on_start` gets the process once it is registered and may return the watch's StopRequest."""
     gate = _gate()
     proc: subprocess.Popen | None = None
+    stop_request: StopRequest | None = None
     log = open(log_path, "ab")  # when Harbor's log cannot be opened, nothing has started yet
     try:
         # Harbor's start, the wait, ending what it left behind and the confirmation are one try. On every way out
@@ -412,9 +475,9 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
                 _live_groups.add(proc.pid)
             gate.raise_held()
             if on_start is not None:
-                on_start(proc)
+                stop_request = on_start(proc)
             try:
-                code = proc.wait(timeout=timeout)
+                code = _wait_for(proc, timeout, stop_request)
             except subprocess.TimeoutExpired:
                 gate.stop_begun()
                 stop_process_group(proc, grace, term_grace, announce=lambda: _say(
@@ -426,15 +489,22 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
                 end_leftover_processes(proc.pid, term_grace)
             _confirm_gone(proc.pid)
             return code
-        except BaseException:
+        except BaseException as err:
             gate.stop_begun()
             if proc is not None and proc.pid in _live_groups:  # a group already confirmed gone is not stopped again
-                stop_process_group(proc, grace, term_grace, announce=gate.flush_notices)
-                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
-                    log, b"\npilot: interrupted; harbor and its processes were stopped\n"))
+                if isinstance(err, WatchStop) and stop_request is not None:
+                    stop_process_group(proc, grace, term_grace, sent=stop_request.sent, errors=stop_request.errors,
+                                       announce=lambda: (_say(f"pilot: {err}: {STOPPING}"), gate.flush_notices()))
+                    line = b"\npilot: the process-table watch asked for a stop; harbor and its processes were stopped\n"
+                else:
+                    stop_process_group(proc, grace, term_grace, announce=gate.flush_notices)
+                    line = b"\npilot: interrupted; harbor and its processes were stopped\n"
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(log, line))
                 _confirm_gone(proc.pid)
             raise
     finally:
+        if stop_request is not None:
+            stop_request.done.set()  # the watch's stop is over, whichever way the run ended
         gate.step("closing Harbor's log", log.close)
 
 
@@ -1446,13 +1516,20 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                                     "events": []}}
     started = time.monotonic()
     finished = False
-    watch = ProcessTableWatch(token, process_sampler, process_interval)
+    # The watch kills sighted processes of Harbor's group itself, and has the runner stop Harbor (one stop owns the
+    # group): the runner's stop path, signals held, every step through the step helper, reported like any failure.
+    request = StopRequest()
+    watch = ProcessTableWatch(token, process_sampler, process_interval, stop=request.ask)
+
+    def hand_over(proc: subprocess.Popen) -> StopRequest:
+        watch.track(proc)
+        return request
+
     try:
         # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
         with watch:
             if watch.clean:
-                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout,
-                                                     on_start=watch.track)
+                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout, on_start=hand_over)
         finished = True
     finally:
         _gate().enter()  # the containers step, the scan and the record are never cut short

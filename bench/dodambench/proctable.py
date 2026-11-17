@@ -9,7 +9,8 @@ runner hands it Harbor's process as soon as it starts. After a sighting, the sig
 Harbor's process group get SIGKILL at once, which ends the exposure within one reading. Then Harbor is stopped
 through its own process group (Harbor runs in a session of its own), which needs no reading of the table: SIGINT,
 on which Harbor removes its containers, then SIGTERM, then SIGKILL to whatever is left of the group. If the group
-cannot be signalled, Harbor itself is killed. The record says what happened, and never holds the token or a
+cannot be signalled, Harbor itself is killed. The stop is a function the watch is given: on its own it is
+stop_group below; the pilot gives it its runner's stop, so that one stop owns Harbor's group. The record says what happened, and never holds the token or a
 command line that held it: only counts, process ids and the signals the stop sent and its errors.
 """
 from __future__ import annotations
@@ -57,6 +58,10 @@ def stop_group(proc: subprocess.Popen, sent: list[str], grace: float = STOP_GRAC
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
             return
+        except PermissionError:
+            if proc.poll() is not None:
+                return  # a group of ended, uncollected processes: macOS refuses the signal, and nothing is left
+            raise
         sent.append(sig.name)
         try:
             proc.wait(timeout=wait)
@@ -68,6 +73,9 @@ def stop_group(proc: subprocess.Popen, sent: list[str], grace: float = STOP_GRAC
         sent.append("SIGKILL")
     except ProcessLookupError:
         pass
+    except PermissionError:
+        if proc.poll() is None:
+            raise
     proc.wait(timeout=KILL_WAIT_SECONDS)
 
 
@@ -99,6 +107,7 @@ class ProcessTableWatch:
         self._ended = False
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stopper: threading.Thread | None = None
 
     @property
     def clean(self) -> bool:
@@ -129,12 +138,14 @@ class ProcessTableWatch:
         return True
 
     def track(self, proc: subprocess.Popen) -> None:
-        """Called by the runner right after it starts Harbor. Stops it at once if a reading already failed."""
+        """Called by the runner right after it starts Harbor. If a reading already failed, the stop begins at once,
+        in a thread of its own: the stop may be the runner's, which must not wait on itself."""
         with self._lock:
             self._proc = proc
             must_stop = self._must_stop
         if must_stop:
-            self._stop_harbor()
+            self._stopper = threading.Thread(target=self._stop_harbor, name="process-table-stop", daemon=True)
+            self._stopper.start()
 
     def _stop_harbor(self) -> None:
         with self._lock:
@@ -192,6 +203,8 @@ class ProcessTableWatch:
 
     def __exit__(self, *exc) -> None:
         self._done.set()
+        if self._stopper is not None:
+            self._stopper.join()
         if self._thread is not None:
             self._thread.join()
             self._ended = True
