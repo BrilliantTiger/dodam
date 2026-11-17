@@ -5,11 +5,12 @@ off command lines; this watch is the second line. It reads the command line of e
 pid=,args=`) once before Harbor starts, every `interval` seconds while it runs and once after it ends.
 
 When the token is in a command line, or the table cannot be read while Harbor runs, the watch stops Harbor. The
-runner hands it Harbor's process as soon as it starts, and the stop goes to Harbor's own process group (Harbor runs
-in a session of its own), so it needs no reading of the table: SIGINT, on which Harbor removes its containers, then
-SIGTERM, then SIGKILL to whatever is left of the group. If the group cannot be signalled, Harbor itself is killed.
-The record says what happened, and never holds the token or a command line that held it: only counts, process ids
-and the stop's own signals and errors.
+runner hands it Harbor's process as soon as it starts. After a sighting, the sighted processes that belong to
+Harbor's process group get SIGKILL at once, which ends the exposure within one reading. Then Harbor is stopped
+through its own process group (Harbor runs in a session of its own), which needs no reading of the table: SIGINT,
+on which Harbor removes its containers, then SIGTERM, then SIGKILL to whatever is left of the group. If the group
+cannot be signalled, Harbor itself is killed. The record says what happened, and never holds the token or a
+command line that held it: only counts, process ids and the signals the stop sent and its errors.
 """
 from __future__ import annotations
 
@@ -46,16 +47,16 @@ def token_pids(table: bytes, token: str) -> list[int]:
     return pids
 
 
-def stop_group(proc: subprocess.Popen, grace: float = STOP_GRACE_SECONDS,
-               term_grace: float = TERM_GRACE_SECONDS) -> list[str]:
+def stop_group(proc: subprocess.Popen, sent: list[str], grace: float = STOP_GRACE_SECONDS,
+               term_grace: float = TERM_GRACE_SECONDS) -> None:
     """Stop Harbor and its process group without reading the process table: SIGINT, then SIGTERM, then SIGKILL to
-    whatever is left of the group. Returns the signals sent; raises OSError when the group cannot be signalled."""
-    sent: list[str] = []
+    whatever is left of the group. Each signal is added to `sent` as it goes, so the list stays true when this
+    raises (OSError when the group cannot be signalled, TimeoutExpired when Harbor is not collected in time)."""
     for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, term_grace)):
         try:
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
-            return sent
+            return
         sent.append(sig.name)
         try:
             proc.wait(timeout=wait)
@@ -68,7 +69,6 @@ def stop_group(proc: subprocess.Popen, grace: float = STOP_GRACE_SECONDS,
     except ProcessLookupError:
         pass
     proc.wait(timeout=KILL_WAIT_SECONDS)
-    return sent
 
 
 class ProcessTableWatch:
@@ -76,16 +76,19 @@ class ProcessTableWatch:
     process to `watch.track` as soon as it starts."""
 
     def __init__(self, token: str, sampler: Callable[[], bytes] = process_table, interval: float = 0.5,
-                 stop: Callable[[subprocess.Popen], list[str]] = stop_group, clock: Callable[[], float] = time.time):
+                 stop: Callable[[subprocess.Popen, list[str]], None] = stop_group,
+                 clock: Callable[[], float] = time.time):
         self._token, self.sampler, self.interval, self._stop, self.clock = token, sampler, interval, stop, clock
         self.times: list[float] = []
         self.hit_samples = 0
         self.hits_after_end = 0
         self.hit_pids: list[int] = []
+        self._sighted: list[int] = []  # the processes of the latest reading that held the token
         self.error: str | None = None
         # not-started: the reading before the start was not clean; not-stopped: the watch never stopped Harbor
         # (a clean run, no Harbor process was handed over, or the token was only seen after Harbor ended);
-        # stopped: Harbor ended after the watch's stop; stop-failed: Harbor was still running after it.
+        # ended-before-stop: Harbor had ended by itself when the watch went to stop it, and no signal was sent;
+        # stopped: the watch sent signals and Harbor ended; stop-failed: Harbor was still running after the stop.
         self.harbor = "not-stopped"
         self.stop_signals: list[str] = []
         self.stop_error: str | None = None
@@ -118,6 +121,7 @@ class ProcessTableWatch:
         self.times.append(self.clock())
         pids = token_pids(table, self._token)
         if pids:
+            self._sighted = pids
             self.hit_samples += 1
             self.hits_after_end += self._ended
             self.hit_pids = sorted(set(self.hit_pids) | set(pids))
@@ -140,14 +144,24 @@ class ProcessTableWatch:
                 return  # nothing handed over yet: track() stops it when it comes
             self._stopping = True
         errors = []
+        sent = self.stop_signals  # the stop adds to the watch's own list, so it survives an error
+        for pid in self._sighted:  # end the exposure first: the sighted processes of Harbor's group
+            try:
+                if pid > 0 and os.getpgid(pid) == proc.pid:
+                    os.kill(pid, signal.SIGKILL)
+                    sent.append(f"SIGKILL to sighted process {pid}")
+            except ProcessLookupError:
+                pass
+            except Exception as err:
+                errors.append(f"killing sighted process {pid} failed: {type(err).__name__}: {err}")
         try:
-            self.stop_signals = list(self._stop(proc))
+            self._stop(proc, sent)
         except Exception as err:
             errors.append(f"stopping Harbor's process group failed: {type(err).__name__}: {err}")
         if proc.poll() is None:
             try:
                 proc.kill()
-                self.stop_signals.append("SIGKILL to Harbor alone")
+                sent.append("SIGKILL to Harbor alone")
                 proc.wait(timeout=KILL_WAIT_SECONDS)
             except Exception as err:
                 errors.append(f"killing Harbor failed: {type(err).__name__}: {err}")
@@ -155,7 +169,11 @@ class ProcessTableWatch:
                 errors.append("processes Harbor started may still be running")
         if errors:
             self.stop_error = self._mask("; ".join(errors))
-        self.harbor = "stopped" if proc.poll() is not None else "stop-failed"
+        ended = proc.poll() is not None
+        if not sent:
+            self.harbor = "ended-before-stop" if ended else "stop-failed"
+        else:
+            self.harbor = "stopped" if ended else "stop-failed"
 
     def _run(self) -> None:
         while not self._done.wait(self.interval):
@@ -191,6 +209,8 @@ class ProcessTableWatch:
             return "Harbor was stopped" + (f" ({self.stop_error})" if self.stop_error else "")
         if self.harbor == "stop-failed":
             return f"Harbor could not be stopped ({self.stop_error})"
+        if self.harbor == "ended-before-stop":
+            return "Harbor had already ended when the watch went to stop it"
         if self.hit_samples and self.hit_samples == self.hits_after_end:
             return "the token was seen only after Harbor had ended"
         return "Harbor was not stopped by the watch"

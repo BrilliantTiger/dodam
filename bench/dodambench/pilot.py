@@ -222,10 +222,24 @@ def read_token(path: Path) -> str:
     return token
 
 
+TOKEN_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN",)  # the names the token is handed to Harbor and its agent under
+
+
+def token_names_problem() -> str | None:
+    """A name the token would go under that the patched Harbor would put on the command line as NAME=VALUE."""
+    from . import harbor_patch
+    unlisted = [n for n in TOKEN_NAMES if n not in harbor_patch.CREDENTIALS_BY_NAME]
+    if unlisted:
+        return (f"refusing to use the token: the patched Harbor would pass {', '.join(unlisted)} with its value "
+                "on the command line")
+    return None
+
+
 def child_env(base: dict[str, str], token: str) -> dict[str, str]:
     """The environment of the Harbor process: the token and the OAuth flag, no API key of any kind."""
     env = {k: v for k, v in base.items() if not k.startswith(DROPPED_ENV_PREFIXES)}
-    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    for name in TOKEN_NAMES:
+        env[name] = token
     env["CLAUDE_FORCE_OAUTH"] = "1"
     return env
 
@@ -242,7 +256,9 @@ def resolve_program(program: Path, path: str | None) -> Path:
 
 
 def check_harbor(harbor: Path) -> None:
-    """Refuse to hand the token to a Harbor that is not the pinned release with Dodam's patch."""
+    """Refuse to hand the token to a Harbor that is not the pinned release with Dodam's patch. This keeps the pilot
+    from using a wrong, unpatched or drifted Harbor by accident; it is no defence against a hostile process of the
+    same user, which could read the token file itself."""
     try:
         harbor_setup_check(Path(harbor))
     except HarborSetupError as err:
@@ -768,6 +784,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     base = dict(os.environ if base_env is None else base_env)
     harbor = resolve_program(harbor, base.get("PATH"))  # the file checked is the file run
     harbor_check(harbor)
+    problem = token_names_problem()
+    if problem:
+        raise PilotError(problem)
     token = read_token(token_file)
     env = child_env(base, token)
     timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

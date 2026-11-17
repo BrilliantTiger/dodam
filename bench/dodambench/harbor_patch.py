@@ -2,15 +2,20 @@
 
 Harbor 0.25.0 starts every command in a task container with `docker compose exec -e NAME=VALUE`, which puts the
 agent's environment, the subscription token among it, on the command line of host processes. The patch in
-bench/harbor/ makes Harbor pass each variable by name only and hand the value to the docker CLI through that
-process's environment. This module applies the patch to an install and checks one; the pilot runs the check before
-it reads the token.
+bench/harbor/ makes Harbor pass the credential names in CREDENTIALS_BY_NAME, and only those, by name, and hand their
+values to the docker CLI through that process's environment; every other variable goes exactly as before. This
+module applies the patch to an install and checks one; the pilot runs the check before it reads the token.
 
-The check pins everything of the install that runs as Harbor's own code with the token in its environment: every
-file of the harbor package (the patched one by its patched hash, all the others by one digest of the release), the
-`harbor` entry script (by its structure, since installers write it from their own templates), and the files that
-run whenever that Python starts (.pth files, sitecustomize, usercustomize). It does not pin Harbor's dependencies or the Python interpreter: they build no command lines, and
-they are pinned by hash when installed (bench/harbor/requirements.txt).
+What the check is for: it keeps the pilot from using a wrong, unpatched or drifted Harbor by accident. It is not a
+defence against a hostile process of the same user, which could read the token file itself. Within that purpose it
+pins what runs as Harbor's own code with the token in its environment: every file of the harbor package (the
+patched one by its patched hash, all the others by one digest of the release), the `harbor` entry script (by its
+structure, since installers write it from their own templates, with nothing after the interpreter on its #! line),
+the files that run whenever that Python starts (.pth files, sitecustomize and usercustomize in any form), and a
+virtual environment that does not also load the system's site-packages. Out of scope, for the same reason: Harbor's
+dependencies and the Python interpreter, which run with the token in their environment but build no command lines
+and are pinned by hash when installed (bench/harbor/requirements.txt); compiled files in __pycache__; and anything
+else that needs write access to the install.
 
 Set up the install once, from bench/ (to move from an earlier version of the patch, install again first):
 
@@ -36,13 +41,16 @@ PATCH_FILE = BENCH / "harbor" / "docker-exec-env-by-name.patch"
 TARGET = Path("harbor/environments/docker/docker.py")
 # sha256 of TARGET as released in harbor 0.25.0 (the wheel's RECORD agrees), and after the patch.
 ORIGINAL_SHA256 = "4f74e08941b3534864643405dd6ff43543597248539d7f5de7208ec5c2f5b511"
-PATCHED_SHA256 = "93cc6fcb66ea072ba193ec352d67e77f63114ebc6ac582c5ee6b7c609f529d80"
+PATCHED_SHA256 = "4427a5dd197a6ab5f7a401038df5f6bbc421e97235265fed32fc49d01df20f61"
+# The names the patched Harbor passes by name only (the list in the patch); every other name goes as NAME=VALUE.
+CREDENTIALS_BY_NAME = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # sha256 over "<path> <sha256>" lines, sorted, of every other file of the harbor package as released in 0.25.0
 # (paths relative to site-packages, __pycache__ left out): 514 files.
 PACKAGE_REST_SHA256 = "8d83a9486ed6829982fa6a427642bb5d31d7b6eb358bc20f33452186d8ea401f"
 # What the `harbor` entry script may contain after its #! line. Installers write it from their own templates, which
 # change between versions (uv, pip 25 and pip 26 all differ), so it is checked by structure, not by bytes: it may
-# import sys and re, import `app` from harbor.cli.main, tidy sys.argv[0] and call sys.exit(app()). Nothing else.
+# import sys and re, import `app` from harbor.cli.main, tidy sys.argv[0] (assigning to nothing else, under no
+# condition but the two installers use) and call sys.exit(app()). Nothing else.
 ENTRY_NAMES = {"__name__", "sys", "re", "app"}
 ENTRY_ATTRIBUTES = {"argv", "exit", "endswith", "removesuffix", "sub"}
 ENTRY_NODES = (ast.Module, ast.Import, ast.ImportFrom, ast.alias, ast.If, ast.Compare, ast.Eq, ast.Name, ast.Load,
@@ -51,7 +59,10 @@ ENTRY_NODES = (ast.Module, ast.Import, ast.ImportFrom, ast.alias, ast.If, ast.Co
 # The only files allowed to run code whenever Harbor's Python starts: uv's virtual environment hook.
 STARTUP_FILES = {"_virtualenv.pth": "69ac3d8f27e679c81b94ab30b3b56e9cd138219b1ba94a1fa3606d5a76a1433d",
                  "_virtualenv.py": "cfb3db86aaa53bb62b5ff764970bec2d71c9228590a0ebec57f6ec926cc0bf1a"}
-STARTUP_NAMES = ("sitecustomize.py", "usercustomize.py")
+STARTUP_MODULES = ("sitecustomize", "usercustomize")  # as a .py file, a package or an extension module
+_ARGV0_STORE = ast.dump(ast.parse("sys.argv[0] = x").body[0].targets[0])
+_ARGV0_LOAD = ast.dump(ast.parse("sys.argv[0]", mode="eval").body)
+_MAIN_TEST = ast.dump(ast.parse("__name__ == '__main__'", mode="eval").body)
 HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -78,6 +89,8 @@ def venv_of(harbor: Path) -> Path:
     words = first[2:].split() if first.startswith(b"#!") else []
     if not words:
         raise HarborSetupError(f"{harbor} is not a Python entry script")
+    if len(words) > 1:
+        raise HarborSetupError(f"{harbor} gives its interpreter more than a path on its #! line")
     venv = Path(words[0].decode("utf-8", "replace")).parent.parent
     if not (venv / "pyvenv.cfg").is_file():
         raise HarborSetupError(f"{harbor} does not run from a virtual environment")
@@ -133,16 +146,28 @@ def entry_script_problem(text: str) -> str | None:
         if isinstance(node, ast.ImportFrom) and (node.module != "harbor.cli.main" or node.level
                                                  or [(a.name, a.asname) for a in node.names] != [("app", None)]):
             return "it imports something other than harbor.cli.main's app"
+        if isinstance(node, ast.Assign) and [ast.dump(t) for t in node.targets] != [_ARGV0_STORE]:
+            return "it assigns to something other than sys.argv[0]"
+        if isinstance(node, ast.If) and not (ast.dump(node.test) == _MAIN_TEST or _is_suffix_test(node.test)):
+            return "it runs something under a condition of its own"
     calls = [ast.dump(n) for n in ast.walk(tree) if isinstance(n, ast.Call)]
     if ast.dump(ast.parse("sys.exit(app())").body[0].value) not in calls:
         return "it does not run harbor.cli.main's app"
     return None
 
 
+def _is_suffix_test(test: ast.expr) -> bool:
+    """`sys.argv[0].endswith("<text>")`, the condition installers write around tidying sys.argv[0]."""
+    return (isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and test.func.attr == "endswith"
+            and ast.dump(test.func.value) == _ARGV0_LOAD and not test.keywords and len(test.args) == 1
+            and isinstance(test.args[0], ast.Constant) and isinstance(test.args[0].value, str))
+
+
 def startup_problems(site: Path) -> list[str]:
     """Files in site-packages that would run code in Harbor's Python and are not the known ones."""
     site = Path(site)
-    names = {p.name for p in site.glob("*.pth")} | {n for n in (*STARTUP_NAMES, *STARTUP_FILES) if (site / n).exists()}
+    names = {p.name for p in site.glob("*.pth")} | {n for n in STARTUP_FILES if (site / n).exists()}
+    names |= {p.name for p in site.iterdir() if p.name.split(".")[0] in STARTUP_MODULES}
     problems = []
     for name in sorted(names):
         want = STARTUP_FILES.get(name)
@@ -157,7 +182,11 @@ def check(harbor: Path, version: str = PINNED_VERSION, original_sha256: str = OR
           patched_sha256: str = PATCHED_SHA256) -> Installed:
     """The install behind `harbor`, when it is the pinned release with the patch; an error otherwise."""
     harbor = Path(harbor).expanduser()
-    installed = inspect(venv_of(harbor))
+    venv = venv_of(harbor)
+    config = (venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    if re.search(r"(?mi)^\s*include-system-site-packages\s*=\s*true\s*$", config):
+        raise HarborSetupError(f"{venv} also loads the system's site-packages, which the check does not cover")
+    installed = inspect(venv)
     if installed.version != version:
         raise HarborSetupError(f"Harbor {installed.version} is installed in {installed.venv}; "
                                f"the pilot runs only with Harbor {version}")
