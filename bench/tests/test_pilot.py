@@ -1308,6 +1308,8 @@ def stop(*_):
     finish(130)
 signal.signal(signal.SIGINT, stop)
 open(os.path.join(out, "harbor-ready"), "w").write("1")
+if mode == "signal-parent":
+    os.kill(os.getppid(), signal.SIGTERM)  # the pilot gets a stop signal while Harbor runs
 if mode == "leave-child":
     import subprocess
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
@@ -1703,3 +1705,152 @@ def test_a_task_without_time_limits_gets_a_clear_message(tmp_path):
     assert "agent_timeout_sec" in str(err.value) and task.id in str(err.value)
     with pytest.raises(pilot.PilotError):
         pilot.open_run_seconds(task, 600.0)
+
+
+
+# --- every step of the stop and the cleanup is independent of the others ----------------------------------------------
+
+class CountingDocker(FakeDocker):
+    def __init__(self, broken=False):
+        super().__init__()
+        self.calls, self.broken = [], broken
+
+    def remove(self, prefix):
+        self.calls.append(prefix)
+        if self.broken:
+            raise RuntimeError("docker broke")
+        return super().remove(prefix)
+
+
+class BrokenLog:
+    """Harbor's log on a full disk: Harbor writes to its file, the pilot's own lines fail."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def fileno(self):
+        return self._f.fileno()
+
+    def write(self, data):
+        raise OSError(28, "No space left on device (log broke)")
+
+    def flush(self):
+        raise OSError(28, "No space left on device (log broke)")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._f.close()
+
+
+class BrokenStream:
+    def write(self, text):
+        raise OSError("messages broke")
+
+    def flush(self):
+        raise OSError("messages broke")
+
+
+def fail_first_call(real, err):
+    calls = []
+
+    def wrapper(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise err
+        return real(*args, **kwargs)
+    return wrapper
+
+
+STOP_STEPS = {"log": "log broke", "containers": "docker broke", "scan": "scan broke", "guard": "guard broke",
+              "record": "record broke", "messages": "could not be printed"}
+
+
+@pytest.mark.parametrize("path", ["signal", "time-limit"])
+@pytest.mark.parametrize("fault", sorted(STOP_STEPS))
+def test_a_failing_step_of_the_stop_never_skips_the_stop_or_another_step(tmp_path, monkeypatch, fault, path):
+    docker = CountingDocker(broken=fault == "containers")
+    if fault == "log":
+        real_open = open
+
+        def fake_open(file, mode="r", *args, **kwargs):
+            f = real_open(file, mode, *args, **kwargs)
+            return BrokenLog(f) if str(file).endswith("harbor.log") and "a" in mode else f
+        monkeypatch.setattr(pilot, "open", fake_open, raising=False)
+    if fault == "scan":
+        monkeypatch.setattr(pilot, "check_for_token", fail_first_call(pilot.check_for_token, RuntimeError("scan broke")))
+    if fault == "guard":
+        def broken_end(*args, **kwargs):
+            raise OSError("guard broke")
+        monkeypatch.setattr(pilot, "end_guard_run", broken_end)
+    if fault == "record":
+        monkeypatch.setattr(pilot, "_write_record", fail_first_call(pilot._write_record, OSError("record broke")))
+    if fault == "messages":
+        monkeypatch.setattr(sys, "stderr", BrokenStream())
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path),
+           "STAND_IN_MODE": "signal-parent" if path == "signal" else "polite"}
+    extra = {"timeout": 2.0} if path == "time-limit" else {}
+    runner = functools.partial(pilot.run_subprocess, grace=5.0, term_grace=1.0)
+    err = None
+    try:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env,
+                                                    docker=docker, **extra))
+    except BaseException as caught:  # the signal path ends in an interrupt
+        err = caught
+    harbor_pid = int((tmp_path / "harbor.pid").read_text())
+    harbor_gone = gone(harbor_pid, within=0.5)
+    if not harbor_gone:
+        os.kill(harbor_pid, signal.SIGKILL)
+    report = "" if err is None else str(err) + "\n" + "\n".join(getattr(err, "__notes__", []))
+    run_dir = tmp_path / "out" / "20261117T070000Z" / "python"
+
+    assert harbor_gone  # the stop came first, whatever failed after it
+    if fault != "log":
+        assert b"pilot: " in (run_dir / "harbor.log").read_bytes()
+    assert docker.calls  # the containers step ran
+    if fault != "record":
+        assert (run_dir / "record.json").exists()  # the record was written
+        record = json.loads((run_dir / "record.json").read_text())
+        if fault != "scan":
+            assert record["leak_scan"] is not None
+    [entry] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    if fault != "guard":
+        assert entry["ended_at"] is not None
+    summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert [r["language"] for r in summary["runs"]] == ["python"]
+    assert "scanned" in report  # the final scans ran
+    assert STOP_STEPS[fault] in report  # and the failure is in the report
+
+
+def test_a_group_already_confirmed_gone_is_not_stopped_again(tmp_path, monkeypatch):
+    stopped = []
+    real_confirm = pilot._confirm_gone
+
+    def confirm_then_get_a_signal(pgid):
+        real_confirm(pgid)
+        raise KeyboardInterrupt  # a stop signal right after the check
+
+    monkeypatch.setattr(pilot, "_confirm_gone", confirm_then_get_a_signal)
+    monkeypatch.setattr(pilot, "stop_process_group", lambda *args, **kwargs: stopped.append(args))
+    env = {**os.environ, "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    cmd = [str(make_harbor(tmp_path)), "run", "-o", str(tmp_path / "jobs"), "--job-name", "j"]
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_subprocess(cmd, env, tmp_path / "h.log", 30.0, grace=1.0, term_grace=1.0)
+    assert stopped == []
+
+
+def test_a_task_without_time_limits_is_refused_with_the_other_argument_checks(tmp_path, monkeypatch):
+    real_load = pilot.load_task
+
+    def load_without_limits(path):
+        task = real_load(path)
+        task.limits.pop("verifier_timeout_sec")
+        return task
+
+    monkeypatch.setattr(pilot, "load_task", load_without_limits)
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, timeout=600.0))
+    assert "verifier_timeout_sec" in str(err.value)
+    assert runner.calls == [] and not (tmp_path / "out").exists()  # refused before anything was made
