@@ -93,11 +93,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The check of claude_only.py is spread over two machines so that each ends well inside the limit.
+        # Each check is spread over machines so that every job ends well inside half of its limit.
         check:
-          - pilot_replan.py --check
-          - claude_only.py --check --part 1/2
-          - claude_only.py --check --part 2/2
+          - pilot_replan.py --check --part schedule
+          - pilot_replan.py --check --part forecast
+          - claude_only.py --check --part 1/3
+          - claude_only.py --check --part 2/3
+          - claude_only.py --check --part 3/3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -18,6 +18,7 @@ Usage: python3 pilot_replan.py              (rewrites pilot_replan.json; a few m
        python3 pilot_replan.py --no-forecast   (keeps the committed forecast part)
        python3 pilot_replan.py --no-schedule   (keeps the committed schedule part)
        python3 pilot_replan.py --check         (computes everything again and says whether the file is what it gives)
+       python3 pilot_replan.py --check --part schedule   (or --part forecast: one of the two parts of that check)
 
 The seeds are run side by side, one process each; every case starts from its seed afresh, so the result does
 not depend on how many run at once.
@@ -532,8 +533,20 @@ def to_text(result: dict) -> str:
 
 if __name__ == "__main__":
     if "--check" in sys.argv:
-        same = OUT.is_file() and OUT.read_text(encoding="utf-8") == to_text(build())
-        print(f"{OUT.name} is what the script gives" if same else f"{OUT.name} differs from what the script gives")
+        # The whole check, or one of its two parts so that it can be spread over machines: "schedule" is the
+        # usage, the capacity and the schedule; "forecast" is the forecast to 1.0. Together they are the file.
+        part = sys.argv[sys.argv.index("--part") + 1] if "--part" in sys.argv else "all"
+        text = OUT.read_text(encoding="utf-8") if OUT.is_file() else ""
+        if part == "all":
+            same = text == to_text(build())
+        elif part in ("schedule", "forecast") and text:
+            was = json.loads(text)
+            again = build(with_forecast=False) if part == "schedule" else dict(was, forecast=forecast())
+            same = to_text(again) == text
+        else:
+            same = False
+        print(f"{part}: {OUT.name} is what the script gives" if same else
+              f"{part}: {OUT.name} differs from what the script gives")
         sys.exit(0 if same else 1)
     OUT.write_text(to_text(build(with_forecast="--no-forecast" not in sys.argv,
                                  with_schedule="--no-schedule" not in sys.argv)), encoding="utf-8")

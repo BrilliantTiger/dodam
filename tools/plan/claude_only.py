@@ -13,7 +13,7 @@ differs between the columns; neither side has the pilot's numbers or the finishe
 
 Usage: python3 claude_only.py           (rewrites claude_only.json and prints the dates; a few minutes)
        python3 claude_only.py --check   (computes everything again and says whether the file is what it gives)
-       python3 claude_only.py --check --part 1/2   (one part of that check; all the parts together are the whole)
+       python3 claude_only.py --check --part 1/3   (one part of that check; all the parts together are the whole)
 
 The comparison's cases are run side by side, one process each; every one starts from its seed afresh.
 """
@@ -149,6 +149,7 @@ def check_part(part: int, parts: int, recorded: dict) -> bool:
     """One part of the full check, so that it can be spread over machines: every `parts`-th case of the
     comparison is run again and set against the recorded date. The first part also runs the single-seed dates
     again and works out again everything the file derives from the dates."""
+    subprocess.run([sys.executable, str(HERE / "build.py")], check=True, capture_output=True)  # writes wbs.json
     found = recorded["comparison"]
     jobs = _jobs(found["seeds"], found["sims"], found["more_sims"])
     kept = {key: found[key[0]][key[1]]["by_seed"] for key in jobs}
