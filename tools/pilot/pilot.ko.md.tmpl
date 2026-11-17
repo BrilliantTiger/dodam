@@ -1,0 +1,177 @@
+# 시범 측정 기록 — {{date_long}}
+
+도담은 AI가 정확하고 안전하게 짜도록 만드는 프로그래밍 언어이고, 아직 설계 단계다. 설계를 정하기 전에 "기존 언어로는 AI가 얼마나 잘 짜는가"를 먼저 잰다. 그 숫자가 도담이 넘어야 할 기준이 된다. 이 문서는 그 측정을 처음으로 끝까지 돌려 본 시범의 기록이다. 무엇을 어떻게 돌렸는지, 결과가 어땠는지, 한 번 돌리는 데 무엇이 들었는지, 그 숫자로 다음 측정과 {{row_month}} 일정을 어떻게 판단했는지를 적는다.
+
+이 문서의 숫자는 모두 저장소에 함께 있는 자료 파일 두 개에서 나온다. 하나는 실행 기록에서 잰 값만 옮긴 것이고, 다른 하나는 그 값에서 계산한 추정을 가정과 함께 적은 것이다. 문서의 숫자가 자료와 달라지면 자동 검사가 실패한다.
+
+## 한눈에
+
+- 회원가입 과제 하나를 기존 언어 {{n_runs}}개로 한 번씩, 모두 {{n_runs}}번 돌렸다. {{n_ok}}번 모두 끝까지 돌았다.
+- {{n_full}}개 언어는 두 단계 모두 만점({{full_reward}})이었다. C++는 기능 검사를 모두 통과했지만 보안 검사 하나에 걸려 두 단계 모두 {{no_reward}}점이었다.
+- 한 번 실행에서 AI가 일한 시간은 평균 {{agent_seconds_mean}}초, 처음부터 끝까지 걸린 시간은 평균 {{wall_seconds_mean}}초였다.
+- 한 번 실행이 구독 한도를 몇 % 쓰는지는 이번 시범으로 정하지 못했다. 주간 사용률은 {{weekly.later_runs}}번을 돌리는 동안 표시 단위({{weekly.display_step_points}}%포인트)만큼도 움직이지 않았고, {{five_hour.guard_window_hours}}시간 한도는 도구가 알려 주지 않았다. 알게 된 것은 위쪽 한계뿐이다.
+- 로그인 토큰은 명령줄에 한 번도 보이지 않았고(프로세스 목록을 {{safety.readings}}번 읽었다), 실행이 남긴 파일에서도 나오지 않았으며, 남은 컨테이너도 없었다.
+- 첫 기준 측정 {{plan.runs}}번은, 모든 실행이 이번에 잰 것과 같다면 이 기계에서 밤에만 돌려 {{x1.nights}}일 밤이 걸린다. 더 큰 모델과 다른 과제는 아직 재지 않았다.
+- 시범은 계획보다 일찍 끝났다. {{row_month}} 일정의 날짜는 바꾸지 않는다. 날짜를 당기거나 미룰 근거가 되는 숫자(큰 모델이 일하는 시간)를 아직 재지 않았기 때문이다.
+
+## 무엇을 어떻게 돌렸나
+
+- **날짜**: {{date_long}}(세계 표준시).
+- **AI**: Anthropic의 공식 명령줄 도구 Claude Code {{cli_version}}. 고치지 않고 그 판으로 고정했고, 실행 기록에도 같은 판이 찍혔다. 모델은 따로 고르지 않아서 도구의 기본값인 {{model}} 모델이 쓰였다. 구독 로그인으로 돌렸다.
+- **과제**: 회원가입과 로그인 서비스({{task}}). 사람들이 가입하고, 로그인하고, 자기 계정을 읽는 HTTP API를 만든다. 단계는 {{n_steps}}개다. 첫 단계에서 처음부터 만들고, 둘째 단계에서 바뀐 요구사항(로그아웃과 이름 고치기)을 더한다.
+- **언어**: Python · TypeScript · Java · C# · Go · Rust · C++. 언어마다 한 번.
+- **격리**: AI는 이 기계 위가 아니라 언어별 컨테이너 안에서 코드를 짰다. 채점은 AI가 볼 수 없는 숨긴 테스트로, 네트워크도 로그인 정보도 없는 다른 컨테이너에서 했다.
+- **흉내 낸 것은 없다**: 실제 구독 계정으로 실제 모델이 코드를 짰고, 실제 채점기가 채점했다.
+- **순서**: {{n_batches}}묶음으로 나누어 돌렸다. Python을 먼저 돌리고, 약 {{weekly.hours_between_first_and_later_runs}}시간 뒤에 TypeScript를, 곧이어 나머지 언어를 돌렸다. 그 사이에 측정기를 고쳤다.
+- **측정기가 스스로 멈추는 조건**: 주간 사용률이 {{weekly.runner_stops_at_percent}}%에 닿거나, 측정기가 돌린 AI의 일한 시간이 {{five_hour.guard_window_hours}}시간 동안 {{five_hour.guard_limit_minutes}}분에 닿으면 새 실행을 시작하지 않는다. 한 번 실행의 시간 제한은 {{time_limit_hours}}시간이다. 이번에는 어느 조건에도 걸리지 않았다.
+
+## 결과
+
+점수는 단계마다 매긴다. 숨긴 테스트(기능 · 경계값 · 보안)를 모두 통과하면 {{full_reward}}이고, 이번 C++처럼 보안 검사 하나에 걸리면 {{no_reward}}이다.
+
+| 언어 | 점수(첫 단계 / 둘째 단계) | 전체 시간(초) | AI가 일한 시간(초, 첫 단계 / 둘째 단계 / 합) | 채점 시간(초, 첫 단계 / 둘째 단계) | 대화 턴 |
+|---|---|---|---|---|---|
+@runs | {{name}} | {{r1}} / {{r2}} | {{wall}} | {{a1}} / {{a2}} / {{asum}} | {{j1}} / {{j2}} | {{turns}} |
+
+AI가 쓴 토큰:
+
+| 언어 | 입력 | 캐시 읽기 | 캐시 쓰기 | 출력 |
+|---|---|---|---|---|
+@runs | {{name}} | {{tin}} | {{tcr}} | {{tcw}} | {{tout}} |
+
+한도와 안전:
+
+| 언어 | 주간 사용률 %(시작 전 저장값 / 첫 읽기 / 끝) | 측정기 지킴이가 센 분(시작 전 / 끝) | 프로세스 목록 읽기(그 가운데 AI가 일하는 동안) | 토큰이 보인 읽기 | 누출 검사에서 찾은 곳 / 읽지 못한 파일 | 남은 컨테이너 |
+|---|---|---|---|---|---|---|
+@runs | {{name}} | {{wb}} / {{wf}} / {{wa}} | {{gb}} / {{ga}} | {{readings}} ({{areadings}}) | {{treadings}} | {{leak_hits}} / {{leak_unread}} | {{containers}} |
+
+### C++ 결과
+
+C++ 프로그램은 빌드됐고, 기능 검사와 경계값 검사를 두 단계 모두 다 통과했다. 첫 단계는 기능 {{cpp_f1}}개 가운데 {{cpp_f1_pass}}개와 경계값 {{cpp_b1}}개 가운데 {{cpp_b1_pass}}개, 둘째 단계는 기능 {{cpp_f2}}개 가운데 {{cpp_f2_pass}}개와 경계값 {{cpp_b2}}개 가운데 {{cpp_b2_pass}}개다.
+
+걸린 것은 보안 검사 하나다. AI가 짠 프로그램이 자기 폴더의 파일을 그대로 내주었다. 채점기가 `{{cpp_request}}`를 요청하자, 이 프로그램을 어떻게 빌드하는지 적은 빌드 파일이 그대로 돌아왔다. 이렇게 짠 서버는 소스 코드나 설정 파일도 같은 길로 내줄 수 있어서 취약점으로 센다. 보안 검사는 첫 단계 {{cpp_s1}}개 가운데 {{cpp_s1_pass}}개, 둘째 단계 {{cpp_s2}}개 가운데 {{cpp_s2_pass}}개를 통과했다. 단계마다 취약점 {{cpp_vulns1}}개로 세었고, 둘째 단계에서는 같은 검사가 여전히 실패해 "고친 뒤에도 깨져 있는 앞 단계 검사" {{cpp_broken2}}개로도 세었다.
+
+이것은 채점기의 잘못이 아니라 AI가 낸 결과다. 시작할 때 C++ 폴더에 있던 것은 그 빌드 파일 하나뿐이었으므로, 파일을 내주는 동작은 AI가 짠 코드에서 나왔다. 나머지 {{n_full}}개 언어에서 실패한 검사는 {{other_failed_checks}}개다.
+
+한 번씩만 돌렸으므로 "C++로 짜면 덜 안전하다"는 결론은 낼 수 없다. 다만 기능 검사만으로는 보이지 않는 문제를 보안 검사가 잡는다는 것은 확인했다.
+
+## 한 번 실행이 쓴 것
+
+### 잰 것: 시간과 토큰
+
+- **AI가 일한 시간**: 한 번에 평균 {{agent_seconds_mean}}초(가장 짧게 {{agent_seconds_min}}초, 가장 길게 {{agent_seconds_max}}초). {{n_runs}}번을 더하면 {{agent_minutes_total}}분이다.
+- **전체 시간**(컨테이너 준비, AI 작업, 빌드, 채점을 모두 더한 시간): 한 번에 평균 {{wall_seconds_mean}}초({{wall_seconds_min}}초에서 {{wall_seconds_max}}초 사이). {{n_runs}}번을 더하면 {{wall_minutes_total}}분이다.
+- **채점 시간**: 한 번에 평균 {{judge_seconds_mean}}초(두 단계를 더한 값).
+- **토큰**({{n_runs}}번을 더한 값): 입력 {{tokens_input}}, 캐시 읽기 {{tokens_cache_read}}, 캐시 쓰기 {{tokens_cache_creation}}, 출력 {{tokens_output}}. 대화 턴은 모두 {{turns_total}}번이다.
+- **도구가 적은 환산 금액**: {{n_runs}}번을 더해 {{cost_total}}달러. 도구가 스스로 계산해 적는 값이고, 구독으로 돌렸으므로 청구된 돈이 아니다. 한도 알림 가운데 추가 과금을 쓰고 있다고 한 것은 {{safety.limit_events_using_extra_usage}}건이다.
+
+### 주간 한도: 위쪽 한계만 안다
+
+도구는 실행하는 동안 주간 사용률을 정수 %로 알려 준다.
+
+- TypeScript부터 C++까지 {{weekly.later_runs}}번을 돌리는 동안 첫 읽기가 {{weekly.later_first_reading}}%였고 마지막 읽기도 {{weekly.later_last_reading}}%였다. 움직인 폭은 {{weekly.moved_during_later_runs_points}}%포인트다.
+- {{n_runs}}번 가운데 첫 읽기와 끝 읽기가 다른 실행은 {{weekly.runs_whose_readings_moved_between_first_and_after}}번이다.
+- 그 앞에 {{weekly.later_stored_before}}%에서 {{weekly.later_first_reading}}%로 {{weekly.rise_between_the_batches_points}}%포인트 오른 것은 실행이 쓴 양이 아니다. {{weekly.later_stored_before}}%는 Python 실행이 끝날 때 저장된 값이고, {{weekly.later_first_reading}}%는 약 {{weekly.hours_between_first_and_later_runs}}시간 뒤 TypeScript 실행의 첫 읽기다. 그 사이에 측정 실행은 없었고, 같은 계정으로 개발 작업을 했다. Python 실행의 {{weekly.first_batch_before}}%와 {{weekly.first_batch_first}}%도 같다. 앞의 값은 그 전에 저장돼 있던 값이다.
+
+**이것이 말해 주는 것.** 표시가 정수 %이므로 {{weekly.later_runs}}번이 쓴 양은 {{weekly.display_step_points}}%포인트보다 작다. 한 번으로 나누면 평균 {{weekly.one_run_below_points}}%포인트보다 작다({{weekly.display_step_points}} ÷ {{weekly.later_runs}}).
+
+**말해 주지 못하는 것.** 아래쪽 한계가 없다. 한 번이 그 위쪽 한계에 가깝게 쓰는지, 그 백분의 일만 쓰는지 가릴 수 없다. 위쪽 한계에 {{plan.runs}}번을 곱하면 {{weekly.baseline_below_points}}%포인트라서, 기준 측정 전체가 한 주 한도 안에 드는지조차 이 숫자로는 알 수 없다. 측정기는 주간 {{weekly.runner_stops_at_percent}}%에서 멈추는데 끝날 때 {{weekly.later_last_reading}}%였으니 남은 여유는 {{weekly.room_to_the_stop_points}}%포인트다. 가장 나쁜 경우(한 번에 {{weekly.one_run_below_points}}%포인트)라면 그 여유는 {{weekly.runs_in_that_room_at_the_bound}}번이면 찬다({{weekly.room_to_the_stop_points}} ÷ {{weekly.one_run_below_points}}). 실제로는 그보다 훨씬 많이 돌릴 수 있을지도 모른다.
+
+**무엇을 더 재면 정해지나.** 그 계정을 다른 작업이 쓰지 않는 시간에 같은 실행을 {{next.same_model_runs}}번 이어서 돌리고, 처음과 끝의 주간 사용률을 읽는다. 그러면 한 번에 {{next.weekly_points_per_run_it_can_tell}}%포인트 단위까지 가려진다({{weekly.display_step_points}} ÷ {{next.same_model_runs}}).
+
+### {{five_hour.guard_window_hours}}시간 한도: 도구가 알려 주지 않는다
+
+{{n_runs}}번 가운데 {{five_hour.guard_window_hours}}시간 한도의 사용률을 알려 준 실행은 {{five_hour.runs_that_reported_it}}번이다. 그래서 이 한도는 측정기의 지킴이로만 지켰다. 지킴이는 측정기가 돌린 AI의 일한 시간을 더해, {{five_hour.guard_window_hours}}시간 동안 {{five_hour.guard_limit_minutes}}분에 닿으면 새 실행을 시작하지 않는다. TypeScript부터 C++까지 {{weekly.later_runs}}번을 돌린 뒤 지킴이가 센 것은 {{five_hour.guard_minutes_after_later_runs}}분이다. Python 실행 뒤에는 {{five_hour.guard_minutes_after_first_batch}}분이었는데, 그 뒤 측정기를 고치면서 지킴이가 기록을 두는 자리가 바뀌어 TypeScript 실행은 {{five_hour.guard_minutes_before_later_runs}}분에서 시작했다.
+
+**이것이 말해 주는 것.** 측정기가 스스로 정한 {{five_hour.guard_limit_minutes}}분 가운데 {{five_hour.guard_minutes_after_later_runs}}분을 썼다는 것뿐이다.
+
+**말해 주지 못하는 것.** 계정의 실제 {{five_hour.guard_window_hours}}시간 한도를 얼마나 썼는지는 알 수 없다. 지킴이의 {{five_hour.guard_limit_minutes}}분은 잰 값이 아니라 조심하려고 정한 값이다. 같은 계정으로 하는 다른 작업은 지킴이가 세지 않는다.
+
+**무엇을 더 재면 정해지나.** 도구가 이 값을 알려 주지 않는 한 실행 기록만으로는 알 수 없다. 가장 싼 방법은 여러 번을 이어 돌리기 전과 뒤에 계정의 사용량 화면에서 이 값을 읽어 적는 것이다. 그 화면은 계정 주인만 볼 수 있다.
+
+## 안전
+
+- **토큰이 명령줄에 보였는가**: 실행하는 동안 {{safety.reading_interval_seconds}}초마다 이 기계의 프로세스 목록을 읽었다. 모두 {{safety.readings}}번 읽었고, 토큰이 보인 읽기는 {{safety.readings_with_the_token}}번이다. {{safety.readings}}번 가운데 {{safety.readings_later_runs}}번은 측정기를 고친 뒤 돌린 {{weekly.later_runs}}번의 것이고, {{safety.readings_while_the_agent_worked}}번은 AI가 일하는 동안의 것이다.
+- **결과물에 토큰이 남았는가**: 실행이 남긴 파일 전부에서 토큰을 찾았다. {{n_runs}}번 가운데 {{safety.clean_leak_scans}}번이 깨끗했다. 찾은 곳은 {{safety.leak_hits}}곳, 읽지 못해 확인하지 못한 파일은 {{safety.files_the_scan_could_not_read}}개다.
+- **남은 것**: 남은 컨테이너 {{safety.containers_left}}개. 감시가 실행을 중간에 멈춘 일 {{safety.runs_where_harbor_was_stopped}}번. 채점 환경에서 발견된 문제 {{safety.judge_environment_problems}}건, AI 도구의 오류 {{safety.agent_errors}}건.
+- **이 확인의 한계**: 프로세스 목록 감시는 명령줄만 본다. 실행 중인 프로세스의 환경 변수는 들여다보지 않았다. {{safety.reading_interval_seconds}}초 간격이라 그보다 짧게 떴다 사라진 프로세스는 놓칠 수 있다.
+
+## 이 시범의 한계
+
+- **언어마다 한 번.** 같은 실행을 되풀이했을 때 점수와 시간이 얼마나 흩어지는지 모른다.
+- **과제 하나.** 다른 과제는 더 오래 걸리거나 덜 걸릴 수 있다.
+- **모델 하나, 그것도 고르지 않은 기본값.** 판을 고정한 것은 도구이고, 모델({{model}})은 도구가 골랐다. 더 큰 모델은 재지 않았다.
+- **한 회사의 모델.** 한 회사 모델로 잰 숫자만으로는 언어의 핵심 설계를 정하지 않는다.
+- **한도.** 주간 한도는 위쪽 한계만 알고, {{five_hour.guard_window_hours}}시간 한도는 모른다.
+- **흉내 낸 것은 없다.** 숫자는 실제 실행에서 나왔다. 약점은 표본이 작다는 것이다.
+
+## 첫 기준 측정에 걸리는 시간
+
+헌장은 첫 기준 측정을 {{plan.runs}}번으로 잡았다. AI 모델 {{plan.models}}개가 과제 {{plan.tasks}}개를 기존 언어 {{plan.languages}}개로 {{plan.repeats}}번씩 짠다({{plan.models}} × {{plan.tasks}} × {{plan.languages}} × {{plan.repeats}} = {{plan.runs}}). 이 측정에서 나온 표가 도담이 넘어야 할 숫자가 된다.
+
+가정:
+
+- 이 기계 한 대에서 한 번에 하나씩 돌린다.
+- 밤에만 돌린다. 하룻밤은 {{plan.night_hours}}시간이고 매일 밤 돌린다.
+- 측정기의 지킴이는 지금 그대로다({{plan.guard_window_hours}}시간 동안 {{plan.guard_limit_minutes}}분). 센 시간이 한도 아래일 때만 새 실행을 시작한다.
+- 한 번 실행의 AI 시간과 전체 시간은 이번에 잰 평균({{agent_seconds_mean}}초와 {{wall_seconds_mean}}초)을 쓴다. AI 시간이 몇 배가 되는 경우에는 늘어난 만큼만 전체 시간에 더한다. 채점과 컨테이너 준비에 드는 시간은 그대로라고 본다.
+- 구독의 주간 한도와 실제 {{plan.guard_window_hours}}시간 한도에는 걸리지 않는다고 놓는다. 위에 적었듯이 이것은 아직 확인하지 못했다.
+
+잰 그대로 계산하면:
+
+- 한 번에 {{x1.agent_minutes_per_run}}분이므로 지킴이는 {{plan.guard_window_hours}}시간 창 하나에서 {{x1.starts_per_window}}번을 시작시킨다. 마지막 실행은 그때까지 센 시간이 {{plan.guard_limit_minutes}}분 바로 아래라서 시작된다. 이 {{x1.starts_per_window}}번은 {{x1.minutes_for_those_starts}}분이면 끝난다.
+- 처음 실행들이 {{plan.guard_window_hours}}시간 창을 벗어나면 같은 수만큼 다시 돌릴 수 있고, 이 둘째 묶음도 {{plan.night_hours}}시간 안에 끝난다. 그래서 하룻밤에 {{x1.runs_per_night}}번이다.
+- {{plan.runs}}번을 하룻밤 {{x1.runs_per_night}}번으로 나누어 올림하면 {{x1.nights}}일 밤이다.
+- AI가 일하는 시간은 모두 {{x1.agent_hours_total}}시간이다. 일정 시뮬레이션의 단위인 AI 작업일(AI 한 대가 {{plan.agent_hours_per_working_day}}시간 일하는 양)로는 {{x1.working_days}}작업일이다. 계획은 한 번에 {{plan.plan_hours_per_run}}시간으로 보고 {{plan_working_days}}작업일을 잡아 두었다.
+
+| 한 번 실행의 AI 시간 | 분 | 창 하나에서 시작하는 수 | 하룻밤 | 걸리는 밤 | AI 시간 합(시간) |
+|---|---|---|---|---|---|
+| 잰 그대로 | {{x1.agent_minutes_per_run}} | {{x1.starts_per_window}} | {{x1.runs_per_night}} | {{x1.nights}} | {{x1.agent_hours_total}} |
+| 잰 값의 {{x2.factor}}배라면(가정) | {{x2.agent_minutes_per_run}} | {{x2.starts_per_window}} | {{x2.runs_per_night}} | {{x2.nights}} | {{x2.agent_hours_total}} |
+| 잰 값의 {{x4.factor}}배라면(가정) | {{x4.agent_minutes_per_run}} | {{x4.starts_per_window}} | {{x4.runs_per_night}} | {{x4.nights}} | {{x4.agent_hours_total}} |
+
+헌장이 이 측정에 잡은 기간은 {{row_start_long}}부터 {{row_end_long}}까지 {{row_nights}}일 밤이다. 그 안에 끝내려면 하룻밤에 {{row_runs_per_night}}번을 돌려야 하고, 그러려면 한 번 실행의 AI 시간이 평균 {{largest_minutes}}분(잰 값의 {{largest_factor}}배)을 넘지 않아야 한다.
+
+**재지 않은 것.** 모델 {{plan.models}}개 가운데 잰 것은 하나이고, 과제 {{plan.tasks}}개 가운데 잰 것도 하나다. 더 큰 모델이 얼마나 더 오래 일하는지는 재 봐야 안다. 표의 {{x2.factor}}배와 {{x4.factor}}배는 측정이 아니라 가정이다.
+
+**싸게 할 수 있는 다음 측정.** 하룻밤이면 된다. 같은 과제를 같은 모델로 {{next.same_model_runs}}번({{plan.languages}}개 언어를 {{plan.repeats}}번씩) 돌린다. AI 시간은 약 {{next.agent_minutes}}분으로 지킴이의 창 하나({{plan.guard_limit_minutes}}분)에 들어가고, 약 {{next.wall_minutes}}분이면 끝난다. 여기서 같은 실행을 되풀이했을 때의 흩어짐과, 주간 사용률이 한 번에 몇 %포인트 움직이는지가 나온다. 같은 밤에 지킴이의 창이 다시 열리면 가장 큰 모델로 {{next.larger_model_runs}}번(언어마다 한 번)을 돌려, AI 시간이 잰 값의 몇 배인지 잰다.
+
+이 문서를 쓰면서 새로 돌린 실행은 없다.
+
+## {{row_month}} 일정을 다시 판단하다
+
+시범이 바꾼 입력은 다음과 같다.
+
+- **시범이 끝났다.** 헌장은 시범을 {{pilot_row_start_short}}부터 {{pilot_row_end_short}}까지로 잡았는데 {{date_short}}에 끝났다. 시작하기로 한 날보다 {{pilot_days_early}}일 이르다. 시범이 돌았다는 것은 그 앞의 일(과제 형식, 견본 과제, 측정기 뼈대)도 끝났다는 뜻이다.
+- **기준 측정이 쓰는 AI 시간.** 계획은 {{plan_working_days}}작업일이었다. 잰 값으로는 {{x1.working_days}}작업일이고, AI 시간이 {{x2.factor}}배라면 {{x2.working_days}}작업일, {{x4.factor}}배라면 {{x4.working_days}}작업일이다.
+- **기준 측정의 가장 짧은 길이.** 지킴이와 밤 시간 때문에 {{x1.nights}}일 밤보다 짧아질 수 없다. AI 시간이 {{x2.factor}}배라면 {{x2.nights}}일 밤, {{x4.factor}}배라면 {{x4.nights}}일 밤이다.
+
+바뀌지 않은 입력이 하나 있다. 구독이 한 주에 내는 AI 작업일이다. 시범은 이것을 재려 했지만 주간 사용률이 움직이지 않아 재지 못했다. 그래서 용량은 전과 같은 가정들로 돌렸다.
+
+일정 시뮬레이션은 작업 분해의 일들을 앞선 일 순서대로 한 주씩 굴린다. 같은 주에 도는 일들이 구독 용량을 나눠 쓰고, 일 길이가 늘어나고, 위험이 터진다. 경우마다 {{sims}}번 돌렸다. "가운데"는 돌린 것의 절반이 그 날까지 끝났다는 뜻이고, "{{pct80}}%"는 돌린 것의 {{pct80}}%가 그 날까지 끝났다는 뜻이다. 시뮬레이션은 과제 {{plan.tasks}}개 만들기와 측정기 완성이 지금 얼마나 진행됐는지 모른다. 그래서 둘 다 시범 다음 날부터 일을 전부 새로 하는 것으로 센다.
+
+계획의 기준 용량(AI 회사마다 계정 하나, 주 약 {{planning.days_a_week}}작업일)일 때:
+
+| 경우 | 과제 {{plan.tasks}}개(가운데) | 측정기 완성(가운데) | 기준 측정 끝(가운데) | 기준 측정 끝({{pct80}}%) | {{row_end_long}}까지 끝날 확률 | 방향 고정 관문(가운데) | 방향 고정 관문({{pct80}}%) | {{gate_long}}까지 관문에 닿을 확률 |
+|---|---|---|---|---|---|---|---|---|
+| 시범 전의 입력 | {{planning.before.b_tasks10.p50}} | {{planning.before.b_runner.p50}} | {{planning.before.b_baseline.p50}} | {{planning.before.b_baseline.p80}} | {{planning.before.p_baseline_by_row_end}}% | {{planning.before.g_dir.p50}} | {{planning.before.g_dir.p80}} | {{planning.before.p_gate_by_its_date}}% |
+| 시범 뒤, 잰 그대로 | {{planning.after_x1.b_tasks10.p50}} | {{planning.after_x1.b_runner.p50}} | {{planning.after_x1.b_baseline.p50}} | {{planning.after_x1.b_baseline.p80}} | {{planning.after_x1.p_baseline_by_row_end}}% | {{planning.after_x1.g_dir.p50}} | {{planning.after_x1.g_dir.p80}} | {{planning.after_x1.p_gate_by_its_date}}% |
+| 시범 뒤, AI 시간 {{x2.factor}}배(가정) | {{planning.after_x2.b_tasks10.p50}} | {{planning.after_x2.b_runner.p50}} | {{planning.after_x2.b_baseline.p50}} | {{planning.after_x2.b_baseline.p80}} | {{planning.after_x2.p_baseline_by_row_end}}% | {{planning.after_x2.g_dir.p50}} | {{planning.after_x2.g_dir.p80}} | {{planning.after_x2.p_gate_by_its_date}}% |
+| 시범 뒤, AI 시간 {{x4.factor}}배(가정) | {{planning.after_x4.b_tasks10.p50}} | {{planning.after_x4.b_runner.p50}} | {{planning.after_x4.b_baseline.p50}} | {{planning.after_x4.b_baseline.p80}} | {{planning.after_x4.p_baseline_by_row_end}}% | {{planning.after_x4.g_dir.p50}} | {{planning.after_x4.g_dir.p80}} | {{planning.after_x4.p_gate_by_its_date}}% |
+
+지금처럼 Claude 계정 하나로만 일할 때(주 약 {{claude_only.days_a_week}}작업일로 가정):
+
+| 경우 | 과제 {{plan.tasks}}개(가운데) | 측정기 완성(가운데) | 기준 측정 끝(가운데) | 기준 측정 끝({{pct80}}%) | {{row_end_long}}까지 끝날 확률 | 방향 고정 관문(가운데) | 방향 고정 관문({{pct80}}%) | {{gate_long}}까지 관문에 닿을 확률 |
+|---|---|---|---|---|---|---|---|---|
+| 시범 전의 입력 | {{claude_only.before.b_tasks10.p50}} | {{claude_only.before.b_runner.p50}} | {{claude_only.before.b_baseline.p50}} | {{claude_only.before.b_baseline.p80}} | {{claude_only.before.p_baseline_by_row_end}}% | {{claude_only.before.g_dir.p50}} | {{claude_only.before.g_dir.p80}} | {{claude_only.before.p_gate_by_its_date}}% |
+| 시범 뒤, 잰 그대로 | {{claude_only.after_x1.b_tasks10.p50}} | {{claude_only.after_x1.b_runner.p50}} | {{claude_only.after_x1.b_baseline.p50}} | {{claude_only.after_x1.b_baseline.p80}} | {{claude_only.after_x1.p_baseline_by_row_end}}% | {{claude_only.after_x1.g_dir.p50}} | {{claude_only.after_x1.g_dir.p80}} | {{claude_only.after_x1.p_gate_by_its_date}}% |
+| 시범 뒤, AI 시간 {{x2.factor}}배(가정) | {{claude_only.after_x2.b_tasks10.p50}} | {{claude_only.after_x2.b_runner.p50}} | {{claude_only.after_x2.b_baseline.p50}} | {{claude_only.after_x2.b_baseline.p80}} | {{claude_only.after_x2.p_baseline_by_row_end}}% | {{claude_only.after_x2.g_dir.p50}} | {{claude_only.after_x2.g_dir.p80}} | {{claude_only.after_x2.p_gate_by_its_date}}% |
+| 시범 뒤, AI 시간 {{x4.factor}}배(가정) | {{claude_only.after_x4.b_tasks10.p50}} | {{claude_only.after_x4.b_runner.p50}} | {{claude_only.after_x4.b_baseline.p50}} | {{claude_only.after_x4.b_baseline.p80}} | {{claude_only.after_x4.p_baseline_by_row_end}}% | {{claude_only.after_x4.g_dir.p50}} | {{claude_only.after_x4.g_dir.p80}} | {{claude_only.after_x4.p_gate_by_its_date}}% |
+
+### 판단
+
+- **시범**: {{date_long}}에 끝났다. 끝났다는 표시였던 "한 번 실행이 구독 한도를 몇 % 쓰는지 안다"는 반만 채웠다. 시간과 토큰은 쟀고, 한도는 위쪽 한계만 안다. 남은 반은 위에 적은 하룻밤 측정으로 채운다.
+- **기준 측정({{row_start_long}} ~ {{row_end_long}})**: 날짜를 그대로 둔다. 계획의 기준 용량에서 {{row_end_long}}까지 끝날 확률은 시범 전의 입력으로 {{planning.before.p_baseline_by_row_end}}%였다. 시범 뒤에는 모든 실행이 잰 것과 같다면 {{planning.after_x1.p_baseline_by_row_end}}%, AI 시간이 {{x2.factor}}배라면 {{planning.after_x2.p_baseline_by_row_end}}%, {{x4.factor}}배라면 {{planning.after_x4.p_baseline_by_row_end}}%다. 가운데 날짜는 차례로 {{planning.after_x1.b_baseline.p50}}, {{planning.after_x2.b_baseline.p50}}, {{planning.after_x4.b_baseline.p50}}이다. 지금 줄의 끝은 "잰 그대로"와 "{{x2.factor}}배" 사이에 있다. 어느 쪽인지는 큰 모델을 재야 알 수 있으므로, 지금은 날짜를 당길 근거도 미룰 근거도 없다. 시작하는 날은 과제 {{plan.tasks}}개와 측정기 완성에 달려 있고, 시범은 그 일의 양을 바꾸지 않았다.
+- **방향 고정 관문({{gate_long}})**: 날짜를 그대로 둔다. 그날까지 닿을 확률은 시범 전의 입력으로 {{planning.before.p_gate_by_its_date}}%였고, 시범 뒤에는 차례로 {{planning.after_x1.p_gate_by_its_date}}%, {{planning.after_x2.p_gate_by_its_date}}%, {{planning.after_x4.p_gate_by_its_date}}%다.
+- **일찍 끝나 생긴 시간**: 시범이 끝나기로 한 날까지 {{pilot_days_before_end}}일이 남았다. 이 시간은 기준 측정의 시작을 정하는 두 일(과제 {{plan.tasks}}개와 측정기 완성)과, 위에 적은 하룻밤 측정에 쓴다. 하룻밤 측정의 숫자가 나오면 표의 어느 줄이 맞는지 정해지고, 그때 날짜를 다시 판단한다.
+- **Claude 계정 하나일 때의 표에 대하여**: 이 가정에서는 기준 측정이 {{row_end_long}}까지 끝날 확률이 시범 전 {{claude_only.before.p_baseline_by_row_end}}%, 시범 뒤 잰 그대로일 때 {{claude_only.after_x1.p_baseline_by_row_end}}%이고, 가운데 날짜는 {{claude_only.before.b_baseline.p50}}에서 {{claude_only.after_x1.b_baseline.p50}}까지 당겨진다. 계획의 기준 용량과의 차이는 시범이 만든 것이 아니라 용량 가정에서 온다. 한편 시범 자체는 Claude 계정 하나로 계획보다 {{pilot_days_early}}일 일찍 끝났다. 주 약 {{claude_only.days_a_week}}작업일이라는 가정이 맞는지는 이번 시범으로 확인하지 못했으므로, 이 표를 날짜를 바꾸는 근거로 쓰지 않고 그 가정이 맞을 때 일정이 얼마나 밀리는지를 보이는 숫자로 적어 둔다.

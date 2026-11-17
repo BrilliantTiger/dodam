@@ -1,0 +1,177 @@
+# Pilot measurement record — {{date_long}}
+
+Dodam is a programming language built so that AI writes it correctly and safely, and it is still in its design phase. Before the design is fixed, we first measure how well AI writes in existing languages. Those numbers become the bar Dodam must beat. This document records the pilot: the first time that measurement was run from start to end. It says what was run and how, what came out, what one run used, and how those numbers were used to judge the next measurement and the {{row_month}} schedule.
+
+Every number in this document comes from two data files kept in the repository with it. One holds only the measured values copied from the run records; the other holds the estimates computed from them, with their assumptions. If a number in the document differs from the data, an automatic check fails.
+
+## At a glance
+
+- One sign-up task was run once in each of {{n_runs}} existing languages, {{n_runs}} runs in all. All {{n_ok}} ran to the end.
+- {{n_full}} languages got the full score ({{full_reward}}) on both steps. C++ passed every functional check but failed one security check, so it scored {{no_reward}} on both steps.
+- In one run the AI worked for {{agent_seconds_mean}} seconds on average, and the run took {{wall_seconds_mean}} seconds from start to end on average.
+- This pilot could not settle what percent of the subscription limits one run uses. The weekly utilization did not move by its display step ({{weekly.display_step_points}} percentage point) over {{weekly.later_runs}} runs, and the tool did not report the {{five_hour.guard_window_hours}}-hour limit. Only an upper bound is known.
+- The login token was never seen on a command line (the process table was read {{safety.readings}} times), it was not found in any file the runs left, and no container was left.
+- The first baseline measurement of {{plan.runs}} runs takes {{x1.nights}} nights on this machine, running at night only, if every run is like the ones measured here. Larger models and other tasks have not been measured.
+- The pilot finished earlier than planned. The dates of the {{row_month}} schedule are not changed, because the number that would justify moving them earlier or later (how long a larger model works) has not been measured yet.
+
+## What was run and how
+
+- **Date**: {{date_long}} (UTC).
+- **AI**: Claude Code {{cli_version}}, Anthropic's official command-line tool. It was pinned to that version unmodified, and the run records show the same version. No model was chosen, so the tool's default, {{model}}, was used. It ran on a subscription login.
+- **Task**: a sign-up and login service ({{task}}). An HTTP API where people sign up, log in and read their own account. It has {{n_steps}} steps: the first builds it from nothing, the second adds a changed requirement (logging out and editing the name).
+- **Languages**: Python, TypeScript, Java, C#, Go, Rust and C++, once each.
+- **Isolation**: the AI wrote its code inside a container for each language, not on this machine. The result was judged with hidden tests the AI cannot see, in another container with no network and no credentials.
+- **Nothing was emulated**: a real model wrote the code on a real subscription account, and the real judge judged it.
+- **Order**: the runs came in {{n_batches}} batches. Python ran first, TypeScript about {{weekly.hours_between_first_and_later_runs}} hours later, and the other languages right after it. The runner was changed in between.
+- **When the runner stops by itself**: it starts no new run once the weekly utilization reaches {{weekly.runner_stops_at_percent}}%, or once the agents it ran have worked {{five_hour.guard_limit_minutes}} minutes within {{five_hour.guard_window_hours}} hours. One run may take at most {{time_limit_hours}} hours. Nothing was stopped this time.
+
+## Results
+
+Each step gets a score. It is {{full_reward}} when every hidden test (functional, boundary and security) passes, and {{no_reward}} when, as for C++ here, one security check fails.
+
+| Language | Score (first step / second step) | Whole run (seconds) | AI working time (seconds, first step / second step / both) | Judging time (seconds, first step / second step) | Turns |
+|---|---|---|---|---|---|
+@runs | {{name}} | {{r1}} / {{r2}} | {{wall}} | {{a1}} / {{a2}} / {{asum}} | {{j1}} / {{j2}} | {{turns}} |
+
+Tokens the AI used:
+
+| Language | Input | Cache read | Cache write | Output |
+|---|---|---|---|---|
+@runs | {{name}} | {{tin}} | {{tcr}} | {{tcw}} | {{tout}} |
+
+Limits and safety:
+
+| Language | Weekly utilization % (stored before the start / first reading / end) | Minutes counted by the runner's guard (before the start / end) | Readings of the process table (of which while the AI worked) | Readings that showed the token | Leak scan: places found / files it could not read | Containers left |
+|---|---|---|---|---|---|---|
+@runs | {{name}} | {{wb}} / {{wf}} / {{wa}} | {{gb}} / {{ga}} | {{readings}} ({{areadings}}) | {{treadings}} | {{leak_hits}} / {{leak_unread}} | {{containers}} |
+
+### The C++ result
+
+The C++ program built and passed every functional and boundary check in both steps: {{cpp_f1_pass}} of {{cpp_f1}} functional and {{cpp_b1_pass}} of {{cpp_b1}} boundary checks in the first step, {{cpp_f2_pass}} of {{cpp_f2}} and {{cpp_b2_pass}} of {{cpp_b2}} in the second.
+
+What failed was one security check. The program the AI wrote served the files of its own folder. When the judge asked for `{{cpp_request}}`, the build file that says how this program is built came back as it is. A server written this way can hand out its source code or its settings the same way, so it counts as a vulnerability. The program passed {{cpp_s1_pass}} of {{cpp_s1}} security checks in the first step and {{cpp_s2_pass}} of {{cpp_s2}} in the second. Each step counted {{cpp_vulns1}} vulnerability, and in the second step the same check still failed, which also counted as {{cpp_broken2}} check of the earlier step still broken after the change.
+
+This is the AI's result, not a fault of the judge. At the start the C++ folder held only that one build file, so serving files came from the code the AI wrote. In the other {{n_full}} languages, {{other_failed_checks}} checks failed.
+
+With one run per language, this does not show that code written in C++ is less safe. It does show that the security checks catch a problem the functional checks alone do not see.
+
+## What one run used
+
+### Measured: time and tokens
+
+- **AI working time**: {{agent_seconds_mean}} seconds per run on average (shortest {{agent_seconds_min}}, longest {{agent_seconds_max}}). The {{n_runs}} runs add up to {{agent_minutes_total}} minutes.
+- **Whole run** (preparing the containers, the AI's work, the build and the judging together): {{wall_seconds_mean}} seconds per run on average (between {{wall_seconds_min}} and {{wall_seconds_max}}). The {{n_runs}} runs add up to {{wall_minutes_total}} minutes.
+- **Judging time**: {{judge_seconds_mean}} seconds per run on average (both steps together).
+- **Tokens** (the {{n_runs}} runs together): input {{tokens_input}}, cache read {{tokens_cache_read}}, cache write {{tokens_cache_creation}}, output {{tokens_output}}. There were {{turns_total}} turns in all.
+- **The amount the tool writes down**: {{cost_total}} dollars for the {{n_runs}} runs together. The tool computes this figure by itself; the runs were on a subscription, so it is not money that was charged. Of the limit notices, {{safety.limit_events_using_extra_usage}} said that extra paid usage was in use.
+
+### The weekly limit: only an upper bound
+
+While it runs, the tool reports the weekly utilization in whole percent.
+
+- Over the {{weekly.later_runs}} runs from TypeScript to C++, the first reading was {{weekly.later_first_reading}}% and the last reading was {{weekly.later_last_reading}}%. It moved by {{weekly.moved_during_later_runs_points}} percentage points.
+- Of the {{n_runs}} runs, {{weekly.runs_whose_readings_moved_between_first_and_after}} had a first reading that differed from its last.
+- The earlier rise of {{weekly.rise_between_the_batches_points}} percentage points, from {{weekly.later_stored_before}}% to {{weekly.later_first_reading}}%, is not what runs used. The {{weekly.later_stored_before}}% is the value stored when the Python run ended, and the {{weekly.later_first_reading}}% is the first reading of the TypeScript run about {{weekly.hours_between_first_and_later_runs}} hours later. No measurement ran in between; the same account was used for development work. The same holds for the {{weekly.first_batch_before}}% and {{weekly.first_batch_first}}% of the Python run: the first value had been stored earlier.
+
+**What this bounds.** The figure is shown in whole percent, so the {{weekly.later_runs}} runs used less than {{weekly.display_step_points}} percentage point together. Divided by the runs, that is less than {{weekly.one_run_below_points}} percentage point per run on average ({{weekly.display_step_points}} ÷ {{weekly.later_runs}}).
+
+**What it cannot tell.** There is no lower bound. It cannot tell whether one run uses close to that upper bound or a hundredth of it. The upper bound times {{plan.runs}} runs is {{weekly.baseline_below_points}} percentage points, so this number cannot even tell whether the whole baseline measurement fits inside one week's limit. The runner stops at {{weekly.runner_stops_at_percent}}% weekly and the figure stood at {{weekly.later_last_reading}}% at the end, which leaves {{weekly.room_to_the_stop_points}} percentage points. In the worst case ({{weekly.one_run_below_points}} percentage point per run) that room is used up after {{weekly.runs_in_that_room_at_the_bound}} runs ({{weekly.room_to_the_stop_points}} ÷ {{weekly.one_run_below_points}}). In fact far more runs may fit.
+
+**What further measurement would settle it.** Run the same run {{next.same_model_runs}} times in a row at a time when nothing else uses the account, and read the weekly utilization at the start and at the end. That resolves one run down to {{next.weekly_points_per_run_it_can_tell}} percentage point ({{weekly.display_step_points}} ÷ {{next.same_model_runs}}).
+
+### The {{five_hour.guard_window_hours}}-hour limit: the tool does not report it
+
+Of the {{n_runs}} runs, {{five_hour.runs_that_reported_it}} reported the utilization of the {{five_hour.guard_window_hours}}-hour limit. So this limit was kept only by the runner's own guard. The guard adds up the working time of the agents the runner ran and starts no new run once it reaches {{five_hour.guard_limit_minutes}} minutes within {{five_hour.guard_window_hours}} hours. After the {{weekly.later_runs}} runs from TypeScript to C++ the guard had counted {{five_hour.guard_minutes_after_later_runs}} minutes. After the Python run it had counted {{five_hour.guard_minutes_after_first_batch}} minutes; the runner was then changed and the guard keeps its record in a new place, so the TypeScript run started from {{five_hour.guard_minutes_before_later_runs}} minutes.
+
+**What this bounds.** Only that {{five_hour.guard_minutes_after_later_runs}} of the {{five_hour.guard_limit_minutes}} minutes the runner set for itself were used.
+
+**What it cannot tell.** How much of the account's real {{five_hour.guard_window_hours}}-hour limit was used. The guard's {{five_hour.guard_limit_minutes}} minutes are not a measured value; they were chosen to be careful. The guard does not count other work done on the same account.
+
+**What further measurement would settle it.** As long as the tool does not report this value, run records alone cannot tell. The cheapest way is to read it from the account's usage screen before and after a row of runs and write it down. Only the account's owner can see that screen.
+
+## Safety
+
+- **Was the token seen on a command line?** While the runs went on, the process table of this machine was read every {{safety.reading_interval_seconds}} seconds: {{safety.readings}} readings in all, and {{safety.readings_with_the_token}} of them showed the token. Of the {{safety.readings}} readings, {{safety.readings_later_runs}} belong to the {{weekly.later_runs}} runs made after the runner was changed, and {{safety.readings_while_the_agent_worked}} were taken while the AI worked.
+- **Was the token left in the results?** Every file the runs left was searched for the token. {{safety.clean_leak_scans}} of the {{n_runs}} scans were clean: {{safety.leak_hits}} places found, {{safety.files_the_scan_could_not_read}} files that could not be read and so could not be checked.
+- **What was left**: {{safety.containers_left}} containers. The watch stopped a run midway {{safety.runs_where_harbor_was_stopped}} times. Problems found in the judging environment: {{safety.judge_environment_problems}}. Errors of the AI tool: {{safety.agent_errors}}.
+- **The limit of this check**: the watch of the process table sees command lines only. The environment variables of running processes were not looked at. With readings {{safety.reading_interval_seconds}} seconds apart, a process that came and went faster can be missed.
+
+## The limits of this pilot
+
+- **One run per language.** We do not know how far the score and the time spread when the same run is repeated.
+- **One task.** Other tasks may take longer or shorter.
+- **One model, and one that was not chosen.** The tool is what was pinned; the tool picked the model ({{model}}). Larger models were not measured.
+- **One company's model.** Numbers measured on one company's models alone do not fix the core design of the language.
+- **The limits.** Only an upper bound is known for the weekly limit, and nothing for the {{five_hour.guard_window_hours}}-hour limit.
+- **Nothing was emulated.** The numbers come from real runs. Their weakness is the small sample.
+
+## How long the first baseline measurement takes
+
+The charter plans the first baseline measurement as {{plan.runs}} runs: {{plan.models}} AI models write {{plan.tasks}} tasks in the {{plan.languages}} existing languages {{plan.repeats}} times each ({{plan.models}} × {{plan.tasks}} × {{plan.languages}} × {{plan.repeats}} = {{plan.runs}}). The table that comes out of it is the bar Dodam must beat.
+
+Assumptions:
+
+- One machine, this one, one run at a time.
+- Runs at night only. A night is {{plan.night_hours}} hours, and every night is used.
+- The runner's guard stays as it is ({{plan.guard_limit_minutes}} minutes within {{plan.guard_window_hours}} hours). A new run starts only while the counted time is below the limit.
+- The AI working time and the whole time of a run are the averages measured here ({{agent_seconds_mean}} and {{wall_seconds_mean}} seconds). Where the AI working time is taken as a multiple, only the added working time is added to the whole time; judging and preparing the containers are taken to stay the same.
+- The subscription's weekly limit and its real {{plan.guard_window_hours}}-hour limit are taken not to stop anything. As said above, this has not been confirmed.
+
+As measured:
+
+- At {{x1.agent_minutes_per_run}} minutes per run the guard lets {{x1.starts_per_window}} runs start in one {{plan.guard_window_hours}}-hour window. The last of them starts because the time counted until then is just below {{plan.guard_limit_minutes}} minutes. These {{x1.starts_per_window}} runs are over in {{x1.minutes_for_those_starts}} minutes.
+- Once the first runs leave the {{plan.guard_window_hours}}-hour window, the same number can run again, and this second row also ends inside the {{plan.night_hours}} hours. That makes {{x1.runs_per_night}} runs a night.
+- {{plan.runs}} runs divided by {{x1.runs_per_night}} a night, rounded up, is {{x1.nights}} nights.
+- The AI works {{x1.agent_hours_total}} hours in all. In the unit of the schedule simulation, the AI working day (what one agent does in {{plan.agent_hours_per_working_day}} hours), that is {{x1.working_days}} working days. The plan had taken {{plan.plan_hours_per_run}} hours per run and set aside {{plan_working_days}} working days.
+
+| AI working time of one run | Minutes | Starts in one window | Runs a night | Nights | AI working time in all (hours) |
+|---|---|---|---|---|---|
+| As measured | {{x1.agent_minutes_per_run}} | {{x1.starts_per_window}} | {{x1.runs_per_night}} | {{x1.nights}} | {{x1.agent_hours_total}} |
+| If {{x2.factor}} times the measured value (an assumption) | {{x2.agent_minutes_per_run}} | {{x2.starts_per_window}} | {{x2.runs_per_night}} | {{x2.nights}} | {{x2.agent_hours_total}} |
+| If {{x4.factor}} times the measured value (an assumption) | {{x4.agent_minutes_per_run}} | {{x4.starts_per_window}} | {{x4.runs_per_night}} | {{x4.nights}} | {{x4.agent_hours_total}} |
+
+The charter gives this measurement the {{row_nights}} nights from {{row_start_long}} to {{row_end_long}}. To end inside them it needs {{row_runs_per_night}} runs a night, and for that the AI working time of a run must not exceed {{largest_minutes}} minutes on average ({{largest_factor}} times the measured value).
+
+**Not measured.** One of the {{plan.models}} models has been measured, and one of the {{plan.tasks}} tasks. How much longer a larger model works is known only once it is measured. The {{x2.factor}} times and {{x4.factor}} times in the table are assumptions, not measurements.
+
+**A cheap next measurement.** One night is enough. Run the same task with the same model {{next.same_model_runs}} times (the {{plan.languages}} languages {{plan.repeats}} times each). That is about {{next.agent_minutes}} minutes of AI working time, which fits in one window of the guard ({{plan.guard_limit_minutes}} minutes), and it is over in about {{next.wall_minutes}} minutes. It gives the spread of a repeated run and how many percentage points the weekly utilization moves per run. When the guard's window opens again the same night, run the largest model {{next.larger_model_runs}} times (once per language) to measure how many times the measured value its working time is.
+
+No new run was made while this document was written.
+
+## Judging the {{row_month}} schedule again
+
+The pilot changes these inputs.
+
+- **The pilot is finished.** The charter had planned it from {{pilot_row_start_short}} to {{pilot_row_end_short}}; it ended on {{date_short}}, {{pilot_days_early}} days before the day it was to start. That the pilot ran also means the work before it is finished (the task format, the sample task, the runner's skeleton).
+- **The AI working time the baseline measurement uses.** The plan had {{plan_working_days}} working days. As measured it is {{x1.working_days}} working days; {{x2.working_days}} if the AI working time is {{x2.factor}} times, {{x4.working_days}} if it is {{x4.factor}} times.
+- **The shortest the baseline measurement can be.** Because of the guard and the night hours it cannot take fewer than {{x1.nights}} nights; {{x2.nights}} nights if the AI working time is {{x2.factor}} times, {{x4.nights}} nights if it is {{x4.factor}} times.
+
+One input did not change: the AI working days the subscriptions give in a week. The pilot was meant to measure it, but the weekly utilization did not move, so it could not. The capacity was therefore run with the same assumptions as before.
+
+The schedule simulation rolls the tasks of the work breakdown forward week by week, in the order of what must come first. Tasks that run in the same week share the subscription capacity, tasks run over their planned length, and risks strike. Each case was run {{sims}} times. "Middle" means half of those runs had ended by that day, and "{{pct80}}%" means {{pct80}}% of them had. The simulation does not know how far the {{plan.tasks}} tasks and the measuring tool have come by now, so it counts both as starting the day after the pilot with all their work still ahead.
+
+At the plan's capacity (one account per AI company, about {{planning.days_a_week}} working days a week):
+
+| Case | The {{plan.tasks}} tasks (middle) | Measuring tool complete (middle) | Baseline measurement ends (middle) | Baseline measurement ends ({{pct80}}%) | Chance it ends by {{row_end_long}} | Direction-fixing gate (middle) | Direction-fixing gate ({{pct80}}%) | Chance the gate is reached by {{gate_long}} |
+|---|---|---|---|---|---|---|---|---|
+| Inputs before the pilot | {{planning.before.b_tasks10.p50}} | {{planning.before.b_runner.p50}} | {{planning.before.b_baseline.p50}} | {{planning.before.b_baseline.p80}} | {{planning.before.p_baseline_by_row_end}}% | {{planning.before.g_dir.p50}} | {{planning.before.g_dir.p80}} | {{planning.before.p_gate_by_its_date}}% |
+| After the pilot, as measured | {{planning.after_x1.b_tasks10.p50}} | {{planning.after_x1.b_runner.p50}} | {{planning.after_x1.b_baseline.p50}} | {{planning.after_x1.b_baseline.p80}} | {{planning.after_x1.p_baseline_by_row_end}}% | {{planning.after_x1.g_dir.p50}} | {{planning.after_x1.g_dir.p80}} | {{planning.after_x1.p_gate_by_its_date}}% |
+| After the pilot, AI working time {{x2.factor}} times (an assumption) | {{planning.after_x2.b_tasks10.p50}} | {{planning.after_x2.b_runner.p50}} | {{planning.after_x2.b_baseline.p50}} | {{planning.after_x2.b_baseline.p80}} | {{planning.after_x2.p_baseline_by_row_end}}% | {{planning.after_x2.g_dir.p50}} | {{planning.after_x2.g_dir.p80}} | {{planning.after_x2.p_gate_by_its_date}}% |
+| After the pilot, AI working time {{x4.factor}} times (an assumption) | {{planning.after_x4.b_tasks10.p50}} | {{planning.after_x4.b_runner.p50}} | {{planning.after_x4.b_baseline.p50}} | {{planning.after_x4.b_baseline.p80}} | {{planning.after_x4.p_baseline_by_row_end}}% | {{planning.after_x4.g_dir.p50}} | {{planning.after_x4.g_dir.p80}} | {{planning.after_x4.p_gate_by_its_date}}% |
+
+Working with one Claude account alone, as now (taken as about {{claude_only.days_a_week}} working days a week):
+
+| Case | The {{plan.tasks}} tasks (middle) | Measuring tool complete (middle) | Baseline measurement ends (middle) | Baseline measurement ends ({{pct80}}%) | Chance it ends by {{row_end_long}} | Direction-fixing gate (middle) | Direction-fixing gate ({{pct80}}%) | Chance the gate is reached by {{gate_long}} |
+|---|---|---|---|---|---|---|---|---|
+| Inputs before the pilot | {{claude_only.before.b_tasks10.p50}} | {{claude_only.before.b_runner.p50}} | {{claude_only.before.b_baseline.p50}} | {{claude_only.before.b_baseline.p80}} | {{claude_only.before.p_baseline_by_row_end}}% | {{claude_only.before.g_dir.p50}} | {{claude_only.before.g_dir.p80}} | {{claude_only.before.p_gate_by_its_date}}% |
+| After the pilot, as measured | {{claude_only.after_x1.b_tasks10.p50}} | {{claude_only.after_x1.b_runner.p50}} | {{claude_only.after_x1.b_baseline.p50}} | {{claude_only.after_x1.b_baseline.p80}} | {{claude_only.after_x1.p_baseline_by_row_end}}% | {{claude_only.after_x1.g_dir.p50}} | {{claude_only.after_x1.g_dir.p80}} | {{claude_only.after_x1.p_gate_by_its_date}}% |
+| After the pilot, AI working time {{x2.factor}} times (an assumption) | {{claude_only.after_x2.b_tasks10.p50}} | {{claude_only.after_x2.b_runner.p50}} | {{claude_only.after_x2.b_baseline.p50}} | {{claude_only.after_x2.b_baseline.p80}} | {{claude_only.after_x2.p_baseline_by_row_end}}% | {{claude_only.after_x2.g_dir.p50}} | {{claude_only.after_x2.g_dir.p80}} | {{claude_only.after_x2.p_gate_by_its_date}}% |
+| After the pilot, AI working time {{x4.factor}} times (an assumption) | {{claude_only.after_x4.b_tasks10.p50}} | {{claude_only.after_x4.b_runner.p50}} | {{claude_only.after_x4.b_baseline.p50}} | {{claude_only.after_x4.b_baseline.p80}} | {{claude_only.after_x4.p_baseline_by_row_end}}% | {{claude_only.after_x4.g_dir.p50}} | {{claude_only.after_x4.g_dir.p80}} | {{claude_only.after_x4.p_gate_by_its_date}}% |
+
+### The verdict
+
+- **The pilot**: finished on {{date_long}}. Its mark of being done, "we know what percent of the subscription limit one run uses", is half met. Time and tokens are measured; for the limits only an upper bound is known. The other half is met by the one-night measurement described above.
+- **The baseline measurement ({{row_start_long}} to {{row_end_long}})**: the dates stay. At the plan's capacity the chance of ending by {{row_end_long}} was {{planning.before.p_baseline_by_row_end}}% with the inputs before the pilot. After the pilot it is {{planning.after_x1.p_baseline_by_row_end}}% if every run is like the measured ones, {{planning.after_x2.p_baseline_by_row_end}}% if the AI working time is {{x2.factor}} times, and {{planning.after_x4.p_baseline_by_row_end}}% if it is {{x4.factor}} times. The middle dates are {{planning.after_x1.b_baseline.p50}}, {{planning.after_x2.b_baseline.p50}} and {{planning.after_x4.b_baseline.p50}} in that order. The end of the row as it stands lies between "as measured" and "{{x2.factor}} times". Which of them holds is known only once a larger model is measured, so for now there is no ground to move the dates earlier and none to move them later. The day it starts depends on the {{plan.tasks}} tasks and on the measuring tool being complete, and the pilot did not change the amount of that work.
+- **The direction-fixing gate ({{gate_long}})**: the date stays. The chance of reaching it by that day was {{planning.before.p_gate_by_its_date}}% with the inputs before the pilot, and after the pilot it is {{planning.after_x1.p_gate_by_its_date}}%, {{planning.after_x2.p_gate_by_its_date}}% and {{planning.after_x4.p_gate_by_its_date}}% in the same order.
+- **The time freed by finishing early**: {{pilot_days_before_end}} days remain until the day the pilot was to end. They go to the two pieces of work that decide when the baseline measurement starts (the {{plan.tasks}} tasks and completing the measuring tool) and to the one-night measurement described above. Once its numbers are in, they say which row of the table holds, and the dates are judged again then.
+- **About the table for one Claude account**: under that assumption the chance that the baseline measurement ends by {{row_end_long}} was {{claude_only.before.p_baseline_by_row_end}}% before the pilot and is {{claude_only.after_x1.p_baseline_by_row_end}}% after it as measured, and the middle date moves earlier from {{claude_only.before.b_baseline.p50}} to {{claude_only.after_x1.b_baseline.p50}}. The gap to the plan's capacity does not come from the pilot; it comes from the capacity assumption. The pilot itself, on the other hand, was finished with one Claude account {{pilot_days_early}} days earlier than planned. This pilot could not confirm whether about {{claude_only.days_a_week}} working days a week is right, so this table is not used as a ground for changing dates; it is written down to show how far the schedule slips if that assumption holds.
