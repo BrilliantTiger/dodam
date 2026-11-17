@@ -46,3 +46,5 @@ AI가 정확하고 탄탄하게 짤 수 있는, 안전하고 빠른 범용 언�
 ## 라이선스
 
 [Apache License 2.0](LICENSE-APACHE) 또는 [MIT](LICENSE-MIT) 중 하나를 골라 쓸 수 있다.
+
+한 파일은 예외다. `bench/harbor/docker-exec-env-by-name.patch`에는 Harbor 0.25.0(`harbor-framework/harbor` 프로젝트)의 소스 코드 줄이 들어 있고, 그 줄은 Apache License 2.0만 따른다. MIT는 그 줄에 적용되지 않는다.

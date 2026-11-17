@@ -230,6 +230,17 @@ def child_env(base: dict[str, str], token: str) -> dict[str, str]:
     return env
 
 
+def resolve_program(program: Path, path: str | None) -> Path:
+    """The absolute path the child process will run: a bare name is looked up in its PATH, as Popen does."""
+    text = str(program)
+    if os.sep not in text:
+        found = shutil.which(text, path=path)
+        if not found:
+            raise PilotError(f"cannot find {text} on PATH")
+        return Path(found).absolute()
+    return Path(text).absolute()
+
+
 def check_harbor(harbor: Path) -> None:
     """Refuse to hand the token to a Harbor that is not the pinned release with Dodam's patch."""
     try:
@@ -305,12 +316,16 @@ def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float) 
 
 
 def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout: float, *,
-                   grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS) -> int:
-    """Run Harbor in its own process group. At the time limit, or on Ctrl-C, stop the whole group."""
+                   grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS,
+                   on_start: Callable[[subprocess.Popen], None] | None = None) -> int:
+    """Run Harbor in its own process group. At the time limit, or on Ctrl-C, stop the whole group.
+    `on_start` gets the process as soon as it runs (the process-table watch stops it through it)."""
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         try:
+            if on_start is not None:
+                on_start(proc)
             return proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
@@ -750,9 +765,11 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             raise PilotError(f"task {task.id} does not run in {lang}")
     docker = docker if docker is not None else DockerContainers()
     timeout = harbor_time_limit(task) if timeout is None else timeout
+    base = dict(os.environ if base_env is None else base_env)
+    harbor = resolve_program(harbor, base.get("PATH"))  # the file checked is the file run
     harbor_check(harbor)
     token = read_token(token_file)
-    env = child_env(dict(os.environ if base_env is None else base_env), token)
+    env = child_env(base, token)
     timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_root = Path(out_root)
     batch = out_root / timestamp
@@ -863,12 +880,12 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
         with watch:
             if watch.clean:
-                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout)
+                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout,
+                                                     on_start=watch.track)
         finished = True
     finally:
         record["wall_seconds"] = round(time.monotonic() - started, 1)
-        record["process_watch"] = {**watch.record(), "agent_phase_samples": watch.count_within(agent_windows(job_dir))}
-        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE or watch.stopped_harbor:
+        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE or not watch.clean:
             # Harbor was cut short and may have left its containers running: remove them first, so nothing
             # keeps writing into the output or using the subscription, and the scan sees the final output.
             try:
@@ -877,6 +894,12 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                 record["containers_left"] = [mask(f"could not check: {type(err).__name__}: {err}", token)]
         scan = check_for_token(run_dir, token)
         record["leak_scan"] = scan.as_dict()
+        record["process_watch"] = watch.record()
+        try:
+            record["process_watch"]["agent_phase_samples"] = watch.count_within(agent_windows(job_dir))
+        except Exception as err:  # only a count; never in the way of the scan's verdict
+            record["process_watch"]["agent_phase_samples"] = None
+            record["process_watch"]["count_error"] = mask(f"{type(err).__name__}: {err}", token)
         if not scan.clean:
             record["status"] = "token-leak" if scan.hits else "leak-scan-failed"
         elif watch.hit_samples:
@@ -889,13 +912,15 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
             _write_record(run_dir, batch, record)
         if not scan.clean:
             raise TokenLeak(scan.message(f"in the {lang} run folder"))
+        left = (f"; containers still in Docker: {', '.join(record['containers_left'])}"
+                if record["containers_left"] else "")
         if watch.hit_samples:
             raise TokenLeak(f"the token was in the command line of process(es) {watch.hit_pids} in "
                             f"{watch.hit_samples} of {len(watch.times)} process-table samples of the {lang} run; "
-                            "Harbor was stopped or never started")
+                            f"{watch.outcome()}{left}")
         if not watch.clean:
             raise PilotError(f"the process-table check of the {lang} run failed ({watch.error}); "
-                             "Harbor was stopped or never started")
+                             f"{watch.outcome()}{left}")
 
     returncode = record["harbor_returncode"]
     status = "ok" if returncode == 0 else "timeout" if returncode == TIMEOUT_RETURNCODE else "harbor-failed"

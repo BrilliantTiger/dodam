@@ -52,3 +52,5 @@ Rules for outside work:
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+One file is an exception: `bench/harbor/docker-exec-env-by-name.patch` carries lines of the source code of Harbor 0.25.0 (the `harbor-framework/harbor` project), which are under the Apache License, Version 2.0, only. The MIT option does not apply to those lines.

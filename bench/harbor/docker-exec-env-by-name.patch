@@ -4,13 +4,24 @@ Harbor starts every command in a task container with `docker compose exec -e NAM
 The values of the agent's environment, the subscription token among them, then sit in the
 command line of host processes, which any process of the same user can read. With this change
 Harbor passes each variable by name only (`-e NAME`) and gives its value to the docker CLI
-through that process's environment, from which docker compose reads it. Names the docker CLI
-or Harbor's compose files read themselves (PATH, HOME, DOCKER_*, COMPOSE_* and Harbor's own
-compose variables) keep the old form, and other container runtimes such as Podman are left
-as they were.
+through that process's environment, from which docker compose reads it.
+
+Names that the docker CLI, its Go runtime, the dynamic loader or Harbor's compose files read
+for themselves keep the old form, so a container's value never steers the host docker CLI.
+These are PATH, HOME, TMPDIR, SHELL, USER, LANG, TERM, NO_COLOR, the proxy variables, the
+certificate variables, the Go runtime settings, Harbor's own compose variables, and every
+name starting with DOCKER_, COMPOSE_, BUILDKIT_, BUILDX_, OTEL_, XDG_, LC_, LD_ or DYLD_.
+Other container runtimes, such as Podman, are left as they were.
 
 Apply it from bench/ with `python -m dodambench.harbor_patch apply`. The pilot refuses to hand
 the token to a Harbor that is not 0.25.0 with exactly this change.
+
+License: every line below that does not start with "+" is Harbor's own source code, from the
+file src/harbor/environments/docker/docker.py of Harbor 0.25.0 (the PyPI package harbor 0.25.0,
+from the harbor-framework/harbor project). Those lines are under the Apache License, Version
+2.0, only, not under the MIT license this repository otherwise offers as an alternative. The
+full text of the Apache License is in LICENSE-APACHE at the root of this repository. The lines
+starting with "+" are this repository's change to that file.
 
 --- a/harbor/environments/docker/docker.py
 +++ b/harbor/environments/docker/docker.py
@@ -33,7 +44,7 @@ the token to a Harbor that is not 0.25.0 with exactly this change.
  
          process = await asyncio.create_subprocess_exec(
              *full_command,
-@@ -1415,9 +1420,32 @@
+@@ -1415,9 +1420,65 @@
          if cwd:
              exec_command.extend(["-w", cwd])
  
@@ -42,23 +53,56 @@ the token to a Harbor that is not 0.25.0 with exactly this change.
 +            # Dodam patch: pass each variable by name and hand its value to the
 +            # docker CLI through that process's environment, so values (the
 +            # agent's credentials among them) stay out of host command lines,
-+            # which any process of the same user can read. Names the docker CLI
-+            # or Harbor's compose files read themselves keep NAME=VALUE, since
-+            # their host values must not change. Checked with docker compose only.
++            # which any process of the same user can read. Names the docker CLI,
++            # its Go runtime, the dynamic loader or Harbor's compose files read
++            # for themselves keep NAME=VALUE, so a container's value never
++            # steers the host CLI. Checked with docker compose only.
 +            by_name = type(self).runtime() is DOCKER_RUNTIME
 +            host_names = {
 +                "PATH",
 +                "HOME",
++                "TMPDIR",
++                "SHELL",
++                "USER",
++                "LANG",
++                "TERM",
++                "NO_COLOR",
++                "HTTP_PROXY",
++                "HTTPS_PROXY",
++                "NO_PROXY",
++                "ALL_PROXY",
++                "http_proxy",
++                "https_proxy",
++                "no_proxy",
++                "all_proxy",
++                "SSL_CERT_FILE",
++                "SSL_CERT_DIR",
++                "GODEBUG",
++                "GOGC",
++                "GOMAXPROCS",
++                "GOMEMLIMIT",
++                "GOTRACEBACK",
 +                "HARBOR_CONTAINER_NAME",
 +                *self._compose_infra_env_vars(),
 +            }
++            host_prefixes = (
++                "DOCKER_",
++                "COMPOSE_",
++                "BUILDKIT_",
++                "BUILDX_",
++                "OTEL_",
++                "XDG_",
++                "LC_",
++                "LD_",
++                "DYLD_",
++            )
              for key, value in env.items():
 -                exec_command.extend(["-e", f"{key}={value}"])
 +                if (
 +                    by_name
 +                    and "=" not in key
 +                    and key not in host_names
-+                    and not key.startswith(("DOCKER_", "COMPOSE_"))
++                    and not key.startswith(host_prefixes)
 +                ):
 +                    exec_command.extend(["-e", key])
 +                    exec_env[key] = value
@@ -67,7 +111,7 @@ the token to a Harbor that is not 0.25.0 with exactly this change.
  
          if user is not None:
              exec_command.extend(["-u", str(user)])
-@@ -1442,6 +1470,7 @@
+@@ -1442,6 +1503,7 @@
              check=False,
              timeout_sec=timeout_sec,
              on_output=self._output_callback(),

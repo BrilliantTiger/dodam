@@ -95,7 +95,7 @@ def test_a_watch_samples_before_during_and_after_the_run():
 def test_a_watch_given_no_harbor_process_never_claims_to_have_stopped_one():
     sampler, stop = Sampler(hit_from=3), Stop()
     with proctable.ProcessTableWatch(FAKE_TOKEN, sampler, interval=0.01, stop=stop) as watch:
-        assert wait_for(lambda: sampler.calls >= 4)
+        assert wait_for(lambda: sampler.calls >= 3)  # the third reading holds the token
     record = watch.record()
     assert not watch.clean and not record["clean"]
     assert record["hit_samples"] >= 1 and record["hit_pids"] == [303]
@@ -126,32 +126,3 @@ def test_samples_are_counted_inside_time_windows():
     assert watch.count_within([(15.0, 35.0)]) == 2
     assert watch.count_within([(0.0, 12.0), (39.0, 41.0)]) == 2
     assert watch.count_within([]) == 0
-
-
-def test_stopping_ends_every_process_this_one_started():
-    code = ("import subprocess, sys, time\n"
-            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-            "print(p.pid, flush=True)\n"
-            "time.sleep(60)\n")
-    child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
-    grandchild = int(child.stdout.readline())
-    stopped = proctable.stop_children(grace=5.0)
-    assert child.pid in stopped and grandchild in stopped
-    assert child.wait(timeout=10) != 0
-
-    def gone(pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        return False
-
-    assert wait_for(lambda: gone(grandchild))
-
-
-def test_a_watch_with_the_real_stop_ends_a_running_child_quickly():
-    started = time.monotonic()
-    with proctable.ProcessTableWatch(FAKE_TOKEN, Sampler(hit_from=3), interval=0.05) as watch:
-        returncode = subprocess.run([sys.executable, "-c", "import time; time.sleep(60)"]).returncode
-    assert returncode != 0 and time.monotonic() - started < 30
-    assert watch.record()["stopped_harbor"]
