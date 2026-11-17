@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,13 @@ def test_read_token_refuses_a_file_others_can_read(tmp_path):
 def test_read_token_names_the_missing_file_without_a_token(tmp_path):
     with pytest.raises(pilot.PilotError):
         pilot.read_token(tmp_path / "nope")
+
+
+def test_child_env_drops_the_settings_that_would_let_python_load_another_harbor():
+    env = pilot.child_env({"PATH": "/bin", "PYTHONPATH": "/elsewhere", "PYTHONHOME": "/py", "PYTHONSTARTUP": "/s.py"},
+                          FAKE_TOKEN)
+    assert not [k for k in env if k.startswith("PYTHON")]
+    assert env["PATH"] == "/bin"
 
 
 def test_child_env_has_the_token_oauth_flag_and_no_api_key():
@@ -529,9 +537,14 @@ def pilot_args(tmp_path, **kw):
                 max_five_hour=50.0, max_weekly=50.0, wait_for_reset=False, model=None,
                 base_env={"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-api-x"},
                 now=lambda: NOW, timestamp="20261117T070000Z", image_check=lambda image: None,
-                docker=FakeDocker())
+                docker=FakeDocker(), harbor_check=lambda harbor: None, process_sampler=clean_table,
+                process_interval=0.01)
     args.update(kw)
     return args
+
+
+def clean_table() -> bytes:
+    return b"    1 /sbin/launchd\n  202 harbor run -p task\n"
 
 
 def test_a_run_writes_one_record_and_a_summary(tmp_path):
@@ -989,3 +1002,94 @@ def test_an_error_outside_the_agent_is_a_trial_error(tmp_path):
 def test_the_agents_own_error_line_makes_an_agent_error(tmp_path):
     summary = pilot.run_pilot(runner=FakeRunner(result_error=True), **pilot_args(tmp_path))
     assert summary["runs"][0]["status"] == "agent-error"
+
+# --- the pinned, patched Harbor ---------------------------------------------------------------------------------
+
+def test_harbor_is_checked_before_the_token_is_read(tmp_path):
+    runner = FakeRunner()
+
+    def refuse(harbor):
+        raise pilot.PilotError("refusing to use the token: Harbor in /v is not patched")
+
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor_check=refuse, token_file=tmp_path / "missing"))
+    assert "not patched" in str(err.value)
+    assert runner.calls == []
+
+
+def test_harbor_is_checked_again_right_before_each_run(tmp_path):
+    seen = []
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, languages=["python", "go"],
+                                                      harbor_check=lambda harbor: seen.append(harbor)))
+    assert seen == [Path("harbor")] * 3
+
+
+def test_the_default_harbor_check_refuses_an_install_that_is_not_the_pinned_patched_one(tmp_path):
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.check_harbor(tmp_path / "missing" / "harbor")
+    assert "refusing" in str(err.value)
+
+
+# --- the process table while Harbor runs ---------------------------------------------------------------------------
+
+class Tables:
+    """Clean process tables until call number `hit_from`, then one with the token in a command line."""
+
+    def __init__(self, hit_from=None, error=None):
+        self.calls, self.hit_from, self.error = 0, hit_from, error
+
+    def __call__(self) -> bytes:
+        self.calls += 1
+        if self.error:
+            raise self.error
+        if self.hit_from is not None and self.calls >= self.hit_from:
+            return clean_table() + f"  303 docker compose exec -e CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN} main\n".encode()
+        return clean_table()
+
+
+def test_a_run_records_its_process_table_samples(tmp_path):
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    watch = record["process_watch"]
+    assert watch["samples"] >= 2 and watch["hit_samples"] == 0 and watch["clean"] and watch["error"] is None
+    assert isinstance(watch["agent_phase_samples"], int)
+    assert record["status"] == "ok"
+    assert summary["runs"][0]["process_watch"]["samples"] == watch["samples"]
+
+
+def test_the_token_in_a_command_line_stops_the_batch_without_showing_the_token(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, languages=["python", "go"],
+                                                          process_sampler=Tables(hit_from=2)))
+    assert FAKE_TOKEN not in str(err.value) and "303" in str(err.value)
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "token-in-process-table"
+    assert record["process_watch"]["hit_pids"] == [303]
+    assert not (tmp_path / "out" / "20261117T070000Z" / "go").exists()
+    assert pilot.scan_for_token(tmp_path / "out", FAKE_TOKEN) == []
+
+
+def test_the_token_seen_before_harbor_starts_means_harbor_never_starts(tmp_path):
+    runner = FakeRunner()
+    with pytest.raises(pilot.TokenLeak):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, process_sampler=Tables(hit_from=1)))
+    assert runner.calls == []
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "token-in-process-table" and record["harbor_returncode"] is None
+
+
+def test_a_process_table_that_cannot_be_read_stops_the_batch(tmp_path):
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, process_sampler=Tables(error=OSError("no ps"))))
+    assert not isinstance(err.value, pilot.TokenLeak) and "process-table" in str(err.value)
+    assert runner.calls == []
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["status"] == "process-watch-failed"
+
+
+def test_the_agent_phase_of_each_step_is_read_from_the_trial(tmp_path):
+    make_trial(tmp_path)
+    start = datetime(2026, 11, 17, 7, 13, 20, tzinfo=timezone.utc).timestamp()
+    assert pilot.agent_windows(tmp_path) == [(start, start + 120.0), (start, start + 120.0)]
+    assert pilot.agent_windows(tmp_path / "nothing-here") == []
