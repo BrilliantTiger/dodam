@@ -1623,3 +1623,23 @@ def test_waiting_says_why_and_until_when_and_reads_the_guard_again(tmp_path, cap
     assert slept and slept[0] <= 900  # a short step, then the guard file is read again
     said = capsys.readouterr().err
     assert "waiting until" in said and "no recorded end" in said
+
+
+def test_a_signal_while_the_start_is_decided_stops_the_batch_before_any_wait(tmp_path, monkeypatch):
+    clock = {"t": NOW}
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    def decide_and_get_a_signal(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)  # held while the start is decided
+        return pilot.Decision(False, "not yet", clock["t"] + 600)
+
+    monkeypatch.setattr(pilot, "start_decision", decide_and_get_a_signal)
+    runner = FakeRunner()
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                    now=lambda: clock["t"]))
+    assert slept == [] and runner.calls == []
