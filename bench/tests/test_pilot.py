@@ -52,7 +52,7 @@ def test_parse_skips_malformed_lines():
 
 def test_parse_accepts_carriage_returns_and_leading_noise():
     raw = "\x1b[0m" + json.dumps(event("five_hour", 0.2)) + "\r"
-    assert len(pilot.parse_rate_limit_events([raw, json.dumps(event("five_hour", 0.2)) + "\r\n"])) == 1
+    assert len(pilot.parse_rate_limit_events([raw, json.dumps(event("five_hour", 0.2)) + "\r\n"])) == 2
 
 
 def test_latest_windows_takes_the_last_event_of_each_window():
