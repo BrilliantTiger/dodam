@@ -1,17 +1,17 @@
-"""Numbers behind the design of command-line judging: who the program runs as, how a case's limits
-are enforced, and how a case is ended.
+"""Measure the candidates the judging of command-line programs was chosen from.
 
-Each candidate is tried against the same attacks, written down before any candidate was built:
-the program tries to read the tests, to write the result, to become the build's user, to leave files
-and shared memory for a later case, to leave a process behind, to fill the disk, to flood its
-output, to fork without end, to use up memory, and to hang.
-
-Run from bench/ on a machine with Docker and the language images:
+The attacks are those of attacks.toml, written before the candidates were compared. Every candidate
+meets the same attacks in fresh containers of the Python image; every container is capped in memory
+and processes, so a candidate that stops nothing cannot take the machine down. What is recorded is
+what the attack got (memory, files, processes), whether its case would fail, whether the judge
+survived, and how long it took.
 
     python experiments/cli_separation.py > separation.json
 
-Everything runs in fresh containers of the images, without network, as vetting does. The part that
-runs inside a container is this same file, started with `inside` as its first argument.
+The parts: when the tests are closed; what a command line says; who the program runs as; what bounds
+files, memory, what outlives a process, and processes; how a case is ended; how what a case left is
+removed; how often the judge measures; what a plain case costs; and what each language's runtime
+needs (address space, idle threads).
 """
 from __future__ import annotations
 
@@ -22,37 +22,117 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
 LIMITS = {"timeout_sec": 5, "memory_mb": 256, "output_kb": 256, "processes": 16, "disk_mb": 32}
-SAFETY_PROCESSES = 600
+CAPS = {"memory_mb": 1024, "processes": 600}
+MB = 1024 * 1024
+CASES = "/dodam-cases"
 
 ATTACK = r'''
-import ctypes, json, os, subprocess, sys, time
+import ctypes, errno, json, os, signal, sys, time
+MB = 1024 * 1024
+libc = ctypes.CDLL(None, use_errno=True)
 what = sys.argv[1]
+got = {}
+
+
+def touch(block):
+    for i in range(0, len(block), 4096):
+        block[i] = 1
+
+
+def write_until_refused(names):
+    written = 0
+    try:
+        for name in names:
+            with open(name, "wb", buffering=0) as f:
+                written += f.write(b"x" * MB)
+    except OSError as error:
+        got["refused"] = errno.errorcode[error.errno]
+    return written // MB
+
+
 if what == "plain":
     print("plain")
-elif what == "snoop":
-    found = {}
-    def attempt(name, action):
+elif what == "memory":
+    blocks = []
+    while True:
+        blocks.append(bytearray(16 * MB)); touch(blocks[-1])
+elif what == "memory-spread":
+    for _ in range(8):
+        if os.fork() == 0:
+            block = bytearray(64 * MB); touch(block); time.sleep(60); os._exit(0)
+    time.sleep(60)
+elif what == "memory-file":
+    held = []
+    while True:
+        held.append(libc.memfd_create(b"hold", 0))
+        for _ in range(4):
+            os.write(held[-1], b"x" * (4 * MB))
+elif what in ("shared-memory", "shared-memory-to-the-brim"):
+    # filled by one short-lived process after another, 64 MB each, so that no process ever holds much
+    size = (320 if what == "shared-memory" else 640) * MB
+    ident = libc.shmget(0, size, 0o1666)
+    got["made"] = ident >= 0
+    libc.shmat.restype = ctypes.c_void_p
+    for part in range(size // (64 * MB) if ident >= 0 else 0):
+        if os.fork() == 0:
+            at = libc.shmat(ident, None, 0)
+            ctypes.memset(at + part * 64 * MB, 1, 64 * MB)
+            os._exit(0)
+        os.wait()
+    print(json.dumps(got))
+elif what == "message-queues":
+    class Message(ctypes.Structure):
+        _fields_ = [("kind", ctypes.c_long), ("text", ctypes.c_char * 8000)]
+    message = Message(1, b"x" * 7999)
+    queues = sent = 0
+    while queues < 4000:
+        ident = libc.msgget(0, 0o1666)
+        if ident < 0:
+            break
+        queues += 1
+        while libc.msgsnd(ident, ctypes.byref(message), 8000, 0o4000) == 0:
+            sent += 1
+    print(json.dumps({"made": queues > 0, "mb": sent * 8000 // MB}))
+elif what == "one-huge-file":
+    with open("big.bin", "wb", buffering=0) as f:
+        written = 0
         try:
-            found[name] = bool(action())
-        except BaseException:
-            found[name] = False
-    def mark(place):
-        with open(os.path.join(place, "marker.txt"), "w") as f:
-            f.write("x")
-        return True
-    attempt("read the tests", lambda: "expected-answer" in open("/tests/answers.txt").read())
-    attempt("write the result", lambda: open("/logs/verifier/reward.json", "w").write('{"reward": 1.0}'))
-    for place in ("/app", "/tmp", "/var/tmp", "/dev/shm", "."):
-        attempt("mark " + place, lambda: mark(place))
-    attempt("make shared memory", lambda: ctypes.CDLL(None).shmget(0xD0DA, 4096, 0o1000 | 0o666) >= 0)
-    attempt("become the build's user", lambda: subprocess.run(["/app/as-agent", "-p", "-c", "id -u"], capture_output=True, text=True).stdout.strip() == "1000" and os.getuid() != 1000)
-    print(json.dumps(found))
+            while written < 400 * MB:
+                written += f.write(b"x" * MB)
+        except OSError as error:
+            got["refused"] = errno.errorcode[error.errno]
+    print(json.dumps({"mb": written // MB, **got}))
+elif what == "many-files":
+    print(json.dumps({"mb": write_until_refused("part-%d.bin" % i for i in range(400)), **got}))
+elif what == "deleted-while-open":
+    held, written = [], 0
+    try:
+        for i in range(8):
+            f = open("gone-%d.bin" % i, "wb", buffering=0); os.unlink(f.name); held.append(f)
+            for _ in range(30):
+                written += f.write(b"x" * MB)
+    except OSError as error:
+        got["refused"] = errno.errorcode[error.errno]
+    print(json.dumps({"mb": written // MB, **got}))
+elif what == "deep-folders":
+    for _ in range(1100):
+        os.mkdir("d"); os.chdir("d")
+    print(json.dumps({"mb": write_until_refused("below-%d.bin" % i for i in range(240)), **got}))
+elif what == "empty-files":
+    i = 0
+    try:
+        while i < 200000:
+            open("e-%d" % i, "w").close(); i += 1
+    except OSError as error:
+        got["refused"] = errno.errorcode[error.errno]
+    print(json.dumps({"entries": i, **got}))
 elif what == "fork":
     while True:
         try:
@@ -66,43 +146,6 @@ elif what == "threads":
             threading.Thread(target=time.sleep, args=(60,), daemon=True).start()
         except RuntimeError:
             time.sleep(0.01)
-elif what == "memory":
-    blocks = []
-    while True:
-        blocks.append(bytearray(16 * 1024 * 1024))
-        for i in range(0, len(blocks[-1]), 4096):
-            blocks[-1][i] = 1
-elif what == "memory-spread":
-    for _ in range(8):
-        if os.fork() == 0:
-            block = bytearray(64 * 1024 * 1024)
-            for i in range(0, len(block), 4096):
-                block[i] = 1
-            time.sleep(60)
-            os._exit(0)
-    time.sleep(60)
-elif what == "big-file":
-    with open("big.bin", "wb") as f:
-        while True:
-            f.write(b"x" * (1024 * 1024))
-elif what == "many-files":
-    i = 0
-    while True:
-        i += 1
-        with open("part-%d.bin" % i, "wb") as f:
-            f.write(b"x" * (1024 * 1024))
-elif what == "flood":
-    while True:
-        sys.stdout.write("x" * 65536)
-elif what == "hang":
-    import signal
-    for number in range(1, 32):
-        try:
-            signal.signal(number, signal.SIG_IGN)
-        except (OSError, ValueError):
-            pass
-    while True:
-        time.sleep(1)
 elif what == "daemon":
     if os.fork() == 0:
         os.setsid()
@@ -112,325 +155,359 @@ elif what == "daemon":
             time.sleep(600)
         os._exit(0)
     os.wait()
+elif what == "read-command-lines":
+    said = b" ".join(open("/proc/%s/cmdline" % p, "rb").read() for p in os.listdir("/proc") if p.isdigit())
+    print(json.dumps({"names the test": b"test_secret_name" in said}))
+elif what == "snoop":
+    def attempt(action):
+        try:
+            return bool(action())
+        except BaseException:
+            return False
+    print(json.dumps({
+        "read the tests": attempt(lambda: open("/tests/hidden.py").read()),
+        "write the result": attempt(lambda: open("/logs/verifier/reward.json", "w").write("1")),
+        "become the build's user": attempt(lambda: __import__("subprocess").run(
+            ["/app/as-agent", "-p", "-c", "id -u"], capture_output=True, text=True).stdout.strip() == "1000"),
+        "change the program for a later case": attempt(lambda: open("/app/main.py", "a").write("#")),
+        "leave a file in a shared temporary folder": attempt(lambda: open("/tmp/left", "w").write("x")),
+        "leave shared memory": attempt(lambda: libc.shmget(0xD0DA, 4096, 0o1666) >= 0),
+    }))
 '''
-LIMIT_ATTACKS = {"fork": "fork without end", "threads": "threads without end", "memory": "use up memory in one process",
-                 "memory-spread": "use up memory spread over eight processes", "big-file": "one huge file",
-                 "many-files": "many files", "flood": "flood of output", "hang": "hang, ignoring every signal"}
 
 
-# ---------------------------------------------------------------- inside a container
+# ------------------------------------------------------------------------------------------------
+# inside a container
+# ------------------------------------------------------------------------------------------------
 
-def inside(mode: str) -> None:
+def inside(part: str, candidate: str, attack: str) -> dict:
     sys.path.insert(0, "/probe/lib")
-    import resource
-    import dodam_cli
     import dodam_judge as judge
 
-    def setup() -> None:
-        os.makedirs("/tests", exist_ok=True)
-        os.makedirs("/logs/verifier", exist_ok=True)
-        Path("/tests/answers.txt").write_text("expected-answer\n")
-        Path("/logs/verifier/reward.json").write_text('{"reward": 0.0}')
-        Path("/app/main.py").write_text(ATTACK)
-        shutil.copy("/bin/sh", "/app/as-agent")
-        subprocess.run(["chown", "-R", "agent:agent", "/app"], check=True)
-        os.chmod("/app/as-agent", 0o6755)
+    app = Path("/app")
+    app.mkdir(exist_ok=True)
+    (app / "main.py").write_text(ATTACK)
+    os.chmod(app / "main.py", 0o644)
+    uid = judge.free_user_id()
+    side = judge.Side(uid, uid)
+    capped = os.path.ismount(CASES)
+    work_root = Path(CASES if capped and candidate not in ("walk", "file-size-only") else tempfile.mkdtemp(dir="/var"))
+    os.chmod(work_root, 0o711)
 
-    def cli_run(limits: dict):
-        env = {"INTERFACE": "cli", "RUN_CMD": "python3 {app}/main.py",
-               **{key: str(limits[name]) for name, key in judge.CLI_LIMITS.items()}}
-        run = judge.CliRun(Path("/app"), Path("/tests"), Path("/logs/verifier"), env, "agent", {})
-        os.environ["DODAM_CLI_CONFIG"] = str(run.settings_file)
-        dodam_cli._config = None
-        return run
+    def taken() -> int:
+        room = os.statvfs(CASES) if capped else None
+        in_cases = (room.f_blocks - room.f_bfree) * room.f_frsize if room else 0
+        return judge.container_memory()["taken"] - in_cases
 
-    def user_tasks(uid: int) -> int:
-        return dodam_cli._running(uid)[1]
-
-    if mode.startswith("who-"):
-        setup()
-        if mode == "who-build-user":      # as the web judge runs a server today
-            judge.close_to_others(Path("/tests"), Path("/logs/verifier"))
-            out = subprocess.run(["su", "-s", "/bin/sh", "agent", "-c", "cd /tmp && python3 /app/main.py snoop"],
-                                 capture_output=True, text=True).stdout
-        elif mode == "who-own-user":      # a user of its own, and nothing else
-            judge.close_to_others(Path("/tests"), Path("/logs/verifier"))
-            out = subprocess.run(["python3", "/app/main.py", "snoop"], capture_output=True, text=True, cwd="/tmp",
-                                 user=54321, group=54321, extra_groups=[]).stdout
-        else:                             # a user of its own, everything closed, no new privileges
-            cli_run(LIMITS)
-            with dodam_cli.case() as c:
-                out = c.run(["snoop"]).out
-        tried = json.loads(out)
-        # what a later case would find is looked at from outside, after the case has ended
-        shared = [line for line in Path("/proc/sysvipc/shm").read_text().splitlines()[1:] if line.strip()]
-        succeeded = {
-            "read the tests": tried["read the tests"],
-            "write the result": tried["write the result"] or json.loads(Path("/logs/verifier/reward.json").read_text()) != {"reward": 0.0},
-            "become the build's user": tried["become the build's user"],
-            "leave a changed program for a later case": Path("/app/marker.txt").exists(),
-            "leave a file in a shared temporary folder for a later case":
-                any(Path(place, "marker.txt").exists() for place in ("/tmp", "/var/tmp", "/dev/shm")),
-            "leave shared memory for a later case": bool(shared),
-        }
-        print(json.dumps({"mode": mode, "succeeded": succeeded, "stopped": sum(not v for v in succeeded.values()),
-                          "of": len(succeeded)}))
-        return
-
-    if mode.startswith("limits-"):
-        setup()
-        run = cli_run(LIMITS)
-        uid = run.uid
-        mb = 1024 * 1024
-
-        def kernel_only(args: list[str]) -> None:
-            def before() -> None:
-                os.setsid()
-                resource.setrlimit(resource.RLIMIT_AS, (LIMITS["memory_mb"] * mb,) * 2)
-                resource.setrlimit(resource.RLIMIT_FSIZE, (LIMITS["disk_mb"] * mb,) * 2)
-                resource.setrlimit(resource.RLIMIT_CPU, (LIMITS["timeout_sec"] + 5,) * 2)
-                resource.setrlimit(resource.RLIMIT_NPROC, (LIMITS["processes"] + 1,) * 2)
-                dodam_cli._become(uid, uid)
-            proc = subprocess.Popen(["python3", "/app/main.py", *args], cwd=work, preexec_fn=before,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def tree_bytes(top: str) -> int:
+        total, stack = 0, [top]
+        while stack:
             try:
-                proc.communicate(timeout=LIMITS["timeout_sec"])
-            except subprocess.TimeoutExpired:
-                pass
-            dodam_cli._kill_user(uid, uid)
-            proc.kill()
-            proc.communicate()
-
-        def watching_only(args: list[str]) -> None:
-            def before() -> None:
-                os.setsid()
-                dodam_cli._become(uid, uid)
-            proc = subprocess.Popen(["python3", "/app/main.py", *args], cwd=work, preexec_fn=before,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            os.set_blocking(proc.stdout.fileno(), False)
-            seen, deadline = 0, time.monotonic() + LIMITS["timeout_sec"]
-            while proc.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-                try:
-                    seen += len(os.read(proc.stdout.fileno(), 1 << 20))
-                except BlockingIOError:
-                    pass
-                pids, tasks = dodam_cli._running(uid)
-                if (tasks > LIMITS["processes"] or dodam_cli._resident_bytes(pids) > LIMITS["memory_mb"] * mb
-                        or seen > LIMITS["output_kb"] * 1024 or dodam_cli._tree_bytes(Path(work))[0] > LIMITS["disk_mb"] * mb):
-                    break
-            dodam_cli._kill_user(uid, uid)
-            proc.kill()
-            proc.wait()
-
-        def chosen(args: list[str]) -> None:
-            c.run(args)
-
-        runner = {"limits-kernel-only": kernel_only, "limits-watching-only": watching_only, "limits-chosen": chosen}[mode]
-        results = {}
-        only = os.environ.get("ONLY_ATTACK")
-        for attack, name in LIMIT_ATTACKS.items():
-            if only and attack != only:
+                with os.scandir(stack.pop()) as entries:
+                    for entry in entries:
+                        info = entry.stat(follow_symlinks=False)
+                        total += info.st_blocks * 512
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+            except OSError:
                 continue
-            c = dodam_cli.Case()
-            work = str(c.work)
-            peak = {"tasks": 0, "resident_mb": 0, "disk_mb": 0}
-            stop = False
+        return total
 
-            def sample() -> None:
-                while not stop:
-                    pids, tasks = dodam_cli._running(uid)
-                    peak["tasks"] = max(peak["tasks"], tasks)
-                    peak["resident_mb"] = max(peak["resident_mb"], dodam_cli._resident_bytes(pids) // mb)
-                    peak["disk_mb"] = max(peak["disk_mb"], dodam_cli._tree_bytes(c.root)[0] // mb)
-                    time.sleep(0.002)
-            import threading
-            thread = threading.Thread(target=sample, daemon=True)
-            thread.start()
-            started = time.monotonic()
-            dodam_cli._spent.clear()
+    def tasks(pids: list[int]) -> int:
+        count = 0
+        for pid in pids:
             try:
-                runner([attack])
-                fault = None
-            except Exception as exc:  # the judge itself failed
-                fault = f"{type(exc).__name__}: {exc}"
-            seconds = round(time.monotonic() - started, 2)
-            stop = True
-            thread.join()
-            peak["disk_mb"] = max(peak["disk_mb"], dodam_cli._tree_bytes(c.root)[0] // mb)  # what it managed to write
-            dodam_cli._kill_user(uid, uid)
-            ended_early = seconds < LIMITS["timeout_sec"] - 0.5
-            within = (peak["tasks"] <= LIMITS["processes"] + 1 and peak["resident_mb"] <= LIMITS["memory_mb"] * 1.25
-                      and peak["disk_mb"] <= LIMITS["disk_mb"] * 1.25)
-            results[name] = {"seconds": seconds, "largest_seen": dict(peak), "judge_fault": fault,
-                             "stopped": fault is None and within and seconds < LIMITS["timeout_sec"] + 3,
-                             "ended_before_the_time_limit": ended_early}
-            shutil.rmtree(c.root, ignore_errors=True)
-        print(json.dumps({"mode": mode, "attacks": results}))
-        return
+                count += int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[17])
+            except (OSError, IndexError, ValueError):
+                pass
+        return count
 
-    if mode.startswith("looks-"):
-        # how often the judge measures memory and files: what gets past it between two looks, and what a case costs
-        setup()
-        every = float(mode.split("-")[1]) / 1000
-        dodam_cli.WATCH = every
-        dodam_cli.TICK = min(dodam_cli.TICK, every)
-        run = cli_run(LIMITS)
-        uid, mb = run.uid, 1024 * 1024
-        import threading
-        results = {}
-        for attack in ("memory", "memory-spread", "many-files"):
-            worst = []
-            for _ in range(5):
-                c = dodam_cli.Case()
-                peak = {"resident_mb": 0, "disk_mb": 0}
-                stop = False
+    def resident(pids: list[int]) -> int:
+        total = 0
+        for pid in pids:
+            try:
+                total += int(open(f"/proc/{pid}/statm").read().split()[1])
+            except (OSError, IndexError, ValueError):
+                pass
+        return total * os.sysconf("SC_PAGE_SIZE")
 
-                def sample() -> None:
-                    while not stop:
-                        peak["resident_mb"] = max(peak["resident_mb"], dodam_cli._resident_bytes(dodam_cli._alive(uid)) // mb)
-                        time.sleep(0.001)
-                thread = threading.Thread(target=sample, daemon=True)
-                thread.start()
-                dodam_cli._spent.clear()
-                c.run([attack])
-                stop = True
-                thread.join()
-                peak["disk_mb"] = dodam_cli._tree_bytes(c.root)[0] // mb
-                worst.append(peak["disk_mb"] if attack == "many-files" else peak["resident_mb"])
-                shutil.rmtree(c.root, ignore_errors=True)
-            results[LIMIT_ATTACKS[attack]] = {"limit_mb": LIMITS["disk_mb"] if attack == "many-files" else LIMITS["memory_mb"],
-                                              "largest_seen_mb_in_5_tries": max(worst)}
-        Path("/app/main.py").write_text("print('plain')\n")
+    def shared_left() -> int:
+        """MB still held in System V shared memory and message queues."""
+        held = 0
+        for name, column in (("shm", "size"), ("msg", "cbytes")):
+            lines = Path(f"/proc/sysvipc/{name}").read_text().splitlines()
+            for line in lines[1:]:
+                held += int(dict(zip(lines[0].split(), line.split())).get(column, 0))
+        return held // MB
+
+    def case(argv: list[str], *, kernel: dict, refuse: bool, watch, every: float = 0.002, as_uid: int = uid,
+             timeout: float = LIMITS["timeout_sec"]) -> dict:
+        """Run the attack once as a case, with the candidate's kernel limits and the candidate's watching."""
+        root = Path(tempfile.mkdtemp(dir=work_root))
+        os.chown(root, as_uid, as_uid)
+        whom = judge.Side(as_uid, as_uid)
+        whom.filter = judge.refusing_filter() if refuse else None
+        before, disk_before = taken(), os.statvfs(root)
+        peak = {"memory_mb": 0, "tasks": 0, "files_mb": 0}
+        stop = threading.Event()
+
+        def sample() -> None:
+            while not stop.is_set():
+                peak["memory_mb"] = max(peak["memory_mb"], (taken() - before) // MB)
+                peak["tasks"] = max(peak["tasks"], tasks(whom.alive()))
+                now = os.statvfs(root)
+                peak["files_mb"] = max(peak["files_mb"], (disk_before.f_bfree - now.f_bfree) * now.f_frsize // MB)
+                time.sleep(0.001)
+        kills_before = judge.killed_for_memory()
+        started = time.monotonic()
+        proc = subprocess.Popen(["python3", "/app/main.py", *argv], cwd=root, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                env={"HOME": str(root), "TMPDIR": str(root), "PATH": os.environ["PATH"]},
+                                preexec_fn=whom.entering(kernel))
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+        limit, fault = None, None
+        while proc.poll() is None:
+            if time.monotonic() - started > timeout:
+                limit = "time"
+                break
+            limit = watch(whom, root, before) if watch else None
+            if limit:
+                break
+            time.sleep(every)
+        try:
+            if not whom.end():
+                fault = "processes of the program could not be ended"
+        except BaseException as error:
+            fault = f"{type(error).__name__}: {error}"
+        seconds = round(time.monotonic() - started, 2)
+        stop.set()
+        sampler.join()
+        out = proc.stdout.read(4000).decode("utf-8", "replace")
+        proc.wait()
+        if limit is None and judge.killed_for_memory() > kills_before:
+            limit = "memory (ended by the kernel)"
+        if limit is None and proc.returncode == -25:
+            limit = "files (the kernel refused the size)"
+        said = json.loads(out) if out.startswith("{") else {}
+        try:
+            judge.remove_tree(root)
+        except OSError as error:
+            fault = fault or f"cannot remove the case's folder: {error}"
+        return {"case_fails_for": limit, "judge_fault": fault, "seconds": seconds, "program_says": said, **peak}
+
+    disk = LIMITS["disk_mb"] * MB
+    base = {"RLIMIT_CORE": 0, "RLIMIT_FSIZE": disk, "RLIMIT_NPROC": LIMITS["processes"]}
+
+    if part == "files":
+        watch = None
+        if candidate == "walk":
+            watch = lambda whom, root, before: "files" if tree_bytes(str(root)) > disk else None
+        return case([attack], kernel=base, refuse=True, watch=watch)
+
+    if part == "memory":
+        if candidate == "processes-only":
+            watch = lambda whom, root, before: "memory" if resident(whom.alive()) > LIMITS["memory_mb"] * MB else None
+        else:
+            watch = lambda whom, root, before: "memory" if taken() - before > LIMITS["memory_mb"] * MB else None
+        return case([attack], kernel=base, refuse=False, watch=watch)
+
+    if part == "outliving":
+        watch = lambda whom, root, before: "memory" if taken() - before > LIMITS["memory_mb"] * MB else None
+        result = case([attack], kernel=base, refuse=candidate == "refused", watch=watch)
+        result["left_after_the_case_mb"] = shared_left()
+        if candidate == "removed-afterwards":
+            pid = os.fork()
+            if pid == 0:
+                import ctypes
+                libc = ctypes.CDLL(None)
+                os.setgroups([]); os.setgid(uid); os.setuid(uid)
+                for name, column, call in (("shm", "shmid", libc.shmctl), ("msg", "msqid", libc.msgctl)):
+                    lines = Path(f"/proc/sysvipc/{name}").read_text().splitlines()
+                    for line in lines[1:]:
+                        call(int(dict(zip(lines[0].split(), line.split()))[column]), 0, None)
+                os._exit(0)
+            os.waitpid(pid, 0)
+        result["left_for_the_next_case_mb"] = shared_left()
+        after = case(["plain"], kernel=base, refuse=candidate == "refused", watch=watch)
+        result["the_next_case_runs"] = after["case_fails_for"] is None and after["judge_fault"] is None
+        return result
+
+    if part == "processes":
+        kernel = dict(base)
+        watch = lambda whom, root, before: "processes" if tasks(whom.alive()) > LIMITS["processes"] else None
+        if candidate == "watching-only":
+            del kernel["RLIMIT_NPROC"]
+        elif candidate == "kernel-cap-one-above-and-watching":
+            kernel["RLIMIT_NPROC"] = LIMITS["processes"] + 1
+        else:
+            watch = None
+        return case([attack], kernel=kernel, refuse=True, watch=watch)
+
+    if part == "interval":
+        every = float(candidate) / 1000
+        watch = lambda whom, root, before: "memory" if taken() - before > LIMITS["memory_mb"] * MB else None
+        over = sorted(case([attack], kernel=base, refuse=True, watch=watch, every=every)["memory_mb"] for _ in range(20))
+        (app / "sleeper.py").write_text("import time\ntime.sleep(2)\n")
+        shares = []
+        for _ in range(5):
+            # the judge's processor use: the processor time this process used while a program slept
+            # for two seconds and was watched, as a share of those two seconds
+            used, clock = time.process_time(), time.monotonic()
+            proc = subprocess.Popen(["python3", "/app/sleeper.py"], preexec_fn=side.entering(base))
+            before = taken()
+            while proc.poll() is None:
+                watch(side, None, before)
+                time.sleep(every)
+            shares.append(round((time.process_time() - used) / (time.monotonic() - clock) * 100, 1))
+        return {"memory_mb_reached_in_20_tries": {"smallest": over[0], "median": over[10], "largest": over[-1]},
+                "judge_processor_percent_smallest_and_largest_of_5": [min(shares), max(shares)]}
+
+    if part == "ending":
+        proc = subprocess.Popen(["python3", "/app/main.py", attack], preexec_fn=side.entering(base),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
+        started = time.monotonic()
+        if candidate == "signal-the-group":
+            try:
+                os.killpg(proc.pid, 9)
+            except ProcessLookupError:
+                pass
+        elif candidate == "walk-the-process-list":
+            for _ in range(200):
+                pids = side.alive()
+                if not pids:
+                    break
+                for pid in pids:
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+                time.sleep(0.01)
+        else:
+            side.end()
+        seconds = round(time.monotonic() - started, 3)
+        time.sleep(0.3)
+        left = len(side.alive())
+        side.end()
+        return {"seconds": seconds, "survivors": left}
+
+    if part == "removing":
+        top = Path(tempfile.mkdtemp(dir="/var"))
+        os.chdir(top)
+        if attack == "deep-folders":
+            for _ in range(1100):
+                os.mkdir("d"); os.chdir("d")
+        else:
+            for i in range(20000):
+                open("e-%d" % i, "w").close()
+        os.chdir("/")
+        started = time.monotonic()
+        try:
+            shutil.rmtree(top) if candidate == "library" else judge.remove_tree(top)
+            error = None
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {str(exc)[:80]}"
+        return {"removed": not top.exists(), "error": error, "seconds": round(time.monotonic() - started, 3)}
+
+    if part == "closing":
+        tests, logs = Path("/tests"), Path("/logs/verifier")
+        tests.mkdir(); logs.mkdir(parents=True)
+        (tests / "hidden.py").write_text("SECRET")
+        agent = judge.Side.named("agent")
+        judge.give_app_to(app, "agent")
+        if candidate == "before-anything-runs":
+            judge.keep_private(tests)
+        ok, _ = judge.run_build("cp -R /tests /app/stolen", app, agent, dict(os.environ), 20)
+        judge.keep_private(tests)
+        return {"hidden_files_the_build_took": len(list((app / "stolen").rglob("*.py"))) if (app / "stolen").exists() else 0}
+
+    if part == "command-line":
+        argv = ["python3", "-c", "import time; time.sleep(3)"]
+        env = dict(os.environ)
+        if candidate == "arguments":
+            argv.append("/tests/security/test_secret_name.py")
+        else:
+            env["OPTIONS"] = "/tests/security/test_secret_name.py"
+        judging = subprocess.Popen(argv, env=env)
+        result = case(["read-command-lines"], kernel=base, refuse=True, watch=None)
+        judging.kill()
+        return result["program_says"]
+
+    if part == "who":
+        tests, logs = Path("/tests"), Path("/logs/verifier")
+        tests.mkdir(); logs.mkdir(parents=True)
+        (tests / "hidden.py").write_text("SECRET")
+        judge.give_app_to(app, "agent")
+        shutil.copy("/bin/sh", "/app/as-agent")
+        os.chown("/app/as-agent", 1000, 1000)
+        os.chmod("/app/as-agent", 0o6755)
+        whom = uid
+        if candidate == "the-builds-user":
+            whom = 1000
+        elif candidate == "a-user-of-its-own-and-nothing-else":
+            pass
+        else:
+            judge.keep_private(tests); judge.keep_private(logs)
+            judge.open_for_reading(app)
+            judge.close_writable_places()
+        result = case(["snoop"], kernel=base, refuse=candidate == "chosen", watch=None, as_uid=whom)
+        got = result["program_says"]
+        return {"succeeded": got, "stopped": sum(not v for v in got.values()), "of": len(got)}
+
+    if part == "time":
+        (app / "plain.py").write_text("print('plain')\n")
+        settings = Path("/probe/settings.json")
+        settings.write_text(json.dumps({"command": ["python3", "/app/plain.py"], "uid": uid, "gid": uid, "limits": LIMITS,
+                                        "work_root": CASES, "fault_file": "/probe/faults", "env": {"PATH": os.environ["PATH"]}}))
+        os.environ["DODAM_CLI_CONFIG"] = str(settings)
+        import dodam_cli
         times = []
-        cpu_before = time.process_time()
-        wall_before = time.monotonic()
         for _ in range(200):
             started = time.perf_counter()
-            dodam_cli._spent.clear()
-            with dodam_cli.case(files={"in.txt": "x"}) as c:
-                c.run([])
-            times.append(time.perf_counter() - started)
-        Path("/app/main.py").write_text("import time\ntime.sleep(2)\n")
-        cpu_before = time.process_time()
-        dodam_cli._spent.clear()
-        with dodam_cli.case() as c:
-            c.run([])
-        print(json.dumps({"mode": mode, "looks_every_ms": every * 1000, "past_the_limit": results,
-                          "median_ms_of_a_plain_case": round(statistics.median(times) * 1000, 2),
-                          "judge_processor_share_while_a_program_runs_percent":
-                              round((time.process_time() - cpu_before) / 2 * 100, 1)}))
-        return
-
-    if mode.startswith("end-"):
-        setup()
-        run = cli_run({**LIMITS, "processes": 64})
-        uid = run.uid
-        results = {}
-        for attack in ("daemon", "fork"):
-            c = dodam_cli.Case()
-
-            def before() -> None:
-                os.setsid()
-                resource.setrlimit(resource.RLIMIT_NPROC, (65, 65))
-                dodam_cli._become(uid, uid)
-            proc = subprocess.Popen(["python3", "/app/main.py", attack], cwd=c.work, preexec_fn=before,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.0)
-            started = time.monotonic()
-            if mode == "end-group":
-                try:
-                    os.killpg(proc.pid, 9)
-                except ProcessLookupError:
-                    pass
-            elif mode == "end-walk":       # the web judge's way: three rounds over the process table
-                for _ in range(3):
-                    pids = judge.user_pids(uid)
-                    if not pids:
-                        break
-                    for pid in pids:
-                        try:
-                            os.kill(pid, 9)
-                        except ProcessLookupError:
-                            pass
-                    time.sleep(0.2)
+            if candidate == "the-program-alone":
+                subprocess.run(["python3", "/app/plain.py"], capture_output=True)
             else:
-                dodam_cli._kill_user(uid, uid)
-            seconds = round(time.monotonic() - started, 3)
-            time.sleep(0.3)
-            results[attack] = {"seconds": seconds, "survivors": len(dodam_cli._alive(uid))}
-            dodam_cli._kill_user(uid, uid)
-            proc.wait()
-            shutil.rmtree(c.root, ignore_errors=True)
-        print(json.dumps({"mode": mode, "after": results}))
-        return
+                dodam_cli._spent.clear()
+                with dodam_cli.case(files={"in.txt": "x"}) as c:   # the judge's own case, whole
+                    c.run([])
+            times.append(time.perf_counter() - started)
+        return {"median_ms": round(statistics.median(times) * 1000, 2)}
 
-    if mode == "time":
-        setup()
-        Path("/app/main.py").write_text("print('plain')\n")
-        runs = 200
-
-        def timed(action) -> float:
-            times = []
-            for _ in range(runs):
-                started = time.perf_counter()
-                action()
-                times.append(time.perf_counter() - started)
-            return round(statistics.median(times) * 1000, 2)
-
-        plain = timed(lambda: subprocess.run(["python3", "/app/main.py"], capture_output=True))
-        su = timed(lambda: subprocess.run(["su", "-s", "/bin/sh", "agent", "-c", "python3 /app/main.py"], capture_output=True))
-        cli_run(LIMITS)
-
-        def one_case() -> None:
-            dodam_cli._spent.clear()
-            with dodam_cli.case(files={"in.txt": "x"}) as c:
-                c.run([])
-        chosen = timed(one_case)
-        print(json.dumps({"mode": mode, "runs": runs, "median_ms": {"the program alone, as root": plain,
-                          "through su as the build's user": su, "a whole case as chosen": chosen}}))
-        return
-
-    if mode == "address-space":
-        # does each language's own runtime start under a limit on address space, the kernel's only per-process memory limit?
-        env = dict(line.split("=", 1) for line in Path("/probe/lang.env").read_text().splitlines())
-        shutil.copytree("/probe/solution", "/app", dirs_exist_ok=True)
-        if env["DEPS_DIR"] and env["DEPS_LINKS"]:
-            judge.restore_deps(Path("/app"), Path(env["DEPS_DIR"]), env["DEPS_LINKS"].split(","))
-        subprocess.run(["chown", "-R", "agent:agent", "/app"], check=True)
-        if env["BUILD_CMD"]:
-            subprocess.run(["su", "-s", "/bin/sh", "agent", "-c", "cd /app && " + env["BUILD_CMD"]], check=True, capture_output=True)
-        command = [part.replace("{app}", "/app") for part in env["RUN_CMD"].split()]
-        work = tempfile.mkdtemp()
-        Path(work, "in.csv").write_text("a,b\n1,2\n")
-        os.chmod(work, 0o777)
-        found = {}
-        for megabytes in (512, 1024, 4096, None):
-            def before() -> None:
-                if megabytes:
-                    resource.setrlimit(resource.RLIMIT_AS, (megabytes * 1024 * 1024,) * 2)
-            done = subprocess.run(command + ["in.csv", "-"], cwd=work, preexec_fn=before, capture_output=True, text=True,
-                                  user=54321, group=54321, extra_groups=[])
+    if part == "language":
+        import resource
+        command = json.loads(os.environ["RUN_COMMAND"])
+        shutil.copytree("/probe/app", "/app", dirs_exist_ok=True)
+        links = [name for name in os.environ.get("DEPS_LINKS", "").split(",") if name]
+        if links:
+            judge.restore_deps(app, Path(os.environ["DEPS_DIR"]), links)
+        built = subprocess.run(os.environ["BUILD_COMMAND"] or "true", shell=True, cwd=app, capture_output=True)
+        if built.returncode != 0:
+            return {"error": "the sample did not build: " + built.stderr.decode("utf-8", "replace")[-200:]}
+        runs = {}
+        for mb in (512, 1024, 4096, 0):
+            def limit(mb=mb):
+                if mb:
+                    resource.setrlimit(resource.RLIMIT_AS, (mb * MB, mb * MB))
             try:
-                found[str(megabytes or "no limit")] = done.returncode == 0 and json.loads(done.stdout) == [{"a": "1", "b": "2"}]
-            except ValueError:
-                found[str(megabytes or "no limit")] = False
-        peak_threads = 0
-        proc = subprocess.Popen(command + ["-", "-"], cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                user=54321, group=54321, extra_groups=[])
-        for _ in range(100):
-            time.sleep(0.01)
-            peak_threads = max(peak_threads, dodam_cli._running(54321)[1])
-        proc.communicate(b"a,b\n1,2\n")
-        print(json.dumps({"mode": mode, "runs_under_address_space_limit_mb": found, "threads_while_waiting_for_input": peak_threads}))
-        return
-    raise SystemExit(f"unknown mode {mode}")
+                done = subprocess.run(command, input=b"a\n1\n", capture_output=True, preexec_fn=limit, timeout=60)
+                runs[str(mb) if mb else "no limit"] = done.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                runs[str(mb) if mb else "no limit"] = False
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        threads = tasks([proc.pid])
+        proc.kill()
+        return {"runs_under_address_space_limit_mb": runs, "threads_while_waiting_for_input": threads}
+    raise SystemExit(f"unknown part {part}")
 
 
-# ---------------------------------------------------------------- on the host
+# ------------------------------------------------------------------------------------------------
+# on the host
+# ------------------------------------------------------------------------------------------------
 
-def in_container(image: str, mode: str, extra: dict[str, Path] | None = None, memory_mb: int = 2048,
-                 attack: str = "") -> dict:
+def in_container(part: str, candidate: str, attack: str = "", image: str = "dodam-bench/python:dev",
+                 memory_mb: int = CAPS["memory_mb"], extra: dict | None = None, env: dict | None = None) -> dict:
     name = f"dodam-probe-{uuid.uuid4().hex[:12]}"
     with tempfile.TemporaryDirectory() as tmp:
         probe = Path(tmp) / "probe"
@@ -439,63 +516,84 @@ def in_container(image: str, mode: str, extra: dict[str, Path] | None = None, me
         shutil.copy(BENCH / "dodambench/judge.py", probe / "lib/dodam_judge.py")
         shutil.copy(BENCH / "dodambench/dodam_cli.py", probe / "lib/dodam_cli.py")
         for target, source in (extra or {}).items():
-            if source.is_dir():
-                shutil.copytree(source, probe / target)
-            else:
-                shutil.copy(source, probe / target)
+            shutil.copytree(source, probe / target)
+        flags = [flag for key, value in (env or {}).items() for flag in ("-e", f"{key}={value}")]
         try:
-            # The cap on processes is this experiment's own safety net: a candidate that cannot stop a
-            # fork bomb must not take the whole machine down with it. The verifier gives the judge no such cap.
             subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0",
                             "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
-                            "--pids-limit", str(SAFETY_PROCESSES), "-e", f"ONLY_ATTACK={attack}", image,
-                            "/opt/judge/bin/python", "/probe/probe.py", "inside", mode], check=True, capture_output=True)
+                            "--pids-limit", str(CAPS["processes"]),
+                            "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
+                            *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack],
+                           check=True, capture_output=True)
             subprocess.run(["docker", "cp", f"{probe}/.", f"{name}:/probe"], check=True, capture_output=True)
             done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
-            return {"mode": mode, "error": "the container did not finish in 300 seconds"}
+            return {"error": "the container did not finish in 300 seconds"}
         finally:
             subprocess.run(["docker", "rm", "--force", name], capture_output=True)
     lines = [line for line in done.stdout.splitlines() if line.startswith("{")]
     if not lines:
         why = (done.stdout + done.stderr).strip().splitlines()[-1:] or [""]
-        return {"mode": mode, "error": f"the judge's own process ended with status {done.returncode} "
-                                       f"(137 means it was killed, as when the container runs out of memory) {why[0][:200]}"}
+        return {"error": f"the judging process ended with status {done.returncode} (137: the kernel ended it "
+                         f"when the container's memory ran out): {why[0][:160]}"}
     return json.loads(lines[-1])
 
 
+def table(part: str, candidates: list[str], attacks: list[str], **room) -> dict:
+    return {candidate: {attack: in_container(part, candidate, attack, **room) for attack in attacks}
+            for candidate in candidates}
+
+
 def main() -> None:
-    sys.path.insert(0, str(BENCH))
-    from dodambench.convert import to_harbor
     from dodambench.languages import LANGUAGES
     from dodambench.task import load_task
+    from dodambench.convert import verifier_env
 
-    python = "dodam-bench/python:dev"
-    report: dict = {"limits_of_a_case": LIMITS}
-    report["who_the_program_runs_as"] = [in_container(python, mode) for mode in
-                                         ("who-build-user", "who-own-user", "who-closed")]
-    report["how_limits_are_enforced"] = []
-    for mode in ("limits-kernel-only", "limits-watching-only", "limits-chosen"):
-        attacks = {}
-        for attack, name in LIMIT_ATTACKS.items():  # a container for each attack, so one failure spoils no other
-            found = in_container(python, mode, attack=attack)
-            attacks[name] = found.get("attacks", {}).get(name, {"stopped": False, "error": found.get("error")})
-        report["how_limits_are_enforced"].append({"mode": mode, "attacks": attacks})
-    report["how_a_case_is_ended"] = [in_container(python, mode) for mode in ("end-group", "end-walk", "end-chosen")]
-    report["time_per_case"] = in_container(python, "time")
-    report["how_often_the_judge_looks"] = [in_container(python, f"looks-{ms}") for ms in (10, 5, 2, 1)]
-    task = load_task(BENCH / "tasks/cli-csv-json")
-    report["each_language"] = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        for lang in LANGUAGES:
-            harbor = to_harbor(task, lang, Path(tmp))
-            extra = {"solution": harbor / "steps/build/solution/variants/secure", "lang.env": harbor / "tests/lang.env"}
-            report["each_language"][lang] = in_container(LANGUAGES[lang].image, "address-space", extra, memory_mb=4096)
+    report = {
+        "limits_of_a_case": LIMITS, "caps_of_every_container": CAPS,
+        "when_the_tests_are_closed": table("closing", ["after-the-build", "before-anything-runs"], ["the build reads the tests"]),
+        "what_a_command_line_says": table("command-line", ["arguments", "environment"], ["the program reads the process list"]),
+        "who_the_program_runs_as": table("who", ["the-builds-user", "a-user-of-its-own-and-nothing-else", "chosen"], ["snoop"]),
+        "what_bounds_files": table("files", ["file-size-only", "walk", "capped-folder"],
+                                   ["one-huge-file", "many-files", "deleted-while-open", "deep-folders", "empty-files"]),
+        "what_counts_as_memory": table("memory", ["processes-only", "whole-container"],
+                                       ["memory", "memory-spread", "memory-file", "shared-memory"]),
+        "what_outlives_a_process": {
+            **table("outliving", ["kept", "removed-afterwards", "refused"], ["shared-memory", "message-queues"]),
+            "in a container of 384 MB": table("outliving", ["removed-afterwards", "refused"],
+                                              ["shared-memory-to-the-brim"], memory_mb=384)},
+        "what_bounds_processes": table("processes", ["watching-only", "kernel-cap-one-above-and-watching", "kernel-cap"],
+                                       ["fork", "threads"]),
+        "how_a_case_is_ended": table("ending", ["signal-the-group", "walk-the-process-list", "as-the-programs-user"],
+                                     ["daemon", "fork"]),
+        "how_what_a_case_left_is_removed": table("removing", ["library", "bounded"], ["deep-folders", "empty-files"]),
+        "how_often_the_judge_measures": table("interval", ["10", "5", "2", "1"], ["memory"]),
+        "time_of_a_plain_case": table("time", ["the-program-alone", "a-whole-case"], ["plain"]),
+    }
+    sample = load_task(BENCH / "tasks/cli-csv-json")
+    languages = {}
+    for key in sample.languages:
+        language = LANGUAGES[key]
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "app"
+            shutil.copytree(sample.root / "solutions/secure" / key / "build", source)
+            settings = verifier_env(sample, key)
+            command = language.run_cmd.replace("{app}", "/app").split() + ["-", "-"]
+            languages[key] = in_container("language", "-", "-", image=language.image, memory_mb=1400,
+                                          extra={"app": source},
+                                          env={"RUN_COMMAND": json.dumps(command), "BUILD_COMMAND": language.build_cmd,
+                                               "DEPS_DIR": settings.get("DEPS_DIR", ""),
+                                               "DEPS_LINKS": settings.get("DEPS_LINKS", "")})
+    report["each_language"] = languages
     print(json.dumps(report, indent=1))
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["inside"]:
-        inside(sys.argv[2])
+        try:
+            print(json.dumps(inside(*sys.argv[2:5])))
+        except BaseException as error:  # the candidate could not even run: that is its result
+            print(json.dumps({"error": f"{type(error).__name__}: {str(error)[:200]}"}))
     else:
+        sys.path.insert(0, str(BENCH))
         main()

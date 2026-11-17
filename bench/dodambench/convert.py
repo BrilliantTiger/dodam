@@ -11,7 +11,7 @@ import stat
 from pathlib import Path
 
 from .languages import DEPS_DIR, LANGUAGES, Language
-from .task import CLI_LIMIT_KEYS, Task, materialize, validate
+from .task import CLI_LIMIT_KEYS, PROCESS_CAP, Task, cases_mount, materialize, validate
 
 JUDGE_SOURCE = Path(__file__).with_name("judge.py")
 CLI_SOURCE = Path(__file__).with_name("dodam_cli.py")
@@ -179,6 +179,13 @@ def to_harbor(task: Task, lang_key: str, out_root: Path | str, image: str | None
     shutil.copy(JUDGE_SOURCE, tests / "lib" / "dodam_judge.py")
     if task.meta.get("interface") == "cli":
         shutil.copy(CLI_SOURCE, tests / "lib" / "dodam_cli.py")
+        # What Harbor's task settings cannot say goes into the container through a file Harbor merges
+        # into its own: a cap on processes, and the capped memory-backed folder the cases live in.
+        (out / "environment").mkdir()
+        (out / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n"
+            f"    pids_limit: {PROCESS_CAP}\n"
+            f"    tmpfs:\n      - {cases_mount(task)}\n", encoding="utf-8")
     env = verifier_env(task, lang_key)
     (tests / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
     _executable(tests / "test.sh", TEST_SH)

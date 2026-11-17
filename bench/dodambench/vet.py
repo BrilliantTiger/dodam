@@ -25,9 +25,9 @@ import uuid
 from pathlib import Path
 
 from .convert import to_harbor, verifier_env
-from .judge import JudgeFault, judge
+from .judge import JUDGE_ROOM_MB, JudgeFault, judge
 from .languages import LANGUAGES, Language
-from .task import Task, load_task, materialize, validate
+from .task import PROCESS_CAP, Task, cases_mount, load_task, materialize, validate
 
 FEATURE_KINDS = ("functional", "boundary")
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
@@ -134,23 +134,61 @@ def _missing_tools(lang_env: dict[str, str], path: str, deps_cmd: str = "") -> l
     return missing
 
 
-def docker_create_cmd(name: str, image: str, step: str, room: dict | None = None) -> list[str]:
+MACHINE_SHARE = 0.75  # how much of the Docker machine's memory one container may be capped at
+
+
+def machine_memory_mb() -> int | None:
+    """The memory of the machine Docker runs containers on; None when Docker does not say."""
+    try:
+        res = subprocess.run(["docker", "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True,
+                             timeout=60)
+        return int(res.stdout.strip()) // 2**20 or None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def container_room(task: Task, machine_mb: int | None) -> dict:
+    """The caps of the container a solution is judged in: memory, processors, processes and, for a
+    command-line task, the capped folder of the cases.
+
+    A memory cap above what the Docker machine has would not hold there, so it is lowered to a share
+    of the machine and the result says so. A command-line task that does not fit under the lowered
+    cap is refused."""
+    asked = int(task.limits["memory_mb"])
+    memory = asked if machine_mb is None else min(asked, int(machine_mb * MACHINE_SHARE))
+    room = {"memory_mb": memory, "cpus": task.limits["cpus"], "processes": PROCESS_CAP}
+    if memory != asked:
+        room["adjusted"] = {"key": "limits.memory_mb", "asked_mb": asked, "given_mb": memory,
+                            "machine_mb": machine_mb,
+                            "message": f"the task asks for {asked} MB but the Docker machine has {machine_mb} MB; "
+                                       f"the container is capped at {memory} MB"}
+    if task.meta.get("interface") == "cli":
+        needed = task.cli["case_memory_mb"] + task.cli["case_disk_mb"] + JUDGE_ROOM_MB
+        if memory < needed:
+            raise VetError(json.dumps({"severity": "error", "file": "task.toml", "key": "limits.memory_mb",
+                                       "message": f"the cases need {needed} MB of container memory and this "
+                                                  f"Docker machine can give {memory} MB"}))
+        room["cases"] = cases_mount(task)
+    return room
+
+
+def docker_create_cmd(name: str, image: str, step: str, room: dict) -> list[str]:
     """A stopped container that, once /tests and /solution are copied in, judges the solution like the verifier.
 
-    For a command-line task the container gets the memory and processors the task gives the verifier,
-    as Harbor gives them, because the program's own limits are measured against that room."""
+    Every such container is capped in memory (with no swap beyond it), processors and processes, so
+    that neither a build nor a program can take the Docker machine down."""
     script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && exec /opt/judge/bin/python "
               f"/tests/lib/dodam_judge.py --tests /tests --app /app --step {shlex.quote(step)} --out /logs/verifier")
-    sized = []
-    if room:
-        sized = ["--memory", f"{room['memory_mb']}m", "--memory-swap", f"{room['memory_mb']}m",
-                 "--cpus", str(room["cpus"])]
-    return ["docker", "create", "--name", name, "--network", "none", "--user", "0", *sized,
+    caps = ["--memory", f"{room['memory_mb']}m", "--memory-swap", f"{room['memory_mb']}m",
+            "--cpus", str(room["cpus"]), "--pids-limit", str(room["processes"])]
+    if room.get("cases"):
+        caps += ["--tmpfs", room["cases"]]
+    return ["docker", "create", "--name", name, "--network", "none", "--user", "0", *caps,
             "-e", "DODAM_APP_USER=agent", image, "sh", "-c", script]
 
 
 def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Path, step: str,
-                   timeout: float = 1800, room: dict | None = None) -> dict:
+                   room: dict, timeout: float = 1800) -> dict:
     """Judge one solution in a fresh container of the image; the judge's files land in out_dir."""
     name = f"dodam-vet-{uuid.uuid4().hex[:12]}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,18 +209,21 @@ def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Pat
 
 def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]:
     results = []
-    room = task.limits if task.meta.get("interface") == "cli" else None
+    room = container_room(task, machine_memory_mb())
     with tempfile.TemporaryDirectory(prefix="dodam-vet-") as work:
         harbor = to_harbor(task, lang, Path(work), image)
         for step in task.steps:
             for variant in task.solutions_for(lang, step.name):
-                result = {"lang": lang, "step": step.name, "solution": variant.label,
-                          "expect": variant.expect, "weakness": variant.weakness, "image": image}
+                result = {"lang": lang, "step": step.name, "solution": variant.label, "expect": variant.expect,
+                          "weakness": variant.weakness, "image": image, "separated": True,
+                          "caps": {k: v for k, v in room.items() if k != "adjusted"}}
+                if "adjusted" in room:
+                    result["adjusted"] = room["adjusted"]
                 started = time.monotonic()
                 try:
                     judged = judge_in_image(image, harbor / "tests",
                                             harbor / "steps" / step.name / "solution" / "variants" / variant.label,
-                                            out_dir / step.name / variant.label, step.name, room=room)
+                                            out_dir / step.name / variant.label, step.name, room)
                 except JudgeFault as exc:
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
                 except (subprocess.SubprocessError, OSError, ValueError) as exc:
@@ -196,14 +237,23 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
 
 
 def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE,
-        image: str | None = None) -> list[dict]:
+        image: str | None = None, unseparated: bool = False) -> list[dict]:
     """Judge each solution of one language at its step; write the judge's files and vet.json to out_dir.
 
-    With an image, judge inside that language image instead of with this machine's tools."""
+    With an image, judge inside that language image, where the program is separated from the judge.
+    Without one the solutions run with this machine's tools as the user who runs this: nothing
+    separates them from the judge, so it must be asked for with unseparated=True, every result says
+    "separated": false, and it is only for the project's own prepared solutions."""
     problems = validate(task)
     if problems:
         raise VetError("; ".join(problems))
     out_dir = Path(out_dir)
+    if image is None and not unseparated:
+        raise VetError(json.dumps({
+            "severity": "error", "file": "vet", "key": "image",
+            "message": "judging without an image runs the solutions as the user who runs this, with nothing "
+                       "between them and the judge; name an image, or ask for it with --unseparated when "
+                       "every solution is the project's own"}))
     if image is not None:
         results = vet_in_image(task, lang, out_dir, image or LANGUAGES[lang].image)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -226,7 +276,7 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
         for step in task.steps:
             for variant in task.solutions_for(lang, step.name):
                 result = {"lang": lang, "step": step.name, "solution": variant.label,
-                          "expect": variant.expect, "weakness": variant.weakness}
+                          "expect": variant.expect, "weakness": variant.weakness, "separated": False}
                 if missing:
                     result.update(ok=False, skipped=True, problems=[f"not on this machine: {', '.join(missing)}"])
                     results.append(result)
@@ -237,7 +287,7 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
                 started = time.monotonic()
                 try:
                     judged = judge(tests_dir, app_dir, step.name, out_dir / step.name / variant.label,
-                                   lang_env=lang_env, extra_env=extra_env)
+                                   lang_env=lang_env, extra_env=extra_env, unseparated=True)
                 except JudgeFault as exc:
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
                 else:
@@ -258,15 +308,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", type=Path, default=Path("vet-out"))
     p.add_argument("--image", nargs="?", const="", default=None,
                    help="judge inside the language image (default tag dodam-bench/<language>:dev) instead of on this machine")
+    p.add_argument("--unseparated", action="store_true",
+                   help="judge with this machine's tools as the user who runs this, with nothing between the "
+                        "solutions and the judge; only for the project's own prepared solutions")
     a = p.parse_args(argv)
     task = load_task(a.task)
     langs = a.lang or [lang for lang in task.languages if (task.root / "solutions" / "secure" / lang).is_dir()]
     good = True
     for lang in langs:
         try:
-            results = vet(task, lang, a.out / task.id / lang, image=a.image)
+            results = vet(task, lang, a.out / task.id / lang, image=a.image, unseparated=a.unseparated)
         except VetError as exc:
-            print(f"task {task.id} is not valid: {exc}", file=sys.stderr)
+            text = str(exc)
+            if not text.startswith("{"):
+                text = json.dumps({"severity": "error", "file": "task", "key": "", "message": text})
+            print(text)  # JSON first; the line a person reads is made from it
+            print(f"task {task.id} cannot be vetted: {json.loads(text)['message']}", file=sys.stderr)
             return 2
         for r in results:
             mark = "skip" if r.get("skipped") else ("ok" if r["ok"] else "FAIL")

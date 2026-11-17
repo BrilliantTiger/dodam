@@ -16,31 +16,40 @@ started and where the case's input files are; `outside`, a neighbour the program
 its working folder; and a home and temporary folder of its own. The test sees the program only from
 outside: its standard output and error, its exit code and the files it left.
 
-Every case has limits: time (added up over the runs of the case), memory (the resident memory of all its
-processes), output (standard output plus standard error), processes (threads count, as the kernel counts
-them), and files written. When the
-program breaks one it is killed and the case fails, whatever the test asserts; so does a program that
-leaves processes behind when it ends. After every run nothing of the program is left running, and after
-every case its folder is removed.
+Every case has limits. In the verifier each is a bound that holds whatever the program does:
+
+- time, added up over the runs of the case: the judge ends the program when it is up;
+- output, standard output plus standard error: the judge stops reading and ends the program;
+- processes and threads: the kernel refuses one more than the limit, for the program's user alone;
+- files: the case's folder lives in a memory-backed folder that the container caps at the limit, so
+  no more can be written, whether in many files, deep trees or files deleted while open; one file
+  cannot be made larger than the limit either, not even a sparse one;
+- memory: the judge measures, every two thousandths of a second, everything the kernel counts for
+  the container beyond what was there when the run began, and ends the program above the limit.
+  Between two measurements the program can be above it; it can never be above the container's
+  memory cap, where the kernel ends the program first, and that fails the case as well. Memory
+  that would outlive the program's processes cannot be taken: the calls for it are refused.
+
+A case that broke a limit fails, whatever the test asserts and even when the test would have been
+left unjudged; so does a program that leaves processes behind, and a case whose folder cannot be
+removed. After every run nothing of the program is left running, and after every case its folder
+is removed.
 
 In the verifier the program runs as a user of its own that owns nothing, in no group, and that cannot
-gain privileges; the judge has taken away its write access everywhere but the case's folder. On a
-developer machine, where the judge is not root, the program runs as the developer and only the time,
-output and file-size limits hold. A fault of the judge itself is written to the fault file the judge
-names and is never reported as a failure of the program.
+gain privileges; the judge has taken away its write access everywhere but the case's folder. Without
+that separation (only for the project's own prepared solutions) the program runs as the judge's user
+and only the time, output and file-size limits hold. A fault of the judge itself is written to the
+fault file the judge names and is never reported as a failure of the program.
 """
 from __future__ import annotations
 
-import ctypes
 import errno
 import json
 import os
 import selectors
-import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -48,22 +57,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    import resource
-except ImportError:  # not a POSIX machine
-    resource = None
+    import dodam_judge as _judge   # in the verifier the judge sits next to this file under that name
+except ImportError:
+    import judge as _judge
 
+resource = _judge.resource
 CONFIG_ENV = "DODAM_CLI_CONFIG"
-# How often the judge looks at the program: whether it ended, and how much memory, how many processes
-# and how much disk it uses. Measured at 10, 5, 2 and 1 thousandths of a second: 2 is the longest at
-# which one process allocating as fast as it can got less than 5% past its memory limit.
+# How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
-MAX_FILES = 20000
-PR_SET_NO_NEW_PRIVS, PR_SET_CHILD_SUBREAPER = 38, 36
-try:
-    _libc = ctypes.CDLL(None, use_errno=True)
-except OSError:
-    _libc = None
+PR_SET_CHILD_SUBREAPER = 36
 
 
 class JudgeFault(Exception):
@@ -117,9 +120,9 @@ def config() -> dict:
             _config = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise fault(f"cannot read the judge's settings: {exc}") from None
-        if _config.get("uid") is not None and _libc is not None:
+        if _config.get("uid") is not None:
             # children the program leaves become children of this process, which collects them
-            _libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+            _judge._libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
     return _config
 
 
@@ -135,71 +138,6 @@ def fault(text: str) -> JudgeFault:
     return JudgeFault(text)
 
 
-def _alive(uid: int) -> list[int]:
-    """Processes of the user that still run; ended ones waiting to be collected do not count."""
-    return _running(uid)[0]
-
-
-def _running(uid: int) -> tuple[list[int], int]:
-    """The user's running processes, and how many threads they have together."""
-    found, threads = [], 0
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        try:
-            if os.stat(f"/proc/{name}").st_uid != uid:
-                continue
-            with open(f"/proc/{name}/stat", "rb") as f:
-                fields = f.read().rsplit(b")", 1)[1].split()
-        except (OSError, IndexError):
-            continue
-        if fields[0] not in (b"Z", b"X"):
-            found.append(int(name))
-            try:
-                threads += int(fields[17])
-            except (IndexError, ValueError):
-                threads += 1
-    return found, threads
-
-
-def _resident_bytes(pids: list[int]) -> int:
-    total = 0
-    for pid in pids:
-        try:
-            with open(f"/proc/{pid}/statm", "rb") as f:
-                total += int(f.read().split()[1])
-        except (OSError, IndexError, ValueError):
-            continue
-    return total * os.sysconf("SC_PAGE_SIZE")
-
-
-def _tree_bytes(top: Path) -> tuple[int, int]:
-    """Disk space and number of entries under a folder; stops counting once there are too many."""
-    total = count = 0
-    stack = [str(top)]
-    while stack and count <= MAX_FILES:
-        try:
-            with os.scandir(stack.pop()) as entries:
-                for entry in entries:
-                    count += 1
-                    try:
-                        info = entry.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    total += info.st_blocks * 512
-                    if stat.S_ISDIR(info.st_mode):
-                        stack.append(entry.path)
-        except OSError:
-            continue
-    return total, count
-
-
-def _become(uid: int, gid: int) -> None:
-    os.setgroups([])
-    os.setgid(gid)
-    os.setuid(uid)
-
-
 def _collect() -> None:
     """Collect every ended child, so none stays in the process table."""
     while True:
@@ -211,84 +149,10 @@ def _collect() -> None:
             return
 
 
-def _kill_user(uid: int, gid: int) -> None:
-    """End every process of the program's user at once: as that user, signal everything it may signal."""
-    deadline = time.monotonic() + 30
-    while _alive(uid):
-        try:
-            pid = os.fork()
-        except OSError:
-            pid = -1
-        if pid == 0:
-            try:
-                _become(uid, gid)
-                os.kill(-1, signal.SIGKILL)
-            except BaseException:
-                pass
-            finally:
-                os._exit(0)
-        if pid > 0:
-            try:
-                os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
-        _collect()
-        if not _alive(uid):
-            break
-        if time.monotonic() > deadline:
-            raise fault("processes of the program could not be ended")
-        time.sleep(0.01)
-    _collect()
-
-
-IPC_ID_COLUMN = {"shm": "shmid", "msg": "msqid", "sem": "semid"}
-
-
-def _ipc_ids(kind: str, uid: int) -> list[int]:
-    try:
-        lines = Path(f"/proc/sysvipc/{kind}").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    if not lines:
-        return []
-    head = lines[0].split()
-    found = []
-    for line in lines[1:]:
-        row = dict(zip(head, line.split()))
-        try:
-            if int(row["uid"]) == uid or int(row["cuid"]) == uid:
-                found.append(int(row[IPC_ID_COLUMN[kind]]))
-        except (KeyError, ValueError):
-            continue
-    return found
-
-
-def _remove_shared_memory(uid: int, gid: int) -> None:
-    """Remove what the program left in the kernel's shared memory, semaphores and message queues.
-
-    Only their owner may remove them, so a child does it as the program's user."""
-    if _libc is None or not any(_ipc_ids(kind, uid) for kind in IPC_ID_COLUMN):
-        return
-    try:
-        pid = os.fork()
-    except OSError as exc:
-        raise fault(f"cannot start a process to clean up after the program: {exc}") from None
-    if pid == 0:
-        try:
-            _become(uid, gid)
-            for kind, call in (("shm", _libc.shmctl), ("msg", _libc.msgctl)):
-                for ident in _ipc_ids(kind, uid):
-                    call(ident, 0, None)  # 0 is IPC_RMID
-            for ident in _ipc_ids("sem", uid):
-                _libc.semctl(ident, 0, 0)
-        except BaseException:
-            pass
-        finally:
-            os._exit(0)
-    os.waitpid(pid, 0)
-    left = [kind for kind in IPC_ID_COLUMN if _ipc_ids(kind, uid)]
-    if left:
-        raise fault(f"cannot remove what the program left in the kernel: {', '.join(left)}")
+def _files_held(folder) -> int:
+    """Bytes held by the memory-backed folder the cases live in, files deleted while open included."""
+    room = os.statvfs(folder)
+    return (room.f_blocks - room.f_bfree) * room.f_frsize
 
 
 class Case:
@@ -299,7 +163,10 @@ class Case:
         self._limits = cfg["limits"]
         self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
         self._broken: list[str] = []
+        self._side = _judge.Side(self._uid, self._gid) if self._uid is not None else None
         try:
+            # cases run one after another, so whatever is in the cases' folder now is not this case's
+            _judge.remove_tree(cfg["work_root"], keep_top=True)
             self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="case-", dir=cfg["work_root"])))
             os.chmod(self.root, 0o755)
             self.work, self.outside, self.home = self.root / "work", self.root / "outside", self.root / "home"
@@ -395,10 +262,17 @@ class Case:
 
     def _names(self, base: Path) -> list[str]:
         found = []
-        for folder, dirs, files in os.walk(base):
-            for name in dirs + files:
-                found.append(os.path.relpath(os.path.join(folder, name), base).replace(os.sep, "/"))
+        try:
+            for folder, dirs, files in os.walk(base, onerror=self._unreadable):
+                for name in dirs + files:
+                    found.append(os.path.relpath(os.path.join(folder, name), base).replace(os.sep, "/"))
+        except RecursionError:
+            raise AssertionError("the program left folders too deep to list") from None
         return sorted(found)
+
+    @staticmethod
+    def _unreadable(error: OSError) -> None:
+        raise AssertionError(f"the program left something that cannot be listed: {error.strerror}")
 
     def files(self) -> list[str]:
         """Everything in the working folder, as paths relative to it."""
@@ -420,28 +294,19 @@ class Case:
             return self._note(Result(None, b"", b"", "time", None, 0.0))
         env = {**self._cfg.get("env", {}), "HOME": str(self.home), "TMPDIR": str(self.home / "tmp"),
                "PWD": str(self.work)}
-        uid, gid = self._uid, self._gid
         file_bytes = limits["disk_mb"] * 1024 * 1024
-
-        def before_exec() -> None:
-            os.setsid()
-            if resource is not None:
-                resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-                resource.setrlimit(resource.RLIMIT_FSIZE, (file_bytes, file_bytes))
-                cpu = int(limits["timeout_sec"]) + 5
-                resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-            if uid is not None:
-                try:
-                    with open("/proc/self/oom_score_adj", "w") as f:
-                        f.write("1000")  # when the container runs out of memory, the program goes first
-                except OSError:
-                    pass
-                # the kernel refuses a process or thread beyond one more than the limit; the judge sees
-                # that one more and fails the case. The count is per user, and this user is this run's alone.
-                resource.setrlimit(resource.RLIMIT_NPROC, (limits["processes"] + 1, limits["processes"] + 1))
-                _become(uid, gid)
-                if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-                    os._exit(126)
+        # no file larger than the limit, and no dump of the program's memory when it crashes
+        kernel_limits = {"RLIMIT_CORE": 0, "RLIMIT_FSIZE": file_bytes}
+        if self._side is not None:
+            # the kernel refuses a process or thread beyond the limit; the count is per user, and
+            # this user is this judging's alone
+            before_exec = self._side.entering({**kernel_limits, "RLIMIT_NPROC": limits["processes"]})
+        else:
+            def before_exec() -> None:
+                os.setsid()
+                if resource is not None:
+                    for name, value in kernel_limits.items():
+                        resource.setrlimit(getattr(resource, name), (value, value))
 
         if not self.work.is_dir():
             raise fault("the case's working folder is gone")
@@ -456,12 +321,16 @@ class Case:
                 raise fault(f"cannot start a process for the program: {exc}") from None
             # the program is not there or cannot be run as built: the program's failure
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
+        killed_before = _judge.killed_for_memory() if self._side is not None else 0
         try:
             result = self._watch(proc, stdin, started, left)
             if result.limit is None and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
             self._end(proc)
+        if self._side is not None and _judge.killed_for_memory() > killed_before:
+            # the container's memory ran out and the kernel ended the program
+            result.limit, result.exit_code = "memory", None
         result.seconds = time.monotonic() - started
         _spent[self._key] = _spent.get(self._key, 0.0) + result.seconds
         return self._note(result)
@@ -475,7 +344,13 @@ class Case:
         limits = self._limits
         max_out = limits["output_kb"] * 1024
         max_memory = limits["memory_mb"] * 1024 * 1024
-        max_disk = limits["disk_mb"] * 1024 * 1024
+        work_root = self._cfg["work_root"]
+
+        def memory_taken() -> int:
+            """Everything the kernel counts for the container but the cases' files."""
+            return _judge.container_memory()["taken"] - _files_held(work_root)
+
+        memory_before = memory_taken() if self._side is not None else 0
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
         limit = None
@@ -542,16 +417,8 @@ class Case:
                 limit = "output"
             elif now >= next_watch:
                 next_watch = now + WATCH
-                if self._uid is not None:
-                    pids, threads = _running(self._uid)
-                    if threads > limits["processes"]:
-                        limit = "processes"
-                    elif _resident_bytes(pids) > max_memory:
-                        limit = "memory"
-                if limit is None:
-                    used, count = _tree_bytes(self.root)
-                    if used > max_disk or count > MAX_FILES:
-                        limit = "files"
+                if self._side is not None and memory_taken() - memory_before > max_memory:
+                    limit = "memory"
         if limit is not None:
             self._end(proc)
         # what the program wrote before it ended is still in the pipes
@@ -571,8 +438,8 @@ class Case:
         return Result(exit_code, b"".join(chunks[proc.stdout]), b"".join(chunks[proc.stderr]), limit, sig, 0.0)
 
     def _left_processes(self, proc: subprocess.Popen) -> bool:
-        if self._uid is not None:
-            return bool(_alive(self._uid))
+        if self._side is not None:
+            return bool(self._side.alive())
         try:
             os.killpg(proc.pid, 0)
         except (ProcessLookupError, PermissionError):
@@ -585,8 +452,8 @@ class Case:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        if self._uid is not None:
-            _kill_user(self._uid, self._gid)
+        if self._side is not None and not self._side.end():
+            raise fault("processes of the program could not be ended")
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -599,27 +466,35 @@ class Case:
         if self._uid is not None:
             _collect()
 
+    def broken(self) -> LimitBroken:
+        limits = self._limits
+        return LimitBroken(f"the program broke a limit of the case: {', '.join(sorted(set(self._broken)))} "
+                           f"(limits: {limits['timeout_sec']} s, {limits['memory_mb']} MB of memory, "
+                           f"{limits['output_kb']} KB of output, {limits['processes']} processes and threads, "
+                           f"{limits['disk_mb']} MB of files)")
+
     def close(self) -> None:
-        if self._uid is not None:
-            _kill_user(self._uid, self._gid)
-            _remove_shared_memory(self._uid, self._gid)
+        """Give back what the case took. What cannot be removed fails the case: the program made it."""
+        if self._side is not None and not self._side.end():
+            raise fault("processes of the program could not be ended")
         try:
-            shutil.rmtree(self.root)
+            _judge.remove_tree(self.root)
         except OSError as exc:
-            raise fault(f"cannot remove the case's folder: {exc}") from None
+            self._broken.append(f"left what cannot be removed ({exc.strerror})")
 
 
 @contextmanager
 def case(files: dict | None = None, outside: dict | None = None):
-    """One case: a fresh folder for the program, removed afterwards. A broken limit fails the case."""
+    """One case: a fresh folder for the program, removed afterwards. A broken limit fails the case,
+    also when the test itself would have passed or would have been left unjudged."""
     c = Case(files, outside)
     try:
         yield c
-    finally:
+    except BaseException:
         c.close()
+        if c._broken:
+            raise c.broken() from None
+        raise
+    c.close()
     if c._broken:
-        limits = c._limits
-        raise LimitBroken(f"the program broke a limit of the case: {', '.join(sorted(set(c._broken)))} "
-                          f"(limits: {limits['timeout_sec']} s, {limits['memory_mb']} MB of memory, "
-                          f"{limits['output_kb']} KB of output, {limits['processes']} processes and threads, "
-                          f"{limits['disk_mb']} MB of files)")
+        raise c.broken()

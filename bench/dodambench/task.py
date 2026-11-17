@@ -10,7 +10,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .judge import CASE_SECONDS, FILE_SECONDS
+from .judge import BUILD_SECONDS, CASE_ENTRIES, CASE_SECONDS, CASES_DIR, FILE_SECONDS, JUDGE_ROOM_MB
 from .languages import LANGUAGES
 
 DOMAINS = {"web", "cli", "data", "net", "sys"}
@@ -29,7 +29,7 @@ WEAKNESSES = {
 # The limits of one case of a command-line task, with the largest value each may take.
 CLI_LIMIT_KEYS = {"case_timeout_sec": 600, "case_memory_mb": 65536, "case_output_kb": 1048576,
                   "case_processes": 1024, "case_disk_mb": 65536}
-BUILD_SECONDS = 900  # what the judge gives the build
+PROCESS_CAP = 1024  # processes and threads in one container: the judge, the build and the program together
 # A hidden test of a command-line task reaches the program only through the judge's case runner, and
 # learns nothing about the language: these would start the program another way or read the settings.
 CLI_TEST_FORBIDDEN = {
@@ -343,6 +343,13 @@ def _whole(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def cases_mount(task: "Task") -> str:
+    """The memory-backed folder the cases live in, as Docker is asked for it: capped at the files a
+    case may write and at the number of entries it may hold."""
+    return (f"{CASES_DIR}:rw,exec,nosuid,nodev,size={task.cli['case_disk_mb']}m,"
+            f"nr_inodes={CASE_ENTRIES},mode=0711")
+
+
 def judging_seconds(task: Task) -> int:
     """The longest the judge can take over one step of a command-line task, whatever the program does:
     the build, and for every file of tests its own allowance plus every test's full time limit."""
@@ -386,10 +393,12 @@ def cli_problems(task: Task) -> list[dict]:
         if key not in CLI_LIMIT_KEYS:
             found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} is not a limit of a case"))
     memory, room = cli.get("case_memory_mb"), task.limits.get("memory_mb")
-    if _whole(memory) and _whole(room) and 0 < room <= memory:
-        found.append(problem("task.toml", "cli.case_memory_mb",
-                             f"[cli] case_memory_mb must be below [limits] memory_mb ({room}), "
-                             "which the judge shares with the program"))
+    disk = cli.get("case_disk_mb")
+    if _whole(memory) and _whole(room) and _whole(disk) and 0 < room < memory + disk + JUDGE_ROOM_MB:
+        found.append(problem("task.toml", "limits.memory_mb",
+                             f"[limits] memory_mb must be at least {memory + disk + JUDGE_ROOM_MB}: the container's "
+                             f"memory holds the case's memory ({memory}), its files ({disk}), which live in "
+                             f"memory, and the judge ({JUDGE_ROOM_MB})"))
     needed, given = judging_seconds(task), task.limits.get("verifier_timeout_sec")
     if needed and _whole(given) and given < needed:
         found.append(problem("task.toml", "limits.verifier_timeout_sec",
