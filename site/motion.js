@@ -57,8 +57,12 @@
         var order = 0;
         entries.forEach(function (entry) {
           if (!entry.isIntersecting) return;
+          var delay = order * 80;
           entry.target.style.setProperty("--i", order++);
           entry.target.classList.add("in");
+          Array.prototype.forEach.call(entry.target.querySelectorAll("[data-count]"), function (el) {
+            countUp(el, delay);
+          });
           seen.unobserve(entry.target);
         });
       },
@@ -69,30 +73,19 @@
     });
   }
 
-  function counts() {
-    var seen = new IntersectionObserver(
-      function (entries) {
-        entries.forEach(function (entry) {
-          if (!entry.isIntersecting) return;
-          seen.unobserve(entry.target);
-          var el = entry.target;
-          var goal = parseInt(el.getAttribute("data-count"), 10);
-          var start = null;
-          function step(now) {
-            if (start === null) start = now;
-            var t = Math.min((now - start) / 1400, 1);
-            el.textContent = String(Math.round(goal * (1 - Math.pow(1 - t, 3))));
-            if (t < 1) window.requestAnimationFrame(step);
-          }
-          window.requestAnimationFrame(step);
-        });
-      },
-      { threshold: 0.6 }
-    );
-    all("[data-count]").forEach(function (el) {
-      el.textContent = "0";
-      seen.observe(el);
-    });
+  // The page holds the real figures. A figure drops to zero and counts up only at the moment
+  // its block is revealed, so it is never left at zero on screen or on paper.
+  function countUp(el, delay) {
+    var goal = parseInt(el.getAttribute("data-count"), 10);
+    var start = null;
+    el.textContent = "0";
+    function step(now) {
+      if (start === null) start = now + delay;
+      var t = Math.min(Math.max(now - start, 0) / 1400, 1);
+      el.textContent = String(Math.round(goal * (1 - Math.pow(1 - t, 3))));
+      if (t < 1) window.requestAnimationFrame(step);
+    }
+    window.requestAnimationFrame(step);
   }
 
   function loops() {
@@ -193,7 +186,6 @@
         return;
       }
       reveals();
-      counts();
       loops();
       resting();
       anchoring();

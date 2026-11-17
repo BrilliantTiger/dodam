@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Dodam — a language AI writes correctly, secure and fast</title>
-  <meta name="description" content="Dodam is a general-purpose language that AI writes correctly and robustly: secure and fast. The compiler enforces the security rules, people read a security report instead of code, and AI agents build the language too. It is in its design phase and open to people and AI agents.">
+  <title>Dodam — a language for AI to write correctly, secure and fast (design phase)</title>
+  <meta name="description" content="Dodam is a general-purpose language being designed for AI to write correctly and robustly: secure and fast. It is in its design phase, and there is no compiler yet. By design the compiler enforces the security rules, people read a security report instead of code, and AI agents build the language too. Open to people and AI agents.">
   <meta name="color-scheme" content="light dark">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Dodam — a language AI writes correctly, secure and fast">
-  <meta property="og:description" content="The compiler enforces the security rules, people read a security report instead of code, and AI agents build the language too. Open to people and AI agents.">
+  <meta property="og:title" content="Dodam — a language for AI to write correctly, secure and fast (design phase)">
+  <meta property="og:description" content="In its design phase: there is no compiler yet. The goal is a language whose compiler enforces the security rules, where people read a security report instead of code, and which AI agents build too. Open to people and AI agents.">
   <meta property="og:url" content="https://brillianttigercorp.com/dodam/">
   <link rel="canonical" href="https://brillianttigercorp.com/dodam/">
   <link rel="alternate" hreflang="en" href="https://brillianttigercorp.com/dodam/">
@@ -49,7 +49,7 @@
       <div class="wrap">
         <p class="status fade" style="--i:0"><i></i>Design phase · no compiler yet</p>
         <h1><span class="w" style="--i:0">A</span> <span class="w" style="--i:1">language</span> <span class="w" style="--i:2">AI</span> <span class="w" style="--i:3">writes</span> <span class="w" style="--i:4">correctly</span> <span class="w" style="--i:5">and</span> <span class="w" style="--i:6">robustly.</span> <em><span class="w" style="--i:8">Secure</span> <span class="pair"><span class="w" style="--i:9">and</span> <span class="w" style="--i:10">fast.</span></span></em></h1>
-        <p class="lede fade" style="--i:8">Dodam is a general-purpose language made for AI coding agents. People do not read the code: they look at the result and a security report. The compiler enforces the security rules, and those rules only ever tighten.</p>
+        <p class="lede fade" style="--i:8">Dodam is a general-purpose language being designed for AI coding agents. People will not read the code: they look at the result and a security report. The compiler will enforce the security rules, and those rules only ever tighten.</p>
         <p class="cta fade" style="--i:10">
           <a class="btn" href="#join">Join the work <span class="arr" aria-hidden="true">→</span></a>
           <a class="btn ghost" href="https://github.com/BrilliantTiger/dodam">View on GitHub</a>
@@ -119,45 +119,53 @@
         </header>
         <div class="stats" data-stagger>
           <div class="stat">
+            <span class="lbl">Insecure</span>
             <span class="num"><span data-count="45">45</span><small>%</small></span>
-            <p>of AI-written code was insecure. In Java, more than 70% failed.</p>
+            <p>45% of AI-written code was insecure. In Java, more than 70% failed.</p>
             <span class="src">Source: Veracode, July 2025</span>
           </div>
           <div class="stat">
+            <span class="lbl">Passed on security</span>
             <span class="num"><span data-count="55">55</span><small>%</small></span>
-            <p>About 55% on security, while syntax correctness was above 95%.</p>
+            <p>Only about 55% passed on security, while syntax correctness was above 95%.</p>
             <span class="src">Source: Veracode, March 2026</span>
           </div>
           <div class="stat">
+            <span class="lbl">Passed on security</span>
             <span class="num"><span data-count="56">56</span><small>%</small></span>
-            <p>Average on security. The best model, GPT-5.5, reached 68%, and larger models did no better.</p>
+            <p>56% on average. The best model, GPT-5.5, reached 68%, and larger models did no better.</p>
             <span class="src">Source: Veracode, July 2026</span>
           </div>
         </div>
-        <p class="note reveal"><strong>Models keep getting newer, and security has stayed where it was.</strong> Waiting for a better model is not a plan. The compiler has to stop these mistakes. The figures are from Veracode’s reports, as collected in Dodam’s design research on October 28, 2026.</p>
+        <p class="note reveal"><strong>Models keep getting newer, and security has stayed where it was.</strong> Waiting for a better model is not a plan. The compiler has to stop these mistakes. The figures come from Veracode’s reports, which are a vendor’s own reports and less verified than research papers. They were collected in Dodam’s design research on October 28, 2026.</p>
       </div>
     </section>
 
     <section id="guarantees">
       <div class="wrap">
         <header class="reveal">
-          <p class="kicker">What the compiler guarantees</p>
+          <p class="kicker">What Dodam guarantees</p>
           <h2>Mistakes become compile errors.</h2>
-          <p class="lead">This is what the design commits to. The compiler that enforces it is not built yet.</p>
+          <p class="lead">The 10 guarantees at the core of the design. Code that breaks one does not compile. The compiler that enforces them is not built yet.</p>
         </header>
         <ul class="grid three" data-stagger>
-          <li><div class="card"><span class="n">01</span><h3>Memory safety</h3><p>No data races and no undefined behavior.</p></div></li>
-          <li><div class="card"><span class="n">02</span><h3>Declared capabilities</h3><p>A function lists the side effects it uses, such as the database, the network, secrets or mail. Anything undeclared does not compile.</p></div></li>
-          <li><div class="card"><span class="n">03</span><h3>Server and browser stay apart</h3><p>Code that touches server-only capabilities can never end up in the browser bundle. Secrets cannot be serialized.</p></div></li>
-          <li><div class="card"><span class="n">04</span><h3>Untrusted until validated</h3><p>External input is marked untrusted until it is validated. SQL, HTML, shell and URL outputs accept only safe types.</p></div></li>
-          <li><div class="card"><span class="n">05</span><h3>Access rules are mandatory</h3><p>Every server function the screen can call says whether it is public or needs a signed-in role. Every stored data type says who may read and write each record.</p></div></li>
-          <li><div class="card"><span class="n">06</span><h3>No duplicate definitions</h3><p>Two definitions that are identical once names are erased do not compile. The fix is to reuse the existing one.</p></div></li>
-          <li><div class="card"><span class="n">07</span><h3>One source of truth for data</h3><p>Stored data is declared once. The compiler generates the schema, types, validation, migrations and client sync.</p></div></li>
-          <li><div class="card"><span class="n">08</span><h3>Resource limits</h3><p>Size caps on untrusted input, linear-time regex, mandatory pagination, timeouts, and rate limits on public functions.</p></div></li>
-          <li><div class="card"><span class="n">09</span><h3>No hidden behavior</h3><p>No null, no exceptions, no implicit conversions, no global mutable state, no macros or reflection.</p></div></li>
-          <li><div class="card"><span class="n">10</span><h3>Errors machines can read</h3><p>Every error is JSON with a fix, and the compiler ships with a server that lets AI agents call it directly.</p></div></li>
-          <li><div class="card"><span class="n">11</span><h3>A security report instead of code review</h3><p>The compiler reports what the program can do, where data leaves it, and every place it was told to trust something. Anything new must be approved by a person before a release build succeeds.</p></div></li>
-          <li><div class="card"><span class="n">12</span><h3>A language AI refines itself</h3><p>AI changes syntax details, libraries and rules, and merges them when benchmark numbers improve. Only relaxing a rule needs a person’s approval, with proof that security does not get worse.</p></div></li>
+          <li><div class="card"><span class="n">01</span><h3>Memory safety</h3><p>No memory errors, no data races and no undefined behavior.</p></div></li>
+          <li><div class="card"><span class="n">02</span><h3>Declared capabilities</h3><p>A function writes the side effects it uses in its signature, down to which host, file, table or secret. Using anything that is not written there is an error.</p></div></li>
+          <li><div class="card"><span class="n">03</span><h3>Where code may run</h3><p>Each capability has fixed places where it may run. Server-only code cannot enter the browser bundle, and secrets cannot be serialized.</p></div></li>
+          <li><div class="card"><span class="n">04</span><h3>External input is validated before use</h3><p>External input is untrusted until it is validated. Outputs such as SQL, HTML, shell, URLs and logs accept only safe types.</p></div></li>
+          <li><div class="card"><span class="n">05</span><h3>No hidden behavior</h3><p>No null, no exceptions, no implicit conversions, no global mutable state, no macros, reflection or operator overloading.</p></div></li>
+          <li><div class="card"><span class="n">06</span><h3>One way to do the same thing</h3><p>One syntax for each thing, one official formatter, and no settings.</p></div></li>
+          <li><div class="card"><span class="n">07</span><h3>Reproducible builds and package capabilities</h3><p>A lock file is required. A package declares the capabilities it uses, and whoever uses it approves them. There are no install scripts.</p></div></li>
+          <li><div class="card"><span class="n">08</span><h3>No duplication</h3><p>Definitions that are the same once names are erased exist only once. The fix is to reuse the one that is already there.</p></div></li>
+          <li><div class="card"><span class="n">09</span><h3>Data in one place</h3><p>Stored data is declared once. The compiler generates the schema, types, validation, migrations and sync.</p></div></li>
+          <li><div class="card"><span class="n">10</span><h3>Resource limits</h3><p>Size limits on external input, linear-time regex only, paging required for lists, a default time limit on external calls, and rate limits on public functions.</p></div></li>
+        </ul>
+        <h3 class="sub reveal">Also part of the design</h3>
+        <ul class="plain" data-stagger>
+          <li><strong>Access rules are required.</strong> Every server function a screen can call says whether it is public or needs a signed-in role. Every stored data type says who may read and write each record.</li>
+          <li><strong>Errors machines can read.</strong> Every error is JSON with a fix, and the compiler ships with a server that lets AI agents call it directly.</li>
+          <li><strong>A security report instead of code review.</strong> The compiler reports what the program can do, where data leaves it, and every place it was told to trust something. Anything new must be approved by a person before a release build succeeds.</li>
+          <li><strong>A language AI refines itself.</strong> AI changes syntax details, libraries and rules, and merges them when benchmark numbers improve. Only relaxing a rule or weakening a guarantee needs a person’s approval, with proof that security does not get worse.</li>
         </ul>
       </div>
     </section>
@@ -167,7 +175,7 @@
         <header class="reveal">
           <p class="kicker">How it is built</p>
           <h2>AI agents build the language too.</h2>
-          <p class="lead">Four roles, kept apart. Work is judged by tests and benchmark numbers, not by who sent it.</p>
+          <p class="lead">4 roles, kept apart. Work is judged by tests and benchmark numbers, not by who sent it.</p>
         </header>
         <ul class="grid four" data-stagger>
           <li><div class="card"><span class="n">Building</span><h3>Tests first, then the change</h3><p>Takes one piece of work, writes the tests first, then implements it.</p></div></li>
@@ -178,8 +186,8 @@
         <ul class="plain" data-stagger>
           <li><strong>The agent that built a change never reviews it.</strong> When a model from another company is available, that model reviews.</li>
           <li><strong>Numbers decide.</strong> Every design decision about syntax or meaning is settled by benchmark numbers, not taste, and the numbers are recorded with the decision.</li>
-          <li><strong>Security rules only tighten.</strong> AI may add or tighten a rule. Relaxing one needs the owner’s approval.</li>
-          <li><strong>The owner handles payments, contracts and accounts.</strong> Everything else is judged by agents against criteria written beforehand.</li>
+          <li><strong>Security rules only tighten.</strong> AI may add or tighten a rule. Relaxing a rule or weakening a guarantee needs the owner’s approval.</li>
+          <li><strong>The owner handles payments, contracts and accounts.</strong> Everything else, apart from that approval, is judged by agents against criteria written beforehand.</li>
         </ul>
       </div>
     </section>
@@ -189,20 +197,20 @@
         <header class="reveal">
           <p class="kicker">Where it stands</p>
           <h2>No compiler yet. First, the bar to beat.</h2>
-          <p class="lead">Dodam is in its design phase. The current work is a benchmark: common programming tasks such as web services, command-line tools and data processing, each with hidden tests for function, edge cases and security. AI writes those programs in seven existing languages, and the benchmark measures how well. <strong>Those numbers are the bar Dodam must beat.</strong></p>
+          <p class="lead">Dodam is in its design phase. The current work is a benchmark: common programming tasks such as web services, command-line tools and data processing, each with hidden tests for function, edge cases and security. AI writes those programs in 7 existing languages, and the benchmark measures how well. <strong>Those numbers are the bar Dodam must beat.</strong></p>
         </header>
         <div class="marquee reveal" data-loop>
-          <ul class="track" aria-label="The seven existing languages"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
+          <ul class="track" aria-label="The 7 existing languages"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
           <ul class="track" aria-hidden="true"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
         </div>
         <ol class="timeline">
-          <li><span class="when">Now – February 24, 2027 <span class="tag">We are here</span></span><h3>Fixing the direction</h3><p>The design charter, the first 30 benchmark tasks, the measuring tools, and the comparison bar measured in seven existing languages.</p></li>
-          <li><span class="when">By May 10, 2028</span><h3>A minimal language</h3><p>First syntax, the checker for capabilities, untrusted data and the server boundary, the security report, and output for native code and the browser.</p></li>
-          <li><span class="when">By April 4, 2029</span><h3>First public release, 0.1</h3><p>100 benchmark tasks, and the loop in which AI improves the language and merges what the numbers support.</p></li>
-          <li><span class="when">By October 30, 2030</span><h3>Real use</h3><p>Standard library, package manager, and one real service built with Dodam running for more than 3 months.</p></li>
-          <li><span class="when">By February 25, 2032</span><h3>1.0</h3><p>The core frozen, a full security audit, and a final judgement on new hidden tasks.</p></li>
+          <li><span class="when">Now – around February 24, 2027 <span class="tag">We are here</span></span><h3>Fixing the direction</h3><p>The design charter, the first 30 benchmark tasks, the measuring tools, and the comparison bar measured in 7 existing languages.</p></li>
+          <li><span class="when">Around May 10, 2028</span><h3>A minimal language</h3><p>First syntax, the checker for capabilities, untrusted data and the server boundary, the security report, and output for native code and the browser.</p></li>
+          <li><span class="when">Around April 4, 2029</span><h3>First public release, 0.1</h3><p>100 benchmark tasks, and the loop in which AI improves the language and merges what the numbers support.</p></li>
+          <li><span class="when">Around October 30, 2030</span><h3>Real use</h3><p>Standard library, package manager, and one real service built with Dodam running for more than 3 months.</p></li>
+          <li><span class="when">Around February 25, 2032</span><h3>1.0</h3><p>The core frozen, a full security audit, and a final judgement on new hidden tasks.</p></li>
         </ol>
-        <p class="note reveal">The dates are median estimates from a schedule simulation run 2,000 times, assuming one subscription from each of three AI companies (Dodam charter, version 0.7, November 17, 2026). <strong>For now the work uses Claude alone.</strong> If it stayed that way to the end, the same simulation puts the median for 1.0 at November 2038. More hands, human and AI, shorten it.</p>
+        <p class="note reveal">The dates are median estimates, not promises. They come from a schedule simulation run 2,000 times, assuming one subscription from each of 3 AI companies (Dodam charter, version 0.7, November 17, 2026). The date by which 1.0 is done with 80% probability is January 18, 2034. <strong>For now the work uses Claude alone.</strong> If it stayed that way to the end, the same simulation (1,200 runs) puts the median for 1.0 at November 2038. More hands, human and AI, shorten it.</p>
       </div>
     </section>
 
@@ -254,7 +262,7 @@
           <li><strong>The measuring tools stay with the project</strong><span>Outside pull requests do not change the judge, the language images, existing benchmark tasks, security tests or approval locks. Report the problem, and the project’s own agents fix it, so the measurement cannot be steered from outside.</span></li>
           <li><strong>Hidden tasks stay private</strong><span>They are kept in a separate private repository and are never shared.</span></li>
           <li><strong>Vulnerabilities go to the Security tab</strong><span>Report them privately, never in public. <a class="link" href="https://github.com/BrilliantTiger/dodam/security/policy">Security policy <span class="arr" aria-hidden="true">→</span></a></span></li>
-          <li><strong>Relaxing a rule needs the owner’s approval</strong><span>With a written reason and a benchmark comparison showing that security does not get worse.</span></li>
+          <li><strong>Relaxing a rule or weakening a guarantee needs the owner’s approval</strong><span>With a written reason and a benchmark comparison showing that security does not get worse.</span></li>
         </ul>
       </div>
     </section>

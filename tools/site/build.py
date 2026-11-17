@@ -8,7 +8,8 @@ The structure, every link and every element live once, in template.html. Each la
 strings file. Dates and large numbers are written in the strings as {d:2027-02-24}, {m:2038-11}
 and {n:2000} and are spelled here in each language's usual form, so a date cannot differ between
 languages. problems() reports any string that a language lacks or adds, and any string whose
-numbers, dates or markup differ from the English one. Standard library only.
+numbers, dates or markup differ from the English one, and any count written as a word instead of
+in digits. The address of the page is set here and nowhere else. Standard library only.
 """
 
 import json
@@ -30,6 +31,13 @@ MONTHS = {
 KEY = re.compile(r"\{\{([a-z0-9_]+)\}\}")
 PLACE = re.compile(r"\{(?:(d|m|n):([0-9-]+)|(repo))\}")
 ALLOWED_TAGS = {"strong", "code", "span"}
+# Counts are written in digits so that a differing count shows up as a differing number.
+COUNT_WORDS = {
+    "en": r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+    "ko": r"둘|셋|넷|다섯|여섯|일곱|여덟|아홉|[두세네] (?:곳|개|가지|명)",
+    "ja": r"[二三四五六七八九十][つ社個件]",
+    "es": r"\b(?:dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b",
+}
 
 
 def load_strings(lang: str) -> dict:
@@ -165,6 +173,8 @@ def problems(strings: dict[str, dict] | None = None) -> list[str]:
                 found.append(f"{lang}: empty string {key}")
             if re.search(r"https?:|href=|<a[\s>]", text):
                 found.append(f"{lang}: {key} carries a link; links belong in the template")
+            if re.search(COUNT_WORDS[lang], text, re.I):
+                found.append(f"{lang}: {key} writes a count as a word; write it in digits")
             if re.search(r"[０-９]", text):
                 found.append(f"{lang}: {key} uses full-width digits")
             if set(re.findall(r"</?([a-z]+)", text)) - ALLOWED_TAGS:

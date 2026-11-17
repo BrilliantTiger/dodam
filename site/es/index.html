@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Dodam — un lenguaje que la IA escribe bien, seguro y rápido</title>
-  <meta name="description" content="Dodam es un lenguaje de propósito general que la IA escribe de forma correcta y robusta: seguro y rápido. El compilador impone las reglas de seguridad, las personas leen un informe de seguridad en lugar del código y los propios agentes de IA construyen el lenguaje. Está en fase de diseño y abierto a personas y a agentes de IA.">
+  <title>Dodam — un lenguaje para que la IA escriba bien, seguro y rápido (fase de diseño)</title>
+  <meta name="description" content="Dodam es un lenguaje de propósito general que se está diseñando para que la IA lo escriba de forma correcta y robusta: seguro y rápido. Está en fase de diseño y aún no hay compilador. Según el diseño, el compilador impone las reglas de seguridad, las personas leen un informe de seguridad en lugar del código y los propios agentes de IA construyen el lenguaje. Abierto a personas y a agentes de IA.">
   <meta name="color-scheme" content="light dark">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Dodam — un lenguaje que la IA escribe bien, seguro y rápido">
-  <meta property="og:description" content="El compilador impone las reglas de seguridad, las personas leen un informe de seguridad en lugar del código y los propios agentes de IA construyen el lenguaje. Abierto a personas y a agentes de IA.">
+  <meta property="og:title" content="Dodam — un lenguaje para que la IA escriba bien, seguro y rápido (fase de diseño)">
+  <meta property="og:description" content="En fase de diseño: aún no hay compilador. El objetivo es un lenguaje cuyo compilador imponga las reglas de seguridad, en el que las personas lean un informe de seguridad en lugar del código y que los propios agentes de IA construyan. Abierto a personas y a agentes de IA.">
   <meta property="og:url" content="https://brillianttigercorp.com/dodam/es/">
   <link rel="canonical" href="https://brillianttigercorp.com/dodam/es/">
   <link rel="alternate" hreflang="en" href="https://brillianttigercorp.com/dodam/">
@@ -49,12 +49,12 @@
       <div class="wrap">
         <p class="status fade" style="--i:0"><i></i>Fase de diseño · aún no hay compilador</p>
         <h1><span class="w" style="--i:0">Un</span> <span class="w" style="--i:1">lenguaje</span> <span class="w" style="--i:2">que</span> <span class="w" style="--i:3">la</span> <span class="w" style="--i:4">IA</span> <span class="w" style="--i:5">escribe</span> <span class="w" style="--i:6">de</span> <span class="w" style="--i:7">forma</span> <span class="w" style="--i:8">correcta</span> <span class="w" style="--i:9">y</span> <span class="w" style="--i:10">robusta.</span> <em><span class="w" style="--i:12">Seguro</span> <span class="pair"><span class="w" style="--i:13">y</span> <span class="w" style="--i:14">rápido.</span></span></em></h1>
-        <p class="lede fade" style="--i:8">Dodam es un lenguaje de propósito general hecho para agentes de programación con IA. Las personas no leen el código: miran el resultado y un informe de seguridad. El compilador impone las reglas de seguridad, y esas reglas solo se vuelven más estrictas.</p>
+        <p class="lede fade" style="--i:8">Dodam es un lenguaje de propósito general que se está diseñando para agentes de programación con IA. Las personas no leerán el código: mirarán el resultado y un informe de seguridad. El compilador impondrá las reglas de seguridad, y esas reglas solo se vuelven más estrictas.</p>
         <p class="cta fade" style="--i:10">
           <a class="btn" href="#join">Participar <span class="arr" aria-hidden="true">→</span></a>
           <a class="btn ghost" href="https://github.com/BrilliantTiger/dodam">Ver en GitHub</a>
         </p>
-        <a class="cue fade" style="--i:13" href="#what"><i></i>Bajar</a>
+        <a class="cue fade" style="--i:13" href="#what"><i></i>Desplazar</a>
       </div>
     </div>
 
@@ -119,45 +119,53 @@
         </header>
         <div class="stats" data-stagger>
           <div class="stat">
+            <span class="lbl">Inseguro</span>
             <span class="num"><span data-count="45">45</span><small>%</small></span>
-            <p>del código escrito por IA era inseguro. En Java, más del 70% falló.</p>
+            <p>El 45% del código escrito por IA era inseguro. En Java, más del 70% falló.</p>
             <span class="src">Fuente: Veracode, julio de 2025</span>
           </div>
           <div class="stat">
+            <span class="lbl">Aprobó en seguridad</span>
             <span class="num"><span data-count="55">55</span><small>%</small></span>
-            <p>Cerca del 55% en seguridad, mientras que la corrección sintáctica superaba el 95%.</p>
+            <p>Solo cerca del 55% aprobó en seguridad, mientras que la corrección sintáctica superaba el 95%.</p>
             <span class="src">Fuente: Veracode, marzo de 2026</span>
           </div>
           <div class="stat">
+            <span class="lbl">Aprobó en seguridad</span>
             <span class="num"><span data-count="56">56</span><small>%</small></span>
-            <p>Promedio en seguridad. El mejor modelo, GPT-5.5, llegó al 68%, y los modelos más grandes no lo hicieron mejor.</p>
+            <p>Un 56% en promedio. El mejor modelo, GPT-5.5, llegó al 68%, y los modelos más grandes no lo hicieron mejor.</p>
             <span class="src">Fuente: Veracode, julio de 2026</span>
           </div>
         </div>
-        <p class="note reveal"><strong>Los modelos son cada vez más nuevos, y la seguridad sigue donde estaba.</strong> Esperar a un modelo mejor no es un plan. Es el compilador el que tiene que detener estos errores. Las cifras proceden de los informes de Veracode, reunidos en la investigación de diseño de Dodam del 28 de octubre de 2026.</p>
+        <p class="note reveal"><strong>Los modelos son cada vez más nuevos, y la seguridad sigue donde estaba.</strong> Esperar a un modelo mejor no es un plan. Es el compilador el que tiene que detener estos errores. Las cifras proceden de los informes de Veracode, que son informes de un proveedor y están menos verificados que los artículos de investigación. Se reunieron en la investigación de diseño de Dodam del 28 de octubre de 2026.</p>
       </div>
     </section>
 
     <section id="guarantees">
       <div class="wrap">
         <header class="reveal">
-          <p class="kicker">Qué garantiza el compilador</p>
+          <p class="kicker">Qué garantiza Dodam</p>
           <h2>Los fallos se convierten en errores de compilación.</h2>
-          <p class="lead">Esto es lo que el diseño se compromete a cumplir. El compilador que lo impone aún no está construido.</p>
+          <p class="lead">Las 10 garantías que forman el núcleo del diseño. El código que incumple alguna no compila. El compilador que las impone aún no está construido.</p>
         </header>
         <ul class="grid three" data-stagger>
-          <li><div class="card"><span class="n">01</span><h3>Seguridad de memoria</h3><p>Sin carreras de datos ni comportamiento indefinido.</p></div></li>
-          <li><div class="card"><span class="n">02</span><h3>Capacidades declaradas</h3><p>Cada función declara los efectos secundarios que usa, como la base de datos, la red, los secretos o el correo. Lo que no se declara no compila.</p></div></li>
-          <li><div class="card"><span class="n">03</span><h3>Servidor y navegador, separados</h3><p>El código que toca capacidades exclusivas del servidor nunca puede acabar en el paquete del navegador. Los secretos no se pueden serializar.</p></div></li>
-          <li><div class="card"><span class="n">04</span><h3>No fiable hasta que se valida</h3><p>La entrada externa se marca como no fiable hasta que se valida. Las salidas hacia SQL, HTML, la shell y las URL solo aceptan tipos seguros.</p></div></li>
-          <li><div class="card"><span class="n">05</span><h3>Reglas de acceso obligatorias</h3><p>Cada función del servidor que la pantalla puede llamar indica si es pública o si exige un rol con sesión iniciada. Cada tipo de dato almacenado indica quién puede leer y escribir cada registro.</p></div></li>
-          <li><div class="card"><span class="n">06</span><h3>Sin definiciones duplicadas</h3><p>Dos definiciones que resultan idénticas al quitar los nombres no compilan. La solución es reutilizar la que ya existe.</p></div></li>
-          <li><div class="card"><span class="n">07</span><h3>Una sola fuente de verdad para los datos</h3><p>Los datos almacenados se declaran una sola vez. El compilador genera el esquema, los tipos, la validación, las migraciones y la sincronización con el cliente.</p></div></li>
-          <li><div class="card"><span class="n">08</span><h3>Límites de recursos</h3><p>Límites de tamaño para la entrada no fiable, expresiones regulares de tiempo lineal, paginación obligatoria, tiempos máximos de espera y límites de frecuencia en las funciones públicas.</p></div></li>
-          <li><div class="card"><span class="n">09</span><h3>Sin comportamiento oculto</h3><p>Sin null, sin excepciones, sin conversiones implícitas, sin estado global mutable, sin macros ni reflexión.</p></div></li>
-          <li><div class="card"><span class="n">10</span><h3>Errores que las máquinas pueden leer</h3><p>Cada error es un JSON que incluye su corrección, y el compilador viene con un servidor que permite a los agentes de IA llamarlo directamente.</p></div></li>
-          <li><div class="card"><span class="n">11</span><h3>Un informe de seguridad en lugar de revisar código</h3><p>El compilador informa de lo que el programa puede hacer, por dónde salen los datos y cada punto en el que se le indicó que confiara en algo. Todo lo nuevo debe aprobarlo una persona antes de que se pueda generar una versión de publicación.</p></div></li>
-          <li><div class="card"><span class="n">12</span><h3>Un lenguaje que la IA perfecciona por sí misma</h3><p>La IA cambia detalles de sintaxis, bibliotecas y reglas, y los integra cuando mejoran las cifras del benchmark. Solo relajar una regla requiere la aprobación de una persona, con pruebas de que la seguridad no empeora.</p></div></li>
+          <li><div class="card"><span class="n">01</span><h3>Seguridad de memoria</h3><p>Sin errores de memoria, sin carreras de datos y sin comportamiento indefinido.</p></div></li>
+          <li><div class="card"><span class="n">02</span><h3>Capacidades declaradas</h3><p>Cada función escribe en su firma los efectos secundarios que usa, hasta el host, el archivo, la tabla o el secreto concretos. Usar algo que no está escrito es un error.</p></div></li>
+          <li><div class="card"><span class="n">03</span><h3>Dónde puede ejecutarse el código</h3><p>Cada capacidad tiene lugares fijos donde puede ejecutarse. El código exclusivo del servidor no puede entrar en el paquete del navegador, y los secretos no se pueden serializar.</p></div></li>
+          <li><div class="card"><span class="n">04</span><h3>La entrada externa se valida antes de usarla</h3><p>La entrada externa no es fiable hasta que se valida. Las salidas hacia SQL, HTML, la shell, las URL y los registros solo aceptan tipos seguros.</p></div></li>
+          <li><div class="card"><span class="n">05</span><h3>Sin comportamiento oculto</h3><p>Sin null, sin excepciones, sin conversiones implícitas, sin estado global mutable, sin macros, reflexión ni sobrecarga de operadores.</p></div></li>
+          <li><div class="card"><span class="n">06</span><h3>Una sola forma de hacer lo mismo</h3><p>Una única sintaxis para cada cosa, un único formateador oficial y ninguna opción de configuración.</p></div></li>
+          <li><div class="card"><span class="n">07</span><h3>Compilaciones reproducibles y capacidades de los paquetes</h3><p>El archivo de bloqueo es obligatorio. Cada paquete declara las capacidades que usa y quien lo utiliza las aprueba. No hay scripts de instalación.</p></div></li>
+          <li><div class="card"><span class="n">08</span><h3>Sin duplicación</h3><p>Las definiciones que resultan idénticas al quitar los nombres solo existen una vez. La solución es reutilizar la que ya existe.</p></div></li>
+          <li><div class="card"><span class="n">09</span><h3>Los datos, en un solo lugar</h3><p>Los datos almacenados se declaran una sola vez. El compilador genera el esquema, los tipos, la validación, las migraciones y la sincronización.</p></div></li>
+          <li><div class="card"><span class="n">10</span><h3>Límites de recursos</h3><p>Límites de tamaño para la entrada externa, expresiones regulares de tiempo lineal, paginación obligatoria en las listas, tiempo máximo por defecto en las llamadas externas y límites de frecuencia en las funciones públicas.</p></div></li>
+        </ul>
+        <h3 class="sub reveal">También forma parte del diseño</h3>
+        <ul class="plain" data-stagger>
+          <li><strong>Las reglas de acceso son obligatorias.</strong> Cada función del servidor que la pantalla puede llamar indica si es pública o si exige un rol con sesión iniciada. Cada tipo de dato almacenado indica quién puede leer y escribir cada registro.</li>
+          <li><strong>Errores que las máquinas pueden leer.</strong> Cada error es un JSON que incluye su corrección, y el compilador viene con un servidor que permite a los agentes de IA llamarlo directamente.</li>
+          <li><strong>Un informe de seguridad en lugar de revisar código.</strong> El compilador informa de lo que el programa puede hacer, por dónde salen los datos y cada punto en el que se le indicó que confiara en algo. Todo lo nuevo debe aprobarlo una persona antes de que se pueda generar una compilación de lanzamiento.</li>
+          <li><strong>Un lenguaje que la IA perfecciona por sí misma.</strong> La IA cambia detalles de sintaxis, bibliotecas y reglas, y los integra cuando mejoran las cifras del benchmark. Solo relajar una regla o debilitar una garantía requiere la aprobación de una persona, con pruebas de que la seguridad no empeora.</li>
         </ul>
       </div>
     </section>
@@ -167,7 +175,7 @@
         <header class="reveal">
           <p class="kicker">Cómo se construye</p>
           <h2>Los agentes de IA también construyen el lenguaje.</h2>
-          <p class="lead">Cuatro roles, que no se mezclan. El trabajo se juzga con pruebas y con cifras del benchmark, no por quién lo envía.</p>
+          <p class="lead">4 roles, que no se mezclan. El trabajo se juzga con pruebas y con cifras del benchmark, no por quién lo envía.</p>
         </header>
         <ul class="grid four" data-stagger>
           <li><div class="card"><span class="n">Construir</span><h3>Primero las pruebas, luego el cambio</h3><p>Toma una tarea, escribe primero las pruebas y después la implementa.</p></div></li>
@@ -178,8 +186,8 @@
         <ul class="plain" data-stagger>
           <li><strong>El agente que construyó un cambio nunca lo revisa.</strong> Cuando hay disponible un modelo de otra empresa, es ese modelo el que revisa.</li>
           <li><strong>Deciden las cifras.</strong> Toda decisión de diseño sobre sintaxis o significado se resuelve con cifras del benchmark, no por gusto, y las cifras se registran junto a la decisión.</li>
-          <li><strong>Las reglas de seguridad solo se vuelven más estrictas.</strong> La IA puede añadir una regla o hacerla más estricta. Relajar una requiere la aprobación del propietario.</li>
-          <li><strong>El propietario se ocupa de los pagos, los contratos y las cuentas.</strong> Todo lo demás lo juzgan los agentes con criterios escritos de antemano.</li>
+          <li><strong>Las reglas de seguridad solo se vuelven más estrictas.</strong> La IA puede añadir una regla o hacerla más estricta. Relajar una regla o debilitar una garantía requiere la aprobación del propietario.</li>
+          <li><strong>El propietario se ocupa de los pagos, los contratos y las cuentas.</strong> Aparte de esa aprobación, todo lo demás lo juzgan los agentes con criterios escritos de antemano.</li>
         </ul>
       </div>
     </section>
@@ -189,20 +197,20 @@
         <header class="reveal">
           <p class="kicker">En qué punto está</p>
           <h2>Aún no hay compilador. Primero, la referencia que hay que superar.</h2>
-          <p class="lead">Dodam está en fase de diseño. El trabajo actual es un benchmark: tareas de programación habituales, como servicios web, herramientas de línea de comandos y procesamiento de datos, cada una con pruebas ocultas de funcionamiento, casos límite y seguridad. La IA escribe esos programas en siete lenguajes existentes, y el benchmark mide lo bien que lo hace. <strong>Esas cifras son la referencia que Dodam debe superar.</strong></p>
+          <p class="lead">Dodam está en fase de diseño. El trabajo actual es un benchmark: tareas de programación habituales, como servicios web, herramientas de línea de comandos y procesamiento de datos, cada una con pruebas ocultas de funcionamiento, casos límite y seguridad. La IA escribe esos programas en 7 lenguajes existentes, y el benchmark mide lo bien que lo hace. <strong>Esas cifras son la referencia que Dodam debe superar.</strong></p>
         </header>
         <div class="marquee reveal" data-loop>
-          <ul class="track" aria-label="Los siete lenguajes existentes"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
+          <ul class="track" aria-label="Los 7 lenguajes existentes"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
           <ul class="track" aria-hidden="true"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
         </div>
         <ol class="timeline">
-          <li><span class="when">Ahora – 24 de febrero de 2027 <span class="tag">Estamos aquí</span></span><h3>Fijar el rumbo</h3><p>La carta de diseño, las primeras 30 tareas del benchmark, las herramientas de medición y la referencia de comparación medida en siete lenguajes existentes.</p></li>
-          <li><span class="when">Antes del 10 de mayo de 2028</span><h3>Un lenguaje mínimo</h3><p>Primera sintaxis, el verificador de capacidades, datos no fiables y frontera del servidor, el informe de seguridad y la salida para código nativo y para el navegador.</p></li>
-          <li><span class="when">Antes del 4 de abril de 2029</span><h3>Primera versión pública, 0.1</h3><p>100 tareas en el benchmark y el ciclo en el que la IA mejora el lenguaje e integra lo que las cifras respaldan.</p></li>
-          <li><span class="when">Antes del 30 de octubre de 2030</span><h3>Uso real</h3><p>Biblioteca estándar, gestor de paquetes y un servicio real hecho con Dodam en funcionamiento durante más de 3 meses.</p></li>
-          <li><span class="when">Antes del 25 de febrero de 2032</span><h3>1.0</h3><p>El núcleo congelado, una auditoría de seguridad completa y una evaluación final con tareas ocultas nuevas.</p></li>
+          <li><span class="when">Ahora – hacia el 24 de febrero de 2027 <span class="tag">Estamos aquí</span></span><h3>Fijar el rumbo</h3><p>La carta de diseño, las primeras 30 tareas del benchmark, las herramientas de medición y la referencia de comparación medida en 7 lenguajes existentes.</p></li>
+          <li><span class="when">Hacia el 10 de mayo de 2028</span><h3>Un lenguaje mínimo</h3><p>Primera sintaxis, el verificador de capacidades, datos no fiables y frontera del servidor, el informe de seguridad y la salida para código nativo y para el navegador.</p></li>
+          <li><span class="when">Hacia el 4 de abril de 2029</span><h3>Primera versión pública, 0.1</h3><p>100 tareas en el benchmark y el ciclo en el que la IA mejora el lenguaje e integra lo que las cifras respaldan.</p></li>
+          <li><span class="when">Hacia el 30 de octubre de 2030</span><h3>Uso real</h3><p>Biblioteca estándar, gestor de paquetes y un servicio real hecho con Dodam en funcionamiento durante más de 3 meses.</p></li>
+          <li><span class="when">Hacia el 25 de febrero de 2032</span><h3>1.0</h3><p>El núcleo congelado, una auditoría de seguridad completa y una evaluación final con tareas ocultas nuevas.</p></li>
         </ol>
-        <p class="note reveal">Las fechas son estimaciones medianas de una simulación del calendario ejecutada 2000 veces, suponiendo una suscripción de cada una de tres empresas de IA (carta de Dodam, versión 0.7, 17 de noviembre de 2026). <strong>Por ahora el trabajo usa solo Claude.</strong> Si siguiera así hasta el final, la misma simulación sitúa la mediana de la versión 1.0 en noviembre de 2038. Más manos, humanas y de IA, lo acortan.</p>
+        <p class="note reveal">Las fechas son estimaciones de la mediana, no promesas. Salen de una simulación del calendario ejecutada 2000 veces, suponiendo una suscripción de cada una de 3 empresas de IA (carta de Dodam, versión 0.7, 17 de noviembre de 2026). La fecha para la que la versión 1.0 está terminada con un 80% de probabilidad es el 18 de enero de 2034. <strong>Por ahora el trabajo usa solo Claude.</strong> Si siguiera así hasta el final, la misma simulación (1200 ejecuciones) sitúa la mediana de la versión 1.0 en noviembre de 2038. Más manos, humanas y de IA, acortan el plazo.</p>
       </div>
     </section>
 
@@ -254,7 +262,7 @@
           <li><strong>Las herramientas de medición las mantiene el proyecto</strong><span>Las pull requests externas no cambian el juez, las imágenes de los lenguajes, las tareas existentes del benchmark, las pruebas de seguridad ni los bloqueos de aprobación. Basta con avisar del problema y los agentes del proyecto lo corrigen, para que la medición no se pueda dirigir desde fuera.</span></li>
           <li><strong>Las tareas ocultas siguen siendo privadas</strong><span>Se guardan en un repositorio privado aparte y nunca se comparten.</span></li>
           <li><strong>Las vulnerabilidades van a la pestaña Security</strong><span>Se comunican en privado, nunca en público. <a class="link" href="https://github.com/BrilliantTiger/dodam/security/policy">Política de seguridad <span class="arr" aria-hidden="true">→</span></a></span></li>
-          <li><strong>Relajar una regla requiere la aprobación del propietario</strong><span>Con una justificación por escrito y una comparación del benchmark que muestre que la seguridad no empeora.</span></li>
+          <li><strong>Relajar una regla o debilitar una garantía requiere la aprobación del propietario</strong><span>Con una justificación por escrito y una comparación del benchmark que muestre que la seguridad no empeora.</span></li>
         </ul>
       </div>
     </section>
