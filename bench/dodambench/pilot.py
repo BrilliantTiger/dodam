@@ -49,6 +49,9 @@ DEFAULT_AGENT_HOSTS = ("api.anthropic.com",)
 SCAN_CHUNK = 1 << 20
 RESET_MARGIN_SECONDS = 30
 MAX_WAITS = 3
+# A wait reads the guard file again at least this often: a pilot that is still going closes its entry
+# within minutes, so a wait on it ends soon after, without polling the file every few seconds.
+WAIT_STEP_SECONDS = 900.0
 STATE_FILE = "state.json"
 CREDENTIAL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # Host variables that could steer the agent to another credential or provider.
@@ -295,25 +298,64 @@ def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float) 
     proc.wait()
 
 
+# How long to wait for Harbor's process group to be confirmed gone after it was stopped or exited.
+CONFIRM_SECONDS = 30.0
+# Harbor process groups this pilot started and has not yet confirmed gone.
+_live_groups: set[int] = set()
+
+
+def _group_gone(pgid: int, within: float) -> bool:
+    """Whether no process of the group is left, waiting up to within seconds for it."""
+    end = time.monotonic() + within
+    while _signal_pgid(pgid, 0):
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _confirm_gone(pgid: int) -> None:
+    if _group_gone(pgid, CONFIRM_SECONDS):
+        _live_groups.discard(pgid)
+
+
+def harbor_groups_left() -> list[int]:
+    """The Harbor process groups this pilot started that are not confirmed gone."""
+    for pgid in list(_live_groups):
+        if _group_gone(pgid, 0.0):
+            _live_groups.discard(pgid)
+    return sorted(_live_groups)
+
+
 def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout: float, *,
                    grace: float = STOP_GRACE_SECONDS, term_grace: float = TERM_GRACE_SECONDS) -> int:
-    """Run Harbor in its own process group. At the time limit, or on Ctrl-C, stop the whole group."""
+    """Run Harbor in its own process group. At the time limit, or on a stop signal, stop the whole group; no
+    further signal can cut that stop short. The group stays registered until it is confirmed gone."""
+    gate = _gate()
     with open(log_path, "ab") as log:
-        proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+        with gate.holding():  # Harbor is never started without being registered
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            _live_groups.add(proc.pid)
         try:
+            gate.raise_held()
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            gate.stop_begun()
             log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
             log.flush()
             stop_process_group(proc, grace, term_grace)
-            return TIMEOUT_RETURNCODE
+            code = TIMEOUT_RETURNCODE
         except BaseException:
+            gate.stop_begun()
             log.write(b"\npilot: interrupted; stopping harbor and its processes\n")
             log.flush()
             stop_process_group(proc, grace, term_grace)
+            _confirm_gone(proc.pid)
             raise
-        end_leftover_processes(proc.pid, term_grace)
+        else:
+            end_leftover_processes(proc.pid, term_grace)
+        _confirm_gone(proc.pid)
         return code
 
 
@@ -861,7 +903,9 @@ class Guard:
 def end_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: float) -> tuple[list[dict], str | None]:
     """Give the run its end in the guard file. When that fails the run stays counted at its whole possible
     duration, and the returned problem stops the batch."""
-    closed = {**entry, "ended_at": ended_at, "agent_seconds": round(float(agent_seconds), 1)}
+    # A clock set back during the run must not write an end before the start.
+    closed = {**entry, "ended_at": max(float(ended_at), float(entry["started_at"])),
+              "agent_seconds": round(float(agent_seconds), 1)}
     try:
         with guard.locked():
             runs = [r for r in guard.read() if r.get("id") != entry["id"]] + [closed]
@@ -880,15 +924,87 @@ class Stopped(KeyboardInterrupt):
         self.signum = signum
 
 
-def _stop_on_signals() -> dict:
-    """Turn SIGTERM and SIGHUP into the Ctrl-C path while a batch runs; returns the handlers to put back."""
-    if threading.current_thread() is not threading.main_thread():
-        return {}
+class SignalGate:
+    """The stop signals of one batch: SIGINT, SIGTERM and hang-up.
 
-    def stop(signum, frame):
+    The first signal begins the stop. From then on, and inside the sections that must not be cut (Harbor's
+    start, the containers step and the run-folder scan, the guard's entries, the summary and the final scans),
+    further signals are held: a second or third signal can never cut the stop short. A signal held in such a
+    section while no stop has begun begins the stop once the section is over."""
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __init__(self):
+        self.depth, self.stopping, self.held, self.previous = 0, False, [], {}
+
+    def install(self) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self.previous = {sig: signal.signal(sig, self._handle) for sig in self.SIGNALS}
+
+    def restore(self) -> None:
+        for sig, handler in self.previous.items():
+            signal.signal(sig, handler)
+        self.previous = {}
+
+    def _handle(self, signum, frame) -> None:
+        if self.stopping or self.depth:
+            self.held.append(signum)
+            return
+        self.stopping = True
         raise Stopped(signum)
 
-    return {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    def stop_begun(self) -> None:
+        self.stopping = True
+
+    def enter(self) -> None:
+        self.depth += 1
+
+    def leave(self) -> None:
+        self.depth = max(0, self.depth - 1)
+
+    @contextmanager
+    def holding(self):
+        self.enter()
+        try:
+            yield
+        finally:
+            self.leave()
+
+    def raise_held(self) -> None:
+        if self.held and not self.stopping:
+            self.stopping = True
+            raise Stopped(self.held[0])
+
+
+_gates = threading.local()
+_NO_GATE = SignalGate()  # outside a batch: never installed, holds nothing
+
+
+def _gate() -> SignalGate:
+    return getattr(_gates, "current", None) or _NO_GATE
+
+
+def close_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: float) -> tuple[list[dict], str | None]:
+    """Give the run its end, but only once Harbor's process group is confirmed gone. Until then Harbor may
+    still be going, so the entry stays open and counts the run's whole possible duration."""
+    left = harbor_groups_left()
+    if left:
+        return [entry], (f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed gone, so the "
+                         f"{entry['language']} run stays open in the five-hour guard file, counted at its whole "
+                         "possible duration; the batch stops")
+    return end_guard_run(guard, entry, ended_at, agent_seconds)
+
+
+def _say(text: str) -> None:
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except OSError:  # a hung-up terminal
+        pass
+
+
+def _duration(seconds: float) -> str:
+    minutes = max(0, int(round(seconds / 60)))
+    return f"{minutes // 60} h {minutes % 60:02d} min"
 
 
 def _missing_steps(task, trial: dict, job_dir: Path) -> list[str]:
@@ -966,15 +1082,17 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                           "five_hour_guard": {"max_agent_minutes": max_agent_minutes_per_5h, "note": GUARD_NOTE}},
                "runs": []}
     stopped: str | None = None
-    handlers = _stop_on_signals()
+    gate, outer_gate = SignalGate(), getattr(_gates, "current", None)
+    _gates.current = gate
+    gate.install()
     try:
         for lang in languages:
             before = json.loads(json.dumps(windows))
             entry: dict | None = None
-            waits = 0
+            waits, announced = 0, None
             while stopped is None and entry is None:
                 # Deciding and entering the start is one step under the guard's lock, on the file as it is now.
-                with guard.locked():
+                with gate.holding(), guard.locked():
                     runs = guard.read()
                     decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h,
                                               now())
@@ -986,13 +1104,19 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                             break
                         minutes_before = agent_minutes(runs, now())
                         entry = {"id": uuid.uuid4().hex, "batch": timestamp, "language": lang, "pid": os.getpid(),
-                                 "started_at": now(), "max_seconds": timeout + STOP_GRACE_SECONDS + TERM_GRACE_SECONDS,
+                                 "started_at": now(), "max_seconds": open_run_seconds(task, timeout),
                                  "ended_at": None, "agent_seconds": None}
                         guard.write(runs + [entry], now())
                         break
                 if wait_for_reset and decision.wait_until and waits < MAX_WAITS:
-                    sleep(max(0.0, decision.wait_until - now()) + RESET_MARGIN_SECONDS)
-                    waits += 1
+                    target = decision.wait_until + RESET_MARGIN_SECONDS
+                    if target != announced:
+                        announced = target
+                        _say(f"pilot: {lang}: waiting until {utc_text(target)} ({_duration(target - now())}), reading "
+                             f"the guard file again every {WAIT_STEP_SECONDS / 60:g} minutes, because {decision.reason}")
+                    sleep(max(0.0, min(target - now(), WAIT_STEP_SECONDS)))
+                    if now() >= target:
+                        waits += 1
                     continue
                 when = (f"; it clears at {utc_text(decision.wait_until)}" if decision.wait_until
                         else "; the reset time is unknown")
@@ -1002,44 +1126,52 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 record = {"language": lang, "status": "not-started", "reason": stopped, "reward": None, "steps": [],
                           "rate_limits": {"before": before, "first": {}, "after": before}}
                 summary["runs"].append(_summary_entry(record))
+                gate.raise_held()
                 continue
             t0 = time.monotonic()
             try:
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
                                  image_check, timeout, now, allow_hosts, docker)
             except BaseException:
-                # whatever stopped the run, the guard gets its end (its whole wall time) and its record is listed
-                _, problem = end_guard_run(guard, entry, now(), time.monotonic() - t0)
-                report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
-                if problem:
-                    report_to(sys.exc_info()[1], problem)
+                # whatever stopped the run: nothing cuts what follows short, the guard gets the run's end (its whole
+                # wall time) only once Harbor is gone, and the record is listed
+                gate.stop_begun()
+                with gate.holding():
+                    _, problem = close_guard_run(guard, entry, now(), time.monotonic() - t0)
+                    report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
+                    if problem:
+                        report_to(sys.exc_info()[1], problem)
                 raise
-            runs_after, problem = end_guard_run(guard, entry, now(), _run_agent_seconds(record))
-            problems = [problem] if problem else []
-            windows = {**windows, **record["rate_limits"]["after"]}
-            try:
-                save_state(out_root, windows, timestamp)
-            except OSError as err:
-                problems.append(f"the state file could not be written ({err.strerror or err}); the batch stops")
-            record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
-                                         "limit_minutes": max_agent_minutes_per_5h,
-                                         "minutes_before": round(minutes_before, 1),
-                                         "minutes_after": round(agent_minutes(runs_after, now()), 1)}
-            # the finished run is listed before anything else can stop the batch
-            _write_record(batch / lang, batch, record)
-            summary["runs"].append(_summary_entry(record))
-            _write_json(batch / "summary.json", summary)
+            with gate.holding():
+                runs_after, problem = close_guard_run(guard, entry, now(), _run_agent_seconds(record))
+                problems = [problem] if problem else []
+                windows = {**windows, **record["rate_limits"]["after"]}
+                try:
+                    save_state(out_root, windows, timestamp)
+                except OSError as err:
+                    problems.append(f"the state file could not be written ({err.strerror or err}); the batch stops")
+                record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
+                                             "limit_minutes": max_agent_minutes_per_5h,
+                                             "minutes_before": round(minutes_before, 1),
+                                             "minutes_after": round(agent_minutes(runs_after, now()), 1)}
+                # the finished run is listed before anything else can stop the batch
+                _write_record(batch / lang, batch, record)
+                summary["runs"].append(_summary_entry(record))
+                _write_json(batch / "summary.json", summary)
             if problems:
                 raise PilotError("; ".join(problems))
             if record["status"] == "timeout":
                 stopped = (f"the {lang} run hit the time limit of {timeout:g} s; Harbor was stopped and its "
                            "containers removed; later languages were not started")
+            gate.raise_held()
     except BaseException as err:
+        gate.stop_begun()
         in_flight = err
         raise
     else:
         in_flight = None
     finally:
+        gate.enter()  # the summary and the final scans are never cut short
         try:
             try:
                 _write_json(batch / "summary.json", summary)
@@ -1056,23 +1188,42 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 if not scan.clean:
                     failures.append(scan.message(where))
             if failures:
-                if in_flight is not None and not isinstance(in_flight, KeyboardInterrupt):
-                    failures.append("the batch had already stopped: "
-                                    + mask(f"{type(in_flight).__name__}: {in_flight}", token))
+                if in_flight is not None:
+                    said = "; ".join([f"{type(in_flight).__name__}: {in_flight}", *getattr(in_flight, "__notes__", [])])
+                    failures.append("the batch had already stopped: " + mask(said, token))
                 raise TokenLeak("; ".join(failures))
-            report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: "
-                                 "clean")
+            left = harbor_groups_left()
+            if left:
+                report_to(in_flight, f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed "
+                                     "gone, so its run stays open in the five-hour guard file; the scans of the batch "
+                                     "folder, the state file and the guard file found no token, but Harbor may still "
+                                     "be running")
+            else:
+                report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: "
+                                     "clean")
             if summary_error is not None and in_flight is None:
                 raise PilotError(f"could not write the batch summary: {summary_error}")
         finally:
-            for sig, handler in handlers.items():
-                signal.signal(sig, handler)
+            gate.restore()
+            _gates.current = outer_gate
+    if gate.held:  # a stop signal came while the last steps were held: the batch is done, now stop
+        stop = Stopped(gate.held[0])
+        stop.add_note("the batch had finished; the batch folder, the state file and the guard file were scanned "
+                      "for the token: clean")
+        raise stop
     return summary
 
 
+def open_run_seconds(task, timeout: float) -> float:
+    """What a run with no recorded end counts: the longest time Harbor could still run without the pilot, which
+    is the larger of the pilot's time limit and the task's own limits as Harbor applies them (a pilot that
+    died no longer enforces its own), plus the time Harbor is given to stop."""
+    return max(float(timeout), harbor_time_limit(task)) + STOP_GRACE_SECONDS + TERM_GRACE_SECONDS
+
+
 def report_to(err: BaseException | None, note: str) -> None:
-    """Attach what happened to an interrupt, so the command line reports it instead of assuming it."""
-    if isinstance(err, KeyboardInterrupt):
+    """Attach what happened to whatever stopped the batch, so the command line reports it instead of assuming it."""
+    if err is not None:
         err.add_note(note)
 
 
@@ -1094,6 +1245,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
             model: str | None, before: dict, runner: Runner, image_check: Callable[[str], None], timeout: float,
             now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS, docker=None) -> dict:
     docker = docker if docker is not None else DockerContainers()
+    _gate().raise_held()  # a signal held while the start was entered stops the run before Harbor starts
     run_dir = batch / lang
     run_dir.mkdir(parents=True, exist_ok=True)
     image = LANGUAGES[lang].image
@@ -1119,6 +1271,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout)
         finished = True
     finally:
+        _gate().enter()  # the containers step, the scan and the record are never cut short
         record["wall_seconds"] = round(time.monotonic() - started, 1)
         if job_dir.is_dir():
             # Harbor may have left this run's containers running, cut short or not: remove them first, so
@@ -1170,9 +1323,11 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         status = "verifier-env"
     record["status"] = status
     _write_record(run_dir, batch, record)
+    _gate().leave()
     if record["containers_left"]:
         raise PilotError(f"the {lang} run was stopped but its containers are still in Docker ("
                          + ", ".join(record["containers_left"]) + "); not starting anything else")
+    _gate().raise_held()
     return record
 
 
@@ -1209,10 +1364,14 @@ def main(argv: list[str] | None = None) -> int:
                             allow_hosts=args.agent_host or DEFAULT_AGENT_HOSTS,
                             max_agent_minutes_per_5h=args.max_agent_minutes_per_5h)
     except TokenLeak as err:
-        print(f"TOKEN LEAK CHECK FAILED: {err}", file=sys.stderr)
+        _say(f"TOKEN LEAK CHECK FAILED: {err}")
+        for note in getattr(err, "__notes__", []):
+            _say(f"  {note}")
         return 3
     except PilotError as err:
-        print(f"pilot: {err}", file=sys.stderr)
+        _say(f"pilot: {err}")
+        for note in getattr(err, "__notes__", []):
+            _say(f"  {note}")
         return 2
     except KeyboardInterrupt as err:
         signum = getattr(err, "signum", None)
