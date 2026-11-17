@@ -1,0 +1,41 @@
+# Checks the introduction page in a real browser: the four languages are built from the template,
+# and the layout holds at every width from 320 to 1100 px, at phone and foldable sizes, with large
+# text, and when the page is folded and unfolded. Needs no secrets and only reads the repository.
+name: site
+
+on:
+  push:
+    paths:
+      - "site/**"
+      - "tools/site/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - "tools/site/**"
+      - ".github/workflows/site.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  layout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install the pinned browser driver
+        run: python -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
+      - name: The committed pages are what the template builds
+        run: python tools/site/build.py --check
+      - name: Lay the page out at every size (uses the Chrome already on the runner)
+        run: python tools/site/sweep.py

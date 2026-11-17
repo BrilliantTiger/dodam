@@ -315,6 +315,43 @@ def test_workflow_pins_actions_and_keeps_permissions_narrow():
     assert "deploy-pages@" in writers[0]
 
 
+def test_site_check_workflow_pins_actions_and_only_reads():
+    text = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
+    uses = re.findall(r"uses:\s*(\S+)", text)
+    assert uses
+    assert [u for u in uses if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", u)] == []
+    assert "write" not in text
+    assert "tools/site/sweep.py" in text and "--require-hashes" in text
+
+
+# --- phones and foldable phones (the browser sweep in tools/site/sweep.py checks the layout) ---
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_page_lets_the_layout_reach_under_cut_outs_safely(lang):
+    metas = {m.get("name"): m.get("content") for m in page(lang).all("meta")}
+    assert "viewport-fit=cover" in metas["viewport"]
+    assert "user-scalable" not in metas["viewport"] and "maximum-scale" not in metas["viewport"]
+
+
+def test_styles_are_fluid_and_touch_friendly():
+    css = (SITE / "style.css").read_text(encoding="utf-8")
+    for needed in ("env(safe-area-inset-left)", "env(safe-area-inset-right)", "env(safe-area-inset-top)",
+                   "env(safe-area-inset-bottom)", "svh", "dvh", "horizontal-viewport-segments: 2",
+                   "vertical-viewport-segments: 2", "env(viewport-segment-", "(hover: hover)"):
+        assert needed in css, needed
+    outside_hover = re.sub(r"@media \(hover: hover\)[^{]*\{(?:[^{}]|\{[^{}]*\})*\}", "", css)
+    assert ":hover" not in outside_hover, "hover effects belong inside @media (hover: hover)"
+    assert not re.search(r"\bheight:\s*\d+px", re.sub(r"(?s)\.progress\s*\{.*?\}", "", css)), "no fixed pixel heights"
+    assert not re.search(r"(?<![\w-])100vh\b(?![^;]*;\s*min-height:[^;]*svh)", css) or "100svh" in css
+
+
+def test_script_lays_out_again_on_resize_and_rests_in_a_hidden_tab():
+    js = (SITE / "motion.js").read_text(encoding="utf-8")
+    assert "ResizeObserver" in js
+    assert "visibilitychange" in js
+
+
 @pytest.mark.parametrize("name", ["README.md", "README.ko.md"])
 def test_readme_links_to_the_page_near_the_top_and_names_the_four_languages(name):
     head = "\n".join((ROOT / name).read_text(encoding="utf-8").splitlines()[:8])
