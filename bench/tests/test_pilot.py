@@ -551,7 +551,7 @@ def test_a_run_writes_one_record_and_a_summary(tmp_path):
     assert record["rate_limits"]["after"]["five_hour"]["utilization"] == 0.4
     assert record["rate_limits"]["after"]["seven_day"]["utilization"] == 0.1
     assert len(record["rate_limits"]["events"]) == 4
-    assert record["leak_scan"] == {"clean": True, "hits": []}
+    assert record["leak_scan"] == {"clean": True, "hits": [], "unchecked": []}
     assert record["verifier_env_problems"] == []
     assert Path(record["harbor_job"]).is_dir()
     assert record["status"] == "ok"
