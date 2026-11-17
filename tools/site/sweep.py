@@ -14,6 +14,9 @@ For each of the four languages it checks, at every width from 320 to 1100 CSS px
   - every link and button is at least 44 by 44 CSS px and none overlap;
   - pieces that sit side by side (header, hero, diagram labels, buttons) do not overlap.
 
+Everything is checked twice: in the system font and in a deliberately wide font, because other
+systems fall back to wider fonts than the one this was written on.
+
 At named sizes (ordinary phones, the cover and inner screens of foldable phones, tablets, desktop,
 portrait and landscape) it also checks the hero headline, the header and the diagram. Then it
 doubles the text size, folds and unfolds the page without reloading it, and, where the browser
@@ -241,6 +244,22 @@ def main() -> int:
                 page.set_viewport_size({"width": width, "height": height})
                 page.evaluate("document.documentElement.style.fontSize = '200%'")
                 report(f"{lang} {width}x{height} with text at 200%", page.evaluate(CHECK, {}))
+                page.evaluate("document.documentElement.style.fontSize = ''")
+
+            # Other systems fall back to wider fonts than this one. Lay everything out again with a wide one.
+            page.add_style_tag(content='*:not(pre):not(code) { font-family: Verdana, "DejaVu Sans", sans-serif !important; }')
+            for width in range(320, 1101, 64 if args.quick else 24):
+                for height in (round(width * 21 / 9), round(width / 1.12)):
+                    page.set_viewport_size({"width": width, "height": height})
+                    report(f"{lang} {width}x{height} in a wide font", page.evaluate(CHECK, {}))
+            for name, width, height in NAMED:
+                page.set_viewport_size({"width": width, "height": height})
+                page.evaluate("scrollTo(0, 0)")
+                report(f"{lang} {name} {width}x{height} in a wide font", page.evaluate(CHECK, {"named": True}))
+            for width, height in BIG_TEXT:
+                page.set_viewport_size({"width": width, "height": height})
+                page.evaluate("document.documentElement.style.fontSize = '200%'")
+                report(f"{lang} {width}x{height} in a wide font with text at 200%", page.evaluate(CHECK, {}))
                 page.evaluate("document.documentElement.style.fontSize = ''")
 
             page.evaluate("document.querySelector('.langs').open = true")

@@ -241,6 +241,8 @@ a {
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
+  flex-wrap: wrap;
+  max-width: 100%;
   min-width: 2.75rem;
   min-height: 2.75rem;
   text-decoration: none;
@@ -530,6 +532,10 @@ h1 {
 
 h1 .w {
   display: inline-block;
+}
+
+h1 .pair {
+  white-space: nowrap;
 }
 
 h1 em {
@@ -1368,7 +1374,8 @@ footer h2 {
    Browsers that do not report the two halves keep the fluid layout above. */
 
 @media (horizontal-viewport-segments: 2) {
-  .wrap {
+  .wrap,
+  .hero .wrap {
     display: grid;
     grid-template-columns: env(viewport-segment-width 0 0, 50vw) env(viewport-segment-width 1 0, 50vw);
     column-gap: calc(env(viewport-segment-left 1 0, 50vw) - env(viewport-segment-right 0 0, 50vw));
@@ -1415,6 +1422,7 @@ footer h2 {
   .hero .wrap > .status {
     grid-row: 1;
     justify-self: start;
+    max-width: calc(100% - 2 * var(--gutter));
   }
 
   .hero .wrap > h1 {

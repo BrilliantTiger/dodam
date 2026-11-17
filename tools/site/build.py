@@ -79,18 +79,25 @@ def headline(lang: str, parts: list[str]) -> str:
     """One span per word (per phrase in Japanese, which has no spaces) so the headline can rise
     in piece by piece without ever splitting a character. Parts marked * are emphasized."""
     glue = "" if lang == "ja" else " "
+    if len(parts) < 2 or parts[-1].startswith("*") != parts[-2].startswith("*"):
+        raise ValueError(f"{lang}: the last two parts of the headline must share their emphasis")
     out, step, inside = [], 0, False
-    for part in parts:
+    for index, part in enumerate(parts):
         strong = part.startswith("*")
         if strong != inside:
             out.append("<em>" if strong else "</em>")
             inside, step = strong, step + 1
+        if index == len(parts) - 2:
+            out.append('<span class="pair">')  # the last two never part, so no word ends up alone
         out.append(f'<span class="w" style="--i:{step}">{part.lstrip("*")}</span>')
         step += 1
+    out.append("</span>")
     if inside:
         out.append("</em>")
     html = glue.join(out)
-    return html.replace(f"<em>{glue}", "<em>").replace(f"{glue}</em>", "</em>") if glue else html
+    for tag in ("<em>", '<span class="pair">'):
+        html = html.replace(f"{tag}{glue}", tag) if glue else html
+    return html.replace(f"{glue}</span></em>", "</span></em>").replace(f"{glue}</span>", "</span>").replace(f"{glue}</em>", "</em>") if glue else html
 
 
 def specials(lang: str) -> dict:
