@@ -273,7 +273,12 @@ SETUP_MARGIN_SECONDS = 1800
 def harbor_time_limit(task) -> float:
     """Longer than Harbor may take by its own limits: each step's agent and judge time-outs, plus room
     for building and starting the environments and installing the agent."""
-    per_step = task.limits["agent_timeout_sec"] + task.limits["verifier_timeout_sec"]
+    limits = getattr(task, "limits", None) or {}
+    missing = [k for k in ("agent_timeout_sec", "verifier_timeout_sec") if not _finite(limits.get(k), 1e-9)]
+    if missing:
+        raise PilotError(f"task {task.id} gives no {' and no '.join(missing)} in its limits, so the time Harbor may "
+                         "take cannot be known; add them to the task")
+    per_step = limits["agent_timeout_sec"] + limits["verifier_timeout_sec"]
     return float(per_step * len(task.steps) + SETUP_MARGIN_SECONDS)
 
 
@@ -332,31 +337,37 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
     """Run Harbor in its own process group. At the time limit, or on a stop signal, stop the whole group; no
     further signal can cut that stop short. The group stays registered until it is confirmed gone."""
     gate = _gate()
+    proc: subprocess.Popen | None = None
     with open(log_path, "ab") as log:
-        with gate.holding():  # Harbor is never started without being registered
-            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
-            _live_groups.add(proc.pid)
+        # Harbor's start, the wait, ending what it left behind and the confirmation are one try: on every way
+        # out that is not a clean confirmation, the whole group is stopped and killed before it is confirmed.
         try:
+            with gate.holding():  # Harbor is never started without being registered
+                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
+                _live_groups.add(proc.pid)
             gate.raise_held()
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            gate.stop_begun()
-            log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
-            log.flush()
-            stop_process_group(proc, grace, term_grace)
-            code = TIMEOUT_RETURNCODE
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                gate.stop_begun()
+                _say(f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}")
+                log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
+                log.flush()
+                stop_process_group(proc, grace, term_grace)
+                code = TIMEOUT_RETURNCODE
+            else:
+                end_leftover_processes(proc.pid, term_grace)
+            _confirm_gone(proc.pid)
+            return code
         except BaseException:
             gate.stop_begun()
-            log.write(b"\npilot: interrupted; stopping harbor and its processes\n")
-            log.flush()
-            stop_process_group(proc, grace, term_grace)
-            _confirm_gone(proc.pid)
+            if proc is not None:
+                log.write(b"\npilot: interrupted; stopping harbor and its processes\n")
+                log.flush()
+                stop_process_group(proc, grace, term_grace)
+                _confirm_gone(proc.pid)
             raise
-        else:
-            end_leftover_processes(proc.pid, term_grace)
-        _confirm_gone(proc.pid)
-        return code
 
 
 def _signal_pgid(pgid: int, sig: int) -> bool:
@@ -947,10 +958,17 @@ class SignalGate:
         self.previous = {}
 
     def _handle(self, signum, frame) -> None:
-        if self.stopping or self.depth:
+        name = signal.Signals(signum).name
+        if self.stopping:
             self.held.append(signum)
+            _say(f"pilot: {name} held: {STOPPING}")
+            return
+        if self.depth:
+            self.held.append(signum)
+            _say(f"pilot: {name} held until the current step is done; then {STOPPING}")
             return
         self.stopping = True
+        _say(f"pilot: {name} received: {STOPPING}; further stop signals are held until then")
         raise Stopped(signum)
 
     def stop_begun(self) -> None:
@@ -976,6 +994,8 @@ class SignalGate:
             raise Stopped(self.held[0])
 
 
+STOPPING = ("the pilot is stopping Harbor and will exit when the cleanup is done (Harbor's containers removed, the "
+            "output scanned, the run closed in the five-hour guard), which can take up to about 15 minutes")
 _gates = threading.local()
 _NO_GATE = SignalGate()  # outside a batch: never installed, holds nothing
 
@@ -998,7 +1018,7 @@ def close_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: f
 def _say(text: str) -> None:
     try:
         print(text, file=sys.stderr, flush=True)
-    except OSError:  # a hung-up terminal
+    except (OSError, RuntimeError, ValueError):  # a hung-up terminal, or a print cut by a signal
         pass
 
 
@@ -1084,6 +1104,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     stopped: str | None = None
     gate, outer_gate = SignalGate(), getattr(_gates, "current", None)
     _gates.current = gate
+    in_flight: BaseException | None = None
     gate.install()
     try:
         for lang in languages:
@@ -1165,12 +1186,11 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 stopped = (f"the {lang} run hit the time limit of {timeout:g} s; Harbor was stopped and its "
                            "containers removed; later languages were not started")
             gate.raise_held()
+        gate.enter()  # from the end of the last run, the summary and the final scans are never cut short
     except BaseException as err:
         gate.stop_begun()
         in_flight = err
         raise
-    else:
-        in_flight = None
     finally:
         gate.enter()  # the summary and the final scans are never cut short
         try:
