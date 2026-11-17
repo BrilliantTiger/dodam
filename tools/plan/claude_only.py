@@ -65,6 +65,8 @@ PLAN_DAYS = 15
 
 def _modules(sims: int = SIMS):
     """The simulation, with the two single-account scenarios added to it."""
+    if not (HERE / "wbs.json").is_file():   # a clean checkout: the simulation reads the work breakdown from it
+        subprocess.run([sys.executable, str(HERE / "build.py")], check=True, capture_output=True)
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
     argv, sys.argv = sys.argv, [sys.argv[0], str(sims)]
