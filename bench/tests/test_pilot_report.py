@@ -668,3 +668,57 @@ def test_the_owner_s_item_about_a_new_token_says_what_is_known_and_not_known_abo
                  "기계 밖에서는 읽을 수 없다"):
         assert said in item, f"the owner's item does not say: {said}"
     assert not re.search(r"Mac mini|sk-ant|/Users|~/|@", item)
+
+
+# --- the plan's rows and sentences about the pilot --------------------------------------------------------------
+
+
+def pilot_rows():
+    assert (PLAN / "pilot_rows.py").is_file(), "the plan's rows about the pilot are not written from the estimates"
+    import pilot_rows as module
+    return module
+
+
+def test_the_plan_s_rows_about_the_pilot_carry_what_the_estimates_give():
+    """The rows of the finished pilot, of the measurement after it and of the re-planning: their figures and
+    dates in the task data are exactly what the estimates give, and the plan document carries those words."""
+    import wbs_data
+    expected = pilot_rows().rows(committed())
+    assert set(expected) == {"b_pilot", "b_night", "pm_replan_nov"}
+    tasks = {task["id"]: task for task in wbs_data.ITEMS}
+    document = PLAN_DOC.read_text(encoding="utf-8")
+    for name, fields in expected.items():
+        for field, text in fields.items():
+            assert tasks[name][field] == text, f"{name}.{field} is not what the estimates give"
+            if field in ("out", "done"):
+                assert text in document, f"the plan document does not carry {name}.{field}"
+    bound = committed()["usage"]["weekly"]["one_run_below_points"]
+    assert f"한 번에 {bound}%포인트보다 작고" in tasks["b_pilot"]["done"]
+
+
+def test_the_words_of_the_plan_s_rows_about_the_pilot_hold_no_figure_of_their_own():
+    module = pilot_rows()
+    for name, fields in module.WORDS.items():
+        for field, words in fields.items():
+            assert not re.search(r"\d", re.sub(r"\{\w+\}", "", words)), f"{name}.{field} holds a figure of its own"
+    now = module.rows(committed())
+    for change, name, field in (
+            (lambda r: r["usage"]["weekly"].update(one_run_below_points=0.5), "b_pilot", "done"),
+            (lambda r: r["usage"].update(agent_seconds_mean=80.5), "b_pilot", "out"),
+            (lambda r: r["capacity"]["next_measurements"]["same_model"].update(runs=21), "b_night", "out"),
+            (lambda r: r["capacity"]["next_measurements"]["largest_model"].update(runs=9), "b_night", "out"),
+            (lambda r: r["schedule"].update(pilot_day="2026-11-19"), "pm_replan_nov", "done"),
+            (lambda r: r["schedule"].update(pilot_day="2026-11-19"), "b_night", "start"),
+            (lambda r: r["schedule"]["pilot_row"].update(end="2026-12-09"), "b_night", "end")):
+        other = copy.deepcopy(committed())
+        change(other)
+        assert module.rows(other)[name][field] != now[name][field], (name, field)
+
+
+def test_the_plan_s_sentences_about_the_pilot_say_what_was_measured():
+    text = PLAN_DOC.read_text(encoding="utf-8")
+    bound = committed()["usage"]["weekly"]["one_run_below_points"]
+    assert "회사별로 잰다" not in text and "부터 실제 용량을 재고" not in text      # the pilot is over; it measured Claude only
+    assert f"Claude만 쟀고, 주간 한도는 한 번에 {bound}%포인트보다 작다는 위쪽 한계만 안다" in text
+    # wherever the plan gives the weekly bound, it is the one the estimates give
+    assert re.findall(r"한 번에 ([\d.]+)%포인트보다 작", text) == [str(bound)] * 2

@@ -211,6 +211,15 @@ VARIANTS = [
     (REPORT, "test_the_owner_s_item_about_a_new_token_says_what_is_known_and_not_known_about_revoking",
      "the owner's item says a new token ends the old one",
      [("TODO.md", "모르는 것: 새 토큰을 만들면 옛 토큰이 끝나는지.", "새 토큰을 만들면 옛 토큰은 끝난다.")]),
+    (REPORT, "test_the_plan_s_rows_about_the_pilot_carry_what_the_estimates_give",
+     "the plan's row of the finished pilot gives another weekly bound than the estimates",
+     [("tools/plan/wbs_data.py", "한 번에 0.21%포인트보다 작고", "한 번에 0.17%포인트보다 작고")]),
+    (REPORT, "test_the_words_of_the_plan_s_rows_about_the_pilot_hold_no_figure_of_their_own",
+     "a figure of the plan's rows about the pilot is written by hand instead of coming from the estimates",
+     [("tools/plan/pilot_rows.py", "허락하는 {night_runs}번", "허락하는 46번")]),
+    (REPORT, "test_the_plan_s_sentences_about_the_pilot_say_what_was_measured",
+     "a sentence of the plan gives another weekly bound than the estimates",
+     [(PLAN_DOC, "한 번에 0.21%포인트보다 작다는 위쪽 한계만 안다", "한 번에 0.17%포인트보다 작다는 위쪽 한계만 안다")]),
 ]
 
 COPIED = ("bench/dodambench", "bench/records", "bench/pyproject.toml", f"bench/tests/{RECORD}", f"bench/tests/{REPORT}",
