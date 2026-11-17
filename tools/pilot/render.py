@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 DATA = ROOT / "bench" / "records" / "pilot-2026-11-17.json"
 REPLAN = ROOT / "tools" / "plan" / "pilot_replan.json"
+EARLIER = ROOT / "tools" / "plan" / "claude_only.json"  # the single-seed dates of charter version 0.7
 LANGS = ("ko", "en")
 NAMES = {"python": "Python", "typescript": "TypeScript", "java": "Java", "csharp": "C#", "go": "Go",
          "rust": "Rust", "cpp": "C++"}
@@ -96,6 +97,43 @@ def run_facts(run: dict) -> dict:
         "leak_hits": num(run["leak_scan"]["hits"]), "leak_unread": num(run["leak_scan"]["unchecked"]),
         "containers": num(run["containers_left"]),
     }
+
+
+def earlier_facts(earlier: dict, replan: dict, lang: str) -> dict:
+    """The single-seed dates an earlier charter gave, and what explains their distance from today's ranges."""
+    f = {"v07.seed": str(earlier["seed"]), "v07.sims": num(earlier["sims_per_case"])}
+    for name, case in earlier["cases"].items():
+        f[f"v07.{name}.p50"] = case["rel_10"]["p50"]
+        f[f"v07.{name}.p50_month"] = month_of(case["rel_10"]["p50"], lang)
+    found = earlier["comparison"]
+    f["v07.n_seeds"] = num(len(found["seeds"]))
+    f["v07.more_sims"] = num(found["more_sims"])
+    for name in ("claude_alone", "claude_shared"):
+        for way, spread in found[name].items():
+            for end in ("earliest", "latest"):
+                f[f"v07.{name}.{way}.{end}_month"] = month_of(spread[end], lang)
+    for key, value in earlier["later_for_each_month"].items():
+        if key != "from":
+            f[f"v07.later.{key}"] = num(value)
+    if found["seeds"][0] != earlier["seed"]:
+        raise RenderError("the comparison's first seed is not the seed of the earlier dates")
+    f["v07.claude_alone.drawn_first_month"] = month_of(found["claude_alone"]["own_scenario"]["by_seed"][0], lang)
+    alone = found["claude_alone"]
+    old = earlier["cases"]["claude_alone"]["rel_10"]["p50"]
+    now = replan["forecast"]["claude_dedicated"]["rel_10_p50"]
+    five = alone["plan_scenario_scaled_first_five_seeds"]
+    if (five["earliest"], five["latest"]) != (now["earliest"], now["latest"]):
+        raise RenderError("the comparison's first five seeds are not the seeds of the range the charter gives")
+    if found["sims"] != earlier["sims_per_case"] or found["sims"] != replan["forecast"]["claude_dedicated"]["sims_per_seed"]:
+        raise RenderError("the charter says the earlier dates and the ranges were run the same number of times")
+    if now["earliest"] <= old <= now["latest"]:
+        raise RenderError("the charter says the earlier date for one Claude account lies outside the range of five seeds")
+    if not alone["plan_scenario_scaled"]["earliest"] <= old <= alone["plan_scenario_scaled"]["latest"]:
+        raise RenderError("the charter says the earlier date lies inside the range once more seeds are run")
+    if alone["own_scenario"]["earliest"] > alone["plan_scenario_scaled"]["latest"] or \
+            alone["plan_scenario_scaled"]["earliest"] > alone["own_scenario"]["latest"]:
+        raise RenderError("the charter says the way the capacity is set does not explain the difference")
+    return f
 
 
 def facts(data: dict, replan: dict, lang: str) -> dict:
@@ -297,11 +335,15 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
     return f
 
 
-def render(lang: str, data: dict | None = None, replan: dict | None = None, text: str | None = None) -> str:
+def render(lang: str, data: dict | None = None, replan: dict | None = None, text: str | None = None,
+           earlier: dict | None = None) -> str:
     data = json.loads(DATA.read_text(encoding="utf-8")) if data is None else data
     replan = json.loads(REPLAN.read_text(encoding="utf-8")) if replan is None else replan
     text = template(lang).read_text(encoding="utf-8") if text is None else text
     known = facts(data, replan, lang)
+    if "{{v07." in text:  # only the lines that set an earlier charter's dates beside today's need them
+        earlier = json.loads(EARLIER.read_text(encoding="utf-8")) if earlier is None else earlier
+        known.update(earlier_facts(earlier, replan, lang))
 
     def fill(line: str, values: dict) -> str:
         def value(m):
