@@ -134,6 +134,7 @@ def pilot_figures():
         "alone_gate_p50": kdate(alone["g_dir"]["p50"]), "alone_gate_p80": kdate(alone["g_dir"]["p80"]),
         "alone_gate_p": alone["p_gate_by_its_date"],
         "gate_day": kdate(sched["gate_day"]),
+        "weekly_bound": PILOT["usage"]["weekly"]["one_run_below_points"],
         "night_runs": PILOT["capacity"]["next_measurements"]["same_model"]["runs"],
         "night_large_runs": PILOT["capacity"]["next_measurements"]["largest_model"]["runs"],
     }
