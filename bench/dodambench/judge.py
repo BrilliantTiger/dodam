@@ -196,6 +196,7 @@ OUTLIVING_CALLS = {
 }
 CASES_DIR = Path("/dodam-cases")   # the memory-backed, size-capped folder the verifier's container gives the cases
 JUDGE_ROOM_MB = 256
+MEMORY_RESERVE_MB = 128     # the judge ends a program that leaves the container less than this
 PROCESS_CEILING = 4096      # a cap on processes above this bounds nothing on a small machine                # what the judge and the language's runtime need beside the case's own limits
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
 
@@ -283,7 +284,9 @@ def container_memory() -> dict[str, int]:
     caches files on disk. Memory in shared memory and in memory-backed folders is not such a cache."""
     current = int(Path("/sys/fs/cgroup/memory.current").read_text())
     stat_lines = dict(line.split()[:2] for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines())
-    return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"])}
+    cap = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+    return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"]),
+            "cap": int(cap) if cap.isdigit() else 0}
 
 
 def killed_for_memory() -> int:

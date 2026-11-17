@@ -352,7 +352,8 @@ def held():
     """What the cases' folder holds and what the kernel counts for the container, in MB."""
     room = os.statvfs("/dodam-cases")
     return {"files_mb": (room.f_blocks - room.f_bfree) * room.f_frsize // 2**20, "entries": room.f_files - room.f_ffree,
-            "kernel_kills": [int(l.split()[1]) for l in open("/sys/fs/cgroup/memory.events") if l.startswith("oom_kill ")][0]}
+            "kernel_kills": [int(l.split()[1]) for l in open("/sys/fs/cgroup/memory.events") if l.startswith("oom_kill ")][0],
+            "most_memory_mb": int(open("/sys/fs/cgroup/memory.peak").read()) // 2**20}
 
 
 def test_before():
@@ -484,11 +485,12 @@ def test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge(
     started = time.monotonic()
     changes, room = {}, None
     if attack == "more memory than the whole container has":
-        # a limit the container cannot give: the kernel ends the program at the container's cap, and
-        # the case fails for memory all the same
+        # a limit the container cannot give: the program is ended before the container's memory runs
+        # out, by the judge, so that the kernel never has to choose what to end; the case fails for memory
         changes, room = {"CASE_MEMORY_MB": "100000"}, {"memory_mb": 640}
     result = judge_attack(tmp_path, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS}, room=room, **changes)
     seconds = time.monotonic() - started
+    assert (tmp_path / "out/attack.json").is_file(), result       # the judge itself must outlive the attack
     seen = found_by(tmp_path / "out", "attack.json")
     assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, (seen, result["report"])
     assert seen["limit"] == limit, seen
@@ -498,10 +500,11 @@ def test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge(
     assert result["reward"]["functional_pass_rate"] == round(2 / 3, 4)
     assert result["exit_code"] == 0 and not (tmp_path / "out/judge-fault.json").exists()
     kills = seen["after"]["kernel_kills"] - seen["before"]["kernel_kills"]
-    if attack == "more memory than the whole container has":
-        assert kills >= 1, "the kernel was to end this program"
-    elif limit == "memory":
+    if limit == "memory":
         assert kills == 0, "the judge's own measuring was to end this program, before the kernel had to"
+    if limit == "memory" and not changes:
+        # ended near the case's limit of 256 MB, not only when the container of 1,024 MB was nearly full
+        assert seen["after"]["most_memory_mb"] < 640, seen
     after = found_by(tmp_path / "out", "after.json")
     assert after["files_mb"] == 0 and after["entries"] <= 2, after
 

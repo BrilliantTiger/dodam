@@ -64,6 +64,11 @@ except ImportError:
 resource = _judge.resource
 CONFIG_ENV = "DODAM_CLI_CONFIG"
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
+def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
+    """The container's memory ran out during the run and the kernel ended a process for it."""
+    return killed_now > killed_before
+
+
 TICK = 0.002
 WATCH = 0.002
 PR_SET_CHILD_SUBREAPER = 36
@@ -328,8 +333,7 @@ class Case:
                 result.limit = "left processes"
         finally:
             self._end(proc)
-        if self._side is not None and _judge.killed_for_memory() > killed_before:
-            # the container's memory ran out and the kernel ended the program
+        if self._side is not None and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
         result.seconds = time.monotonic() - started
         _spent[self._key] = _spent.get(self._key, 0.0) + result.seconds
@@ -349,6 +353,12 @@ class Case:
         def memory_taken() -> int:
             """Everything the kernel counts for the container but the cases' files."""
             return _judge.container_memory()["taken"] - _files_held(work_root)
+
+        def memory_runs_out() -> bool:
+            """The container is about to run out of memory, whatever the case's limit says. Ending the
+            program here keeps the kernel from having to choose what to end."""
+            now = _judge.container_memory()
+            return bool(now["cap"]) and now["taken"] > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
 
         memory_before = memory_taken() if self._side is not None else 0
         chunks = {proc.stdout: [], proc.stderr: []}
@@ -417,7 +427,7 @@ class Case:
                 limit = "output"
             elif now >= next_watch:
                 next_watch = now + WATCH
-                if self._side is not None and memory_taken() - memory_before > max_memory:
+                if self._side is not None and (memory_taken() - memory_before > max_memory or memory_runs_out()):
                     limit = "memory"
         if limit is not None:
             self._end(proc)

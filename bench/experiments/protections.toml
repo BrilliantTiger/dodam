@@ -212,16 +212,24 @@ what = "The judge measures all memory of the container and ends the program abov
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory]"]
 [[protection.change]]
-find = '''                if self._side is not None and memory_taken() - memory_before > max_memory:'''
-put = '''                if False:'''
+find = '''(memory_taken() - memory_before > max_memory or memory_runs_out())'''
+put = '''(memory_runs_out())'''
 
 [[protection]]
 what = "A program the kernel ended for memory fails its case"
 file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_run_during_which_the_kernel_ended_a_process_for_memory_is_told"]
+[[protection.change]]
+find = '''    return killed_now > killed_before'''
+put = '''    return False'''
+
+[[protection]]
+what = "The judge ends a program that leaves the container too little memory"
+file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[more memory than the whole container has]"]
 [[protection.change]]
-find = '''        if self._side is not None and _judge.killed_for_memory() > killed_before:'''
-put = '''        if False:'''
+find = '''(memory_taken() - memory_before > max_memory or memory_runs_out())'''
+put = '''(memory_taken() - memory_before > max_memory)'''
 
 [[protection]]
 what = "The program is ended at the case's time limit"

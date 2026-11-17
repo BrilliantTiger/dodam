@@ -694,3 +694,9 @@ def test_the_filter_refuses_the_calls_that_make_what_outlives_a_process():
         for call in (shmget, msgget, semget, mq_open):
             at = next(i for i, line in enumerate(lines) if line[0] == 0x15 and line[3] == call and i > 3)
             assert at + 1 + lines[at][1] == len(lines) - 1, "the check must jump to the refusal"
+
+
+def test_a_run_during_which_the_kernel_ended_a_process_for_memory_is_told():
+    told = getattr(dodam_cli, "_ended_by_the_kernel", None)
+    assert told is not None, "the case runner does not look whether the kernel ended something"
+    assert told(3, 4) is True and told(3, 3) is False

@@ -167,13 +167,13 @@ A limit is a bound, not a measurement. For each resource there is a line that ca
 | Output | the output limit plus what one pipe holds | the judge keeps what fits in the limit, reads no more and ends the program | fails |
 | Processes and threads | the limit itself | the kernel refuses that user a process or thread beyond the limit; the user is this judging's alone | cannot be taken |
 | Files | the limit itself, and 20,000 entries | the container caps the memory-backed folder the case's folder lives in at that size. Many small files, deep folders, files deleted while open, the home and temporary folders are all inside it, so together they come to that size. One file cannot be made larger than the limit, not even a sparse one (the kernel) | cannot be taken. A program the kernel ended for making one file too large fails |
-| Memory | the container's memory cap | every 0.002 seconds the judge measures the memory of the whole container and ends the program above the limit. What gets past it in between is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case whose program the kernel ended |
+| Memory | the container's memory cap | every 0.002 seconds the judge measures the memory of the whole container and ends the program above the limit, and also, whatever the limit, when the container has less than 128 MB left. What gets past it in between is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case whose program the kernel ended |
 
 **What counts as memory.** Not the memory of the processes alone but everything the kernel counts for the container: the memory of all processes, memory files that belong to no process, pipes and what the kernel keeps for them. The cache of files on disk and the files in the case's folder are taken out (the case's files count against the file limit). What was there when the run began is subtracted; the rest is the case's memory.
 
 **What cannot be made.** Memory that stays when its processes have ended, which is System V shared memory, message queues and semaphores, and POSIX message queues: the kernel refuses the calls themselves. The folder for POSIX shared memory is closed to writing. So once the program's processes are ended, nothing of its memory is left but the files in the case's folder.
 
-**How far memory can really be passed.** Memory alone can be passed between two measurements. The most it can be passed by is the container's memory cap less the limit and less what the judge uses. The values measured at an interval of 0.002 seconds are in "The numbers". A program that is above the limit and comes back below it between two measurements may not fail its case. Even then it cannot pass the container's cap.
+**How far memory can really be passed.** Memory alone can be passed between two measurements. The most it can be passed by is the container's memory cap less the limit and less what the judge uses. The judge ends the program when the container has less than 128 MB left, so the kernel has to choose what to end only when a program takes another 128 MB within 0.002 seconds. The values measured at an interval of 0.002 seconds are in "The numbers". A program that is above the limit and comes back below it between two measurements may not fail its case. Even then it cannot pass the container's cap.
 
 **The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that eats more memory than the container has and one that prints 400 MB are tests, and in all three the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
 
@@ -384,7 +384,8 @@ For every protection there is one variant of the code without it (`bench/experim
 | The judge refuses a container without a cap on processes | the judge is started without a cap on processes |
 | The judge refuses a container without the cases' capped folder | the judge is started without that folder |
 | The judge measures all memory of the container and ends the program above the limit | the program takes memory as fast as it can; it must be ended before the kernel steps in |
-| A program the kernel ended for memory fails its case | the case's limit is set above the container's cap and memory is taken to the end |
+| A program the kernel ended for memory fails its case | the case runner is told that the kernel ended a process for memory during the run |
+| The judge ends a program that leaves the container too little memory | the case's limit is set above the container's cap and memory is taken to the end; it must be ended before the kernel steps in |
 | The program is ended at the case's time limit | the program hangs |
 | The judge stops reading output at the limit | the program prints without end |
 | A program that leaves a process behind fails its case | the program leaves a daemon and ends |
