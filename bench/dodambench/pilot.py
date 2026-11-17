@@ -289,18 +289,35 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
         pass
 
 
-def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float) -> None:
+def stop_process_group(proc: subprocess.Popen, grace: float, term_grace: float,
+                       announce: Callable[[], None] | None = None) -> None:
     """Ask Harbor to stop as Ctrl-C does, so it removes its containers; then SIGTERM, which Harbor also
-    turns into a clean stop; then kill whatever is left of its process group."""
+    turns into a clean stop; then kill whatever is left of its process group. The group's first signal goes
+    out before anything else; what the pilot has to say is printed only after it, while it waits."""
     for sig, wait in ((signal.SIGINT, grace), (signal.SIGTERM, term_grace)):
         _signal_group(proc, sig)
-        try:
-            proc.wait(timeout=wait)
+        if announce is not None:
+            announce, say = None, announce
+            say()
+        if _wait_saying(proc, wait):
             break
-        except subprocess.TimeoutExpired:
-            continue
     _signal_group(proc, signal.SIGKILL)  # anything Harbor left running in its group
     proc.wait()
+
+
+def _wait_saying(proc: subprocess.Popen, wait: float) -> bool:
+    """Wait up to wait seconds for Harbor to exit, printing the notices of held signals as they come."""
+    end = time.monotonic() + wait
+    while True:
+        _gate().flush_notices()
+        left = end - time.monotonic()
+        if left <= 0:
+            return proc.poll() is not None
+        try:
+            proc.wait(timeout=min(1.0, left))
+            return True
+        except subprocess.TimeoutExpired:
+            continue
 
 
 # How long to wait for Harbor's process group to be confirmed gone after it was stopped or exited.
@@ -338,9 +355,11 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
     further signal can cut that stop short. The group stays registered until it is confirmed gone."""
     gate = _gate()
     proc: subprocess.Popen | None = None
-    with open(log_path, "ab") as log:
-        # Harbor's start, the wait, ending what it left behind and the confirmation are one try: on every way
-        # out that is not a clean confirmation, the whole group is stopped and killed before it is confirmed.
+    log = open(log_path, "ab")  # when Harbor's log cannot be opened, nothing has started yet
+    try:
+        # Harbor's start, the wait, ending what it left behind and the confirmation are one try. On every way out
+        # that is not a clean confirmation, stopping the whole group is the first thing that happens; the steps
+        # after it (the pilot's line in Harbor's log, the confirmation) cannot skip it or each other.
         try:
             with gate.holding():  # Harbor is never started without being registered
                 proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=log,
@@ -351,10 +370,10 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
                 code = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 gate.stop_begun()
-                _say(f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}")
-                log.write(b"\npilot: harbor did not finish within the time limit; stopping it and its processes\n")
-                log.flush()
-                stop_process_group(proc, grace, term_grace)
+                stop_process_group(proc, grace, term_grace, announce=lambda: _say(
+                    f"pilot: the run hit its time limit of {timeout:g} s: {STOPPING}"))
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
+                    log, b"\npilot: harbor did not finish within the time limit; it and its processes were stopped\n"))
                 code = TIMEOUT_RETURNCODE
             else:
                 end_leftover_processes(proc.pid, term_grace)
@@ -362,12 +381,19 @@ def run_subprocess(cmd: list[str], env: dict[str, str], log_path: Path, timeout:
             return code
         except BaseException:
             gate.stop_begun()
-            if proc is not None:
-                log.write(b"\npilot: interrupted; stopping harbor and its processes\n")
-                log.flush()
-                stop_process_group(proc, grace, term_grace)
+            if proc is not None and proc.pid in _live_groups:  # a group already confirmed gone is not stopped again
+                stop_process_group(proc, grace, term_grace, announce=gate.flush_notices)
+                gate.step("the pilot's line in Harbor's log", lambda: _log_line(
+                    log, b"\npilot: interrupted; harbor and its processes were stopped\n"))
                 _confirm_gone(proc.pid)
             raise
+    finally:
+        gate.step("closing Harbor's log", log.close)
+
+
+def _log_line(log, text: bytes) -> None:
+    log.write(text)
+    log.flush()
 
 
 def _signal_pgid(pgid: int, sig: int) -> bool:
@@ -947,6 +973,8 @@ class SignalGate:
 
     def __init__(self):
         self.depth, self.stopping, self.held, self.previous = 0, False, [], {}
+        self.notices: list[str] = []  # what the handler has to say, printed only where it cannot delay a stop
+        self.failures: list[str] = []  # the steps of the stop and the cleanup that failed, for the report
 
     def install(self) -> None:
         if threading.current_thread() is threading.main_thread():
@@ -958,18 +986,31 @@ class SignalGate:
         self.previous = {}
 
     def _handle(self, signum, frame) -> None:
+        # No input or output here: the handler only records, so nothing it does can stand before the stop.
         name = signal.Signals(signum).name
         if self.stopping:
             self.held.append(signum)
-            _say(f"pilot: {name} held: {STOPPING}")
+            self.notices.append(f"pilot: {name} held: {STOPPING}")
             return
         if self.depth:
             self.held.append(signum)
-            _say(f"pilot: {name} held until the current step is done; then {STOPPING}")
+            self.notices.append(f"pilot: {name} held until the current step is done; then {STOPPING}")
             return
         self.stopping = True
-        _say(f"pilot: {name} received: {STOPPING}; further stop signals are held until then")
+        self.notices.append(f"pilot: {name} received: {STOPPING}; further stop signals are held until then")
         raise Stopped(signum)
+
+    def flush_notices(self) -> None:
+        while self.notices:
+            _say(self.notices.pop(0))
+
+    def step(self, what: str, action: Callable[[], object]) -> tuple[bool, object]:
+        """One step of the stop or the cleanup: a failure is noted for the report and never skips the next step."""
+        try:
+            return True, action()
+        except Exception as err:
+            self.failures.append(f"{what} failed ({type(err).__name__}: {err})")
+            return False, None
 
     def stop_begun(self) -> None:
         self.stopping = True
@@ -1016,10 +1057,12 @@ def close_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: f
 
 
 def _say(text: str) -> None:
+    """Print to stderr; a print that fails (a hung-up terminal, a full disk behind stderr) is noted for the
+    report, never raised."""
     try:
         print(text, file=sys.stderr, flush=True)
-    except (OSError, RuntimeError, ValueError):  # a hung-up terminal, or a print cut by a signal
-        pass
+    except Exception as err:
+        _gate().failures.append(f"a message could not be printed ({type(err).__name__}: {err})")
 
 
 def _duration(seconds: float) -> str:
@@ -1085,8 +1128,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     for lang in languages:
         if lang not in LANGUAGES or lang not in task.languages:
             raise PilotError(f"task {task.id} does not run in {lang}")
+    own_limit = harbor_time_limit(task)  # a task without time limits is refused here, before anything is made
     docker = docker if docker is not None else DockerContainers()
-    timeout = harbor_time_limit(task) if timeout is None else timeout
+    timeout = own_limit if timeout is None else timeout
     token = read_token(token_file)
     env = child_env(dict(os.environ if base_env is None else base_env), token)
     timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1159,13 +1203,18 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 # wall time) only once Harbor is gone, and the record is listed
                 gate.stop_begun()
                 with gate.holding():
-                    _, problem = close_guard_run(guard, entry, now(), time.monotonic() - t0)
+                    gate.flush_notices()
+                    closed, result = gate.step(f"closing the {lang} run in the five-hour guard file",
+                                               lambda: close_guard_run(guard, entry, now(), time.monotonic() - t0))
                     report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
-                    if problem:
-                        report_to(sys.exc_info()[1], problem)
+                    if closed and result[1]:
+                        report_to(sys.exc_info()[1], result[1])
                 raise
+            failures_before = len(gate.failures)
             with gate.holding():
-                runs_after, problem = close_guard_run(guard, entry, now(), _run_agent_seconds(record))
+                closed, result = gate.step(f"closing the {lang} run in the five-hour guard file",
+                                           lambda: close_guard_run(guard, entry, now(), _run_agent_seconds(record)))
+                runs_after, problem = result if closed else ([entry], None)
                 problems = [problem] if problem else []
                 windows = {**windows, **record["rate_limits"]["after"]}
                 try:
@@ -1177,9 +1226,11 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                                              "minutes_before": round(minutes_before, 1),
                                              "minutes_after": round(agent_minutes(runs_after, now()), 1)}
                 # the finished run is listed before anything else can stop the batch
-                _write_record(batch / lang, batch, record)
+                gate.step(f"writing the {lang} record", lambda: _write_record(batch / lang, batch, record))
                 summary["runs"].append(_summary_entry(record))
-                _write_json(batch / "summary.json", summary)
+                gate.step("writing the batch summary", lambda: _write_json(batch / "summary.json", summary))
+            if len(gate.failures) > failures_before:
+                problems.append("a step after the run failed (see below); the batch stops")
             if problems:
                 raise PilotError("; ".join(problems))
             if record["status"] == "timeout":
@@ -1194,36 +1245,43 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     finally:
         gate.enter()  # the summary and the final scans are never cut short
         try:
-            try:
-                _write_json(batch / "summary.json", summary)
-            except OSError as err:  # the scans below must run all the same
-                summary_error: OSError | None = err
-            else:
-                summary_error = None
+            gate.flush_notices()
+            summary_written, _ = gate.step("writing the batch summary",
+                                           lambda: _write_json(batch / "summary.json", summary))
             # Last, whatever happened: everything the batch left behind, the records, the summary, the state and
             # the guard file. Every scan runs, and every failure is reported together.
             failures = []
             for root, where in ((batch, "in the batch folder"), (out_root / STATE_FILE, "in the state file"),
                                 (guard.path, "in the five-hour guard file")):
-                scan = check_for_token(root, token)
-                if not scan.clean:
+                scanned, scan = gate.step(f"the scan {where}", lambda root=root: check_for_token(root, token))
+                if not scanned:
+                    failures.append(f"the scan {where} itself failed, so the token could not be ruled out there")
+                elif not scan.clean:
                     failures.append(scan.message(where))
+            steps_failed = ("steps of the stop or the cleanup that failed, each without skipping the others: "
+                            + mask("; ".join(gate.failures), token)) if gate.failures else ""
             if failures:
                 if in_flight is not None:
                     said = "; ".join([f"{type(in_flight).__name__}: {in_flight}", *getattr(in_flight, "__notes__", [])])
                     failures.append("the batch had already stopped: " + mask(said, token))
+                if steps_failed:
+                    failures.append(steps_failed)
                 raise TokenLeak("; ".join(failures))
             left = harbor_groups_left()
             if left:
-                report_to(in_flight, f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed "
-                                     "gone, so its run stays open in the five-hour guard file; the scans of the batch "
-                                     "folder, the state file and the guard file found no token, but Harbor may still "
-                                     "be running")
+                scan_note = (f"Harbor's process group ({', '.join(map(str, left))}) could not be confirmed gone, so its "
+                             "run stays open in the five-hour guard file; the scans of the batch folder, the state file "
+                             "and the guard file found no token, but Harbor may still be running")
             else:
-                report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: "
-                                     "clean")
-            if summary_error is not None and in_flight is None:
-                raise PilotError(f"could not write the batch summary: {summary_error}")
+                scan_note = "the batch folder, the state file and the guard file were scanned for the token: clean"
+            report_to(in_flight, scan_note)
+            if steps_failed:
+                report_to(in_flight, steps_failed)
+            if in_flight is None and (steps_failed or not summary_written):
+                stop = PilotError("the batch ended, but steps of the cleanup failed; the details follow")
+                stop.add_note(scan_note)
+                stop.add_note(steps_failed)
+                raise stop
         finally:
             gate.restore()
             _gates.current = outer_gate
@@ -1254,7 +1312,9 @@ def _record_note(batch: Path, lang: str, summary: dict) -> str:
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
         summary["runs"].append(_summary_entry(record))
-    except (OSError, ValueError, KeyError):
+    except Exception:
+        summary["runs"].append({"language": lang, "status": "no-record", "steps": [],
+                                "reason": "the run stopped and its record could not be written or read"})
         return f"{lang}: no record was written"
     scan = record.get("leak_scan") or {}
     return (f"{lang}: {record.get('status')}; containers left: {', '.join(record.get('containers_left') or []) or 'none'}"
@@ -1293,6 +1353,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         finished = True
     finally:
         _gate().enter()  # the containers step, the scan and the record are never cut short
+        _gate().flush_notices()
         record["wall_seconds"] = round(time.monotonic() - started, 1)
         if job_dir.is_dir():
             # Harbor may have left this run's containers running, cut short or not: remove them first, so
@@ -1301,14 +1362,16 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                 record["containers_left"] = remove_run_containers(docker, job_dir)
             except Exception as err:
                 record["containers_left"] = [mask(f"could not check: {type(err).__name__}: {err}", token)]
-        scan = check_for_token(run_dir, token)
+        scanned, scan = _gate().step(f"the scan of the {lang} run folder", lambda: check_for_token(run_dir, token))
+        if not scanned:  # a scan that could not run rules nothing out: it counts as a failed scan
+            scan = LeakScan([], ["the whole run folder (the scan itself failed)"])
         record["leak_scan"] = scan.as_dict()
         if not scan.clean:
             record["status"] = "token-leak" if scan.hits else "leak-scan-failed"
         elif not finished:
             record["status"] = "interrupted"
         if record["status"]:
-            _write_record(run_dir, batch, record)
+            _gate().step(f"writing the {lang} record", lambda: _write_record(run_dir, batch, record))
         if not scan.clean:
             raise TokenLeak(scan.message(f"in the {lang} run folder"))
 
@@ -1343,7 +1406,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
     if record["verifier_env_problems"]:
         status = "verifier-env"
     record["status"] = status
-    _write_record(run_dir, batch, record)
+    _gate().step(f"writing the {lang} record", lambda: _write_record(run_dir, batch, record))
     _gate().leave()
     if record["containers_left"]:
         raise PilotError(f"the {lang} run was stopped but its containers are still in Docker ("
