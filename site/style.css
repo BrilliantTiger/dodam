@@ -1444,6 +1444,7 @@ footer h2 {
   }
 
   .hero .wrap > .cue {
+    min-width: 3rem;
     margin: 0;
   }
 }
