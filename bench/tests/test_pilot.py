@@ -1308,6 +1308,11 @@ def stop(*_):
     finish(130)
 signal.signal(signal.SIGINT, stop)
 open(os.path.join(out, "harbor-ready"), "w").write("1")
+if mode == "leave-child":
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    open(os.path.join(out, "child.pid"), "w").write(str(child.pid))
+    finish(0)
 if mode == "exit":
     finish(0)
 time.sleep(120)
@@ -1350,6 +1355,13 @@ if stage == "scans":
         poke()
         return real_check(*args, **kwargs)
     pilot.check_for_token = check
+if stage == "leftover":
+    real_leftover = pilot.end_leftover_processes
+
+    def leftover(*args, **kwargs):
+        poke()
+        return real_leftover(*args, **kwargs)
+    pilot.end_leftover_processes = leftover
 if stage == "guard-end":
     real_end = pilot.end_guard_run
 
@@ -1382,9 +1394,10 @@ def launch_pilot(tmp_path, stage="", sig=signal.SIGTERM, mode="polite"):
     token_file(tmp_path)
     make_harbor(tmp_path)
     (tmp_path / "driver.py").write_text(PILOT_DRIVER)
-    return subprocess.Popen([sys.executable, str(tmp_path / "driver.py"), str(BENCH), str(tmp_path), stage,
-                             str(int(sig))], env={**os.environ, "STAND_IN_MODE": mode},
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(tmp_path / "pilot-stderr.txt", "wb") as said:
+        return subprocess.Popen([sys.executable, str(tmp_path / "driver.py"), str(BENCH), str(tmp_path), stage,
+                                 str(int(sig))], env={**os.environ, "STAND_IN_MODE": mode},
+                                stdout=subprocess.DEVNULL, stderr=said)
 
 
 def start_pilot_process(tmp_path):
@@ -1400,10 +1413,11 @@ def stop_stray_harbor(tmp_path, proc):
     if proc.poll() is None:
         proc.kill()
         proc.wait()
-    try:
-        os.kill(int((tmp_path / "harbor.pid").read_text()), signal.SIGKILL)
-    except (OSError, ValueError):
-        pass
+    for name in ("harbor.pid", "child.pid"):
+        try:
+            os.kill(int((tmp_path / name).read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
@@ -1511,12 +1525,13 @@ def wait_for_file(path: Path, proc, within=60.0):
     ("stopping", signal.SIGTERM),
     ("stopping", signal.SIGHUP),
     ("stopping", signal.SIGINT),
+    ("leftover", signal.SIGTERM),
     ("scans", signal.SIGTERM),
     ("guard-end", signal.SIGHUP),
 ])
 def test_a_signal_at_any_stage_never_cuts_the_stop_short(tmp_path, stage, sig):
-    mode = {"stopping": "slow-stop", "scans": "exit", "guard-end": "exit"}.get(stage, "polite")
-    proc = launch_pilot(tmp_path, stage=stage if stage in ("before-harbor", "scans", "guard-end") else "",
+    mode = {"stopping": "slow-stop", "leftover": "leave-child", "scans": "exit", "guard-end": "exit"}.get(stage, "polite")
+    proc = launch_pilot(tmp_path, stage=stage if stage in ("before-harbor", "leftover", "scans", "guard-end") else "",
                         sig=sig, mode=mode)
     try:
         if stage in ("running", "stopping"):
@@ -1533,6 +1548,8 @@ def test_a_signal_at_any_stage_never_cuts_the_stop_short(tmp_path, stage, sig):
         if harbor_started:
             assert gone(int((tmp_path / "harbor.pid").read_text()), within=0.5)  # gone before the pilot ended
             assert (tmp_path / "containers-step").exists()
+        if (tmp_path / "child.pid").exists():  # what Harbor left in its group is gone too
+            assert gone(int((tmp_path / "child.pid").read_text()), within=0.5)
         assert "scanned" in (tmp_path / "notes.txt").read_text()
         [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
         assert run["ended_at"] is not None
@@ -1643,3 +1660,46 @@ def test_a_signal_while_the_start_is_decided_stops_the_batch_before_any_wait(tmp
         pilot.run_pilot(runner=runner, **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
                                                     now=lambda: clock["t"]))
     assert slept == [] and runner.calls == []
+
+
+
+def test_the_stop_says_what_it_is_doing(tmp_path):
+    proc = launch_pilot(tmp_path, mode="slow-stop")
+    try:
+        wait_for_file(tmp_path / "harbor-ready", proc)
+        proc.send_signal(signal.SIGTERM)
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGINT)  # held: Harbor takes 2 s to stop
+        assert proc.wait(timeout=120) == 128 + signal.SIGTERM
+        said = (tmp_path / "pilot-stderr.txt").read_text()
+        assert "stopping Harbor" in said and "exit when the cleanup is done" in said
+        assert "SIGINT" in said and "held" in said
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+def test_a_signal_as_the_last_run_ends_still_gets_the_summary_and_the_final_scans(tmp_path, monkeypatch):
+    real_enter = pilot.SignalGate.enter
+    sent = []
+
+    def enter(self):
+        if not sent and sys._getframe(1).f_code.co_name == "run_pilot":
+            sent.append(True)  # the first time run_pilot itself starts holding, after its last run
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_enter(self)
+
+    monkeypatch.setattr(pilot.SignalGate, "enter", enter)
+    with pytest.raises(KeyboardInterrupt) as err:
+        pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    assert sent
+    assert "scanned" in "\n".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_task_without_time_limits_gets_a_clear_message(tmp_path):
+    task = load_task(TASKS / "web-signup")
+    task.limits.pop("agent_timeout_sec")
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.harbor_time_limit(task)
+    assert "agent_timeout_sec" in str(err.value) and task.id in str(err.value)
+    with pytest.raises(pilot.PilotError):
+        pilot.open_run_seconds(task, 600.0)
