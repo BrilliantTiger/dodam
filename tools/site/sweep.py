@@ -159,7 +159,7 @@ STATE = """
   const svg = document.querySelector('.dam svg').getBoundingClientRect();
   const fig = document.querySelector('.dam');
   const pad = parseFloat(getComputedStyle(fig).paddingLeft) + parseFloat(getComputedStyle(fig).paddingRight) + 2;
-  const mark = document.querySelector('#now .marquee').getBoundingClientRect();
+  const mark = document.querySelector('#now .timeline').getBoundingClientRect();
   return {
     sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     svgFits: svg.width > 150 && svg.width <= fig.getBoundingClientRect().width - pad + 2 && Math.abs(svg.width / svg.height - 640 / 316) < 0.6,
@@ -286,9 +286,23 @@ def main() -> int:
             for cover, inner in FOLD:
                 page.set_viewport_size({"width": cover[0], "height": cover[1]})
                 page.goto(base + path)
+                # Before anything is scrolled into view, the figures in the page are the real ones, on
+                # screen and on paper: a count-up may start from zero only when it really runs.
+                shown = page.evaluate("[...document.querySelectorAll('[data-count]')].map(e => e.textContent + '/' + e.dataset.count)")
+                page.emulate_media(media="print")
+                printed = page.evaluate("[...document.querySelectorAll('[data-count]')].map(e => e.textContent + '/' + e.dataset.count)")
+                page.emulate_media(media="screen")
+                for what, values in (("before it is seen", shown), ("when printed", printed)):
+                    if any(v.split("/")[0] != v.split("/")[1] for v in values):
+                        report(f"{lang} {cover[0]}x{cover[1]}", [f"a figure does not show its real value {what} ({values})"])
                 page.evaluate("document.querySelector('.stats').scrollIntoView({block: 'center', behavior: 'instant'})")
-                page.wait_for_timeout(1800)  # the numbers count up while they are on screen
-                page.evaluate("document.querySelector('#now .marquee').scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(350)
+                during = page.evaluate("[...document.querySelectorAll('[data-count]')].map(e => e.textContent + '/' + e.dataset.count)")
+                if all(v.split("/")[0] == v.split("/")[1] for v in during):
+                    report(f"{lang} {cover[0]}x{cover[1]}", ["the figures did not count up when they came into view"])
+                page.wait_for_timeout(1900)  # the numbers finish counting while they are on screen
+                # Read the timeline: its top at the top of the screen, so part of its line is drawn.
+                page.evaluate("document.querySelector('#now .timeline').scrollIntoView({block: 'start', behavior: 'instant'})")
                 page.wait_for_timeout(600)
                 for step, (width, height) in enumerate((inner, cover, inner)):
                     page.set_viewport_size({"width": width, "height": height})
@@ -304,10 +318,8 @@ def main() -> int:
                         found.append("the diagram kept its old size")
                     if not two["readingInView"]:
                         found.append("the section being read left the screen")
-                    if not 0 <= two["drawn"] <= 1:
+                    if not 0 < two["drawn"] <= 1:
                         found.append(f"the timeline line was not redrawn ({two['drawn']})")
-                    if one["track"] == two["track"]:
-                        found.append("the marquee stopped")
                     if any(c.split("/")[0] != c.split("/")[1] for c in two["counts"]):
                         found.append(f"a count did not finish ({two['counts']})")
                     report(where, found)
@@ -320,6 +332,13 @@ def main() -> int:
                 two = page.evaluate(STATE)
                 if one["pieces"] == two["pieces"] or not two["svgFits"]:
                     report(f"{lang} unfolded {inner[0]}x{inner[1]}", ["the diagram is not running at its new size"])
+                page.evaluate("document.querySelector('#now .marquee').scrollIntoView({block: 'center', behavior: 'instant'})")
+                page.wait_for_timeout(600)
+                one = page.evaluate(STATE)
+                page.wait_for_timeout(400)
+                two = page.evaluate(STATE)
+                if one["track"] == two["track"]:
+                    report(f"{lang} unfolded {inner[0]}x{inner[1]}", ["the marquee is not running at its new size"])
             moving.close()
         browser.close()
 

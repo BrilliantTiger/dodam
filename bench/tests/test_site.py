@@ -15,8 +15,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "site"
-SITE_URL = "https://brillianttigercorp.com/dodam/"
-REPO_URL = "https://github.com/BrilliantTiger/dodam"
 LANGS = ["en", "ko", "ja", "es"]
 NAMES = {"en": "English", "ko": "한국어", "ja": "日本語", "es": "Español"}
 SECTIONS = ["what", "why", "guarantees", "how", "now", "join", "rules", "license"]
@@ -36,6 +34,11 @@ def builder():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# The address is set once, in the build script. Everything else reads it from there.
+SITE_URL = builder().SITE_URL
+REPO_URL = builder().REPO_URL
 
 
 class Page(HTMLParser):
@@ -186,6 +189,75 @@ def test_page_names_the_seven_existing_languages(lang):
         assert name in text
 
 
+# --- goals read as goals, and facts are the charter's ---------------------------------------
+
+DESIGN_PHASE = {"en": "design phase", "ko": "설계 단계", "ja": "設計段階", "es": "fase de diseño"}
+NO_COMPILER = {"en": "no compiler", "ko": "컴파일러는 아직 없", "ja": "コンパイラはまだありません", "es": "no hay compilador"}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_share_texts_say_it_is_a_design_with_no_compiler_yet(lang):
+    p = page(lang)
+    metas = {m.get("name") or m.get("property"): m.get("content") or "" for m in p.all("meta")}
+    for text in (p.title, metas["og:title"]):
+        assert DESIGN_PHASE[lang] in text.lower(), text
+    for text in (metas["description"], metas["og:description"]):
+        assert DESIGN_PHASE[lang] in text.lower(), text
+        assert NO_COMPILER[lang] in text.lower(), text
+
+
+def charter() -> str:
+    return (ROOT / "docs" / "charter.ko.md").read_text(encoding="utf-8")
+
+
+def charter_guarantees() -> list[str]:
+    after = charter().split("아래 열 가지는", 1)[1]
+    rows = []
+    for line in after.splitlines()[1:]:
+        if line.startswith("| **"):
+            rows.append(line)
+        elif rows:
+            break
+    return rows
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_guarantee_cards_are_the_ten_in_the_charter(lang):
+    assert len(charter_guarantees()) == 10
+    html = page_path(lang).read_text(encoding="utf-8")
+    section = html.split('id="guarantees"', 1)[1].split('id="how"', 1)[0]
+    assert section.count('class="card"') == 10
+    assert re.search(r"(?<!\d)10(?!\d)", Page("<main>" + section.split("<ul", 1)[0]).text)
+
+
+def test_dates_and_numbers_are_the_charter_s():
+    build, text = builder(), charter()
+    research = (ROOT / "docs" / "research" / "2026-10-28-design-research.ko.md").read_text(encoding="utf-8")
+    en = build.load_strings("en")
+    found = set()
+    for value in en.values():
+        found.update(re.findall(r"\{(d|m|n):([0-9-]+)\}", "".join(value) if isinstance(value, list) else value))
+    needed = {("d", "2027-02-24"), ("d", "2028-05-10"), ("d", "2029-04-04"), ("d", "2030-10-30"), ("d", "2032-02-25"),
+              ("d", "2034-01-18"), ("m", "2038-11"), ("d", "2026-11-17"), ("n", "2000"), ("n", "1200")}
+    assert needed - found == set()
+    for kind, value in sorted(found):
+        if kind == "n":
+            assert f"{int(value):,}번" in text or (value == "2000" and "2천 번" in text), value
+        elif kind == "m" and f"Veracode {value}" in research:
+            continue
+        elif value == "2026-10-28":
+            continue  # the date of the research notes read above
+        else:
+            assert build.spell("ko", kind, value) in text, value
+    assert "판: v0.7 (2026-11-17)" in text and "0.7" in en["now_note"]
+    for fact, key in (("벤치마크 과제 30개", "t1_p"), ("기존 언어 7개", "t1_p"), ("벤치마크 과제 100개", "t3_p"), ("3개월 넘게", "t4_p")):
+        assert fact in text
+        assert re.search(r"\d+", fact).group(0) in re.findall(r"\d+", en[key]), key
+    for line, key in (("45%가 불안전했고, Java는 70% 넘게", "stat1"), ("95%를 넘었는데 보안은 약 55%", "stat2"), ("평균 56%, 최고는 GPT-5.5의 68%", "stat3")):
+        assert line in research
+        assert set(re.findall(r"\d+(?:\.\d+)?", line)) - {"45", "56"} <= set(re.findall(r"\d+(?:\.\d+)?", en[key])), key
+
+
 # --- the site as a whole --------------------------------------------------------------------
 
 
@@ -281,6 +353,29 @@ def test_check_catches_a_different_number():
     assert edited(change)
 
 
+SEVEN = {"en": ("7 existing languages", "seven existing languages"), "ko": ("기존 언어 7개", "기존 언어 일곱 개"),
+         "ja": ("既存の7つの言語", "既存の七つの言語"), "es": ("7 lenguajes existentes", "siete lenguajes existentes")}
+
+
+def test_check_catches_a_different_count():
+    def change(s):
+        key = text_key(s, SEVEN["en"][0])
+        assert SEVEN["ja"][0] in s["ja"][key]
+        s["ja"][key] = s["ja"][key].replace("7", "8", 1)
+
+    assert edited(change)
+
+
+def test_check_rejects_a_count_written_as_a_word_even_in_every_language():
+    def change(s):
+        key = text_key(s, SEVEN["en"][0])
+        for lang, (digits, words) in SEVEN.items():
+            assert digits in s[lang][key]
+            s[lang][key] = s[lang][key].replace(digits, words)
+
+    assert edited(change)
+
+
 def test_check_catches_a_different_date():
     def change(s):
         key = text_key(s, "{m:2038-11}")
@@ -358,6 +453,17 @@ def test_readme_links_to_the_page_near_the_top_and_names_the_four_languages(name
     assert SITE_URL in head
     for language in NAMES.values():
         assert language in head
+    # Every link in the README that is not to GitHub is one of the four page addresses.
+    links = [u for u in re.findall(r"https?://[^\s)>\]]+", head) if "github.com" not in u]
+    assert links
+    assert [u for u in links if u not in {page_url(lang) for lang in LANGS}] == []
+
+
+def test_site_check_runs_on_every_push_and_pull_request():
+    text = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
+    head = text.partition("\njobs:")[0]
+    assert "paths" not in head and "branches" not in head
+    assert re.search(r"\n  push:", head) and re.search(r"\n  pull_request:", head)
 
 
 def test_only_two_readmes_exist():

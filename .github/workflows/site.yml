@@ -3,17 +3,10 @@
 # text, and when the page is folded and unfolded. Needs no secrets and only reads the repository.
 name: site
 
+# It runs on every push and pull request, with no path filter, so that it can be a required check.
 on:
   push:
-    paths:
-      - "site/**"
-      - "tools/site/**"
-      - ".github/workflows/site.yml"
   pull_request:
-    paths:
-      - "site/**"
-      - "tools/site/**"
-      - ".github/workflows/site.yml"
 
 permissions:
   contents: read
