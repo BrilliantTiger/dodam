@@ -39,6 +39,7 @@ from .languages import LANGUAGES
 from .task import load_task
 
 BENCH = Path(__file__).resolve().parents[1]
+REPO = BENCH.parent  # a token file inside it is refused
 DEFAULT_TOKEN_FILE = Path("~/.dodam/claude-token-dodam")
 DEFAULT_OUT = BENCH / "out" / "pilot"
 DEFAULT_HARBOR = BENCH / ".harbor-venv" / "bin" / "harbor"
@@ -208,6 +209,8 @@ def decide(windows: dict[str, dict], max_five_hour: float, max_weekly: float, no
 def read_token(path: Path) -> str:
     """The bare token in a one-line file only its owner can read. Errors never contain the token."""
     path = Path(path).expanduser()
+    if path.resolve().is_relative_to(Path(REPO).resolve()):
+        raise PilotError(f"the token file {path} is inside the repository; keep it outside, for example in ~/.dodam")
     try:
         mode = path.stat().st_mode
     except OSError as err:
@@ -422,6 +425,13 @@ def image_present(image: str) -> None:
     result = subprocess.run(["docker", "image", "inspect", image], capture_output=True)
     if result.returncode != 0:
         raise PilotError(f"the image {image} is not in Docker; build it from bench/images (see its README)")
+
+
+def task_trial_prefix(task_id: str) -> str:
+    """The start of the compose project names of every trial of the task, in any language. Harbor names a trial
+    after its task folder ("<task id>__<language>") cut to 32 characters with any trailing "_" and "-" removed,
+    then "__" and 7 random characters; this keeps the part all languages share, also for a long task id."""
+    return compose_prefix(f"{task_id}__"[:32].rstrip("_-"))
 
 
 def compose_prefix(task_folder_name: str) -> str:
@@ -722,9 +732,11 @@ def read_agent_output(job_dir: Path, step_order: list[str] | None = None) -> dic
 
 FIVE_HOURS = 5 * 3600
 DEFAULT_GUARD_MINUTES = 30.0
-# The guard protects the account, not one output folder, so its state lives beside the account's token:
-# batches with different --out folders share one allowance.
+# The guard protects the account, not one output folder or one token file, so its state is one file per user:
+# every pilot this user runs shares one allowance, whatever token file or --out folder it uses. Its folder is
+# ~/.dodam, or the folder in DODAM_PILOT_GUARD_DIR (the tests use that to keep it in their own folders).
 GUARD_FILE = "pilot-guard.json"
+GUARD_DIR_ENV = "DODAM_PILOT_GUARD_DIR"
 GUARD_NOTE = ("a guard on this runner's own agent time per rolling five hours, not a measurement of the "
               "account's five-hour usage: the agent does not report that window, and the owner's own use "
               "of the account is not counted")
@@ -826,8 +838,10 @@ def load_state(out_root: Path) -> dict[str, dict]:
     return windows if isinstance(windows, dict) else {}
 
 
-def guard_path(token_file: Path) -> Path:
-    return Path(token_file).expanduser().parent / GUARD_FILE
+def guard_path(token_file: Path | None = None) -> Path:
+    """The guard's file: one per user, whatever token file the pilot uses."""
+    folder = os.environ.get(GUARD_DIR_ENV) or str(DEFAULT_TOKEN_FILE.parent)
+    return Path(folder).expanduser() / GUARD_FILE
 
 
 GUARD_VERSION = 1
@@ -866,6 +880,7 @@ class Guard:
     @contextmanager
     def locked(self):
         try:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         except OSError as err:
             raise GuardError(self.path, f"cannot be written: its lock file cannot be opened ({err.strerror})",
@@ -1165,7 +1180,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                     decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h,
                                               now())
                     if decision.start:
-                        left = docker.leftovers(compose_prefix(task.id))  # every language of the task
+                        left = docker.leftovers(task_trial_prefix(task.id))  # every language of the task
                         if left:
                             stopped = ("containers of an earlier run of this task are still in Docker ("
                                        + ", ".join(left) + "); not started until they are removed")
@@ -1444,7 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="five-hour guard: do not start when this runner's agents worked this many minutes or more "
                         "in runs that ended in the last five hours, a run with no recorded end counting its whole time "
                         "limit (default 30); a guard, not a measurement of the account; its state is a locked file "
-                        "beside the token file, shared by every pilot on that token")
+                        "in ~/.dodam, shared by every pilot this user runs")
     p.add_argument("--wait-for-reset", action="store_true", help="wait for the window to reset instead of stopping")
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
