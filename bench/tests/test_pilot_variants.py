@@ -22,6 +22,7 @@ DATA = "bench/records/pilot-2026-11-17.json"
 SIM = "tools/plan/montecarlo2.py"
 ESTIMATES = "tools/plan/pilot_replan.py"
 ESTIMATED = "tools/plan/pilot_replan.json"
+EARLIER = "tools/plan/claude_only.json"
 RENDER = "tools/pilot/render.py"
 KO, EN = "tools/pilot/pilot.ko.md.tmpl", "tools/pilot/pilot.en.md.tmpl"
 DOC_KO, DOC_EN = "docs/pilot/2026-11-17-pilot.ko.md", "docs/pilot/2026-11-17-pilot.en.md"
@@ -191,6 +192,22 @@ VARIANTS = [
     (REPORT, "test_a_changed_figure_in_the_data_is_missed_in_the_charter",
      "a figure of the charter is written by hand instead of coming from the data",
      [(QUOTE_KO, "{{next.same.runs}}", "46"), (QUOTE_EN, "{{next.same.runs}}", "46")]),
+    (REPORT, "test_the_dates_in_the_history_row_of_charter_version_0_7_are_the_recorded_output",
+     "a date in the history row of charter version 0.7 differs from the recorded output",
+     [(CHARTER_KO, "두 회사면 2033-08-31", "두 회사면 2033-09-07"), (CHARTER_EN, "with two companies it is 2033-08-31", "with two companies it is 2033-09-07")]),
+    (REPORT, "test_the_recorded_earlier_dates_are_what_their_script_gives",
+     "the recorded output names another date than the script gives",
+     [(EARLIER, '"p50": "2038-11-10"', '"p50": "2038-11-17"')]),
+    (REPORT, "test_no_document_says_the_earlier_dates_could_not_be_reproduced",
+     "the history row says again that the earlier dates could not be reproduced",
+     [(CHARTER_KO, "그 계산을 저장소에 넣었고, 그것으로 세 날짜가 그대로 다시 나온다.", "그 계산은 다시 낼 수 없었다."),
+      (CHARTER_EN, "It has been put into the repository, and it gives the three dates again exactly.", "It could not be reproduced.")]),
+    (REPORT, "test_the_charter_says_what_explains_the_distance_between_the_earlier_date_and_the_range",
+     "the charter is rendered although the earlier date lies outside the range of ten seeds as well",
+     [(RENDER, '    if not alone["plan_scenario_scaled"]["earliest"] <= old <= alone["plan_scenario_scaled"]["latest"]:', "    if False:")]),
+    (REPORT, "test_the_owner_s_item_about_a_new_token_says_what_is_known_and_not_known_about_revoking",
+     "the owner's item says a new token ends the old one",
+     [("TODO.md", "모르는 것: 새 토큰을 만들면 옛 토큰이 끝나는지.", "새 토큰을 만들면 옛 토큰은 끝난다.")]),
 ]
 
 COPIED = ("bench/dodambench", "bench/records", "bench/pyproject.toml", f"bench/tests/{RECORD}", f"bench/tests/{REPORT}",
@@ -221,6 +238,7 @@ def break_it(folder: Path, edits: list) -> None:
             continue
         name, text, replacement = edit
         target = folder / name
+        assert target.is_file(), f"{name}, which this variant breaks, is not in the repository"
         now = target.read_text(encoding="utf-8")
         assert text in now, f"{name} no longer holds the text this variant breaks"
         target.write_text(now.replace(text, replacement), encoding="utf-8")

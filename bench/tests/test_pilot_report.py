@@ -558,3 +558,113 @@ def test_a_changed_figure_in_the_data_is_missed_in_the_charter(lang):
         change(replan)
         lines = render.render(lang, replan=replan, text=source.read_text(encoding="utf-8")).splitlines()
         assert [line for line in lines if line.strip() and line not in have], "a changed figure went unnoticed"
+
+
+# --- the dates an earlier charter gave, and the owner's item about a new token ----------------------------------
+
+EARLIER = PLAN / "claude_only.json"
+UNTRUE = ("could not be reproduced", "not kept in the repository and", "다시 낼 수 없", "저장소에 남지 않은 계산")
+
+
+def earlier() -> dict:
+    assert EARLIER.is_file(), "the computation behind the dates of charter version 0.7 is not recorded in the repository"
+    return json.loads(EARLIER.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_dates_in_the_history_row_of_charter_version_0_7_are_the_recorded_output(lang):
+    recorded = earlier()
+    rows = [line for line in (ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8").splitlines()
+            if line.startswith("| v0.7 |")]
+    assert len(rows) == 1
+    cases = recorded["cases"]
+    assert cases["claude_alone"]["rel_10"]["p50"] in rows[0] and cases["two_companies"]["rel_10"]["p50"] in rows[0]
+    assert f"{recorded['sims_per_case']:,}" in rows[0]
+    known = {date for case in cases.values() for date in [case["rel_01_p50"], *case["rel_10"].values()]}
+    found = set(re.findall(r"20[3-4]\d-\d\d-\d\d", rows[0]))
+    assert found and found <= known          # no date of the forecast years in that row but the recorded ones
+    kept = render.quote_template("charter", lang).read_text(encoding="utf-8") if hasattr(render, "quote_template") else ""
+    for name in ("claude_alone", "claude_shared", "two_companies"):
+        assert "{{v07.%s.p50}}" % name in kept, "the charter does not set the earlier dates beside the ranges"
+
+
+def test_the_recorded_earlier_dates_are_what_their_script_gives():
+    recorded = earlier()
+    assert (PLAN / "claude_only.py").is_file(), "the script that gives the earlier dates is not in the repository"
+    import claude_only
+    again = claude_only.compute()
+    assert {key: recorded[key] for key in again} == again
+    assert (recorded["seed"], recorded["sims_per_case"]) == (11, 1200)
+    found = recorded["comparison"]
+    for name in ("claude_alone", "claude_shared"):
+        for way, spread in found[name].items():
+            dates = spread.get("by_seed") or found[name]["plan_scenario_scaled"]["by_seed"][1:6]
+            assert (spread["earliest"], spread["latest"]) == (min(dates), max(dates)), (name, way)
+            assert "by_seed" not in spread or len(spread["by_seed"]) == len(found["seeds"])
+    one = claude_only.compare(seeds=found["seeds"][:1])       # the first seed again, every column
+    for name in ("claude_alone", "claude_shared"):
+        for way in ("own_scenario", "plan_scenario_scaled"):
+            assert one[name][way]["by_seed"] == found[name][way]["by_seed"][:1], (name, way)
+    days = lambda a, b: (dt.date.fromisoformat(b) - dt.date.fromisoformat(a)).days
+    cases, said = recorded["cases"], recorded["later_for_each_month"]
+    later = days(cases["two_companies"]["rel_10"]["p50"], cases["claude_alone"]["rel_10"]["p50"])
+    work = days(said["from"], cases["claude_alone"]["rel_10"]["p50"])
+    assert said["days_for_each_month"] == round(later / work * 30.44) and said["months_later"] == round(later / 30.44)
+    text = (PLAN / "claude_only.py").read_text(encoding="utf-8") + EARLIER.read_text(encoding="utf-8")
+    assert not re.search(r"/Users|/home/|/private|/tmp|@", text)
+
+
+def test_no_document_says_the_earlier_dates_could_not_be_reproduced():
+    files = [ROOT / "README.md", ROOT / "README.ko.md", ROOT / "TODO.md", *sorted((ROOT / "docs").rglob("*.md")),
+             *sorted(PILOT.glob("*.tmpl")), *sorted(PLAN.glob("plan_content.py"))]
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for phrase in UNTRUE:
+            assert phrase not in text, f"{path.name} gives a reason that is not true: {phrase}"
+    for lang, true in (("ko", "그것으로 세 날짜가 그대로 다시 나온다"), ("en", "it gives the three dates again exactly")):
+        rows = [line for line in (ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8").splitlines()
+                if line.startswith("| v0.9 |")]
+        assert len(rows) == 1 and true in rows[0], f"the {lang} history row does not give the true reason"
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_charter_says_what_explains_the_distance_between_the_earlier_date_and_the_range(lang):
+    source = quote_template("charter", lang).read_text(encoding="utf-8")
+    assert "{{v07.claude_alone.plan_scenario_scaled.latest_month}}" in source, \
+        "the charter does not say what explains the earlier date lying outside the range"
+    recorded = earlier()
+    have = set((ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8").splitlines())
+    changed = copy.deepcopy(recorded)                      # another recorded date is missed in the charter
+    changed["cases"]["claude_alone"]["rel_10"]["p50"] = "2038-10-06"
+    lines = render.render(lang, text=source, earlier=changed).splitlines()
+    assert [line for line in lines if line.strip() and line not in have]
+
+    def refused(change) -> bool:
+        other = copy.deepcopy(recorded)
+        change(other["comparison"]["claude_alone"])
+        try:
+            render.render(lang, text=source, earlier=other)
+        except render.RenderError:
+            return True
+        return False
+    # it says the seed explains it: with more seeds the earlier date lies inside the range ...
+    assert refused(lambda alone: alone["plan_scenario_scaled"].update(latest="2038-10-01"))
+    # ... and the way the capacity is set does not: the two ranges overlap
+    assert refused(lambda alone: alone["own_scenario"].update(earliest="2039-01-05", latest="2039-06-01"))
+    # the first five seeds of the comparison are the seeds of the range the charter gives
+    assert refused(lambda alone: alone["plan_scenario_scaled_first_five_seeds"].update(latest="2038-10-01"))
+
+
+def test_the_owner_s_item_about_a_new_token_says_what_is_known_and_not_known_about_revoking():
+    items = [line for line in (ROOT / "TODO.md").read_text(encoding="utf-8").splitlines()
+             if line.startswith("- [ ]") and "토큰을 새로 만들지" in line]
+    assert len(items) == 1
+    item = items[0]
+    version = json.loads(DATA.read_text(encoding="utf-8"))["runs"][0]["claude_code"]["observed"]
+    for said in (f"Claude Code {version}에는 이런 토큰의 목록을 보는 명령도, 하나를 무효로 만드는 명령도 없고",
+                 "모르는 것: 새 토큰을 만들면 옛 토큰이 끝나는지",
+                 "새 토큰을 만드는 것만으로 노출이 없어진다고는 할 수 없다",
+                 "모델에 요청을 보내는 데만 쓸 수 있고 한 해 동안 유효하다",
+                 "기계 밖에서는 읽을 수 없다"):
+        assert said in item, f"the owner's item does not say: {said}"
+    assert not re.search(r"Mac mini|sk-ant|/Users|~/|@", item)
