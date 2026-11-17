@@ -498,6 +498,41 @@ def test_the_first_values_of_each_window_come_from_its_first_event():
     assert first["five_hour"]["utilization"] == 0.1 and first["seven_day"]["utilization"] == 0.2
 
 
+# The shape Claude Code 2.1.326 wrote in the first real run: the representative window has no utilization
+# of its own; the value is in unifiedWindows, as a fraction, with the reset time in epoch seconds.
+REAL_INFO = {"status": "allowed", "resetsAt": 1795136400, "rateLimitType": "seven_day", "overageStatus": "rejected",
+             "overageDisabledReason": "org_level_disabled", "isUsingOverage": False,
+             "unifiedWindows": {"seven_day": {"utilization": 0.25, "resetsAt": 1795136400, "status": "allowed"}}}
+
+
+def real_event(utilization):
+    info = json.loads(json.dumps(REAL_INFO))
+    info["unifiedWindows"]["seven_day"]["utilization"] = utilization
+    return {"type": "rate_limit_event", "rate_limit_info": info, "uuid": "u", "session_id": "s"}
+
+
+def test_the_first_values_take_the_whole_first_event_as_claude_code_writes_it():
+    infos = pilot.parse_rate_limit_events(lines(real_event(0.25), real_event(0.3)))
+    assert pilot.first_windows(infos)["seven_day"]["utilization"] == 0.25
+    latest = pilot.latest_windows(infos)
+    assert latest["seven_day"]["utilization"] == 0.3 and latest["seven_day"]["resets_at"] == 1795136400
+    assert not pilot.decide(latest, 50, 30, 1795136400 - 10).start
+    assert pilot.decide(latest, 50, 50, 1795136400 - 10).start
+
+
+def test_regulated_windows_the_agent_never_reported_are_named():
+    infos = pilot.parse_rate_limit_events(lines(real_event(0.25)))
+    assert pilot.unreported_windows(pilot.latest_windows(infos)) == ["five_hour"]
+    assert pilot.unreported_windows({}) == ["five_hour", "seven_day"]
+    assert pilot.unreported_windows(win(0.1, 0.1)) == []
+
+
+def test_the_record_names_the_windows_the_agent_never_reported(tmp_path):
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    record = json.loads((tmp_path / "out" / "20261117T070000Z" / "python" / "record.json").read_text())
+    assert record["rate_limits"]["unreported"] == []
+
+
 def test_the_stop_message_says_when_the_window_resets(tmp_path):
     state = tmp_path / "out" / "state.json"
     state.parent.mkdir(parents=True)
