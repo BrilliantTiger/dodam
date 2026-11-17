@@ -3,6 +3,11 @@
 None of these tests needs Docker, Harbor or a real token; the token below is a made-up string.
 """
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -84,9 +89,17 @@ def test_missing_utilization_stays_unknown():
     assert windows["five_hour"]["utilization_pct"] is None
 
 
-@pytest.mark.parametrize("raw,pct", [(0, 0.0), (0.5, 50.0), (0.99, 99.0), (1, 100.0), (1.0, 100.0), (37, 37.0), (100, 100.0)])
-def test_utilization_is_read_as_a_fraction_up_to_one_and_a_percent_above(raw, pct):
+@pytest.mark.parametrize("raw,pct", [(0, 0.0), (0.5, 50.0), (0.99, 99.0), (1, 100.0), (1.0, 100.0), (1.2, 120.0),
+                                     (37, 3700.0)])
+def test_utilization_is_always_read_as_a_fraction(raw, pct):
+    # Claude Code writes fractions (0.25 in the real run meant 25%); a value above 1 is past the limit,
+    # never a small percent.
     assert pilot.normalize_percent(raw) == pytest.approx(pct)
+
+
+def test_a_utilization_above_one_is_over_every_limit():
+    assert not pilot.decide(win(1.2, 0.1), 100, 100, NOW).start
+    assert not pilot.decide(win(0.1, 37), 100, 100, NOW).start
 
 
 @pytest.mark.parametrize("raw", [None, "x", True, -1, float("nan")])
@@ -273,6 +286,50 @@ def test_scan_finds_a_token_split_across_the_read_chunks(tmp_path):
     assert pilot.scan_for_token(tmp_path, FAKE_TOKEN)
 
 
+def test_a_token_in_a_name_is_masked_in_every_report(tmp_path):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / (FAKE_TOKEN + ".txt")).write_text("x")
+    (tmp_path / ("dir-" + FAKE_TOKEN)).mkdir()
+    scan = pilot.check_for_token(tmp_path, FAKE_TOKEN)
+    assert not scan.clean
+    assert sorted(scan.hits) == ["d/<token>.txt", "dir-<token>"]
+    assert FAKE_TOKEN not in json.dumps(scan.as_dict())
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.assert_no_leak(tmp_path, FAKE_TOKEN)
+    assert FAKE_TOKEN not in str(err.value) and "<token>.txt" in str(err.value)
+
+
+skip_as_root = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads every file")
+
+
+@skip_as_root
+def test_a_file_the_scan_cannot_read_fails_the_scan(tmp_path):
+    secret = tmp_path / "from-container.log"
+    secret.write_text(FAKE_TOKEN)
+    secret.chmod(0)
+    try:
+        scan = pilot.check_for_token(tmp_path, FAKE_TOKEN)
+        assert not scan.clean and scan.hits == [] and scan.unchecked == ["from-container.log"]
+        with pytest.raises(pilot.TokenLeak) as err:
+            pilot.assert_no_leak(tmp_path, FAKE_TOKEN)
+        assert "could not" in str(err.value) and FAKE_TOKEN not in str(err.value)
+    finally:
+        secret.chmod(0o600)
+
+
+@skip_as_root
+def test_a_folder_the_scan_cannot_open_fails_the_scan(tmp_path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "inside.log").write_text(FAKE_TOKEN)
+    locked.chmod(0)
+    try:
+        scan = pilot.check_for_token(tmp_path, FAKE_TOKEN)
+        assert not scan.clean and scan.unchecked == ["locked"]
+    finally:
+        locked.chmod(0o700)
+
+
 def test_assert_no_leak_fails_loudly_without_the_token_in_the_message(tmp_path):
     (tmp_path / "x.log").write_text(FAKE_TOKEN)
     with pytest.raises(pilot.TokenLeak) as err:
@@ -303,9 +360,22 @@ def test_verifier_env_problems_are_found_in_the_task_and_in_the_trial_config(tmp
     assert pilot.verifier_env_problems(clean, tmp_path / "job") == []
 
 
+@pytest.mark.parametrize("old,new", [('environment_mode = "separate"', 'environment_mode = "shared"'),
+                                     ('network_mode = "no-network"', 'network_mode = "public"')])
+def test_the_verifier_must_stay_separate_and_without_network(tmp_path, old, new):
+    task_dir = to_harbor(load_task(TASKS / "web-signup"), "python", tmp_path, "dodam-bench/python:dev")
+    toml = task_dir / "task.toml"
+    head, verifier = toml.read_text().split("[verifier]\n", 1)
+    assert old in verifier
+    toml.write_text(head + "[verifier]\n" + verifier.replace(old, new, 1))
+    problems = pilot.verifier_env_problems(task_dir)
+    assert problems and any(new.split(" = ")[0] in p for p in problems)
+
+
 # --- reading what the agent and Harbor wrote -----------------------------------------------------------------
 
-def make_trial(job_dir: Path, rewards=(1.0, 0.5), tokens=(100, 20, 30)) -> None:
+def make_trial(job_dir: Path, rewards=(1.0, 0.5), tokens=(100, 20, 30), five_status="allowed",
+               result_error=False, week=0.1) -> None:
     trial = job_dir / "web-signup__python__abc"
     result = {"task_name": "dodam/web-signup-python", "trial_name": trial.name,
               "agent_info": {"name": "claude-code", "version": "2.1.326", "model_info": None},
@@ -326,9 +396,9 @@ def make_trial(job_dir: Path, rewards=(1.0, 0.5), tokens=(100, 20, 30)) -> None:
         agent.mkdir(parents=True)
         (agent / "claude-code.txt").write_text("\n".join(lines(
             {"type": "system", "subtype": "init", "model": "claude-sonnet-5-5", "claude_code_version": "2.1.326"},
-            event("five_hour", 0.3 if name == "build" else 0.4),
-            event("seven_day", 0.1),
-            {"type": "result", "subtype": "success", "total_cost_usd": 0.5, "num_turns": 7,
+            event("five_hour", 0.3 if name == "build" else 0.4, status=five_status),
+            event("seven_day", week),
+            {"type": "result", "subtype": "success", "is_error": result_error, "total_cost_usd": 0.5, "num_turns": 7,
              "usage": {"input_tokens": 10, "output_tokens": 30, "cache_read_input_tokens": 20,
                        "cache_creation_input_tokens": 90}})) + "\n")
     (trial / "result.json").write_text(json.dumps(result))
@@ -385,15 +455,42 @@ def test_read_agent_output_orders_steps_by_the_task_not_by_name(tmp_path):
 # --- one pilot run, with a fake Harbor ---------------------------------------------------------------------------
 
 class FakeRunner:
-    def __init__(self, leak=False, returncode=0, rewards=(1.0, 1.0), stray_leak=False, agent_error=False):
+    def __init__(self, leak=False, returncode=0, rewards=(1.0, 1.0), stray_leak=False, agent_error=False,
+                 name_leak=False, unreadable=False, bad_time=False, interrupt=False, trial_error=False,
+                 result_error=False, five_status="allowed", week=0.1, docker=None, containers=()):
         self.calls, self.leak, self.returncode, self.rewards = [], leak, returncode, rewards
         self.stray_leak, self.agent_error = stray_leak, agent_error
+        self.name_leak, self.unreadable, self.bad_time, self.interrupt = name_leak, unreadable, bad_time, interrupt
+        self.trial_error, self.result_error, self.five_status = trial_error, result_error, five_status
+        self.timeouts, self.week, self.docker, self.containers = [], week, docker, list(containers)
 
     def __call__(self, cmd, env, log_path, timeout):
         self.calls.append((list(cmd), dict(env)))
+        self.timeouts.append(timeout)
         jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
         jobs.mkdir(parents=True)
-        make_trial(jobs, rewards=self.rewards)
+        if self.docker is not None:
+            self.docker.projects += self.containers
+        make_trial(jobs, rewards=self.rewards, five_status=self.five_status, result_error=self.result_error,
+                   week=self.week)
+        token = env["CLAUDE_CODE_OAUTH_TOKEN"]
+        path = next(jobs.glob("*/result.json"))
+        data = json.loads(path.read_text())
+        if self.bad_time:
+            data["started_at"] = "not a time"
+        if self.trial_error:
+            data["exception_info"] = {"exception_type": "VerifierTimeoutError", "exception_message": "judge too slow"}
+        path.write_text(json.dumps(data))
+        if self.name_leak:
+            (jobs / (token + ".txt")).write_text("x")
+        if self.unreadable:
+            locked = jobs / "from-container.log"
+            locked.write_text(token)
+            locked.chmod(0)
+        if self.interrupt:
+            if self.stray_leak:
+                (Path(log_path).parents[1] / "stray.log").write_text(token)
+            raise KeyboardInterrupt
         if self.agent_error:
             path = next(jobs.glob("*/result.json"))
             data = json.loads(path.read_text())
@@ -408,12 +505,31 @@ class FakeRunner:
         return self.returncode
 
 
+class FakeDocker:
+    """Containers of Harbor runs, by compose project name."""
+
+    def __init__(self, leftovers=(), stuck=()):
+        self.projects = list(leftovers)
+        self.stuck = list(stuck)
+        self.removed: list[str] = []
+
+    def leftovers(self, prefix):
+        return [p for p in self.projects if p.startswith(prefix)]
+
+    def remove(self, prefix):
+        gone = [p for p in self.projects if p.startswith(prefix) and p not in self.stuck]
+        self.removed += gone
+        self.projects = [p for p in self.projects if p not in gone]
+        return self.leftovers(prefix)
+
+
 def pilot_args(tmp_path, **kw):
     args = dict(task_path=TASKS / "web-signup", languages=["python"], out_root=tmp_path / "out",
                 token_file=token_file(tmp_path), harbor=Path("harbor"), claude_version="2.1.326",
                 max_five_hour=50.0, max_weekly=50.0, wait_for_reset=False, model=None,
                 base_env={"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-api-x"},
-                now=lambda: NOW, timestamp="20261117T070000Z", image_check=lambda image: None)
+                now=lambda: NOW, timestamp="20261117T070000Z", image_check=lambda image: None,
+                docker=FakeDocker())
     args.update(kw)
     return args
 
@@ -569,7 +685,7 @@ def test_the_last_values_of_one_run_are_the_before_values_of_the_next(tmp_path):
     assert again["runs"][0]["rate_limits"]["before"]["five_hour"]["utilization"] == 0.4
 
 
-def test_languages_run_one_after_the_other_and_stop_at_the_first_refusal(tmp_path):
+def test_languages_run_one_after_the_other(tmp_path):
     runner = FakeRunner()
     args = pilot_args(tmp_path, languages=["python", "go"])
     summary = pilot.run_pilot(runner=runner, **args)
@@ -615,3 +731,261 @@ def test_waiting_for_the_reset_sleeps_until_then_and_starts(tmp_path):
                                                           now=lambda: clock["t"]))
     assert summary["runs"][0]["status"] == "ok"
     assert len(slept) == 1 and 600 <= slept[0] <= 700
+
+
+# --- the leak scans hold on every path out of a run --------------------------------------------------------------
+
+def read_record(tmp_path, lang="python"):
+    return json.loads((tmp_path / "out" / "20261117T070000Z" / lang / "record.json").read_text())
+
+
+def test_a_token_in_a_harbor_file_name_never_reaches_a_record_or_a_message(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(name_leak=True), **pilot_args(tmp_path))
+    assert FAKE_TOKEN not in str(err.value) and "<token>.txt" in str(err.value)
+    record_path = tmp_path / "out" / "20261117T070000Z" / "python" / "record.json"
+    assert FAKE_TOKEN not in record_path.read_text() and "<token>.txt" in record_path.read_text()
+    assert read_record(tmp_path)["status"] == "token-leak"
+    for path in (tmp_path / "out").rglob("*"):
+        if path.is_file() and FAKE_TOKEN not in path.name:
+            assert FAKE_TOKEN.encode() not in path.read_bytes(), path.name
+
+
+@skip_as_root
+def test_an_unreadable_file_in_harbors_output_fails_the_run(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(unreadable=True), **pilot_args(tmp_path))
+    assert "could not" in str(err.value)
+    record = read_record(tmp_path)
+    assert record["status"] == "leak-scan-failed"
+    assert [u.rsplit("/", 1)[-1] for u in record["leak_scan"]["unchecked"]] == ["from-container.log"]
+
+
+def test_a_leak_is_raised_even_when_harbors_output_cannot_be_read(tmp_path):
+    with pytest.raises(pilot.TokenLeak):
+        pilot.run_pilot(runner=FakeRunner(leak=True, bad_time=True), **pilot_args(tmp_path))
+    assert read_record(tmp_path)["status"] == "token-leak"
+
+
+def test_harbor_output_that_cannot_be_read_is_recorded_not_raised(tmp_path):
+    summary = pilot.run_pilot(runner=FakeRunner(bad_time=True), **pilot_args(tmp_path))
+    assert summary["runs"][0]["status"] == "no-result"
+    assert "ValueError" in read_record(tmp_path)["error"]
+
+
+def test_an_interrupted_run_still_gets_the_batch_scan(tmp_path):
+    with pytest.raises(pilot.TokenLeak) as err:
+        pilot.run_pilot(runner=FakeRunner(interrupt=True, stray_leak=True), **pilot_args(tmp_path))
+    assert "stray.log" in str(err.value)
+
+
+def test_an_interrupted_run_stops_its_containers_and_passes_the_interrupt_on(tmp_path):
+    docker = FakeDocker()
+    runner = FakeRunner(interrupt=True, docker=docker, containers=["web-signup__python__abc__env"])
+    with pytest.raises(KeyboardInterrupt):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker, languages=["python", "go"]))
+    assert docker.removed == ["web-signup__python__abc__env"]
+    assert read_record(tmp_path)["status"] == "interrupted"
+    summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert [r["language"] for r in summary["runs"]] == ["python"]
+    assert len(runner.calls) == 1
+
+
+# --- time limits and Harbor's containers -------------------------------------------------------------------------------
+
+def test_a_timeout_stops_the_containers_and_the_batch(tmp_path):
+    docker = FakeDocker()
+    projects = ["web-signup__python__abc__env", "web-signup__python__abc__verifier-build"]
+    runner = FakeRunner(returncode=pilot.TIMEOUT_RETURNCODE, docker=docker, containers=projects)
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker, languages=["python", "go"]))
+    assert [r["status"] for r in summary["runs"]] == ["timeout", "not-started"]
+    assert "time limit" in summary["runs"][1]["reason"]
+    assert sorted(docker.removed) == sorted(projects)
+    assert len(runner.calls) == 1
+
+
+def test_containers_that_will_not_stop_hold_the_batch(tmp_path):
+    docker = FakeDocker(stuck=["web-signup__python__abc__env"])
+    runner = FakeRunner(returncode=pilot.TIMEOUT_RETURNCODE, docker=docker, containers=["web-signup__python__abc__env"])
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker, languages=["python", "go"]))
+    assert "web-signup__python__abc__env" in str(err.value)
+    assert len(runner.calls) == 1
+    assert read_record(tmp_path)["containers_left"] == ["web-signup__python__abc__env"]
+
+
+def test_leftover_containers_of_an_earlier_run_keep_a_language_from_starting(tmp_path):
+    runner = FakeRunner()
+    docker = FakeDocker(leftovers=["web-signup__python__old__env"])
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+    assert "web-signup__python__old__env" in summary["runs"][0]["reason"]
+
+
+def test_the_default_time_limit_is_above_harbors_own_limits(tmp_path):
+    task = load_task(TASKS / "web-signup")
+    harbor_own = sum(task.limits["agent_timeout_sec"] + task.limits["verifier_timeout_sec"] for _ in task.steps)
+    assert pilot.harbor_time_limit(task) > harbor_own
+    runner = FakeRunner()
+    pilot.run_pilot(runner=runner, **pilot_args(tmp_path))
+    assert runner.timeouts == [pilot.harbor_time_limit(task)]
+
+
+HARBOR_STAND_IN = """
+import signal, subprocess, sys, time
+out, mode = sys.argv[1], sys.argv[2]
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+open(out + "/child.pid", "w").write(str(child.pid))
+if mode == "polite":
+    def stop(*_):
+        open(out + "/stopped-politely", "w").write("1")
+        sys.exit(0)
+    signal.signal(signal.SIGINT, stop)
+else:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+open(out + "/ready", "w").write("1")
+time.sleep(120)
+"""
+
+
+def gone(pid: int, within: float = 10.0) -> bool:
+    end = time.monotonic() + within
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def start_stand_in(tmp_path, mode):
+    script = tmp_path / "stand_in.py"
+    script.write_text(HARBOR_STAND_IN)
+    return [sys.executable, str(script), str(tmp_path), mode]
+
+
+def wait_ready(tmp_path, within=10.0):
+    end = time.monotonic() + within
+    while not (tmp_path / "ready").exists() and time.monotonic() < end:
+        time.sleep(0.05)
+
+
+def test_a_timeout_asks_harbor_to_stop_and_ends_its_whole_process_group(tmp_path):
+    started = time.monotonic()
+    code = pilot.run_subprocess(start_stand_in(tmp_path, "polite"), dict(os.environ), tmp_path / "h.log", 2.0,
+                                grace=10.0, term_grace=2.0)
+    assert code == pilot.TIMEOUT_RETURNCODE
+    assert (tmp_path / "stopped-politely").exists()  # Harbor gets the chance to clean up first
+    assert gone(int((tmp_path / "child.pid").read_text()))
+    assert time.monotonic() - started < 20
+    assert "time limit" in (tmp_path / "h.log").read_text()
+
+
+def test_a_harbor_that_ignores_the_stop_is_killed_with_its_group(tmp_path):
+    started = time.monotonic()
+    code = pilot.run_subprocess(start_stand_in(tmp_path, "stubborn"), dict(os.environ), tmp_path / "h.log", 2.0,
+                                grace=1.0, term_grace=1.0)
+    assert code == pilot.TIMEOUT_RETURNCODE
+    assert gone(int((tmp_path / "child.pid").read_text()))
+    assert time.monotonic() - started < 20
+
+
+def test_ctrl_c_is_passed_to_harbor_and_its_group_is_ended(tmp_path):
+    def interrupt(*_):
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    try:
+        cmd = start_stand_in(tmp_path, "polite")
+        signal.setitimer(signal.ITIMER_REAL, 2.0)
+        with pytest.raises(KeyboardInterrupt):
+            pilot.run_subprocess(cmd, dict(os.environ), tmp_path / "h.log", 60.0, grace=10.0, term_grace=2.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert (tmp_path / "stopped-politely").exists()
+    assert gone(int((tmp_path / "child.pid").read_text()))
+
+
+# --- usage regulation, end to end -----------------------------------------------------------------------------------
+
+def test_a_rejected_window_in_a_run_keeps_the_next_language_from_starting(tmp_path):
+    runner = FakeRunner(five_status="rejected")
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, languages=["python", "go"]))
+    assert [r["status"] for r in summary["runs"]] == ["ok", "not-started"]
+    assert "rejected" in summary["runs"][1]["reason"] and len(runner.calls) == 1
+
+
+def test_a_utilization_above_one_in_a_run_keeps_the_next_language_from_starting(tmp_path):
+    runner = FakeRunner(week=1.2)
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, languages=["python", "go"], max_weekly=100.0))
+    assert [r["status"] for r in summary["runs"]] == ["ok", "not-started"]
+    assert "120%" in summary["runs"][1]["reason"]
+
+
+@pytest.mark.parametrize("kw", [{"max_five_hour": 0}, {"max_weekly": 101}, {"max_agent_minutes_per_5h": 0}])
+def test_limits_outside_their_range_are_refused_before_anything_runs(tmp_path, kw):
+    runner = FakeRunner()
+    with pytest.raises(pilot.PilotError):
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, **kw))
+    assert runner.calls == []
+
+
+def test_the_five_hour_guard_counts_this_runners_agent_minutes_of_the_last_five_hours():
+    runs = [{"started_at": NOW - 6 * 3600, "agent_seconds": 5000},  # outside the window
+            {"started_at": NOW - 3600, "agent_seconds": 1500}]
+    assert pilot.guard_decision(runs, 30, NOW).start  # 25 minutes
+    runs.append({"started_at": NOW - 600, "agent_seconds": 400})
+    d = pilot.guard_decision(runs, 30, NOW)  # 31.7 minutes
+    assert not d.start and d.wait_until == NOW - 3600 + 5 * 3600
+    assert "guard" in d.reason and "not a measurement" in d.reason
+
+
+def test_a_run_adds_its_agent_time_to_the_guard_and_the_record_says_it_is_a_guard(tmp_path):
+    pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path))
+    state = json.loads((tmp_path / "out" / "state.json").read_text())
+    assert state["runs"] == [{"batch": "20261117T070000Z", "language": "python", "started_at": NOW,
+                              "agent_seconds": 240.0}]
+    guard = read_record(tmp_path)["five_hour_guard"]
+    assert guard["limit_minutes"] == 30 and guard["minutes_before"] == 0 and guard["minutes_after"] == 4
+    assert "not a measurement" in guard["note"]
+
+
+def test_the_guard_stops_the_batch_when_this_runners_agent_time_reaches_it(tmp_path):
+    runner = FakeRunner()
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, languages=["python", "go"],
+                                                          max_agent_minutes_per_5h=3))
+    assert [r["status"] for r in summary["runs"]] == ["ok", "not-started"]
+    assert "guard" in summary["runs"][1]["reason"] and len(runner.calls) == 1
+
+
+def test_waiting_for_the_guard_waits_until_old_runs_leave_the_window(tmp_path):
+    slept = []
+    clock = {"t": NOW}
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    state = tmp_path / "out" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"windows": {}, "runs": [
+        {"batch": "b", "language": "go", "started_at": NOW - 5 * 3600 + 600, "agent_seconds": 1900}]}))
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                                now=lambda: clock["t"]))
+    assert summary["runs"][0]["status"] == "ok"
+    assert len(slept) == 1 and 600 <= slept[0] <= 700
+
+
+# --- naming what went wrong -----------------------------------------------------------------------------------------
+
+def test_an_error_outside_the_agent_is_a_trial_error(tmp_path):
+    summary = pilot.run_pilot(runner=FakeRunner(trial_error=True), **pilot_args(tmp_path))
+    assert summary["runs"][0]["status"] == "trial-error"
+
+
+def test_the_agents_own_error_line_makes_an_agent_error(tmp_path):
+    summary = pilot.run_pilot(runner=FakeRunner(result_error=True), **pilot_args(tmp_path))
+    assert summary["runs"][0]["status"] == "agent-error"
