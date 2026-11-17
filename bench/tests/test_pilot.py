@@ -2,6 +2,7 @@
 
 None of these tests needs Docker, Harbor or a real token; the token below is a made-up string.
 """
+import functools
 import json
 import os
 import signal
@@ -1292,23 +1293,38 @@ HARBOR_FAKE = """#!{python}
 import os, signal, sys, time
 args = sys.argv[1:]
 out = os.environ["STAND_IN_DIR"]
+mode = os.environ.get("STAND_IN_MODE", "polite")
 jobs, job = args[args.index("-o") + 1], args[args.index("--job-name") + 1]
 os.makedirs(os.path.join(jobs, job, "web-signup__python__abc"), exist_ok=True)
 open(os.path.join(out, "harbor.pid"), "w").write(str(os.getpid()))
+def finish(code):
+    open(os.path.join(out, "harbor-exit"), "w").write(repr(time.time()))
+    sys.exit(code)
 def stop(*_):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if mode == "slow-stop":
+        time.sleep(2.0)  # Harbor removing its containers
     open(os.path.join(out, "harbor-stopped"), "w").write("1")
-    sys.exit(130)
+    finish(130)
 signal.signal(signal.SIGINT, stop)
 open(os.path.join(out, "harbor-ready"), "w").write("1")
+if mode == "exit":
+    finish(0)
 time.sleep(120)
 """
 
 PILOT_DRIVER = """
-import os, sys
+import functools, os, signal, sys
 from pathlib import Path
 bench, tmp = sys.argv[1], Path(sys.argv[2])
+stage = sys.argv[3] if len(sys.argv) > 3 else ""
+sig = int(sys.argv[4]) if len(sys.argv) > 4 else int(signal.SIGTERM)
 sys.path.insert(0, bench)
 from dodambench import pilot
+
+
+def poke():
+    os.kill(os.getpid(), sig)
 
 
 class NoContainers:
@@ -1316,28 +1332,63 @@ class NoContainers:
         return []
 
     def remove(self, prefix):
+        (tmp / "containers-step").write_text(prefix)
         return []
 
+
+runner = functools.partial(pilot.run_subprocess, grace=10.0, term_grace=2.0)
+if stage == "before-harbor":
+    real_runner = runner
+
+    def runner(*args, **kwargs):
+        poke()
+        return real_runner(*args, **kwargs)
+if stage == "scans":
+    real_check = pilot.check_for_token
+
+    def check(*args, **kwargs):
+        poke()
+        return real_check(*args, **kwargs)
+    pilot.check_for_token = check
+if stage == "guard-end":
+    real_end = pilot.end_guard_run
+
+    def end(*args, **kwargs):
+        poke()
+        return real_end(*args, **kwargs)
+    pilot.end_guard_run = end
 
 try:
     pilot.run_pilot(task_path=Path(bench) / "tasks" / "web-signup", languages=["python"], out_root=tmp / "out",
                     token_file=tmp / "claude-token", harbor=tmp / "harbor", claude_version="2.1.326",
-                    base_env={"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp)},
-                    image_check=lambda image: None, docker=NoContainers(), timestamp="20261117T070000Z")
+                    base_env={"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp),
+                              "STAND_IN_MODE": os.environ.get("STAND_IN_MODE", "polite")},
+                    image_check=lambda image: None, docker=NoContainers(), timestamp="20261117T070000Z",
+                    runner=runner)
 except KeyboardInterrupt as err:
     (tmp / "notes.txt").write_text("\\n".join(getattr(err, "__notes__", [])))
     sys.exit(128 + getattr(err, "signum", 2))
 """
 
 
-def start_pilot_process(tmp_path):
-    token_file(tmp_path)
+def make_harbor(tmp_path) -> Path:
     harbor = tmp_path / "harbor"
     harbor.write_text(HARBOR_FAKE.replace("{python}", sys.executable))
     harbor.chmod(0o755)
+    return harbor
+
+
+def launch_pilot(tmp_path, stage="", sig=signal.SIGTERM, mode="polite"):
+    token_file(tmp_path)
+    make_harbor(tmp_path)
     (tmp_path / "driver.py").write_text(PILOT_DRIVER)
-    proc = subprocess.Popen([sys.executable, str(tmp_path / "driver.py"), str(BENCH), str(tmp_path)],
+    return subprocess.Popen([sys.executable, str(tmp_path / "driver.py"), str(BENCH), str(tmp_path), stage,
+                             str(int(sig))], env={**os.environ, "STAND_IN_MODE": mode},
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def start_pilot_process(tmp_path):
+    proc = launch_pilot(tmp_path)
     end = time.monotonic() + 60
     while not (tmp_path / "harbor-ready").exists():
         assert proc.poll() is None and time.monotonic() < end, "the pilot did not start the stand-in Harbor"
@@ -1443,3 +1494,132 @@ def test_a_failed_save_keeps_the_finished_run_in_the_summary_and_stops_the_batch
     summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
     assert [(r["language"], r["status"]) for r in summary["runs"]] == [("python", "ok")]
     assert len(runner.calls) == 1
+
+
+# --- the stop path, signal by signal, and the guard's remaining holes ----------------------------------------------------
+
+def wait_for_file(path: Path, proc, within=60.0):
+    end = time.monotonic() + within
+    while not path.exists():
+        assert proc.poll() is None and time.monotonic() < end, f"{path.name} did not appear"
+        time.sleep(0.02)
+
+
+@pytest.mark.parametrize("stage,sig", [
+    ("before-harbor", signal.SIGTERM),
+    ("running", signal.SIGTERM),
+    ("stopping", signal.SIGTERM),
+    ("stopping", signal.SIGHUP),
+    ("stopping", signal.SIGINT),
+    ("scans", signal.SIGTERM),
+    ("guard-end", signal.SIGHUP),
+])
+def test_a_signal_at_any_stage_never_cuts_the_stop_short(tmp_path, stage, sig):
+    mode = {"stopping": "slow-stop", "scans": "exit", "guard-end": "exit"}.get(stage, "polite")
+    proc = launch_pilot(tmp_path, stage=stage if stage in ("before-harbor", "scans", "guard-end") else "",
+                        sig=sig, mode=mode)
+    try:
+        if stage in ("running", "stopping"):
+            wait_for_file(tmp_path / "harbor-ready", proc)
+            proc.send_signal(sig)
+        if stage == "stopping":  # a second and a third signal while Harbor takes 2 s to stop
+            time.sleep(0.5)
+            proc.send_signal(sig)
+            time.sleep(0.5)
+            proc.send_signal(sig)
+        assert proc.wait(timeout=120) == 128 + sig
+        harbor_started = (tmp_path / "harbor.pid").exists()
+        assert harbor_started == (stage != "before-harbor")
+        if harbor_started:
+            assert gone(int((tmp_path / "harbor.pid").read_text()), within=0.5)  # gone before the pilot ended
+            assert (tmp_path / "containers-step").exists()
+        assert "scanned" in (tmp_path / "notes.txt").read_text()
+        [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+        assert run["ended_at"] is not None
+        if (tmp_path / "harbor-exit").exists():  # closed only once Harbor was gone
+            assert run["ended_at"] >= float((tmp_path / "harbor-exit").read_text())
+    finally:
+        stop_stray_harbor(tmp_path, proc)
+
+
+def test_the_guard_entry_stays_open_while_harbor_is_not_confirmed_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(pilot, "_group_gone", lambda pgid, within: False, raising=False)
+    runner = functools.partial(pilot.run_subprocess, grace=1.0, term_grace=1.0)
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env))
+    assert "confirmed gone" in str(err.value)
+    [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    assert run["ended_at"] is None  # still counted at its whole possible duration
+
+
+def test_an_open_entry_counts_the_longest_time_harbor_could_run_without_the_pilot(tmp_path):
+    seen = {}
+
+    class Peek(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout):
+            seen["entry"] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"][-1]
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=Peek(), **pilot_args(tmp_path, timeout=600.0))
+    harbor_own = pilot.harbor_time_limit(load_task(TASKS / "web-signup"))
+    assert seen["entry"]["max_seconds"] >= harbor_own + pilot.STOP_GRACE_SECONDS + pilot.TERM_GRACE_SECONDS
+
+
+def test_a_clock_set_back_during_a_run_keeps_the_guard_file_usable(tmp_path):
+    clock = {"t": NOW}
+
+    class ClockBack(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout):
+            clock["t"] = NOW - 3600
+            return super().__call__(cmd, env, log_path, timeout)
+
+    pilot.run_pilot(runner=ClockBack(), **pilot_args(tmp_path, now=lambda: clock["t"]))
+    [run] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
+    assert run["ended_at"] >= run["started_at"]
+    again = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, timestamp="20261117T080000Z",
+                                                              now=lambda: clock["t"]))
+    assert again["runs"][0]["status"] == "ok"
+
+
+@skip_as_root
+def test_a_failed_guard_end_is_reported_whatever_stopped_the_run(tmp_path):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    tf = token_file(keys)
+    docker = FakeDocker(stuck=["web-signup__python__abc__env"])
+
+    class Runner(FakeRunner):
+        def __call__(self, cmd, env, log_path, timeout):
+            code = super().__call__(cmd, env, log_path, timeout)
+            keys.chmod(0o500)  # the guard can no longer be written when the run ends
+            return code
+
+    runner = Runner(docker=docker, containers=["web-signup__python__abc__env"])
+    try:
+        with pytest.raises(pilot.PilotError) as err:
+            pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=tf, docker=docker))
+    finally:
+        keys.chmod(0o700)
+    said = str(err.value) + "\n" + "\n".join(getattr(err.value, "__notes__", []))
+    assert "web-signup__python__abc__env" in said and "pilot-guard.json" in said
+
+
+def test_waiting_says_why_and_until_when_and_reads_the_guard_again(tmp_path, capsys):
+    other = guard_entry(NOW - 60, max_seconds=11160.0, ident="other")
+    write_guard(tmp_path, other)
+    slept = []
+    clock = {"t": NOW}
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock["t"] += seconds
+        if len(slept) == 1:  # the other pilot finishes meanwhile
+            write_guard(tmp_path, {**other, "ended_at": NOW, "agent_seconds": 60.0})
+
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                                now=lambda: clock["t"]))
+    assert summary["runs"][0]["status"] == "ok"
+    assert slept and slept[0] <= 900  # a short step, then the guard file is read again
+    said = capsys.readouterr().err
+    assert "waiting until" in said and "no recorded end" in said
