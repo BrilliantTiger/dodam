@@ -17,6 +17,7 @@ D = json.loads((HERE / "wbs.json").read_text(encoding="utf-8"))
 ANCH = json.loads((HERE / "anchors.json").read_text(encoding="utf-8"))
 MC2 = json.loads((HERE / "montecarlo2.json").read_text(encoding="utf-8"))
 SC = json.loads((HERE / "scenarios.json").read_text(encoding="utf-8"))
+PILOT = json.loads((HERE / "pilot_replan.json").read_text(encoding="utf-8"))  # written by pilot_replan.py
 ITEMS = D["items"]
 GROUPS = D["groups"]
 BY = {i["id"]: i for i in ITEMS}
@@ -102,6 +103,39 @@ def stats():
         "rel_p50_k": kdate(ANCH["rel_10"]["p50"]), "rel_p80_k": kdate(ANCH["rel_10"]["p80"]),
         "years_p50": (dt.date.fromisoformat(ANCH["rel_10"]["p50"]) - dt.date(2026, 11, 2)).days / 365.25,
         "gate": gate, "k": kdate, "km": kmonth,
+        **pilot_figures(),
+    }
+
+
+def pilot_figures():
+    """What the plan says about the seeds, the tasks the forecast rolled and today's capacity."""
+    fc, sched = PILOT["forecast"], PILOT["schedule"]
+    plan = fc["planning"]
+    if plan["seeds"][0]["rel_10"] != {q: ANCH["rel_10"][q] for q in ("p50", "p80")}:
+        raise SystemExit("the forecast's own seed no longer gives the milestone dates the plan prints")
+    if plan["tasks"] != sched["tasks_rolled"] or plan["tasks"] + sched["tasks_added_later_and_left_out"] != len(ITEMS):
+        raise SystemExit("the tasks the forecast rolled and the tasks added later do not add up to the work breakdown")
+    span = lambda case, key, show: f"{show(fc[case][key]['earliest'])}~{show(fc[case][key]['latest'])}"
+    today, alone = (sched["capacities"][name]["after_x1"] for name in ("claude_shared", "claude_dedicated"))
+    days = sched["working_days_a_week"]
+    return {
+        "n_rolled": plan["tasks"], "n_added": sched["tasks_added_later_and_left_out"],
+        "fc_seed": fc["plan_seed"], "fc_seeds": len(fc["seeds"]), "fc_sims": plan["sims_per_seed"],
+        "fc_other_sims": fc["claude_shared"]["sims_per_seed"],
+        "fc_rel_p50": span("planning", "rel_10_p50", kdate), "fc_rel_p80": span("planning", "rel_10_p80", kdate),
+        "fc_rel_p50_weeks": plan["rel_10_p50"]["weeks_apart"], "fc_rel_p80_weeks": plan["rel_10_p80"]["weeks_apart"],
+        "fc_gate_p50": span("planning", "g_dir_p50", kdate), "fc_gate_p80": span("planning", "g_dir_p80", kdate),
+        "fc_shared_p50": span("claude_shared", "rel_10_p50", kmonth),
+        "fc_alone_p50": span("claude_dedicated", "rel_10_p50", kmonth),
+        "fc_last": kmonth(fc["claude_shared"]["last_day_of_the_simulation"]),
+        "days_plan": days["planning"], "days_shared": days["claude_shared"], "days_alone": days["claude_dedicated"],
+        "today_gate_p50": kdate(today["g_dir"]["p50"]), "today_gate_p80": kdate(today["g_dir"]["p80"]),
+        "today_gate_p": today["p_gate_by_its_date"],
+        "alone_gate_p50": kdate(alone["g_dir"]["p50"]), "alone_gate_p80": kdate(alone["g_dir"]["p80"]),
+        "alone_gate_p": alone["p_gate_by_its_date"],
+        "gate_day": kdate(sched["gate_day"]),
+        "night_runs": PILOT["capacity"]["next_measurements"]["same_model"]["runs"],
+        "night_large_runs": PILOT["capacity"]["next_measurements"]["largest_model"]["runs"],
     }
 
 
