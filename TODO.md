@@ -18,11 +18,11 @@
 
 ## 소유자가 하실 일
 
-- [ ] **지금** — GitHub 조직 `dodam-lang` 만들기(https://github.com/organizations/new, 무료 요금제, 소유자는 uygnoey 계정). 저장소를 공개하려면 먼저 있어야 한다. 11/17에도 이름은 비어 있었다
-- [ ] **지금** — 리니어에 팀 `Dodam`(키 `DOD`)을 만들고, 그 팀 안에 프로젝트 `방향 고정`(목표일 2027-02-24)을 만든다. 무료 요금제의 팀 2개 제한에 걸리면 Basic(1인 월 10달러, 1년 단위 결제)으로 올린다. 그다음 일감 만들기와 진행은 AI가 한다
+- [x] **11/17** — GitHub: 새 조직을 만들지 않고, 이미 쓰는 BrilliantTiger 조직에 저장소를 둔다
+- [ ] **지금** — 리니어에 팀 `Dodam`(키 `DOD`) 만들기(설정 → Teams → 새 팀, 1분 안팎). 리니어 연결 도구에는 팀을 만드는 기능이 없고, 브라우저 확장은 다른 claude.ai 계정으로 로그인돼 있어 AI가 대신 만들 수 없었다. 팀이 생기면 프로젝트 `방향 고정`과 일감은 AI가 만든다. 지금은 Business 체험판이라 팀 수 제한이 없다. 체험판이 끝나면 무료 요금제 제한(팀 2개 · 일감 250개)이 다시 걸린다. 리니어 안내로는 지워지는 것은 없지만, 일감이 250개를 넘으면 새 일감을 만들 수 없다
 - [x] **11/17** — Claude 구독: 소유자의 개인 Claude Max 20x 계정을 도담 계정으로 쓴다. 따로 사지 않는다(회사마다 계정 하나)
 - [ ] **나중에** — ChatGPT Pro(월 200달러): 당분간 사지 않는다(11/17 결정). 사면 바로 Codex를 붙여 검토와 측정에 쓴다. Claude만 쓰는 한 달마다 1.0이 두 회사로 할 때보다 약 2주 늦어진다. Google AI Ultra는 아래 문의 답을 받기 전에는 사지 않는다
-- [ ] **지금** — Claude 계정 설정: claude.ai 개인정보 설정에서 대화를 학습에 쓰지 않게 한다. 추가 사용 과금(usage credits)은 이미 꺼져 있다(11/17 확인). ChatGPT는 구독할 때 설정에서 "Improve the model for everyone"을 끄고, Codex 설정의 "Include environments"도 끈다
+- [x] **11/17** — Claude 계정 설정: 대화를 학습에 쓰지 않게 꺼 두었다(소유자 기억). 추가 사용 과금(usage credits)도 꺼져 있다(11/17 확인). ChatGPT는 구독할 때 설정에서 "Improve the model for everyone"을 끄고, Codex 설정의 "Include environments"도 끈다
 - [ ] **11월 첫 주** — Google에 자동 실행 문의 보내기. Google AI 개발자 포럼(https://discuss.ai.google.dev)의 Google Antigravity 게시판에 아래 영어 글을 새 글로 올린다(공식 이메일 창구는 없다). Google One 회원이면 고객센터 채팅(https://one.google.com/support)에도 보내고 문의 번호를 적어 둔다. 허락을 글로 받기 전에는 Google AI Ultra를 사지 않는다. 4주 안에 답이 없거나 안 된다고 하면 Google 개인 요금제는 쓰지 않는다
 
   <details><summary>보낼 글(영어)</summary>

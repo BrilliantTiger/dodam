@@ -12,6 +12,7 @@ Rules for AI agents and humans contributing to this repository.
 - Documents people read (Markdown, HTML, video) carry no internal codes or section numbers and never send the reader to another document; write the meaning in place.
 - Paths, file names and identifiers are in English.
 - Commit messages carry no AI co-author or attribution trailers.
+- Never write the owner's real name or contact details in the repository, in commit messages or on work items. Write "the owner" (in Korean, 소유자).
 
 ## Working together
 
