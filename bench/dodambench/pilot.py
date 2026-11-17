@@ -33,6 +33,9 @@ DEFAULT_TOKEN_FILE = Path("~/.dodam/claude-token-dodam")
 DEFAULT_OUT = BENCH / "out" / "pilot"
 DEFAULT_HARBOR = BENCH / ".harbor-venv" / "bin" / "harbor"
 DEFAULT_MAX_PERCENT = 50.0
+# With the subscription token Harbor cannot tell where the agent sends its requests, so it adds no host
+# to the agent's network allowlist; the agent reaches the model only through the hosts named here.
+DEFAULT_AGENT_HOSTS = ("api.anthropic.com",)
 SCAN_CHUNK = 1 << 20
 RESET_MARGIN_SECONDS = 30
 MAX_WAITS = 3
@@ -102,11 +105,14 @@ def _window(info: dict) -> dict:
     return entry
 
 
-def latest_windows(infos: Iterable[dict]) -> dict[str, dict]:
-    """The last known values of each window (five_hour, seven_day, ...) after reading the events in order."""
+def latest_windows(infos: Iterable[dict], keep_first: bool = False) -> dict[str, dict]:
+    """The last known values of each window (five_hour, seven_day, ...) after reading the events in order,
+    or with keep_first the values each window had in the first event that named it."""
     windows: dict[str, dict] = {}
 
     def put(name: str, entry: dict) -> None:
+        if keep_first and name in windows:
+            return
         merged = dict(windows.get(name, {}))
         merged.update({k: v for k, v in entry.items() if v is not None})
         merged.setdefault("utilization", None)
@@ -123,6 +129,15 @@ def latest_windows(infos: Iterable[dict]) -> dict[str, dict]:
                 if isinstance(block, dict):
                     put(str(name), _window(block))
     return windows
+
+
+def first_windows(infos: Iterable[dict]) -> dict[str, dict]:
+    """The values each window had when the run first reported it: the closest thing to the start."""
+    return latest_windows(infos, keep_first=True)
+
+
+def utc_text(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # --- the start / stop decision -----------------------------------------------------------------------------
@@ -207,10 +222,14 @@ def host_claude_version() -> str:
 
 
 def harbor_command(harbor: Path, task_dir: Path, jobs_dir: Path, job_name: str, claude_version: str,
-                   model: str | None = None, env_type: str = "docker") -> list[str]:
-    """The Harbor command. Credentials are never arguments: Harbor reads them from its environment."""
+                   model: str | None = None, env_type: str = "docker",
+                   allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS) -> list[str]:
+    """The Harbor command. Credentials are never arguments: Harbor reads them from its environment.
+    The allowed hosts apply to the agent's phase only; the verifier keeps no network."""
     cmd = [str(harbor), "run", "-p", str(task_dir), "-a", "claude-code", "--ak", f"version={claude_version}",
            "-e", env_type, "-o", str(jobs_dir), "--job-name", job_name, "-n", "1", "--yes", "-q"]
+    for host in allow_hosts:
+        cmd += ["--allow-agent-host", host]
     if model:
         cmd += ["-m", model]
     return cmd
@@ -417,7 +436,7 @@ def _summary_entry(record: dict) -> dict:
     keys = ("language", "status", "reason", "reward", "steps", "wall_seconds", "rate_limits", "record")
     entry = {k: record.get(k) for k in keys if k in record}
     entry["steps"] = [{"step": s["step"], "reward": s["reward"]} for s in record.get("steps", [])]
-    entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "after")}
+    entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "first", "after") if k in record["rate_limits"]}
     return entry
 
 
@@ -426,7 +445,8 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
               wait_for_reset: bool = False, model: str | None = None, base_env: dict[str, str] | None = None,
               now: Callable[[], float] = time.time, timestamp: str | None = None,
               image_check: Callable[[str], None] = image_present, runner: Runner = run_subprocess,
-              sleep: Callable[[float], None] = time.sleep, timeout: float = 7200.0) -> dict:
+              sleep: Callable[[float], None] = time.sleep, timeout: float = 7200.0,
+              allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS) -> dict:
     task = load_task(Path(task_path))
     for lang in languages:
         if lang not in LANGUAGES or lang not in task.languages:
@@ -439,7 +459,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     batch.mkdir(parents=True, exist_ok=True)
     windows = load_state(out_root)
     summary = {"timestamp": timestamp, "task": task.id, "languages": languages, "claude_code_pinned": claude_version,
-               "model": model or "agent default",
+               "model": model or "agent default", "agent_hosts": list(allow_hosts),
                "limits": {"max_five_hour_percent": max_five_hour, "max_weekly_percent": max_weekly,
                           "wait_for_reset": wait_for_reset}, "runs": []}
     stopped: str | None = None
@@ -453,14 +473,17 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 waits += 1
                 decision = decide(windows, max_five_hour, max_weekly, now())
             if not decision.start:
-                stopped = decision.reason
+                when = (f"; the window resets at {utc_text(decision.wait_until)}" if decision.wait_until
+                        else "; the reset time is unknown")
+                stopped = (decision.reason + when + "; not started (run again after the reset, "
+                           "or pass --wait-for-reset to wait for it)")
         if stopped is not None:
             record = {"language": lang, "status": "not-started", "reason": stopped, "reward": None, "steps": [],
-                      "rate_limits": {"before": before, "after": before}}
+                      "rate_limits": {"before": before, "first": {}, "after": before}}
             summary["runs"].append(_summary_entry(record))
             continue
         record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner, image_check,
-                         timeout, now)
+                         timeout, now, allow_hosts)
         windows = {**windows, **record["rate_limits"]["after"]}
         save_state(out_root, windows, timestamp)
         summary["runs"].append(_summary_entry(record))
@@ -468,12 +491,15 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
         if not record["leak_scan"]["clean"]:
             raise TokenLeak("the token was found in the run output: " + ", ".join(record["leak_scan"]["hits"]))
     _write_json(batch / "summary.json", summary)
+    # Last, everything this batch left behind: Harbor's output, the records, the summary and the state.
+    for root in (batch, out_root / STATE_FILE):
+        assert_no_leak(root, token)
     return summary
 
 
 def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbor: Path, claude_version: str,
             model: str | None, before: dict, runner: Runner, image_check: Callable[[str], None], timeout: float,
-            now: Callable[[], float]) -> dict:
+            now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS) -> dict:
     run_dir = batch / lang
     run_dir.mkdir(parents=True, exist_ok=True)
     image = LANGUAGES[lang].image
@@ -484,7 +510,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         raise PilotError("refusing to run: " + "; ".join(problems))
     jobs_dir = run_dir / "jobs"
     job_name = f"pilot-{lang}-{batch.name}"
-    cmd = harbor_command(harbor, task_dir, jobs_dir, job_name, claude_version, model)
+    cmd = harbor_command(harbor, task_dir, jobs_dir, job_name, claude_version, model, allow_hosts=allow_hosts)
     started = time.monotonic()
     returncode = runner(cmd, env, run_dir / "harbor.log", timeout)
     wall = time.monotonic() - started
@@ -497,7 +523,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                     "model": model, "usage": None, "steps": [], "reward": None, "error": None,
                     "leak_scan": {"clean": not hits, "hits": hits},
                     "verifier_env_problems": verifier_env_problems(task_dir, job_dir) if job_dir.is_dir() else [],
-                    "rate_limits": {"before": before, "after": {}, "events": []}}
+                    "rate_limits": {"before": before, "first": {}, "after": {}, "events": []}}
     status = "ok" if returncode == 0 else "harbor-failed"
     try:
         trial = read_trial(job_dir)
@@ -510,10 +536,14 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                       harbor_wall_seconds=trial["harbor_wall_seconds"], usage=agent["usage"],
                       model=model or agent["model"])
         record["claude_code_version"]["observed"] = agent["claude_code_version"]
-        record["rate_limits"] = {"before": before, "after": latest_windows(agent["rate_limit_infos"]),
+        record["rate_limits"] = {"before": before, "first": first_windows(agent["rate_limit_infos"]),
+                                 "after": latest_windows(agent["rate_limit_infos"]),
                                  "events": agent["rate_limit_infos"]}
         if status == "ok" and (not trial["steps"] or any(s["reward"] is None for s in trial["steps"])):
             status = "incomplete"
+        # Harbor judges a step even when the agent's command failed, so a reward alone proves nothing.
+        if status in ("ok", "incomplete") and (trial["error"] or any(s["error"] for s in trial["steps"])):
+            status = "agent-error"
     if record["verifier_env_problems"]:
         status = "verifier-env"
     if hits:
@@ -541,11 +571,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--claude-version", help="Claude Code version to pin (default: the host's `claude --version`)")
     p.add_argument("--model", help="model name for the agent (default: the CLI's own default)")
     p.add_argument("--timeout-sec", type=float, default=7200.0, help="stop Harbor after this many seconds")
+    p.add_argument("--agent-host", action="append",
+                   help="host the agent may reach while it works; repeat for several (default: api.anthropic.com)")
     args = p.parse_args(argv)
     try:
         summary = run_pilot(args.task, args.lang, args.out, args.token_file.expanduser(), args.harbor,
                             args.claude_version or host_claude_version(), args.max_five_hour, args.max_weekly,
-                            args.wait_for_reset, args.model, timeout=args.timeout_sec)
+                            args.wait_for_reset, args.model, timeout=args.timeout_sec,
+                            allow_hosts=args.agent_host or DEFAULT_AGENT_HOSTS)
     except TokenLeak as err:
         print(f"TOKEN LEAK: {err}", file=sys.stderr)
         return 3
