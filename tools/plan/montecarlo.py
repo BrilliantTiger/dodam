@@ -6,6 +6,7 @@ Usage: python3 montecarlo.py [n_sims]
 import datetime as dt
 import json
 import math
+import os
 import random
 import sys
 from collections import defaultdict
@@ -13,6 +14,11 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 D = json.loads((HERE / "wbs.json").read_text(encoding="utf-8"))
+# Tasks added to the work breakdown after the forecast was made carry the day they were added. The forecast
+# rolls the tasks it was made with, so that its dates can be reproduced; DODAM_PLAN_ALL_TASKS=1 rolls every task.
+ADDED_LATER = [i["id"] for i in D["items"] if i.get("added")]
+if not os.environ.get("DODAM_PLAN_ALL_TASKS"):
+    D["items"] = [i for i in D["items"] if not i.get("added")]
 ITEMS = {i["id"]: i for i in D["items"]}
 ORDER = sorted(D["items"], key=lambda x: (x["start"], 0 if x.get("milestone") else 1))
 day = dt.date.fromisoformat
