@@ -975,6 +975,9 @@ class SignalGate:
         self.depth, self.stopping, self.held, self.previous = 0, False, [], {}
         self.notices: list[str] = []  # what the handler has to say, printed only where it cannot delay a stop
         self.failures: list[str] = []  # the steps of the stop and the cleanup that failed, for the report
+        # Messages that could not be printed: they cannot be reported by printing, so they are kept in the
+        # batch summary, and listed when the batch ends with an error for another reason. They fail nothing.
+        self.unprinted: list[dict] = []
 
     def install(self) -> None:
         if threading.current_thread() is threading.main_thread():
@@ -1010,7 +1013,7 @@ class SignalGate:
             return True, action()
         except Exception as err:
             self.failures.append(f"{what} failed ({type(err).__name__}: {err})")
-            return False, None
+            return False, err
 
     def stop_begun(self) -> None:
         self.stopping = True
@@ -1057,12 +1060,12 @@ def close_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: f
 
 
 def _say(text: str) -> None:
-    """Print to stderr; a print that fails (a hung-up terminal, a full disk behind stderr) is noted for the
-    report, never raised."""
+    """Print to stderr. A print that fails (a hung-up terminal, a full disk behind stderr) is never raised and
+    fails nothing: the message is kept for the batch summary."""
     try:
         print(text, file=sys.stderr, flush=True)
     except Exception as err:
-        _gate().failures.append(f"a message could not be printed ({type(err).__name__}: {err})")
+        _gate().unprinted.append({"message": text, "error": f"{type(err).__name__}: {err}"})
 
 
 def _duration(seconds: float) -> str:
@@ -1194,6 +1197,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                 summary["runs"].append(_summary_entry(record))
                 gate.raise_held()
                 continue
+            failures_before = len(gate.failures)  # counted from before the run: a step failing inside it counts
             t0 = time.monotonic()
             try:
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
@@ -1210,7 +1214,6 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                     if closed and result[1]:
                         report_to(sys.exc_info()[1], result[1])
                 raise
-            failures_before = len(gate.failures)
             with gate.holding():
                 closed, result = gate.step(f"closing the {lang} run in the five-hour guard file",
                                            lambda: close_guard_run(guard, entry, now(), _run_agent_seconds(record)))
@@ -1246,6 +1249,8 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
         gate.enter()  # the summary and the final scans are never cut short
         try:
             gate.flush_notices()
+            if gate.unprinted:
+                summary["unprinted_messages"] = [{k: mask(v, token) for k, v in m.items()} for m in gate.unprinted]
             summary_written, _ = gate.step("writing the batch summary",
                                            lambda: _write_json(batch / "summary.json", summary))
             # Last, whatever happened: everything the batch left behind, the records, the summary, the state and
@@ -1266,6 +1271,8 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                     failures.append("the batch had already stopped: " + mask(said, token))
                 if steps_failed:
                     failures.append(steps_failed)
+                if gate.unprinted:
+                    failures.append(f"{len(gate.unprinted)} message(s) could not be printed; the batch summary keeps them")
                 raise TokenLeak("; ".join(failures))
             left = harbor_groups_left()
             if left:
@@ -1277,6 +1284,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             report_to(in_flight, scan_note)
             if steps_failed:
                 report_to(in_flight, steps_failed)
+            if gate.unprinted:
+                report_to(in_flight, f"{len(gate.unprinted)} message(s) could not be printed "
+                                     f"({gate.unprinted[0]['error']}); the batch summary keeps them")
             if in_flight is None and (steps_failed or not summary_written):
                 stop = PilotError("the batch ended, but steps of the cleanup failed; the details follow")
                 stop.add_note(scan_note)
@@ -1358,10 +1368,15 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         if job_dir.is_dir():
             # Harbor may have left this run's containers running, cut short or not: remove them first, so
             # nothing keeps writing into the output or using the subscription, and the scan sees the final output.
-            try:
-                record["containers_left"] = remove_run_containers(docker, job_dir)
-            except Exception as err:
-                record["containers_left"] = [mask(f"could not check: {type(err).__name__}: {err}", token)]
+            removed, result = _gate().step(f"the containers step of the {lang} run",
+                                           lambda: remove_run_containers(docker, job_dir))
+            if not removed:
+                record["containers_left"] = [mask(f"could not check: {type(result).__name__}: {result}", token)]
+            else:
+                record["containers_left"] = result
+                if result:  # containers that stay are reported with the other failures, record or not
+                    _gate().failures.append(f"the containers of the {lang} run are still in Docker: "
+                                            + ", ".join(result))
         scanned, scan = _gate().step(f"the scan of the {lang} run folder", lambda: check_for_token(run_dir, token))
         if not scanned:  # a scan that could not run rules nothing out: it counts as a failed scan
             scan = LeakScan([], ["the whole run folder (the scan itself failed)"])
