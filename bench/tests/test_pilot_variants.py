@@ -3,7 +3,8 @@
 For every test in test_pilot_record.py and test_pilot_report.py this file names one broken variant of the
 implementation, of the data or of a document. The check copies the files, breaks them that one way, runs that
 one test in the copy and expects it to fail. A test that still passed on its broken variant would be a test
-that does not test what its name says.
+that does not test what its name says. A test that runs once for each language has to fail in the language
+whose file the variant breaks.
 
 The table for people: python tests/test_pilot_variants.py
 """
@@ -32,6 +33,7 @@ DOC_KO, DOC_EN = "docs/pilot/2026-11-17-pilot.ko.md", "docs/pilot/2026-11-17-pil
 CHARTER_KO, CHARTER_EN = "docs/charter.ko.md", "docs/charter.en.md"
 QUOTE_KO, QUOTE_EN = "tools/pilot/charter.ko.tmpl", "tools/pilot/charter.en.tmpl"
 PLAN_DOC = "docs/plan/2026-10-29-plan-to-1.0.ko.md"
+PLAN_PAGE = "docs/plan/2026-10-29-plan-to-1.0.ko.html"
 RERENDER = "render the document again"
 
 # (test file, test, what is broken, [(file, text, replacement), ...] and RERENDER where the document must follow)
@@ -220,6 +222,48 @@ VARIANTS = [
     (REPORT, "test_the_plan_s_sentences_about_the_pilot_say_what_was_measured",
      "a sentence of the plan gives another weekly bound than the estimates",
      [(PLAN_DOC, "한 번에 0.21%포인트보다 작다는 위쪽 한계만 안다", "한 번에 0.17%포인트보다 작다는 위쪽 한계만 안다")]),
+    (REPORT, "test_the_dates_the_charter_keeps_are_the_plan_s_milestone_dates",
+     "a date the charter keeps is changed by hand: the 1.0 date in the Korean table, the 80% date in the English paragraph",
+     [(CHARTER_KO, "| ~ 2032년 2월 25일 | 1.0 |", "| ~ 2032년 3월 25일 | 1.0 |"),
+      (CHARTER_EN, "with 80% probability is January 18, 2034.", "with 80% probability is January 25, 2034.")]),
+    (REPORT, "test_every_figure_in_the_charter_s_part_on_the_schedule_is_written_from_the_estimates_or_named",
+     "a figure of the charter's part on the schedule that has no computation is changed by hand",
+     [(CHARTER_KO, "벤치마크 과제 30개(웹 20", "벤치마크 과제 31개(웹 20"),
+      (CHARTER_EN, "30 benchmark tasks (20 web", "31 benchmark tasks (20 web")]),
+    (REPORT, "test_the_plan_s_page_is_what_its_scripts_write",
+     "a date in the plan's page is changed by hand",
+     [(PLAN_PAGE, "2032년 2월 25일", "2032년 3월 25일")]),
+    (REPORT, "test_no_statement_that_was_withdrawn_is_stated_as_current",
+     "the owner's list says again that every month with Claude alone makes 1.0 about two weeks later",
+     [("TODO.md", "ChatGPT 설정에서", "Claude만 쓰는 한 달마다 1.0이 두 회사로 할 때보다 약 2주 늦어진다. ChatGPT 설정에서")]),
+    (REPORT, "test_the_owner_s_item_on_the_second_company_gives_what_the_charter_gives",
+     "the owner's item gives another range for two companies than the estimates",
+     [("TODO.md", "2033년 7월~2033년 9월이다", "2033년 7월~2033년 10월이다")]),
+    (REPORT, "test_the_first_night_says_how_often_each_language_is_run",
+     "the document says again that every language is repeated more than six times",
+     [(DOC_KO, "언어 4개는 7번, 나머지 3개는 6번 되풀이하므로", "언어마다 6번 넘게 되풀이하므로")]),
+    (REPORT, "test_the_document_says_when_other_work_can_only_raise_the_weekly_figure",
+     "the condition under which other work can only raise the figure is left out",
+     [(DOC_KO, "주간 한도의 한 주가 두 읽기 사이에 새로 시작하지 않는 한, ", ""),
+      (DOC_EN, "Unless the week of the weekly limit starts anew between the two readings, other work", "Other work")]),
+    (REPORT, "test_where_every_seed_gives_the_same_date_the_documents_say_so_instead_of_giving_a_range",
+     "a document may say \"with every seed\" although the seeds give different dates",
+     [(RENDER, '            if found["earliest"] == found["latest"]:    # only then may a document say "with every seed"',
+       "            if True:")]),
+    (REPORT, "test_the_date_at_twice_the_capacity_is_given_as_a_range_over_the_seeds",
+     "the charter gives the date at twice the capacity as one month again",
+     [(CHARTER_KO, "2030년 12월~2031년 1월 사이로 당겨진다", "2031년 1월로 당겨진다")]),
+    (REPORT, "test_the_readme_gives_the_80_percent_dates_beside_the_middle_dates",
+     "the 80% date in the README is changed by hand",
+     [("README.ko.md", "80% 확률로는 2034년 1월까지다", "80% 확률로는 2034년 2월까지다"),
+      ("README.md", "with 80% probability by January 2034", "with 80% probability by February 2034")]),
+    (REPORT, "test_the_plan_s_row_for_the_one_night_measurement_says_what_the_charter_says",
+     "the plan's row says again that an unmoved figure shows the baseline measurement fits the weekly limit",
+     [("tools/plan/wbs_data.py", "기준 측정 630번이 14%포인트보다 적게 쓴다는 것(시범 날 남아 있던 여유는 15%포인트였다)",
+       "기준 측정이 주간 한도에 든다는 것")]),
+    (REPORT, "test_the_seeds_run_side_by_side_give_what_each_gives_alone",
+     "the seed a run starts from depends on the seeds that run beside it",
+     [(ESTIMATES, "[(cap, seed, sims) for seed in seeds]", "[(cap, seeds[0] * (n + 1), sims) for n, seed in enumerate(seeds)]")]),
 ]
 
 COPIED = ("bench/dodambench", "bench/records", "bench/pyproject.toml", f"bench/tests/{RECORD}", f"bench/tests/{REPORT}",
@@ -231,14 +275,14 @@ def copy_of_the_files(folder: Path) -> Path:
         source, target = ROOT / name, folder / name
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
-            shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__", "*.html"))
+            shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
         else:
             shutil.copy2(source, target)
     return folder
 
 
 def run_the_test(folder: Path, file: str, test: str) -> tuple[int, str]:
-    done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"tests/{file}::{test}"],
+    done = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfp", "-p", "no:cacheprovider", f"tests/{file}::{test}"],
                           cwd=folder / "bench", capture_output=True, text=True)
     return done.returncode, done.stdout + done.stderr
 
@@ -292,6 +336,20 @@ def test_a_test_fails_on_its_broken_variant(outcomes, file, test, what, edits):
         f"{test} did not fail when {what}:\n{output[-1500:]}"
     assert OWN_ASSERTION.search(output) and not OTHER_ERROR.search(output), \
         f"{test} failed when {what}, but not on an assertion of its own:\n{output[-1500:]}"
+    # A test that runs once for each language must fail in the language whose file the variant breaks.
+    cases = {case: state for state, case in re.findall(rf"(?m)^(PASSED|FAILED) \S+::{test}\[([^\]]+)\]", output)}
+    for lang in sorted({language_of(edit[0]) for edit in edits if edit != RERENDER} - {None}):
+        own = [state for case, state in cases.items() if re.search(rf"(^|-){lang}$", case)]
+        assert not own or "FAILED" in own, f"{test} did not fail in its {lang} case when {what}:\n{output[-1500:]}"
+
+
+def language_of(name: str) -> str | None:
+    """The language of a document or template, or None for a file both languages share."""
+    if ".ko." in name or name in ("README.ko.md", "TODO.md"):
+        return "ko"
+    if ".en." in name or name == "README.md":
+        return "en"
+    return None
 
 
 def test_every_test_about_the_pilot_has_a_broken_variant():

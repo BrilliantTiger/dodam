@@ -511,6 +511,14 @@ def quote_template(name: str, lang: str) -> Path:
     return PILOT / f"{name}.{lang}.tmpl"
 
 
+PART = " @part"   # a rendered line that ends so must stand inside a line of the document; any other, be a whole line
+
+
+def not_carried(lines: list[str], text: str) -> list[str]:
+    have = set(text.splitlines())
+    return [line for line in lines if (line[:-len(PART)] not in text if line.endswith(PART) else line not in have)]
+
+
 @pytest.mark.parametrize("name,lang", QUOTES)
 def test_the_lines_about_the_pilot_in_a_hand_kept_document_are_rendered_from_the_data(name, lang):
     """The charter (its rows, its paragraphs and its history rows), the status line of the README and the
@@ -519,9 +527,8 @@ def test_the_lines_about_the_pilot_in_a_hand_kept_document_are_rendered_from_the
     assert source.is_file(), f"the {lang} {name} lines about the pilot are not tied to the data"
     kept = {"charter": ROOT / "docs" / f"charter.{lang}.md", "owner_list": ROOT / "TODO.md",
             "readme": ROOT / ("README.ko.md" if lang == "ko" else "README.md")}[name]
-    have = set(kept.read_text(encoding="utf-8").splitlines())
     lines = [line for line in render.render(lang, text=source.read_text(encoding="utf-8")).splitlines() if line.strip()]
-    assert lines and [line for line in lines if line not in have] == []
+    assert lines and not_carried(lines, kept.read_text(encoding="utf-8")) == []
     digits = re.compile(r"(?<![A-Za-z\d.])v\d\.\d+(?![\d.])|(?<![\d.,])1\.0(?![\d.])|11월 일정")   # names, not figures
     bare = render.PLACE.sub("", digits.sub("", source.read_text(encoding="utf-8")))
     assert not re.search(r"\d", bare), "a figure stands in the template instead of coming from the data"
@@ -549,7 +556,7 @@ def test_the_owner_s_list_scopes_what_it_says_about_the_token():
 def test_a_changed_figure_in_the_data_is_missed_in_the_charter(lang):
     source = quote_template("charter", lang)
     assert source.is_file(), f"the {lang} charter's lines about the pilot are not tied to the data"
-    have = set((ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8").splitlines())
+    have = (ROOT / "docs" / f"charter.{lang}.md").read_text(encoding="utf-8")
     for change in (lambda r: r["schedule"]["capacities"]["claude_shared"]["after_x1"].update(p_gate_by_its_date=0.31),
                    lambda r: r["usage"]["weekly"].update(one_run_below_points=0.5),
                    lambda r: r["forecast"]["claude_shared"]["rel_10_p50"].update(latest="2039-03-02"),
@@ -557,7 +564,7 @@ def test_a_changed_figure_in_the_data_is_missed_in_the_charter(lang):
         replan = copy.deepcopy(committed())
         change(replan)
         lines = render.render(lang, replan=replan, text=source.read_text(encoding="utf-8")).splitlines()
-        assert [line for line in lines if line.strip() and line not in have], "a changed figure went unnoticed"
+        assert not_carried([line for line in lines if line.strip()], have), "a changed figure went unnoticed"
 
 
 # --- the dates an earlier charter gave, and the owner's item about a new token ----------------------------------
@@ -722,3 +729,257 @@ def test_the_plan_s_sentences_about_the_pilot_say_what_was_measured():
     assert f"Claude만 쟀고, 주간 한도는 한 번에 {bound}%포인트보다 작다는 위쪽 한계만 안다" in text
     # wherever the plan gives the weekly bound, it is the one the estimates give
     assert re.findall(r"한 번에 ([\d.]+)%포인트보다 작", text) == [str(bound)] * 2
+
+
+# --- every place a figure is published; statements that were withdrawn; statements with their conditions -------
+
+
+CHARTER = {"ko": ROOT / "docs" / "charter.ko.md", "en": ROOT / "docs" / "charter.en.md"}
+README = {"ko": ROOT / "README.ko.md", "en": ROOT / "README.md"}
+PILOT_DOC = {lang: ROOT / "docs" / "pilot" / f"2026-11-17-pilot.{lang}.md" for lang in ("ko", "en")}
+PLAN_PAGE = ROOT / "docs" / "plan" / "2026-10-29-plan-to-1.0.ko.html"
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+               "November", "December")
+
+
+def month(iso: str, lang: str) -> str:
+    y, m, _ = (int(x) for x in iso.split("-"))
+    return f"{y}년 {m}월" if lang == "ko" else f"{MONTH_NAMES[m - 1]} {y}"
+
+
+def full_day(iso: str, lang: str) -> str:
+    y, m, d = (int(x) for x in iso.split("-"))
+    return f"{y}년 {m}월 {d}일" if lang == "ko" else f"{MONTH_NAMES[m - 1]} {d}, {y}"
+
+
+def anchors() -> dict:
+    return json.loads((PLAN / "anchors.json").read_text(encoding="utf-8"))
+
+
+def read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def schedule_part(lang: str) -> str:
+    """The charter's part on the schedule: from its heading to the next heading of the same level."""
+    text = read(CHARTER[lang])
+    start = text.index("\n## 일정\n" if lang == "ko" else "\n## Schedule\n")
+    return text[start:text.index("\n## ", start + 4)]
+
+
+MILESTONES = {"ko": (("g_dir", "방향 고정"), ("g_min", "최소 언어"), ("rel_01", "AI 개선 루프와 첫 공개"),
+                     ("rel_03", "실제로 쓰기"), ("rel_10", "1.0")),
+              "en": (("g_dir", "Direction fixing"), ("g_min", "Minimal language"),
+                     ("rel_01", "AI improvement loop and first public release"), ("rel_03", "Real use"),
+                     ("rel_10", "1.0"))}
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_dates_the_charter_keeps_are_the_plan_s_milestone_dates(lang):
+    """The schedule table and the paragraph under it keep the plan's dates; they are what anchors.py gives."""
+    part, dates = schedule_part(lang), anchors()
+    for name, title in MILESTONES[lang]:
+        assert f"~ {full_day(dates[name]['p50'], lang)} | {title} |" in part, (name, "the middle date in the table")
+    last = full_day(dates["rel_10"]["p80"], lang)
+    assert (f"80% 확률로 1.0이 끝나는 날은 {last}이다." if lang == "ko" else
+            f"The date by which 1.0 is done with 80% probability is {last}.") in part
+    decided = month(dates["d_mm_decide"]["p50"], lang)
+    assert (f"결정({decided} 초)" if lang == "ko" else f"decision (early {decided})") in part
+    assert f"~ {full_day(dates['g_dir']['p50'], lang)})\n" in read(CHARTER[lang]), "the heading of the next steps"
+
+
+# What is left of the charter's part on the schedule once every line and sentence written from the estimates
+# is taken out: figures that are decisions, scope or findings of research and have no computation here. They
+# are listed so that changing one of them by hand fails as well, and so that a new figure has to be either
+# written from the estimates or added here on purpose.
+NOT_COMPUTED = {
+    "ko": ["2026년", "11월", "30개(웹", "20", "10)와", "7개로", "1.0", "100개,", "0.1", "판(0.1)", "매니저(0.2),", "3개월",
+           "0건),", "0.3과", "1.0", "1.0", "1.0", "\"2029년~", "1.0\"은", "1%가", "1.0까지", "3.7~4.9년이", "2027년",
+           "1월"],
+    "en": ["2026", "30", "(20", "10", "7", "1.0", "100", "0.1,", "(0.1)", "(0.2),", "3", "(0", "0.3", "1.0",
+           "1.0,", "1.0", "\"1.0", "2029\"", "1%", "3.7", "4.9", "1.0", "2027,"],
+}
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_every_figure_in_the_charter_s_part_on_the_schedule_is_written_from_the_estimates_or_named(lang):
+    source = quote_template("charter", lang)
+    assert "{{anchor." in read(source), "the dates the charter keeps are not written from the plan's milestone dates"
+    left = schedule_part(lang)
+    for line in sorted(render.render(lang, text=read(source)).splitlines(), key=len, reverse=True):
+        piece = line[:-len(PART)] if line.endswith(PART) else line
+        if piece.strip():
+            left = left.replace(piece, " ")
+    assert re.findall(r"\S*\d\S*", left) == NOT_COMPUTED[lang]
+
+
+def test_the_plan_s_page_is_what_its_scripts_write(plan_copy):
+    for command in (["build.py"], ["build_html.py", "page.html"], ["wrap_local.py", "page.html", "plan.html"]):
+        subprocess.run([sys.executable, *command], cwd=plan_copy, check=True, capture_output=True)
+    assert read(plan_copy / "plan.html") == read(PLAN_PAGE)
+
+
+# Statements that charter versions 0.8 and 0.9 and the reviews withdrew or changed. A row of a version history
+# says what an older version said and stays; so does a line that names the statement as an earlier one.
+WITHDRAWN = (
+    (r"한 달마다.{0,40}(2주|두 주)", "about two weeks later for every month with Claude alone"),
+    (r"two weeks later|about two weeks", "about two weeks later for every month with Claude alone"),
+    (r"2038-11-10|2040-07-11|2033-08-31", "the single dates for Claude alone and for two companies"),
+    (r"6번을 돌리는 동안|while 6 runs", "the weekly bound over six runs"),
+    (r"37%(에서|였고)|was 37%|from 37%", "the chance before the pilot from one seed"),
+    (r"경우마다 2,000번, 회사마다 계정 하나", "the schedule run once for each case"),
+    (r"7개 언어를 3번씩\)|21 runs", "the one-night measurement of 21 runs"),
+    (r"묶음 측정 뒤에 (다시 )?(판단|잰다)|again after the one-night", "the dates judged after the one-night measurement"),
+    (r"명령줄에 한 번도 보이지 않았고", "the token never shown, without the runs that were not watched"),
+    (r"두 배면 \d{4}년 \d+월로 당겨진다\.|moves up to [A-Z][a-z]+ \d{4}\.", "the date at twice the capacity from one seed, unqualified"),
+    (r"번 넘게 되풀이|repeated more than", "every language repeated more than six times"),
+    (r"올리기만 하므로|can only raise the figure, so", "other work can only raise the figure, without its condition"),
+    (r"기준 측정이 주간 한도에 든다는 것", "an unmoved figure shows the baseline measurement fits the weekly limit"),
+    (r"부터 실제 용량을 재고|회사별로 잰다", "the pilot will measure the capacity of each company"),
+)
+EARLIER_OR_HISTORY = re.compile(r"^\| v\d|^\| \S+ 판 \||이전 판에 적었던|earlier version|version 0\.7|<h2>판 이력|<h2>문서 이력")
+
+
+def published() -> list[Path]:
+    found = [ROOT / "TODO.md", *README.values(), *CHARTER.values(), *PILOT_DOC.values(), PLAN_DOC, PLAN_PAGE,
+             PLAN / "README.md"]
+    found += sorted(PLAN.glob("*.py")) + sorted(PILOT.glob("*.tmpl")) + sorted(PILOT.glob("*.py"))
+    return found
+
+
+def test_no_statement_that_was_withdrawn_is_stated_as_current():
+    weekly = committed()["usage"]["weekly"]["one_run_below_points"]
+    stated = []
+    for path in published():
+        for number, line in enumerate(read(path).splitlines(), 1):
+            if EARLIER_OR_HISTORY.search(line):
+                continue
+            for pattern, what in WITHDRAWN:
+                if re.search(pattern, line):
+                    stated.append((path.name, number, what))
+            # wherever a line gives the bound of the weekly limit for one run of the pilot, it is today's
+            for bound in re.findall(r"주간 (?:한도|사용률)[^.|]{0,80}한 번에 ([\d.]+)%포인트보다 작", line):
+                if bound != str(weekly):
+                    stated.append((path.name, number, f"the weekly bound {bound}"))
+    assert stated == []
+
+
+def test_the_owner_s_item_on_the_second_company_gives_what_the_charter_gives():
+    item = next(line for line in read(ROOT / "TODO.md").splitlines() if "ChatGPT Pro(월" in line)
+    assert "약 2주" not in item and "한 달마다" not in item
+    fc = committed().get("forecast") or {}
+    shared, two = fc["claude_shared"]["rel_10_p50"], fc["two_companies"]["rel_10_p50"]
+    assert f"끝까지 가면 씨앗에 따라 {month(shared['earliest'], 'ko')}~{month(shared['latest'], 'ko')}이고" in item
+    assert f"두 회사로 하면(주 약 {fc['two_companies']['working_days_a_week']}작업일) " \
+           f"{month(two['earliest'], 'ko')}~{month(two['latest'], 'ko')}이다" in item
+    assert "잰 값이 아니라 가정" in item
+    gate = full_day(committed()["schedule"]["gate_day"], "ko")
+    assert f'"방향 고정"({gate}까지)' in read(ROOT / "TODO.md")
+
+
+def test_the_first_night_says_how_often_each_language_is_run():
+    night = committed()["capacity"]["next_measurements"]["same_model"]
+    languages = committed()["capacity"]["assumptions"]["languages"]
+    rounds, beyond = divmod(night["runs"], languages)
+    assert beyond, "this test is written for a night that does not run every language equally often"
+    assert (night.get("languages_run_once_more"), night.get("runs_of_those_languages"),
+            night.get("languages_run_in_whole_rounds_only"), night["whole_rounds_of_the_languages"]) == \
+        (beyond, rounds + 1, languages - beyond, rounds)
+    assert f"언어 {beyond}개는 {rounds + 1}번, 나머지 {languages - beyond}개는 {rounds}번 되풀이하므로" in read(PILOT_DOC["ko"])
+    assert f"{beyond} languages are run {rounds + 1} times and the other {languages - beyond} are run {rounds} times" \
+        in read(PILOT_DOC["en"])
+    other = copy.deepcopy(committed())
+    other["capacity"]["next_measurements"]["same_model"]["languages_run_once_more"] = 0
+    with pytest.raises(render.RenderError):     # "some are run once more" would not be true
+        render.render("ko", replan=other)
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_document_says_when_other_work_can_only_raise_the_weekly_figure(lang):
+    text = read(PILOT_DOC[lang])
+    if lang == "ko":
+        assert "올리기만 하므로" not in text
+        assert "한 주가 두 읽기 사이에 새로 시작하지 않는 한, 같은 계정의 다른 작업은 숫자를 올리기만 한다" in text
+        assert "새로 시작하는 시각이 그 밤에 들지 않는 날에 재고, 마지막 읽기가 첫 읽기보다 작으면 그 밤의 결과는 쓰지 않는다" in text
+    else:
+        assert "can only raise the figure, so" not in text
+        assert "Unless the week of the weekly limit starts anew between the two readings, other work on the same " \
+               "account can only raise the figure" in text
+        assert "a night whose last reading is lower than its first is not used" in text
+
+
+SAME_ENDS = re.compile(r"(\d{4}-\d{2}-\d{2})~\1|between (\d{4}-\d{2}-\d{2}) and \2\b|(\d{4}년 \d+월 \d+일)~\3")
+
+
+def test_where_every_seed_gives_the_same_date_the_documents_say_so_instead_of_giving_a_range():
+    for path in (*CHARTER.values(), *README.values(), *PILOT_DOC.values(), PLAN_DOC, PLAN_PAGE, ROOT / "TODO.md"):
+        assert not SAME_ENDS.search(read(path)), f"{path.name} gives a range whose two ends are the same date"
+    gate = committed()["forecast"]["planning"]["g_dir_p50"]
+    assert gate["earliest"] == gate["latest"], "this test is written for a gate date that every seed gives"
+    assert f"어느 씨앗에서나 {gate['earliest']}이고" in read(CHARTER["ko"])
+    assert f"at {gate['earliest']} with every seed" in read(CHARTER["en"])
+    other = copy.deepcopy(committed())
+    other["forecast"]["planning"]["g_dir_p50"]["latest"] = "2027-03-03"
+    for lang in ("ko", "en"):
+        with pytest.raises(render.RenderError):     # "with every seed" would not be true
+            render.render(lang, replan=other, text=read(quote_template("charter", lang)))
+
+
+def test_the_date_at_twice_the_capacity_is_given_as_a_range_over_the_seeds():
+    fc = committed().get("forecast") or {}
+    assert "double_capacity" in fc, "the estimates do not run twice the plan's capacity with several seeds"
+    double, plan = fc["double_capacity"], fc["planning"]
+    assert double["working_days_a_week"] == 2 * plan["working_days_a_week"]
+    assert [s["seed"] for s in double["seeds"]] == fc["seeds"] and len(fc["seeds"]) >= 5
+    middles = [s["rel_10"]["p50"] for s in double["seeds"]]
+    assert (double["rel_10_p50"]["earliest"], double["rel_10_p50"]["latest"]) == (min(middles), max(middles))
+    first, last = (month(double["rel_10_p50"][end], "ko") for end in ("earliest", "latest"))
+    assert f"씨앗 {len(fc['seeds'])}개로 {double['sims_per_seed']:,}번씩 돌려 {first}~{last} 사이로 당겨진다" in read(CHARTER["ko"])
+    first, last = (month(double["rel_10_p50"][end], "en") for end in ("earliest", "latest"))
+    assert f"it moves up to between {first} and {last}, run {double['sims_per_seed']:,} times with each of " \
+           f"{len(fc['seeds'])} seeds" in read(CHARTER["en"])
+    plan_text = read(PLAN_DOC)
+    first, last = (month(double["rel_10_p50"][end], "ko") for end in ("earliest", "latest"))
+    assert plan_text.count(f"{first}~{last}") >= 3, "the plan gives the single-seed date without its range"
+    assert "나머지 줄은 경우마다 씨앗 하나로" in plan_text
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_the_readme_gives_the_80_percent_dates_beside_the_middle_dates(lang):
+    fc, text = committed().get("forecast") or {}, read(README[lang])
+    upper = month(fc["planning"]["seeds"][0]["rel_10"]["p80"], lang)
+    stops = month(fc["claude_shared"]["last_day_of_the_simulation"], lang)
+    assert fc["claude_shared"]["rel_10_p80"]["seeds_at_the_last_day"] == len(fc["seeds"])
+    if lang == "ko":
+        assert f"80% 확률로는 {upper}까지다" in text
+        assert f"80% 날짜는 일정 시뮬레이션이 멈추는 {stops}보다 늦다" in text
+    else:
+        assert f"with 80% probability by {upper}" in text
+        assert f"the 80% date would lie beyond {stops}, where the schedule simulation stops" in text
+
+
+def test_the_plan_s_row_for_the_one_night_measurement_says_what_the_charter_says():
+    import wbs_data
+    row = next(task for task in wbs_data.ITEMS if task["id"] == "b_night")
+    night = committed()["capacity"]["next_measurements"]["same_model"]
+    runs = committed()["capacity"]["assumptions"]["runs"]
+    said = f"기준 측정 {runs}번이 {night['baseline_below_points_if_unmoved']:g}%포인트보다 적게 쓴다는 것"
+    assert "주간 한도에 든다는 것" not in row["done"]
+    assert said in row["done"] and said in read(CHARTER["ko"]) and said in read(PLAN_DOC)
+    assert f"(시범 날 남아 있던 여유는 {night['room_on_the_pilot_day_points']:g}%포인트였다)" in row["done"]
+
+
+def test_the_seeds_run_side_by_side_give_what_each_gives_alone():
+    """The estimates run their seeds at once; a seed's figures must not depend on which others run beside it."""
+    cap = committed()["capacity"]
+    try:
+        both = pilot_replan.schedule(cap, seeds=(11, 12), sims=40)
+        alone = pilot_replan.schedule(cap, seeds=(12,), sims=40)
+    except TypeError:
+        both = alone = None
+    assert both is not None, "the schedule cannot be run for a stated number of runs"
+    for name, cases in both["capacities"].items():
+        for case, found in cases.items():
+            assert found["seeds"][1] == alone["capacities"][name][case]["seeds"][0], (name, case)
+    assert both["capacities"]["planning"]["before"]["seeds"][0] != both["capacities"]["planning"]["before"]["seeds"][1]
+
