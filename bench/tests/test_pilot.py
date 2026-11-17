@@ -1711,14 +1711,17 @@ def test_a_task_without_time_limits_gets_a_clear_message(tmp_path):
 # --- every step of the stop and the cleanup is independent of the others ----------------------------------------------
 
 class CountingDocker(FakeDocker):
-    def __init__(self, broken=False):
+    def __init__(self, broken=False, stuck=False):
         super().__init__()
-        self.calls, self.broken = [], broken
+        self.calls, self.broken, self.stays = [], broken, stuck
 
     def remove(self, prefix):
         self.calls.append(prefix)
         if self.broken:
             raise RuntimeError("docker broke")
+        if self.stays:  # this run's container will not go
+            self.projects.append("web-signup__python__abc__env")
+            self.stuck = ["web-signup__python__abc__env"]
         return super().remove(prefix)
 
 
@@ -1764,29 +1767,31 @@ def fail_first_call(real, err):
 
 
 STOP_STEPS = {"log": "log broke", "containers": "docker broke", "scan": "scan broke", "guard": "guard broke",
-              "record": "record broke", "messages": "could not be printed"}
+              "record": "record broke", "messages": "could not be printed",
+              "stuck": "web-signup__python__abc__env"}
 
 
 @pytest.mark.parametrize("path", ["signal", "time-limit"])
-@pytest.mark.parametrize("fault", sorted(STOP_STEPS))
+@pytest.mark.parametrize("fault", sorted(set(STOP_STEPS) - {"stuck"}) + ["containers+record", "stuck+record"])
 def test_a_failing_step_of_the_stop_never_skips_the_stop_or_another_step(tmp_path, monkeypatch, fault, path):
-    docker = CountingDocker(broken=fault == "containers")
-    if fault == "log":
+    faults = set(fault.split("+"))  # two steps fail together in the last two cases
+    docker = CountingDocker(broken="containers" in faults, stuck="stuck" in faults)
+    if "log" in faults:
         real_open = open
 
         def fake_open(file, mode="r", *args, **kwargs):
             f = real_open(file, mode, *args, **kwargs)
             return BrokenLog(f) if str(file).endswith("harbor.log") and "a" in mode else f
         monkeypatch.setattr(pilot, "open", fake_open, raising=False)
-    if fault == "scan":
+    if "scan" in faults:
         monkeypatch.setattr(pilot, "check_for_token", fail_first_call(pilot.check_for_token, RuntimeError("scan broke")))
-    if fault == "guard":
+    if "guard" in faults:
         def broken_end(*args, **kwargs):
             raise OSError("guard broke")
         monkeypatch.setattr(pilot, "end_guard_run", broken_end)
-    if fault == "record":
+    if "record" in faults:
         monkeypatch.setattr(pilot, "_write_record", fail_first_call(pilot._write_record, OSError("record broke")))
-    if fault == "messages":
+    if "messages" in faults:
         monkeypatch.setattr(sys, "stderr", BrokenStream())
     env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path),
            "STAND_IN_MODE": "signal-parent" if path == "signal" else "polite"}
@@ -1806,21 +1811,27 @@ def test_a_failing_step_of_the_stop_never_skips_the_stop_or_another_step(tmp_pat
     run_dir = tmp_path / "out" / "20261117T070000Z" / "python"
 
     assert harbor_gone  # the stop came first, whatever failed after it
-    if fault != "log":
+    if "log" not in faults:
         assert b"pilot: " in (run_dir / "harbor.log").read_bytes()
     assert docker.calls  # the containers step ran
-    if fault != "record":
+    if "record" not in faults:
         assert (run_dir / "record.json").exists()  # the record was written
         record = json.loads((run_dir / "record.json").read_text())
-        if fault != "scan":
+        if "scan" not in faults:
             assert record["leak_scan"] is not None
     [entry] = json.loads((tmp_path / "pilot-guard.json").read_text())["runs"]
-    if fault != "guard":
+    if "guard" not in faults:
         assert entry["ended_at"] is not None
     summary = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
     assert [r["language"] for r in summary["runs"]] == ["python"]
-    assert "scanned" in report  # the final scans ran
-    assert STOP_STEPS[fault] in report  # and the failure is in the report
+    if "messages" in faults:  # a failed print cannot be reported by printing: the summary keeps it
+        assert summary["unprinted_messages"]
+    if err is None:  # only a failed print leaves a run that hit its time limit without an error
+        assert faults == {"messages"} and path == "time-limit"
+    else:
+        assert "scanned" in report  # the final scans ran
+        for step in faults:  # and every failure is in the report
+            assert STOP_STEPS[step] in report
 
 
 def test_a_group_already_confirmed_gone_is_not_stopped_again(tmp_path, monkeypatch):
@@ -1854,3 +1865,63 @@ def test_a_task_without_time_limits_is_refused_with_the_other_argument_checks(tm
         pilot.run_pilot(runner=runner, **pilot_args(tmp_path, timeout=600.0))
     assert "verifier_timeout_sec" in str(err.value)
     assert runner.calls == [] and not (tmp_path / "out").exists()  # refused before anything was made
+
+
+
+class CloseFails:
+    """Harbor's log that cannot be closed at the end."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def fileno(self):
+        return self._f.fileno()
+
+    def write(self, data):
+        return self._f.write(data)
+
+    def flush(self):
+        return self._f.flush()
+
+    def close(self):
+        self._f.close()
+        raise OSError("close broke")
+
+
+def test_a_step_that_fails_inside_a_run_that_ended_on_its_own_stops_the_batch(tmp_path, monkeypatch):
+    real_open = open
+
+    def fake_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return CloseFails(f) if str(file).endswith("harbor.log") and "a" in mode else f
+
+    monkeypatch.setattr(pilot, "open", fake_open, raising=False)
+    started = []
+
+    def runner(cmd, env, log_path, timeout):
+        started.append(cmd)
+        return pilot.run_subprocess(cmd, env, log_path, timeout, grace=1.0, term_grace=1.0)
+
+    env = {"PATH": os.environ.get("PATH", ""), "STAND_IN_DIR": str(tmp_path), "STAND_IN_MODE": "exit"}
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.run_pilot(runner=runner, **pilot_args(tmp_path, harbor=make_harbor(tmp_path), base_env=env,
+                                                    languages=["python", "go"]))
+    assert len(started) == 1  # the second language never started
+    assert "close broke" in str(err.value) + "\n".join(getattr(err.value, "__notes__", []))
+
+
+def test_a_failed_print_keeps_a_good_batch_good_and_is_kept_in_the_summary(tmp_path, monkeypatch):
+    other = guard_entry(NOW - 60, max_seconds=11160.0, ident="other")
+    write_guard(tmp_path, other)
+    clock = {"t": NOW}
+
+    def sleep(seconds):
+        clock["t"] += seconds
+        write_guard(tmp_path, {**other, "ended_at": NOW, "agent_seconds": 60.0})  # the other pilot finishes
+
+    monkeypatch.setattr(sys, "stderr", BrokenStream())  # the waiting message cannot be printed
+    summary = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, wait_for_reset=True, sleep=sleep,
+                                                                now=lambda: clock["t"]))
+    assert summary["runs"][0]["status"] == "ok"
+    saved = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
+    assert any("waiting until" in m["message"] and "messages broke" in m["error"] for m in saved["unprinted_messages"])
