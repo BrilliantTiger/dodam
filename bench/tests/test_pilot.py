@@ -1244,9 +1244,10 @@ def test_an_unreadable_guard_file_starts_nothing(tmp_path):
 
 
 @skip_as_root
-def test_a_guard_file_that_cannot_be_written_starts_nothing(tmp_path):
+def test_a_guard_file_that_cannot_be_written_starts_nothing(tmp_path, monkeypatch):
     keys = tmp_path / "keys"
     keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
     tf = token_file(keys)
     write_guard(keys)
     (keys / "pilot-guard.json.lock").write_text("")
@@ -1487,9 +1488,10 @@ def test_a_run_without_every_step_of_the_task_is_not_ok(tmp_path, damage):
 
 @skip_as_root
 @pytest.mark.parametrize("what", ["state", "guard"])
-def test_a_failed_save_keeps_the_finished_run_in_the_summary_and_stops_the_batch(tmp_path, what):
+def test_a_failed_save_keeps_the_finished_run_in_the_summary_and_stops_the_batch(tmp_path, what, monkeypatch):
     keys = tmp_path / "keys"
     keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
     tf = token_file(keys)
     if what == "state":
         (tmp_path / "out" / "state.json").mkdir(parents=True)
@@ -1602,9 +1604,10 @@ def test_a_clock_set_back_during_a_run_keeps_the_guard_file_usable(tmp_path):
 
 
 @skip_as_root
-def test_a_failed_guard_end_is_reported_whatever_stopped_the_run(tmp_path):
+def test_a_failed_guard_end_is_reported_whatever_stopped_the_run(tmp_path, monkeypatch):
     keys = tmp_path / "keys"
     keys.mkdir()
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(keys))
     tf = token_file(keys)
     docker = FakeDocker(stuck=["web-signup__python__abc__env"])
 
@@ -1925,3 +1928,47 @@ def test_a_failed_print_keeps_a_good_batch_good_and_is_kept_in_the_summary(tmp_p
     assert summary["runs"][0]["status"] == "ok"
     saved = json.loads((tmp_path / "out" / "20261117T070000Z" / "summary.json").read_text())
     assert any("waiting until" in m["message"] and "messages broke" in m["error"] for m in saved["unprinted_messages"])
+
+
+
+# --- the description, sentence by sentence ---------------------------------------------------------------------------
+
+def test_every_pilot_of_this_user_shares_one_guard_whatever_its_token_file(tmp_path):
+    first_keys, second_keys = tmp_path / "a", tmp_path / "b"
+    first_keys.mkdir()
+    second_keys.mkdir()
+    first = pilot.run_pilot(runner=FakeRunner(), **pilot_args(tmp_path, token_file=token_file(first_keys),
+                                                              max_agent_minutes_per_5h=3))
+    assert first["runs"][0]["status"] == "ok"
+    runner = FakeRunner()
+    second = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, token_file=token_file(second_keys),
+                                                         out_root=tmp_path / "elsewhere", max_agent_minutes_per_5h=3))
+    assert second["runs"][0]["status"] == "not-started" and "guard" in second["runs"][0]["reason"]
+    assert runner.calls == []
+
+
+def test_leftovers_of_a_task_with_a_long_id_keep_a_run_from_starting(tmp_path, monkeypatch):
+    long_id = "web-signup-with-a-much-longer-task-id"
+    real_load = pilot.load_task
+
+    def load_with_a_long_id(path):
+        task = real_load(path)
+        task.meta["id"] = long_id
+        return task
+
+    monkeypatch.setattr(pilot, "load_task", load_with_a_long_id)
+    trial = f"{long_id}__go"[:32].rstrip("_-") + "__old1234"  # Harbor's own rule for a trial's name
+    docker = FakeDocker(leftovers=[f"{trial}__env"])
+    runner = FakeRunner()
+    summary = pilot.run_pilot(runner=runner, **pilot_args(tmp_path, docker=docker))
+    assert runner.calls == [] and summary["runs"][0]["status"] == "not-started"
+    assert f"{trial}__env" in summary["runs"][0]["reason"]
+
+
+def test_a_token_file_inside_the_repository_is_refused(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "bench").mkdir(parents=True)
+    monkeypatch.setattr(pilot, "REPO", repo, raising=False)
+    with pytest.raises(pilot.PilotError) as err:
+        pilot.read_token(token_file(repo / "bench"))
+    assert "repository" in str(err.value) and FAKE_TOKEN not in str(err.value)
