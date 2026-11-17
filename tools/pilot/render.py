@@ -7,6 +7,7 @@ where a {{name}} stands.
 
 Usage: python3 render.py            (rewrites docs/pilot/2026-11-17-pilot.ko.md and .en.md)
 """
+import datetime as dt
 import json
 import re
 import sys
@@ -59,6 +60,11 @@ def short_date(iso: str, lang: str) -> str:
     return f"{m}월 {d}일" if lang == "ko" else f"{d} {MONTHS[m - 1]}"
 
 
+def month_of(iso: str, lang: str) -> str:
+    y, m, _ = (int(x) for x in iso.split("-"))
+    return f"{y}년 {m}월" if lang == "ko" else f"{MONTHS[m - 1]} {y}"
+
+
 def percent(share: float) -> str:
     return num(round(share * 100))
 
@@ -73,7 +79,7 @@ def run_facts(run: dict) -> dict:
         raise RenderError("the document is written for runs of two steps")
     watch, weekly = run["process_watch"], run["weekly"]
     return {
-        "name": NAMES[run["language"]], "status": run["status"],
+        "name": NAMES[run["language"]], "status": run["status"], "started": run["batch_started_utc"][11:16],
         "r1": one(steps[0]["reward"]), "r2": one(steps[1]["reward"]),
         "wall": one(run["wall_seconds"]),
         "a1": one(steps[0]["agent_seconds"]), "a2": one(steps[1]["agent_seconds"]),
@@ -104,6 +110,7 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
         f[name] = iso
         f[name + "_long"] = long_date(iso, lang)
         f[name + "_short"] = short_date(iso, lang)
+        f[name + "_md"] = "/".join(str(int(x)) for x in iso.split("-")[1:])
 
     versions = {r["claude_code"]["observed"] for r in runs} | {r["claude_code"]["pinned"] for r in runs}
     models = {r["model"] for r in runs}
@@ -111,6 +118,7 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
     if len(versions) != 1 or len(models) != 1 or asked != {"agent default"}:
         raise RenderError("the document is written for one version and one model that was not chosen")
     put_date("date", data["date_utc"])
+    put_date("night_start", str(dt.date.fromisoformat(data["date_utc"]) + dt.timedelta(days=1)))
     put("cli_version", versions.pop())
     put("model", models.pop())
     put("task", data["task"])
@@ -153,8 +161,38 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
     f["cost_total"] = f"{used['cost_usd_as_the_cli_counts_it_total']:.2f}"
     for group in ("weekly", "five_hour", "safety"):
         for key, value in used[group].items():
+            if value is None:
+                raise RenderError(f"the data does not say {group}.{key}, which the document states")
             f[f"{group}.{key}"] = one(value) if key.startswith(("guard_minutes", "hours_", "reading_interval")) \
                 else num(value)
+    for run in runs:
+        f[f"run.{run['language']}.asum"] = one(sum(st["agent_seconds"] for st in run["steps"]))
+        f[f"run.{run['language']}.wall"] = one(run["wall_seconds"])
+        put(f"run.{run['language']}.turns", run["turns"])
+    today = used["day"]
+    for key, value in today.items():
+        if not isinstance(value, list):
+            put(f"day.{key}", value)
+    if [(e["tokens"] > 0, e["steps_that_ended_with_an_error"] > 0, e["process_table_watched"], e["language"])
+            for e in today["not_counted_starts"]] != [(False, True, False, "python"), (True, False, False, "python")]:
+        raise RenderError("the document tells of two unwatched Python starts: one where the agent never worked, "
+                          "then one complete run")
+    for n, early in enumerate(today["not_counted_starts"], start=1):
+        for key, value in early.items():
+            if key == "rewards":
+                f[f"e{n}.r1"], f[f"e{n}.r2"] = one(value[0]), one(value[1])
+            elif isinstance(value, bool) or value is None:
+                continue
+            elif key.endswith("_seconds") or key.endswith("_seconds_counted"):
+                f[f"e{n}.{key}"] = one(value)
+            else:
+                put(f"e{n}.{key}", value)
+    put("e2.weekly_percent_at_its_end", today["not_counted_starts"][1]["weekly_percent_at_its_end"])
+    if today["not_counted_starts"][1]["weekly_percent_at_its_end"] != used["weekly"]["first_batch_before"]:
+        raise RenderError("the document says the figure stored before the counted Python run is the reading "
+                          "of the uncounted run before it")
+    if used["safety"]["watched_runs"] != len(runs) or used["safety"]["starts_without_a_watch"] != today["not_counted"]:
+        raise RenderError("the document says the watch covered the counted runs and none of the others")
 
     for key, value in cap["assumptions"].items():
         put(f"plan.{key}", value)
@@ -173,10 +211,22 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
         raise RenderError("the document says that only the measured case fits the row")
     f["largest_factor"] = f"{cap['largest_factor_that_fits_the_row']:.2f}"
     f["largest_minutes"] = f"{cap['agent_minutes_per_run_at_that_factor']:.2f}"
-    for key, value in cap["next_measurement"].items():
-        put(f"next.{key}", value)
+    for which, short in (("same_model", "same"), ("largest_model", "large")):
+        for key, value in cap["next_measurements"][which].items():
+            if isinstance(value, bool):
+                continue
+            if value is None:
+                raise RenderError(f"the estimates do not say {which}.{key}, which the document states")
+            f[f"next.{short}.{key}"] = f"{value:.3f}" if key == "one_run_below_points_if_unmoved" and which == \
+                "same_model" else num(value)
+    if not cap["next_measurements"]["same_model"]["unmoved_shows_the_baseline_fits_that_room"]:
+        raise RenderError("the document says an unmoved figure after the first night shows the baseline fits the room")
 
-    put("sims", sched["sims"])
+    put("sims", sched["sims_per_seed"])
+    put("n_seeds", len(sched["seeds"]))
+    put("runs_per_case", sched["runs_per_case"])
+    put("tasks_rolled", sched["tasks_rolled"])
+    put("tasks_left_out", sched["tasks_added_later_and_left_out"])
     put("pct80", sched["upper_percent"])
     put_date("pilot_row_start", sched["pilot_row"]["start"])
     put_date("pilot_row_end", sched["pilot_row"]["end"])
@@ -184,26 +234,66 @@ def facts(data: dict, replan: dict, lang: str) -> dict:
     put("pilot_days_before_end", sched["pilot_row"]["days_before_its_end"])
     put_date("gate", sched["gate_day"])
     put("plan_working_days", sched["baseline_working_days_in_the_plan"])
+    for key, value in sched["noise"].items():
+        put(f"noise.{key}", value)
     for name, days in sched["working_days_a_week"].items():
         put(f"{name}.days_a_week", days)
     for name, cases in sched["capacities"].items():
         for case, result in cases.items():
+            where = f"{name}.{case}"
             for key, value in result.items():
-                where = f"{name}.{case}.{key}"
+                if key == "seeds":
+                    continue
                 if isinstance(value, dict):
-                    f[where + ".p50"], f[where + ".p80"] = value["p50"], value["p80"]
+                    for q in ("p50", "p80"):
+                        put_date(f"{where}.{key}.{q}", value[q])
                 else:
-                    f[where] = percent(value)
+                    f[f"{where}.{key}"] = percent(value)
+                    shares = [s[key] for s in result["seeds"]]
+                    f[f"{where}.{key}.lo"], f[f"{where}.{key}.hi"] = percent(min(shares)), percent(max(shares))
     plan = sched["capacities"]["planning"]
     if not plan["after_x1"]["b_baseline"]["p50"] <= cap["row"]["end"] <= plan["after_x2"]["b_baseline"]["p50"]:
         raise RenderError("the verdict says the row's end lies between the measured case and twice the working time")
-    alone = sched["capacities"]["claude_only"]
-    if not alone["after_x1"]["b_baseline"]["p50"] < alone["before"]["b_baseline"]["p50"]:
-        raise RenderError("the verdict says the pilot moves the middle date earlier for one Claude account")
-    if used["weekly"]["moved_during_later_runs_points"] != 0 or used["five_hour"]["runs_that_reported_it"] != 0:
+    chance = lambda case: plan[case]["p_baseline_by_row_end"]
+    if not (abs(chance("finished_only") - chance("before")) <= 0.03 < chance("numbers_only") - chance("before")):
+        raise RenderError("the document says the rise in the chance comes from the pilot's numbers, not from "
+                          "counting finished work as finished")
+    for name in ("claude_dedicated", "claude_shared"):
+        if sched["capacities"][name]["after_x1"]["p_baseline_by_row_end"] > 0.1:
+            raise RenderError("the document says the chance under today's capacity is small")
+    if used["weekly"]["moved_between_the_two_readings_points"] != 0 or used["five_hour"]["runs_that_reported_it"] != 0:
         raise RenderError("the document says the weekly figure did not move and the other limit was not reported")
     if used["safety"]["readings_with_the_token"] or used["safety"]["leak_hits"] or used["safety"]["containers_left"]:
         raise RenderError("the document says no token was seen, none was left and no container was left")
+
+    fc = replan["forecast"]
+    put("fc.n_seeds", len(fc["seeds"]))
+    f["fc.plan_seed"] = str(fc["plan_seed"])
+    for name in ("planning", "planning_with_every_task", "two_companies", "claude_dedicated", "claude_shared"):
+        case = fc[name]
+        put(f"fc.{name}.sims", case["sims_per_seed"])
+        put(f"fc.{name}.tasks", case["tasks"])
+        put(f"fc.{name}.days_a_week", case["working_days_a_week"])
+        for key in ("g_dir_p50", "g_dir_p80", "rel_10_p50", "rel_10_p80"):
+            found = case[key]
+            for end in ("earliest", "latest"):
+                put_date(f"fc.{name}.{key}.{end}", found[end])
+                f[f"fc.{name}.{key}.{end}_month"] = month_of(found[end], lang)
+            put(f"fc.{name}.{key}.weeks_apart", found["weeks_apart"])
+            put(f"fc.{name}.{key}.days_apart", found["days_apart"])
+    put_date("fc.plan.rel_10_p50", fc["planning"]["seeds"][0]["rel_10"]["p50"])
+    put_date("fc.plan.rel_10_p80", fc["planning"]["seeds"][0]["rel_10"]["p80"])
+    put_date("fc.plan.g_dir_p50", fc["planning"]["seeds"][0]["g_dir"]["p50"])
+    f["fc.plan.rel_10_p50_month"] = month_of(fc["planning"]["seeds"][0]["rel_10"]["p50"], lang)
+    f["fc.last_month"] = month_of(fc["claude_shared"]["last_day_of_the_simulation"], lang)
+    for name in ("claude_dedicated", "claude_shared"):
+        if fc[name]["rel_10_p80"]["seeds_at_the_last_day"] != len(fc["seeds"]):
+            raise RenderError("the document says the 80 percent date under today's capacity is later than the "
+                              "simulation's last day")
+    every, made = fc["planning_with_every_task"], fc["planning"]
+    for key in ("rel_10_p50", "rel_10_p80"):
+        if every[key]["earliest"] > made[key]["latest"] or made[key]["earliest"] > every[key]["latest"]:
+            raise RenderError("the document says the added task moves the dates no further than a change of seed")
     return f
 
 
@@ -220,19 +310,59 @@ def render(lang: str, data: dict | None = None, replan: dict | None = None, text
             return values[m.group(1)]
         return PLACE.sub(value, line)
 
+    lines = text.splitlines()
+    # The schedule table is written once, for the plan's capacity; "@table <capacity>" repeats it for another.
+    first = next((n for n, line in enumerate(lines) if "{{planning.before.b_baseline.p50}}" in line), None)
+    table = []
+    if first is not None:
+        last = first
+        while last + 1 < len(lines) and lines[last + 1].startswith("|"):
+            last += 1
+        table = lines[first - 2:last + 1]
     out = []
-    for line in text.splitlines():
+    for line in lines:
         if line.startswith("@runs "):
             out.extend(fill(line[len("@runs "):], run_facts(run)) for run in data["runs"])
+        elif line.startswith("@table "):
+            name = line[len("@table "):].strip()
+            if not table or name not in replan["schedule"]["capacities"]:
+                raise RenderError(f"the {lang} template asks for a table the data does not give: {name}")
+            out.extend(fill(row.replace("{{planning.", "{{" + name + "."), known) for row in table)
         else:
             out.append(fill(line, known))
     return "\n".join(out) + "\n"
 
 
-def own_digits(lang: str) -> list[str]:
+# Templates whose rendered lines must stand word for word, each as a whole line, in a document kept by hand.
+QUOTES = {
+    "charter": {"ko": "docs/charter.ko.md", "en": "docs/charter.en.md"},
+    "readme": {"ko": "README.ko.md", "en": "README.md"},
+    "owner_list": {"ko": "TODO.md"},
+}
+# Names that carry a digit and are not figures: a version of the charter, the release, the name of a task.
+NAMES_WITH_DIGITS = re.compile(r"(?<![A-Za-z\d.])v\d\.\d+(?![\d.])|(?<![\d.,])1\.0(?![\d.])|11월 일정")
+
+
+def quote_template(name: str, lang: str) -> Path:
+    return HERE / f"{name}.{lang}.tmpl"
+
+
+def quoted(name: str, lang: str, data: dict | None = None, replan: dict | None = None) -> list[str]:
+    """The lines a hand-kept document must carry, rendered from the data."""
+    text = quote_template(name, lang).read_text(encoding="utf-8")
+    return [line for line in render(lang, data, replan, text).splitlines() if line.strip()]
+
+
+def missing_quotes(name: str, lang: str, data: dict | None = None, replan: dict | None = None) -> list[str]:
+    """Rendered lines that the hand-kept document does not carry as they are."""
+    have = set((ROOT / QUOTES[name][lang]).read_text(encoding="utf-8").splitlines())
+    return [line for line in quoted(name, lang, data, replan) if line not in have]
+
+
+def own_digits(lang: str, path: Path | None = None) -> list[str]:
     """Lines of a template that carry a digit outside a {{name}}: figures the data would not govern."""
-    lines = template(lang).read_text(encoding="utf-8").splitlines()
-    return [line for line in lines if re.search(r"\d", PLACE.sub("", line))]
+    lines = (path or template(lang)).read_text(encoding="utf-8").splitlines()
+    return [line for line in lines if re.search(r"\d", NAMES_WITH_DIGITS.sub("", PLACE.sub("", line)))]
 
 
 if __name__ == "__main__":
