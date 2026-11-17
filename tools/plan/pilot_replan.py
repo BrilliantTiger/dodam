@@ -36,6 +36,9 @@ PILOT_ROW = ("2026-11-29", "2026-12-06")              # where the charter had pl
 # Tasks the pilot shows to be finished: it could not have run without the task format, the sample task and
 # the runner's skeleton, and re-planning after the first runs is this work itself.
 FINISHED = ("b_format", "b_sample", "b_runner0", "b_pilot", "pm_replan_nov")
+# The one-night batch measurement the pilot led to: half a working day that nothing waits for. The simulation
+# leaves it out, in the cases before the pilot (the plan did not have it) and after it alike.
+LEFT_OUT = ("b_night",)
 CAPACITIES = (("planning", 1.0), ("claude_only", 1 / 3))  # about 15 and about 5 AI working days a week
 WATCHED = ("b_tasks10", "b_runner", "b_baseline", "g_dir")
 
@@ -209,7 +212,8 @@ def schedule(cap: dict) -> dict:
     items = {it["id"]: it for it in MC.ITEMS}
     row_end = cap["row"]["end"]
     gate_day = items["g_dir"]["start"]
-    finished = {i: PILOT_DAY for i in FINISHED}
+    outside = {i: PILOT_DAY for i in LEFT_OUT if i in items}
+    finished = dict({i: PILOT_DAY for i in FINISHED}, **outside)
 
     def one(cap_scale: float, **kw) -> dict:
         random.seed(SEED)
@@ -236,7 +240,7 @@ def schedule(cap: dict) -> dict:
               "working_days_a_week": {name: round(M.SCEN[scen][0] * scale) for name, scale in CAPACITIES},
               "capacities": {}}
     for name, scale in CAPACITIES:
-        cases = {"before": one(scale, measure=light)}
+        cases = {"before": one(scale, measure=light, finished=outside)}
         for c in cap["cases"]:
             measure = dict(light, b_baseline=c["working_days"], b_pilot=0)
             cases[f"after_x{c['factor']}"] = one(scale, measure=measure, finished=finished,
