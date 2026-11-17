@@ -1108,6 +1108,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                                  "ended_at": None, "agent_seconds": None}
                         guard.write(runs + [entry], now())
                         break
+                gate.raise_held()  # nothing was entered: a signal held meanwhile stops the batch before any wait
                 if wait_for_reset and decision.wait_until and waits < MAX_WAITS:
                     target = decision.wait_until + RESET_MARGIN_SECONDS
                     if target != announced:
