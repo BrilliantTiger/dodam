@@ -15,6 +15,7 @@ the batch stops. Results go to out/pilot/<UTC timestamp>/.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -23,8 +24,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -649,7 +653,26 @@ GUARD_NOTE = ("a guard on this runner's own agent time per rolling five hours, n
 
 def agent_minutes(runs: Iterable[dict], now: float) -> float:
     """This runner's agent minutes that may lie in the five hours before now (never fewer)."""
-    return sum(float(r.get("agent_seconds") or 0) for r in _inside(runs, now)) / 60.0
+    return sum(_counted(r)[0] for r in _inside(runs, now)) / 60.0
+
+
+def _finite(value, minimum: float = 0.0) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+            and value >= minimum)
+
+
+def _counted(run: dict) -> tuple[float, float | None]:
+    """The seconds a run counts for, and until when it may lie in a window. A finished run counts its agent
+    time until its end. A run with no recorded end may still be going, or its pilot died: it counts its
+    whole possible duration until its start plus that duration (None when even that is unknown)."""
+    end = _end(run)
+    if end is not None:
+        return float(run.get("agent_seconds") or 0.0), end
+    limit, started = run.get("max_seconds"), run.get("started_at")
+    if _finite(limit) and _finite(started):
+        return float(limit), float(started) + float(limit)
+    agent = run.get("agent_seconds")
+    return (float(agent) if _finite(agent) else math.inf), None
 
 
 def _end(run: dict) -> float | None:
@@ -667,8 +690,8 @@ def _inside(runs: Iterable[dict], now: float) -> list[dict]:
     for r in runs:
         if not isinstance(r, dict):
             continue
-        end = _end(r)
-        if end is None or end > now - FIVE_HOURS:
+        reach = _counted(r)[1]
+        if reach is None or reach > now - FIVE_HOURS:
             out.append(r)
     return out
 
@@ -676,21 +699,26 @@ def _inside(runs: Iterable[dict], now: float) -> list[dict]:
 def guard_decision(runs: Iterable[dict], limit_minutes: float, now: float) -> Decision:
     """Start only while this runner's agents worked less than the limit in runs that ended in the last five
     hours or have no end time."""
-    inside = sorted(_inside(runs, now), key=lambda r: (_end(r) is None, _end(r) or 0.0))
-    used = sum(float(r.get("agent_seconds") or 0) for r in inside) / 60.0
+    inside = sorted(_inside(runs, now), key=lambda r: (_counted(r)[1] is None, _counted(r)[1] or 0.0))
+    used = sum(_counted(r)[0] for r in inside) / 60.0
     if used < limit_minutes:
         return Decision(True)
     remaining, wait = used, None
-    for r in inside:  # the time when the ends of enough of the earliest runs have left the window
-        if _end(r) is None:
-            wait = None  # a run with no end time never leaves the window by itself
+    for r in inside:  # the time when enough of the earliest runs have left the window
+        seconds, reach = _counted(r)
+        if reach is None:
+            wait = None  # a run whose reach is unknown never leaves the window by itself
             break
-        remaining -= float(r.get("agent_seconds") or 0) / 60.0
-        wait = _end(r) + FIVE_HOURS
+        remaining -= seconds / 60.0
+        wait = reach + FIVE_HOURS
         if remaining < limit_minutes:
             break
-    return Decision(False, f"five-hour guard: this runner's agents worked {used:.1f} minutes in runs that ended "
-                           f"in the last five hours or are not known to have ended, at or above the "
+    open_runs = sum(1 for r in inside if _end(r) is None)
+    counted = "an unknown number of" if math.isinf(used) else f"{used:.1f}"
+    also = (f", {open_runs} of them with no recorded end, each counted at its whole time limit (a run still "
+            "going, or one whose pilot died)" if open_runs else "")
+    return Decision(False, f"five-hour guard: this runner's agents count {counted} minutes in runs that ended in "
+                           f"the last five hours or may still be going{also}, at or above the "
                            f"{limit_minutes:g}-minute limit ({GUARD_NOTE})", wait)
 
 
@@ -723,17 +751,151 @@ def guard_path(token_file: Path) -> Path:
     return Path(token_file).expanduser().parent / GUARD_FILE
 
 
-def load_runs(guard_file: Path) -> list[dict]:
+GUARD_VERSION = 1
+NO_RUN_STARTED = "No run was started."
+REPAIR_ADVICE = ("Repair it, or move it aside only when no pilot has used this token in the last five hours: "
+                 "the guard then starts from nothing.")
+WRITE_ADVICE = "Make the file and its folder writable for this user."
+
+
+class GuardError(PilotError):
+    """The guard's file cannot be used, so the guard cannot vouch for a start."""
+
+    def __init__(self, path: Path, reason: str, advice: str, consequence: str = NO_RUN_STARTED):
+        self.path, self.reason, self.advice = path, reason, advice
+        super().__init__(self.saying(consequence))
+
+    def saying(self, consequence: str) -> str:
+        return f"the five-hour guard file {self.path} {self.reason}. {consequence} {self.advice}"
+
+
+class Guard:
+    """The five-hour guard's file beside the token: a versioned JSON document listing this runner's runs.
+
+    Every change is read, change and write under an exclusive lock on a lock file beside it, so deciding a
+    start and entering it is one step for every pilot on this token. A run is entered before Harbor starts,
+    with no end and its whole possible duration, and gets its end when it is over; a pilot that dies leaves
+    the entry open, and an open entry counts that whole duration. Every write goes whole to the disk: a
+    temporary file, fsync, rename, fsync of the folder; the file is mode 0600 and never holds the token. A
+    file that is damaged, unreadable or cannot be written stops the start; only a missing file is a first use.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.lock_path = self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def locked(self):
+        try:
+            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as err:
+            raise GuardError(self.path, f"cannot be written: its lock file cannot be opened ({err.strerror})",
+                             WRITE_ADVICE) from None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing it releases the lock
+
+    def read(self) -> list[dict]:
+        """The runs in the file; none when there is no file yet. Call it under the lock."""
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return []
+        except OSError as err:
+            raise GuardError(self.path, f"cannot be read ({err.strerror})", REPAIR_ADVICE) from None
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise GuardError(self.path, "is not whole JSON (it may have been cut off)", REPAIR_ADVICE) from None
+        if not isinstance(data, dict) or data.get("version") != GUARD_VERSION or not isinstance(data.get("runs"), list):
+            raise GuardError(self.path, f"is not in this runner's format (version {GUARD_VERSION} with a list of runs)",
+                             REPAIR_ADVICE)
+        if not all(self._valid(r) for r in data["runs"]):
+            raise GuardError(self.path, "holds a run this runner cannot read", REPAIR_ADVICE)
+        return data["runs"]
+
+    @staticmethod
+    def _valid(run) -> bool:
+        if not isinstance(run, dict) or not isinstance(run.get("id"), str):
+            return False
+        started, limit = run.get("started_at"), run.get("max_seconds")
+        if not (_finite(started) and _finite(limit) and limit > 0):
+            return False
+        ended, agent = run.get("ended_at"), run.get("agent_seconds")
+        if ended is None:
+            return agent is None or _finite(agent)
+        return _finite(ended) and ended >= started and _finite(agent)
+
+    def write(self, runs: list[dict], now: float) -> None:
+        """Replace the file whole with the runs that may still count. Call it under the lock."""
+        data = (json.dumps({"version": GUARD_VERSION, "note": GUARD_NOTE, "runs": _inside(runs, now)},
+                           indent=2, allow_nan=False) + "\n").encode("utf-8")
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, self.path)
+            folder = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(folder)
+            finally:
+                os.close(folder)
+        except OSError as err:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise GuardError(self.path, f"cannot be written ({err.strerror})", WRITE_ADVICE) from None
+
+
+def end_guard_run(guard: Guard, entry: dict, ended_at: float, agent_seconds: float) -> tuple[list[dict], str | None]:
+    """Give the run its end in the guard file. When that fails the run stays counted at its whole possible
+    duration, and the returned problem stops the batch."""
+    closed = {**entry, "ended_at": ended_at, "agent_seconds": round(float(agent_seconds), 1)}
     try:
-        runs = json.loads(Path(guard_file).read_text(encoding="utf-8")).get("runs")
-    except (OSError, ValueError, AttributeError):
-        return []
-    return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
+        with guard.locked():
+            runs = [r for r in guard.read() if r.get("id") != entry["id"]] + [closed]
+            guard.write(runs, ended_at)
+        return runs, None
+    except GuardError as err:
+        return [entry], err.saying(f"The end of the {entry['language']} run was not recorded, so it stays counted "
+                                   "at its whole time limit; the batch stops.")
 
 
-def save_guard(guard_file: Path, runs: list[dict], now: float) -> None:
-    Path(guard_file).write_text(json.dumps({"note": GUARD_NOTE, "runs": _inside(runs, now)}, indent=2),
-                                encoding="utf-8")
+class Stopped(KeyboardInterrupt):
+    """SIGTERM or a hang-up (a closed terminal or a dropped session), handled like Ctrl-C."""
+
+    def __init__(self, signum: int):
+        super().__init__(f"stopped by signal {signum}")
+        self.signum = signum
+
+
+def _stop_on_signals() -> dict:
+    """Turn SIGTERM and SIGHUP into the Ctrl-C path while a batch runs; returns the handlers to put back."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def stop(signum, frame):
+        raise Stopped(signum)
+
+    return {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
+
+
+def _missing_steps(task, trial: dict, job_dir: Path) -> list[str]:
+    """The task's steps with no judged result or no agent log."""
+    judged = {s["step"] for s in trial["steps"] if s["reward"] is not None}
+    logged = {p.parent.parent.name for p in Path(job_dir).glob("*/steps/*/agent/claude-code.txt")}
+    return [s.name for s in task.steps if s.name not in judged or s.name not in logged]
 
 
 def save_state(out_root: Path, windows: dict[str, dict], timestamp: str) -> None:
@@ -796,8 +958,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
     batch = out_root / timestamp
     batch.mkdir(parents=True, exist_ok=True)
     windows = load_state(out_root)
-    guard_file = guard_path(token_file)
-    runs = load_runs(guard_file)
+    guard = Guard(guard_path(token_file))
     summary = {"timestamp": timestamp, "task": task.id, "languages": languages, "claude_code_pinned": claude_version,
                "model": model or "agent default", "agent_hosts": list(allow_hosts), "time_limit_seconds": timeout,
                "limits": {"max_five_hour_percent": max_five_hour, "max_weekly_percent": max_weekly,
@@ -805,56 +966,71 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
                           "five_hour_guard": {"max_agent_minutes": max_agent_minutes_per_5h, "note": GUARD_NOTE}},
                "runs": []}
     stopped: str | None = None
+    handlers = _stop_on_signals()
     try:
         for lang in languages:
             before = json.loads(json.dumps(windows))
-            if stopped is None:
-                decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h, now())
-                waits = 0
-                while not decision.start and wait_for_reset and decision.wait_until and waits < MAX_WAITS:
-                    sleep(max(0.0, decision.wait_until - now()) + RESET_MARGIN_SECONDS)
-                    waits += 1
+            entry: dict | None = None
+            waits = 0
+            while stopped is None and entry is None:
+                # Deciding and entering the start is one step under the guard's lock, on the file as it is now.
+                with guard.locked():
+                    runs = guard.read()
                     decision = start_decision(windows, runs, max_five_hour, max_weekly, max_agent_minutes_per_5h,
                                               now())
-                if not decision.start:
-                    when = (f"; it clears at {utc_text(decision.wait_until)}" if decision.wait_until
-                            else "; the reset time is unknown")
-                    stopped = (decision.reason + when + "; not started (run again after the reset, "
-                               "or pass --wait-for-reset to wait for it)")
-            if stopped is None:
-                left = docker.leftovers(compose_prefix(task.id))  # every language of the task
-                if left:
-                    stopped = ("containers of an earlier run of this task are still in Docker ("
-                               + ", ".join(left) + "); not started until they are removed")
+                    if decision.start:
+                        left = docker.leftovers(compose_prefix(task.id))  # every language of the task
+                        if left:
+                            stopped = ("containers of an earlier run of this task are still in Docker ("
+                                       + ", ".join(left) + "); not started until they are removed")
+                            break
+                        minutes_before = agent_minutes(runs, now())
+                        entry = {"id": uuid.uuid4().hex, "batch": timestamp, "language": lang, "pid": os.getpid(),
+                                 "started_at": now(), "max_seconds": timeout + STOP_GRACE_SECONDS + TERM_GRACE_SECONDS,
+                                 "ended_at": None, "agent_seconds": None}
+                        guard.write(runs + [entry], now())
+                        break
+                if wait_for_reset and decision.wait_until and waits < MAX_WAITS:
+                    sleep(max(0.0, decision.wait_until - now()) + RESET_MARGIN_SECONDS)
+                    waits += 1
+                    continue
+                when = (f"; it clears at {utc_text(decision.wait_until)}" if decision.wait_until
+                        else "; the reset time is unknown")
+                stopped = (decision.reason + when + "; not started (run again after the reset, "
+                           "or pass --wait-for-reset to wait for it)")
             if stopped is not None:
                 record = {"language": lang, "status": "not-started", "reason": stopped, "reward": None, "steps": [],
                           "rate_limits": {"before": before, "first": {}, "after": before}}
                 summary["runs"].append(_summary_entry(record))
                 continue
-            minutes_before = agent_minutes(runs, now())
-            started_at, t0 = now(), time.monotonic()
+            t0 = time.monotonic()
             try:
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
                                  image_check, timeout, now, allow_hosts, docker)
             except BaseException:
-                # whatever stopped the run, its time still counts for the guard and its record is listed
-                runs.append({"batch": timestamp, "language": lang, "started_at": started_at, "ended_at": now(),
-                             "agent_seconds": round(time.monotonic() - t0, 1)})
-                save_guard(guard_file, runs, now())
+                # whatever stopped the run, the guard gets its end (its whole wall time) and its record is listed
+                _, problem = end_guard_run(guard, entry, now(), time.monotonic() - t0)
                 report_to(sys.exc_info()[1], _record_note(batch, lang, summary))
+                if problem:
+                    report_to(sys.exc_info()[1], problem)
                 raise
-            runs.append({"batch": timestamp, "language": lang, "started_at": started_at, "ended_at": now(),
-                         "agent_seconds": _run_agent_seconds(record)})
+            runs_after, problem = end_guard_run(guard, entry, now(), _run_agent_seconds(record))
+            problems = [problem] if problem else []
             windows = {**windows, **record["rate_limits"]["after"]}
-            save_state(out_root, windows, timestamp)
-            save_guard(guard_file, runs, now())
+            try:
+                save_state(out_root, windows, timestamp)
+            except OSError as err:
+                problems.append(f"the state file could not be written ({err.strerror or err}); the batch stops")
             record["five_hour_guard"] = {"note": GUARD_NOTE, "window_hours": 5,
                                          "limit_minutes": max_agent_minutes_per_5h,
                                          "minutes_before": round(minutes_before, 1),
-                                         "minutes_after": round(agent_minutes(runs, now()), 1)}
+                                         "minutes_after": round(agent_minutes(runs_after, now()), 1)}
+            # the finished run is listed before anything else can stop the batch
             _write_record(batch / lang, batch, record)
             summary["runs"].append(_summary_entry(record))
             _write_json(batch / "summary.json", summary)
+            if problems:
+                raise PilotError("; ".join(problems))
             if record["status"] == "timeout":
                 stopped = (f"the {lang} run hit the time limit of {timeout:g} s; Harbor was stopped and its "
                            "containers removed; later languages were not started")
@@ -865,18 +1041,32 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
         in_flight = None
     finally:
         try:
-            _write_json(batch / "summary.json", summary)
-        except OSError as err:  # the scans below must run all the same
-            summary_error: OSError | None = err
-        else:
-            summary_error = None
-        # Last, whatever happened: everything the batch left behind, the records, the summary and the state.
-        assert_no_leak(batch, token, "in the batch folder")
-        assert_no_leak(out_root / STATE_FILE, token, "in the state file")
-        assert_no_leak(guard_file, token, "in the five-hour guard file")
-        report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: clean")
-        if summary_error is not None and in_flight is None:
-            raise PilotError(f"could not write the batch summary: {summary_error}")
+            try:
+                _write_json(batch / "summary.json", summary)
+            except OSError as err:  # the scans below must run all the same
+                summary_error: OSError | None = err
+            else:
+                summary_error = None
+            # Last, whatever happened: everything the batch left behind, the records, the summary, the state and
+            # the guard file. Every scan runs, and every failure is reported together.
+            failures = []
+            for root, where in ((batch, "in the batch folder"), (out_root / STATE_FILE, "in the state file"),
+                                (guard.path, "in the five-hour guard file")):
+                scan = check_for_token(root, token)
+                if not scan.clean:
+                    failures.append(scan.message(where))
+            if failures:
+                if in_flight is not None and not isinstance(in_flight, KeyboardInterrupt):
+                    failures.append("the batch had already stopped: "
+                                    + mask(f"{type(in_flight).__name__}: {in_flight}", token))
+                raise TokenLeak("; ".join(failures))
+            report_to(in_flight, "the batch folder, the state file and the guard file were scanned for the token: "
+                                 "clean")
+            if summary_error is not None and in_flight is None:
+                raise PilotError(f"could not write the batch summary: {summary_error}")
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
     return summary
 
 
@@ -966,7 +1156,8 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                                  "after": latest_windows(agent["rate_limit_infos"]),
                                  "unreported": unreported_windows(latest_windows(agent["rate_limit_infos"])),
                                  "events": agent["rate_limit_infos"]}
-        if status == "ok" and (not trial["steps"] or any(s["reward"] is None for s in trial["steps"])):
+        record["missing_steps"] = _missing_steps(task, trial, job_dir)
+        if status == "ok" and (not trial["steps"] or record["missing_steps"]):
             status = "incomplete"
         if status in ("ok", "incomplete"):
             # Harbor judges a step even when the agent's command failed, so a reward alone proves nothing.
@@ -997,8 +1188,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="the same for the weekly windows (default 50)")
     p.add_argument("--max-agent-minutes-per-5h", type=float, default=DEFAULT_GUARD_MINUTES,
                    help="five-hour guard: do not start when this runner's agents worked this many minutes or more "
-                        "in runs that ended in the last five hours (default 30); a guard, not a measurement of the "
-                        "account; its state is kept beside the token file, shared by every --out folder")
+                        "in runs that ended in the last five hours, a run with no recorded end counting its whole time "
+                        "limit (default 30); a guard, not a measurement of the account; its state is a locked file "
+                        "beside the token file, shared by every pilot on that token")
     p.add_argument("--wait-for-reset", action="store_true", help="wait for the window to reset instead of stopping")
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -1023,10 +1215,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pilot: {err}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as err:
-        print("pilot: interrupted", file=sys.stderr)
-        for note in getattr(err, "__notes__", []) or ["nothing more is known; look at the batch folder"]:
-            print(f"  {note}", file=sys.stderr)
-        return 130
+        signum = getattr(err, "signum", None)
+        try:
+            print(f"pilot: stopped by {signal.Signals(signum).name}" if signum else "pilot: interrupted", file=sys.stderr)
+            for note in getattr(err, "__notes__", []) or ["nothing more is known; look at the batch folder"]:
+                print(f"  {note}", file=sys.stderr)
+        except OSError:  # a hung-up terminal
+            pass
+        return 128 + signum if signum else 130
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
         print(f"{run['language']}: {run['status']}" + (f" ({steps})" if steps else "") + (f" - {run['reason']}" if run.get("reason") else ""))
