@@ -10,7 +10,9 @@ The token is read here and handed to Harbor only through the child process envir
 run, and at the end of the batch whatever happened, the output is scanned for it; a file the scan cannot
 read fails the scan, and reports never show the token. Harbor runs in its own process group: at the
 time limit or on Ctrl-C it is asked to stop, then its group is ended, its containers are removed and
-the batch stops. Results go to out/pilot/<UTC timestamp>/.
+the batch stops. The token goes only to the pinned Harbor with Dodam's patch, which keeps it off host
+command lines, and the host process table is watched for it while Harbor runs. Results go to
+out/pilot/<UTC timestamp>/.
 """
 from __future__ import annotations
 
@@ -31,7 +33,9 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .convert import to_harbor
+from .harbor_patch import HarborSetupError, check as harbor_setup_check
 from .languages import LANGUAGES
+from .proctable import ProcessTableWatch, process_table
 from .task import load_task
 
 BENCH = Path(__file__).resolve().parents[1]
@@ -39,6 +43,7 @@ DEFAULT_TOKEN_FILE = Path("~/.dodam/claude-token-dodam")
 DEFAULT_OUT = BENCH / "out" / "pilot"
 DEFAULT_HARBOR = BENCH / ".harbor-venv" / "bin" / "harbor"
 DEFAULT_MAX_PERCENT = 50.0
+DEFAULT_PROCESS_INTERVAL = 0.5
 # With the subscription token Harbor cannot tell where the agent sends its requests, so it adds no host
 # to the agent's network allowlist; the agent reaches the model only through the hosts named here.
 DEFAULT_AGENT_HOSTS = ("api.anthropic.com",)
@@ -49,7 +54,7 @@ STATE_FILE = "state.json"
 CREDENTIAL_NAMES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # Host variables that could steer the agent to another credential or provider.
 DROPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_FORCE_", "OPENAI_", "CODEX_", "GEMINI_",
-                        "GOOGLE_API", "AWS_BEARER")
+                        "GOOGLE_API", "AWS_BEARER", "PYTHON")  # PYTHON*: Harbor's Python must load the checked Harbor
 
 
 class PilotError(Exception):
@@ -223,6 +228,14 @@ def child_env(base: dict[str, str], token: str) -> dict[str, str]:
     env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     env["CLAUDE_FORCE_OAUTH"] = "1"
     return env
+
+
+def check_harbor(harbor: Path) -> None:
+    """Refuse to hand the token to a Harbor that is not the pinned release with Dodam's patch."""
+    try:
+        harbor_setup_check(Path(harbor))
+    except HarborSetupError as err:
+        raise PilotError(f"refusing to use the token: {err}") from None
 
 
 def parse_claude_version(text: str) -> str:
@@ -560,6 +573,21 @@ def read_trial(job_dir: Path) -> dict:
             "harbor_wall_seconds": _seconds({"started_at": data.get("started_at"), "finished_at": data.get("finished_at")})}
 
 
+def agent_windows(job_dir: Path) -> list[tuple[float, float]]:
+    """Start and end (epoch seconds) of each step's agent phase in the trial's result; empty when unreadable."""
+    try:
+        data = json.loads(_trial_result(job_dir).read_text(encoding="utf-8"))
+        windows = []
+        for sr in data.get("step_results") or [data]:
+            timing = sr.get("agent_execution") or {}
+            if timing.get("started_at") and timing.get("finished_at"):
+                start = datetime.fromisoformat(timing["started_at"].replace("Z", "+00:00")).timestamp()
+                windows.append((start, start + _seconds(timing)))
+        return windows
+    except Exception:  # only used to count samples; Harbor's output is judged elsewhere
+        return []
+
+
 def read_agent_output(job_dir: Path, step_order: list[str] | None = None) -> dict:
     """The rate-limit infos (in step order), model, Claude Code version, summed usage and the agent's own
     error results of the agent logs."""
@@ -689,6 +717,9 @@ def _summary_entry(record: dict) -> dict:
     entry["steps"] = [{"step": s["step"], "reward": s["reward"]} for s in record.get("steps", [])]
     entry["rate_limits"] = {k: record["rate_limits"][k] for k in ("before", "first", "after", "unreported")
                             if k in record["rate_limits"]}
+    if record.get("process_watch"):
+        entry["process_watch"] = {k: record["process_watch"][k]
+                                  for k in ("samples", "agent_phase_samples", "hit_samples", "clean")}
     return entry
 
 
@@ -705,7 +736,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
               image_check: Callable[[str], None] = image_present, runner: Runner = run_subprocess,
               sleep: Callable[[float], None] = time.sleep, timeout: float | None = None,
               allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS,
-              max_agent_minutes_per_5h: float = DEFAULT_GUARD_MINUTES, docker=None) -> dict:
+              max_agent_minutes_per_5h: float = DEFAULT_GUARD_MINUTES, docker=None,
+              harbor_check: Callable[[Path], None] = check_harbor, process_sampler: Callable[[], bytes] = process_table,
+              process_interval: float = DEFAULT_PROCESS_INTERVAL) -> dict:
     for name, value in (("five-hour", max_five_hour), ("weekly", max_weekly)):
         if not 0 < value <= 100:
             raise PilotError(f"the {name} limit must be a percent above 0 and at most 100, not {value:g}")
@@ -717,6 +750,7 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             raise PilotError(f"task {task.id} does not run in {lang}")
     docker = docker if docker is not None else DockerContainers()
     timeout = harbor_time_limit(task) if timeout is None else timeout
+    harbor_check(harbor)
     token = read_token(token_file)
     env = child_env(dict(os.environ if base_env is None else base_env), token)
     timestamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -761,8 +795,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
             minutes_before = agent_minutes(runs, now())
             started_at, t0 = now(), time.monotonic()
             try:
+                harbor_check(harbor)
                 record = run_one(task, lang, batch, env, token, harbor, claude_version, model, before, runner,
-                                 image_check, timeout, now, allow_hosts, docker)
+                                 image_check, timeout, now, allow_hosts, docker, process_sampler, process_interval)
             except BaseException:
                 # whatever stopped the run, its time still counts for the guard and its record is listed
                 runs.append({"batch": timestamp, "language": lang, "started_at": started_at,
@@ -798,7 +833,9 @@ def run_pilot(task_path: Path, languages: list[str], out_root: Path, token_file:
 
 def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbor: Path, claude_version: str,
             model: str | None, before: dict, runner: Runner, image_check: Callable[[str], None], timeout: float,
-            now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS, docker=None) -> dict:
+            now: Callable[[], float], allow_hosts: Iterable[str] = DEFAULT_AGENT_HOSTS, docker=None,
+            process_sampler: Callable[[], bytes] = process_table,
+            process_interval: float = DEFAULT_PROCESS_INTERVAL) -> dict:
     docker = docker if docker is not None else DockerContainers()
     run_dir = batch / lang
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -816,17 +853,22 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                     "harbor_returncode": None, "wall_seconds": None, "time_limit_seconds": timeout,
                     "claude_code_version": {"pinned": claude_version, "observed": None},
                     "model": model, "usage": None, "steps": [], "reward": None, "error": None, "status": None,
-                    "leak_scan": None, "containers_left": [], "verifier_env_problems": [],
+                    "leak_scan": None, "process_watch": None, "containers_left": [], "verifier_env_problems": [],
                     "rate_limits": {"before": before, "first": {}, "after": {}, "unreported": list(REGULATED_WINDOWS),
                                     "events": []}}
     started = time.monotonic()
     finished = False
+    watch = ProcessTableWatch(token, process_sampler, process_interval)
     try:
-        record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout)
+        # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
+        with watch:
+            if watch.clean:
+                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout)
         finished = True
     finally:
         record["wall_seconds"] = round(time.monotonic() - started, 1)
-        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE:
+        record["process_watch"] = {**watch.record(), "agent_phase_samples": watch.count_within(agent_windows(job_dir))}
+        if not finished or record["harbor_returncode"] == TIMEOUT_RETURNCODE or watch.stopped_harbor:
             # Harbor was cut short and may have left its containers running: remove them first, so nothing
             # keeps writing into the output or using the subscription, and the scan sees the final output.
             try:
@@ -837,12 +879,23 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         record["leak_scan"] = scan.as_dict()
         if not scan.clean:
             record["status"] = "token-leak" if scan.hits else "leak-scan-failed"
+        elif watch.hit_samples:
+            record["status"] = "token-in-process-table"
+        elif not watch.clean:
+            record["status"] = "process-watch-failed"
         elif not finished:
             record["status"] = "interrupted"
         if record["status"]:
             _write_record(run_dir, batch, record)
         if not scan.clean:
             raise TokenLeak(scan.message(f"in the {lang} run folder"))
+        if watch.hit_samples:
+            raise TokenLeak(f"the token was in the command line of process(es) {watch.hit_pids} in "
+                            f"{watch.hit_samples} of {len(watch.times)} process-table samples of the {lang} run; "
+                            "Harbor was stopped or never started")
+        if not watch.clean:
+            raise PilotError(f"the process-table check of the {lang} run failed ({watch.error}); "
+                             "Harbor was stopped or never started")
 
     returncode = record["harbor_returncode"]
     status = "ok" if returncode == 0 else "timeout" if returncode == TIMEOUT_RETURNCODE else "harbor-failed"
@@ -924,6 +977,10 @@ def main(argv: list[str] | None = None) -> int:
     for run in summary["runs"]:
         steps = ", ".join(f"{s['step']}={s['reward']}" for s in run["steps"])
         print(f"{run['language']}: {run['status']}" + (f" ({steps})" if steps else "") + (f" - {run['reason']}" if run.get("reason") else ""))
+        if run.get("process_watch"):
+            w = run["process_watch"]
+            print(f"  process table: {w['samples']} samples ({w['agent_phase_samples']} while the agent worked), "
+                  f"the token in {w['hit_samples']}")
         unreported = (run.get("rate_limits") or {}).get("unreported")
         if run["status"] != "not-started" and unreported:
             print(f"  note: the agent reported no utilization for {', '.join(unreported)}; there only a rejected "

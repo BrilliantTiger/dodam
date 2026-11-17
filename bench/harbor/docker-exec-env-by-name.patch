@@ -1,0 +1,77 @@
+Dodam's one change to Harbor 0.25.0: harbor/environments/docker/docker.py
+
+Harbor starts every command in a task container with `docker compose exec -e NAME=VALUE ...`.
+The values of the agent's environment, the subscription token among them, then sit in the
+command line of host processes, which any process of the same user can read. With this change
+Harbor passes each variable by name only (`-e NAME`) and gives its value to the docker CLI
+through that process's environment, from which docker compose reads it. Names the docker CLI
+or Harbor's compose files read themselves (PATH, HOME, DOCKER_*, COMPOSE_* and Harbor's own
+compose variables) keep the old form, and other container runtimes such as Podman are left
+as they were.
+
+Apply it from bench/ with `python -m dodambench.harbor_patch apply`. The pilot refuses to hand
+the token to a Harbor that is not 0.25.0 with exactly this change.
+
+--- a/harbor/environments/docker/docker.py
++++ b/harbor/environments/docker/docker.py
+@@ -709,6 +709,7 @@
+         timeout_sec: int | None = None,
+         stdin_data: bytes | None = None,
+         on_output: OutputCallback | None = None,
++        exec_env: dict[str, str] | None = None,
+     ) -> ExecResult:
+         """Run a docker compose command and return the result."""
+         runtime = type(self).runtime()
+@@ -729,6 +730,10 @@
+         full_command.extend(command)
+ 
+         env = self._compose_env_vars(include_os_env=True)
++        if exec_env:
++            # Values of bare `-e NAME` flags: docker compose reads them from its
++            # own environment, so they never reach a host command line.
++            env.update(exec_env)
+ 
+         process = await asyncio.create_subprocess_exec(
+             *full_command,
+@@ -1415,9 +1420,32 @@
+         if cwd:
+             exec_command.extend(["-w", cwd])
+ 
++        exec_env: dict[str, str] = {}
+         if env:
++            # Dodam patch: pass each variable by name and hand its value to the
++            # docker CLI through that process's environment, so values (the
++            # agent's credentials among them) stay out of host command lines,
++            # which any process of the same user can read. Names the docker CLI
++            # or Harbor's compose files read themselves keep NAME=VALUE, since
++            # their host values must not change. Checked with docker compose only.
++            by_name = type(self).runtime() is DOCKER_RUNTIME
++            host_names = {
++                "PATH",
++                "HOME",
++                "HARBOR_CONTAINER_NAME",
++                *self._compose_infra_env_vars(),
++            }
+             for key, value in env.items():
+-                exec_command.extend(["-e", f"{key}={value}"])
++                if (
++                    by_name
++                    and "=" not in key
++                    and key not in host_names
++                    and not key.startswith(("DOCKER_", "COMPOSE_"))
++                ):
++                    exec_command.extend(["-e", key])
++                    exec_env[key] = value
++                else:
++                    exec_command.extend(["-e", f"{key}={value}"])
+ 
+         if user is not None:
+             exec_command.extend(["-u", str(user)])
+@@ -1442,6 +1470,7 @@
+             check=False,
+             timeout_sec=timeout_sec,
+             on_output=self._output_callback(),
++            exec_env=exec_env,
+         )
+ 
+     @override
