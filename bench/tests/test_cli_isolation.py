@@ -586,7 +586,31 @@ def test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image(tmp
         pytest.fail(f"the sample task is refused: {exc}")
     assert len(results) == 10
     assert [r for r in results if not r["ok"]] == []
+    # every security test of a step is failed by at least one vulnerable solution of that step
+    for step in ("build", "change-1"):
+        tests = json.loads((tmp_path / "out" / step / "secure/details.json").read_text())["tests"]
+        own = {t["name"] for t in tests if t["kind"] == "security" and t["step"] == step}
+        caught = set()
+        for r in results:
+            if r["step"] == step and r["expect"] == "vulnerable":
+                details = json.loads((tmp_path / "out" / step / r["solution"] / "details.json").read_text())
+                caught |= {t["name"] for t in details["tests"] if t["kind"] == "security" and t["outcome"] == "failed"}
+        assert own and own - caught == set(), (step, own - caught)
     by_label = {(r["step"], r["solution"]): r["reward"] for r in results}
     assert by_label[("change-1", "secure")]["reward"] == 1.0
     assert by_label[("change-1", "broken-crlf-kept-in-field")]["regression_broken"] >= 1.0
     assert by_label[("build", "vulnerable-no-size-limit")]["vulns_found"] >= 1.0
+
+
+def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
+    seen = []
+    for attempt in range(3):
+        results = vet(load_task(cli_task_dir), "python", tmp_path / f"out-{attempt}", image=IMAGE)
+        view = []
+        for r in results:
+            details = json.loads((tmp_path / f"out-{attempt}" / r["step"] / r["solution"] / "details.json").read_text())
+            view.append((r["step"], r["solution"], r["ok"], r["reward"],
+                         [(t["file"], t["name"], t["outcome"]) for t in details["tests"]]))
+        seen.append(view)
+    assert len(seen[0]) == 5
+    assert seen[0] == seen[1] == seen[2]

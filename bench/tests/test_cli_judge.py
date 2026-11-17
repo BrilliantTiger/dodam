@@ -471,3 +471,13 @@ def test_the_converted_task_is_judged_like_the_source_task(cli_task_dir, tmp_pat
     env["RUN_CMD"] = f"{sys.executable} {{app}}/main.py"
     result = judge(harbor / "tests", app, "change-1", tmp_path / "out", lang_env=env)
     assert result["reward"]["reward"] == 1.0 and len(result["report"]["tests"]) == 4
+
+
+def test_judging_the_same_program_again_gives_the_same_result(tmp_path):
+    program = "import sys\nsys.exit(1 if sys.argv[1] in ('s', 'u') else 0)\n"
+    seen = []
+    for attempt in range(3):
+        (tmp_path / str(attempt)).mkdir()
+        result = judge_program(tmp_path / str(attempt), program, KINDS, step="change-1")
+        seen.append((result["reward"], [(t["file"], t["name"], t["outcome"]) for t in result["report"]["tests"]]))
+    assert seen[0] == seen[1] == seen[2]
