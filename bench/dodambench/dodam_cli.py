@@ -24,11 +24,14 @@ Every case has limits. In the verifier each is a bound that holds whatever the p
 - files: the case's folder lives in a memory-backed folder that the container caps at the limit, so
   no more can be written, whether in many files, deep trees or files deleted while open; one file
   cannot be made larger than the limit either, not even a sparse one;
-- memory: the judge measures, every two thousandths of a second, everything the kernel counts for
-  the container beyond what was there when the run began, and ends the program above the limit.
-  Between two measurements the program can be above it; it can never be above the container's
-  memory cap, where the kernel ends the program first, and that fails the case as well. Memory
-  that would outlive the program's processes cannot be taken: the calls for it are refused.
+- memory: the judge measures, as often as it gets to run and at most every two thousandths of a
+  second, everything the kernel counts for the container beyond what was there when the run began,
+  memory moved out to swap included, and ends the program above the limit. Between two
+  measurements the program can be above it. After the run the judge also reads the highest value
+  the kernel itself kept for the container: a new high that lies above the limit fails the case
+  even when no measurement saw it. The program can never be above the container's memory cap,
+  where the kernel ends it first, and that fails the case as well. Memory that would outlive the
+  program's processes cannot be taken: the calls for it are refused.
 
 A case that broke a limit fails, whatever the test asserts and even when the test would have been
 left unjudged; so does a program that leaves processes behind, and a case whose folder cannot be
@@ -70,6 +73,14 @@ CONFIG_ENV = "DODAM_CLI_CONFIG"
 def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
     """The container's memory ran out during the run and the kernel ended a process for it."""
     return killed_now > killed_before
+
+
+def _passed_unseen(high_before: int, high_now: int, all_before: int, allowed: int) -> bool:
+    """The container's memory made a new high during the run, and that high lies further above what
+    the container held when the run began than the case may take in memory and files together. The
+    kernel keeps the high whatever happens between two measurements; it never goes down, so a run
+    that stays below an earlier high is not seen this way."""
+    return high_now > high_before and high_now - all_before > allowed
 
 
 TICK = 0.002
@@ -171,6 +182,8 @@ class Case:
         self._limits = cfg["limits"]
         self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
         self._broken: list[str] = []
+        # how the judge measured this case: how often, and the longest time between two measurements
+        self.measured = {"measurements": 0, "longest_gap": 0.0}
         self._side = _judge.Side(self._uid, self._gid) if self._uid is not None else None
         try:
             # cases run one after another, so whatever is in the cases' folder now is not this case's
@@ -330,6 +343,8 @@ class Case:
             # the program is not there or cannot be run as built: the program's failure
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
         killed_before = _judge.killed_for_memory() if self._side is not None else 0
+        high_before = _judge.highest_memory() if self._side is not None else 0
+        all_before = _judge.container_memory()["all"] if self._side is not None else 0
         try:
             result = self._watch(proc, stdin, started, left)
             if result.limit is None and self._left_processes(proc):
@@ -337,6 +352,9 @@ class Case:
         finally:
             self._end(proc)
         if self._side is not None and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
+            result.limit, result.exit_code = "memory", None
+        if self._side is not None and result.limit is None and _passed_unseen(
+                high_before, _judge.highest_memory(), all_before, (limits["memory_mb"] + limits["disk_mb"]) * 2**20):
             result.limit, result.exit_code = "memory", None
         result.seconds = time.monotonic() - started
         _spent[self._key] = _spent.get(self._key, 0.0) + result.seconds
@@ -378,7 +396,7 @@ class Case:
         else:
             proc.stdin.close()
         deadline = started + timeout
-        next_watch = 0.0
+        next_watch = last_watch = 0.0
         open_streams = 2
 
         def take(stream) -> bool:
@@ -430,6 +448,10 @@ class Case:
                 limit = "output"
             elif now >= next_watch:
                 next_watch = now + WATCH
+                if last_watch:
+                    self.measured["longest_gap"] = max(self.measured["longest_gap"], now - last_watch)
+                last_watch = now
+                self.measured["measurements"] += 1
                 if self._side is not None and (memory_taken() - memory_before > max_memory or memory_runs_out()):
                     limit = "memory"
         if limit is not None:

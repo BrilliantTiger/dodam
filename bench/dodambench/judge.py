@@ -26,9 +26,15 @@ file. In the verifier the program then runs as a user of its own that owns nothi
 write access away from every place others could write and leaves the program only its case's
 folder, which lives in a memory-backed folder the container caps. The judge refuses to start when
 the container has no cap on memory or processes, when its memory cap cannot hold on the machine, or
-when that folder is missing. When the judge itself cannot do its work it writes judge-fault.json
-instead of a result and ends with exit code 3, so a fault of the judge never looks like a failure
-of the program.
+when that folder is missing; the caps are checked for every kind of task. When the judge itself
+cannot do its work it writes judge-fault.json instead of a result and ends with exit code 3, so a
+fault of the judge never looks like a failure of the program.
+
+The outcome of every case is written down when the case ends. When the process that runs the cases
+is ended, by the kernel or by anything else, the case that was running fails with that reason, the
+cases before it keep their outcome and the cases after it are run by a new process. Whatever the
+program's side left as files is handled by routines that take one step per entry, hold two folders
+open at a time, follow no link and refuse a tree of more than TREE_ENTRIES entries.
 
 Without a user to run the program as nothing separates the program from the judge. That is only for
 the project's own prepared solutions: it must be asked for, it is refused for root, and its result
@@ -57,7 +63,6 @@ import sys
 import tempfile
 import time
 import tomllib
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -107,20 +112,17 @@ def restore_deps(app_dir: Path, deps_dir: Path, links: list[str]) -> None:
     """Point each dependency folder of the app at the pinned copy, dropping what the app brought."""
     for name in links:
         target = app_dir / name
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.exists():
-            shutil.rmtree(target)
+        remove_whatever(target)
         target.symlink_to(deps_dir / name, target_is_directory=True)
 
 
-def give_app_to(app_dir: Path, user: str) -> None:
-    """Make the plain user own the app folder so its build can write there; links are not followed."""
+def give_app_to(app_dir: Path, user: str) -> int:
+    """Make the plain user own the app folder so its build can write there; links are not followed.
+    Says how many entries the folder holds."""
     entry = pwd.getpwnam(user)
     os.lchown(app_dir, entry.pw_uid, entry.pw_gid)
-    for root, dirs, files in os.walk(app_dir):
-        for name in dirs + files:
-            os.lchown(os.path.join(root, name), entry.pw_uid, entry.pw_gid)
+    return walk_tree(app_dir, lambda folder, name, info: os.chown(name, entry.pw_uid, entry.pw_gid, dir_fd=folder,
+                                                           follow_symlinks=False))
 
 
 def user_pids(uid: int, proc_root: Path = Path("/proc")) -> list[int]:
@@ -143,21 +145,6 @@ def user_pids(uid: int, proc_root: Path = Path("/proc")) -> list[int]:
                     found.append(int(entry.name))
                 break
     return found
-
-
-def kill_user(user: str) -> None:
-    """Kill everything the plain user still runs, including daemons that left the process group."""
-    uid = pwd.getpwnam(user).pw_uid
-    for _ in range(3):
-        pids = user_pids(uid)
-        if not pids:
-            return
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        time.sleep(0.2)
 
 
 def write_output(path: Path, text: str) -> None:
@@ -196,9 +183,15 @@ OUTLIVING_CALLS = {
 }
 CASES_DIR = Path("/dodam-cases")   # the memory-backed, size-capped folder the verifier's container gives the cases
 JUDGE_ROOM_MB = 256
-MEMORY_RESERVE_MB = 128     # the judge ends a program that leaves the container less than this
-PROCESS_CEILING = 4096      # a cap on processes above this bounds nothing on a small machine                # what the judge and the language's runtime need beside the case's own limits
+MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the container less than this
+PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
+TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
+WRITABLE_PLACES = 10_000           # how many places any user may write a build may leave
+SEARCH_SECONDS = 300               # how long the search for such places may take
+KERNEL_ENDED = "the kernel ended a process because the container ran out of memory"
+TIMED_OUT = "timed out"
+PROGRESS_ENV = "DODAM_JUDGE_PROGRESS"
 
 
 def refusing_filter(machine: str | None = None) -> bytes | None:
@@ -244,18 +237,27 @@ def confine(uid: int, gid: int, groups: list[int], limits: dict[str, int], filte
             os._exit(126)
 
 
-def remove_tree(top: str | Path, keep_top: bool = False) -> None:
+class TooMuchLeft(Exception):
+    """The program's side left more than the judge handles. The step fails with this reason."""
+
+
+def remove_tree(top: str | Path, keep_top: bool = False, most: int | None = None) -> None:
     """Remove a folder and everything in it, whatever a program made there: any depth, any names,
     links (never followed), closed permissions, special files. It holds two folders open at a time
-    and remembers only the names on the way down, so its cost is one step per entry."""
+    and remembers only the names on the way down, so its cost is one step per entry; it gives up
+    after `most` entries."""
     top = str(top)
     here = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     names: list[str] = []
+    seen, most = 0, TREE_ENTRIES if most is None else most
     try:
         while True:
             went_down = False
             with os.scandir(here) as entries:
                 for entry in entries:
+                    seen += 1
+                    if seen > most:
+                        raise TooMuchLeft(f"a folder to remove holds more than {most} entries")
                     if entry.is_dir(follow_symlinks=False):
                         os.chmod(entry.name, 0o700, dir_fd=here)
                         below = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
@@ -279,43 +281,114 @@ def remove_tree(top: str | Path, keep_top: bool = False) -> None:
         os.rmdir(top)
 
 
-def container_memory() -> dict[str, int]:
-    """What the kernel counts for this container, in bytes: all memory taken, and what of it only
-    caches files on disk. Memory in shared memory and in memory-backed folders is not such a cache."""
-    current = int(Path("/sys/fs/cgroup/memory.current").read_text())
-    stat_lines = dict(line.split()[:2] for line in Path("/sys/fs/cgroup/memory.stat").read_text().splitlines())
-    cap = Path("/sys/fs/cgroup/memory.max").read_text().strip()
-    return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"]),
-            "cap": int(cap) if cap.isdigit() else 0}
+def remove_whatever(path: str | Path) -> None:
+    """Remove what sits at a path, whatever it is: a link is removed and not followed, a folder goes with all in it."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        remove_tree(path)
+    else:
+        os.unlink(path)
 
 
-def killed_for_memory() -> int:
+def walk_tree(top: str | Path, visit, most: int | None = None) -> int:
+    """Call visit(folder, name, info) for every entry below top: folder is the open folder the entry
+    is in, info what the entry itself is (a link is not followed). It reaches every entry at any
+    depth and with any name, holds two folders open at a time, remembers only the names of the
+    folders it has still to enter, and gives up after `most` entries. Says how many entries there are."""
+    here = os.open(str(top), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    to_enter: list[list[str]] = []
+    seen, most = 0, TREE_ENTRIES if most is None else most
+    try:
+        while True:
+            below = []
+            with os.scandir(here) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > most:
+                        raise TooMuchLeft(f"the program's folder holds more than {most} entries")
+                    info = entry.stat(follow_symlinks=False)
+                    visit(here, entry.name, info)
+                    if stat.S_ISDIR(info.st_mode):
+                        below.append(entry.name)
+            to_enter.append(below)
+            while not to_enter[-1]:
+                to_enter.pop()
+                if not to_enter:
+                    return seen
+                above = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=here)
+                os.close(here)
+                here = above
+            down = os.open(to_enter[-1].pop(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+            os.close(here)
+            here = down
+    finally:
+        os.close(here)
+
+
+GROUP = Path("/sys/fs/cgroup")
+
+
+def _group_number(group: Path, name: str) -> int | None:
+    try:
+        text = (group / name).read_text().strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def container_memory(group: Path = GROUP) -> dict[str, int]:
+    """What the kernel counts for this container, in bytes. "taken" is all memory but what only
+    caches files on disk, together with what was moved out to swap: memory in shared memory and in
+    memory-backed folders is counted, and so is memory the kernel swapped out. "all" is everything
+    in memory, the cache as well, which is what the kernel's own highest value counts."""
+    current = int((group / "memory.current").read_text())
+    stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
+    swapped = _group_number(group, "memory.swap.current") or 0
+    return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"]) + swapped,
+            "all": current, "cap": _group_number(group, "memory.max") or 0}
+
+
+def highest_memory(group: Path = GROUP) -> int:
+    """The most memory this container ever held, as the kernel keeps it; 0 where it keeps none.
+    It never goes down, so it shows only a new high, and it does not count what was swapped out."""
+    return _group_number(group, "memory.peak") or 0
+
+
+def memory_events(group: Path = GROUP) -> dict[str, int]:
+    """The kernel's counts for this container's memory; empty where it keeps none."""
+    try:
+        return {name: int(count) for name, count in
+                (line.split() for line in (group / "memory.events").read_text().splitlines())}
+    except (OSError, ValueError):
+        return {}
+
+
+def killed_for_memory(group: Path = GROUP) -> int:
     """How many processes the kernel has ended in this container because its memory ran out."""
-    for line in Path("/sys/fs/cgroup/memory.events").read_text().splitlines():
-        if line.startswith("oom_kill "):
-            return int(line.split()[1])
-    return 0
+    return memory_events(group).get("oom_kill", 0)
 
 
-def container_caps(disk_mb: int | None = None, group: Path = Path("/sys/fs/cgroup"),
+def container_caps(disk_mb: int | None = None, group: Path = GROUP,
                    machine_info: Path = Path("/proc/meminfo")) -> dict:
     """The caps the kernel holds this container to. A judge fault when one is missing or cannot hold
-    on this machine, since then nothing bounds what the program's side takes."""
+    on this machine, since then nothing bounds what the program's side takes. It also says how much
+    the container may move out to swap: the judge counts that as memory."""
     def number(name: str) -> int | None:
-        try:
-            text = (group / name).read_text().strip()
-        except OSError:
-            return None
-        return int(text) if text.isdigit() else None
+        return _group_number(group, name)
 
     def refuse(key: str, message: str) -> JudgeFault:
         return JudgeFault(json.dumps({"severity": "error", "file": "container", "key": key, "message": message}))
 
     memory, processes = number("memory.max"), number("pids.max")
-    machine = 0
+    machine = machine_swap = 0
     for line in machine_info.read_text().splitlines():
         if line.startswith("MemTotal:"):
             machine = int(line.split()[1]) * 1024
+        if line.startswith("SwapTotal:"):
+            machine_swap = int(line.split()[1]) * 1024
     if memory is None:
         raise refuse("memory", "the container has no memory cap, so nothing bounds the memory the program takes")
     if memory > machine:
@@ -326,7 +399,14 @@ def container_caps(disk_mb: int | None = None, group: Path = Path("/sys/fs/cgrou
                                   f"{PROCESS_CEILING}, so a build that forks without end is not bounded")
     if refusing_filter() is None:
         raise refuse("machine", f"no call filter is known for a {platform.machine()} machine")
-    caps = {"memory_mb": memory // 2**20, "processes": processes}
+    # how much of the machine's swap this container may use: none when the machine has none
+    allowed = number("memory.swap.max")
+    try:
+        unbounded = (group / "memory.swap.max").read_text().strip() == "max"
+    except OSError:
+        unbounded = False
+    swap = machine_swap if unbounded else min(allowed or 0, machine_swap)
+    caps = {"memory_mb": memory // 2**20, "processes": processes, "swap_mb": swap // 2**20}
     if disk_mb is not None:
         try:
             room = os.statvfs(CASES_DIR)
@@ -415,19 +495,22 @@ class Side:
         return not self.alive()
 
 
-def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str], timeout: float) -> tuple[bool, str]:
-    """Run the build and say whether it worked, with the end of what it printed. The build is the
-    agent's code: with a side it runs confined as that user, what it prints is read and dropped but
-    for its end, and when it ends nothing of it is left running."""
+def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str],
+              timeout: float) -> tuple[bool, str, str]:
+    """Run the build and say whether it worked, with the end of what it printed and, when it was
+    ended from outside, by what. The build is the agent's code: with a side it runs confined as that
+    user, what it prints is read and dropped but for its end, and when it ends nothing of it is
+    left running."""
     try:
         proc = subprocess.Popen(["/bin/sh", "-c", command], cwd=app_dir, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=side.environment(env) if side else env,
                                 preexec_fn=side.entering() if side else None, start_new_session=side is None)
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"the build could not be started: {exc}"
+        return False, f"the build could not be started: {exc}", ""
     tail = b""
     deadline = time.monotonic() + timeout
+    killed_before = killed_for_memory()
     os.set_blocking(proc.stdout.fileno(), False)
     timed_out = False
     while True:
@@ -455,16 +538,22 @@ def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    if side:
-        side.end()
+    if side and not side.end():
+        raise JudgeFault("processes of the build could not be ended")
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
         raise JudgeFault("the build did not end after it was killed") from None
     proc.stdout.close()
     if timed_out:
-        return False, "build timed out"
-    return proc.returncode == 0, tail.decode("utf-8", errors="replace")[-2000:]
+        return False, "build timed out", "the build was ended at its time limit"
+    text = tail.decode("utf-8", errors="replace")[-2000:]
+    if killed_for_memory() > killed_before:
+        # whatever the build went on to do, a part of it was ended: what it made is not what it builds
+        return False, text, KERNEL_ENDED.replace("a process", "a process of the build")
+    if proc.returncode < 0:
+        return False, text, f"the build was ended by signal {-proc.returncode}"
+    return proc.returncode == 0, text, ""
 
 
 CLI_LIMITS = {"timeout_sec": "CASE_TIMEOUT_SEC", "memory_mb": "CASE_MEMORY_MB", "output_kb": "CASE_OUTPUT_KB",
@@ -475,6 +564,7 @@ NO_FILES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "securityfs", "debug
 FILE_SECONDS, CASE_SECONDS = 30, 2
 BUILD_SECONDS = 900
 ARGS_ENV = "DODAM_JUDGE_ARGS"
+RESULT_FILES = ("reward.json", "reward.txt", "details.json", "judge-fault.json")
 
 
 def free_user_id() -> int:
@@ -490,48 +580,79 @@ def free_user_id() -> int:
             return number
 
 
-def writable_by_others(mounts: Path = Path("/proc/self/mounts")) -> list[str]:
-    """Every folder and file any user may write, on every file system mounted here."""
+def writable_by_others(mounts: Path = Path("/proc/self/mounts")):
+    """Every folder and file any user may write, on every file system mounted here, one at a time.
+    The search is given SEARCH_SECONDS and WRITABLE_PLACES places; a build that left more fails."""
     tops = []
     for line in mounts.read_text(encoding="utf-8").splitlines():
         parts = line.split()
         if len(parts) >= 3 and parts[2] not in NO_FILES:
             tops.append(parts[1].replace("\\040", " "))
-    found: list[str] = []
-    for top in tops:
-        res = subprocess.run(["find", top, "-xdev", "(", "-type", "d", "-o", "-type", "f", ")", "-perm", "-0002",
-                              "-print0"], capture_output=True)
-        found += [p.decode("utf-8", errors="surrogateescape") for p in res.stdout.split(b"\0") if p]
-    return sorted(set(found))
+    deadline = time.monotonic() + SEARCH_SECONDS
+    found = 0
+    for top in sorted(set(tops)):
+        search = subprocess.Popen(["find", top, "-xdev", "(", "-type", "d", "-o", "-type", "f", ")", "-perm", "-0002",
+                                   "-print0"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        rest = b""
+        try:
+            while True:
+                ready, _, _ = select.select([search.stdout], [], [], max(deadline - time.monotonic(), 0))
+                if not ready:
+                    raise TooMuchLeft("the build left more files than can be searched for places any user may write")
+                data = os.read(search.stdout.fileno(), 1 << 16)
+                if len(rest) + len(data) > 1 << 22 and b"\0" not in data:
+                    rest = rest[:8192]          # the start of a path too long to name is enough to close it
+                    continue
+                *paths, rest = (rest + data).split(b"\0")
+                for path in paths:
+                    found += 1
+                    if found > WRITABLE_PLACES:
+                        raise TooMuchLeft(f"the build left more than {WRITABLE_PLACES} places any user may write")
+                    yield path
+                if not data:
+                    break
+        finally:
+            search.kill()
+            search.wait()
+            search.stdout.close()
 
 
 def close_writable_places() -> int:
-    """Take write access away from every place any user could write; says how many places it closed."""
+    """Take write access away from every place any user could write; says how many places it closed.
+    A place so deep that no path can name it is closed off altogether: the folder above it that a
+    path can still name is closed to other users, who then reach nothing below it."""
     closed = 0
     for path in writable_by_others():
         try:
-            os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o002)
+            if len(path) < 4000:
+                os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o002)
+            else:
+                above = path[:4000].rsplit(b"/", 1)[0]
+                os.chmod(above, stat.S_IMODE(os.lstat(above).st_mode) & ~0o007)
             closed += 1
         except OSError as exc:
             if exc.errno != 30:  # a read-only file system cannot be written anyway
-                raise JudgeFault(f"cannot close {path} to the program: {exc}") from None
+                raise JudgeFault(f"cannot close a place any user may write to the program: {exc}") from None
     return closed
 
 
 def open_for_reading(app_dir: Path) -> None:
     """After the build: everyone may read and run the program, nobody but its owner may change it,
-    and no file of it lends its owner's rights to whoever runs it."""
-    for root, dirs, files in os.walk(app_dir):
-        for name in [""] + dirs + files:
-            path = os.path.join(root, name) if name else root
-            try:
-                if os.path.islink(path):
-                    continue
-                mode = stat.S_IMODE(os.stat(path).st_mode)
-                mode = (mode | 0o004 | (0o001 if mode & 0o100 or os.path.isdir(path) else 0)) & ~0o6022
-                os.chmod(path, mode)
-            except OSError:
-                pass
+    and no file of it lends its owner's rights to whoever runs it. Every entry is reached, at any
+    depth; one that cannot be changed stops the judging."""
+    def opened(folder: int | None, name: str, info: os.stat_result) -> None:
+        if stat.S_ISLNK(info.st_mode):
+            return
+        mode = stat.S_IMODE(info.st_mode)
+        wanted = (mode | 0o004 | (0o001 if mode & 0o100 or stat.S_ISDIR(info.st_mode) else 0)) & ~0o6022
+        if wanted != mode:
+            os.chmod(name, wanted, dir_fd=folder)
+
+    try:
+        opened(None, str(app_dir), os.lstat(app_dir))
+        walk_tree(app_dir, opened)
+    except OSError as exc:
+        raise JudgeFault(f"cannot open the built program for reading: {exc}") from None
 
 
 def keep_private(folder: Path) -> None:
@@ -583,7 +704,6 @@ class CliRun:
             remove_tree(self.work_root, keep_top=True)
         else:
             self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
-        os.chmod(self.work_root, 0o711)
         self.fault_file = self.private / "faults.jsonl"
         env = {k: v for k, v in {**os.environ, **extra_env}.items()
                if not k.startswith(("DODAM_", "PYTEST_")) and k not in ("PYTHONPATH", "HOME", "TMPDIR", "PWD", "OLDPWD")}
@@ -596,23 +716,23 @@ class CliRun:
                          "PYTHONPATH": str(Path(__file__).resolve().parent),
                          "PYTHONDONTWRITEBYTECODE": "1", "DODAM_CLI_CONFIG": str(self.settings_file)}
 
-    def run_file(self, path: Path, junit: Path) -> list[dict]:
+    def run_file(self, path: Path, ended: list[dict]) -> list[dict]:
         tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
         timeout = FILE_SECONDS + tests * (self.limits["timeout_sec"] + CASE_SECONDS)
-        cases = run_pytest(path, self.test_env, junit, timeout)
+        cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
         if self.fault_file.exists():
             raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
         self.sweep()
-        whole = [c for c in cases if c["name"] == path.name]
+        whole = [c for c in cases if c["name"] == path.name or c["message"] == TIMED_OUT]
         if whole:
-            # a program cannot make a file of tests run out of time or end without a report: its cases are limited
+            # a program cannot make a file of tests run out of time or be impossible to list: its cases are limited
             raise JudgeFault(f"{path.name}: {whole[0]['message']}")
         return cases
 
     def sweep(self) -> None:
         """Between two files of tests nothing of the program is left: no process, no case folder."""
-        if self.uid is not None:
-            Side(self.uid, self.uid).end()
+        if self.uid is not None and not Side(self.uid, self.uid).end():
+            raise JudgeFault("processes of the program could not be ended")
         if not self.work_root.is_dir():
             raise JudgeFault("the folder the cases live in is gone")
         try:
@@ -626,18 +746,25 @@ class CliRun:
         except JudgeFault:
             pass
         if self.uid is None:
-            shutil.rmtree(self.work_root, ignore_errors=True)
+            try:
+                os.rmdir(self.work_root)
+            except OSError:
+                pass
         shutil.rmtree(self.private, ignore_errors=True)
 
 
 def write_fault(out_dir: Path, text: str) -> None:
     """Say that the judge failed, and leave no result that could be read as a judgement of the program."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("reward.json", "reward.txt"):
-        path = out_dir / name
-        if path.is_symlink() or path.exists():
-            path.unlink()
+    clear_results(out_dir)
     write_output(out_dir / "judge-fault.json", json.dumps({"judge_fault": text}, indent=1, ensure_ascii=False))
+
+
+def clear_results(out_dir: Path) -> None:
+    """Remove whatever sits where the judge's files go, a folder or a link as well. The judge does
+    this before anything runs, so a judge that is ended half-way leaves nothing that reads as a result."""
+    for name in RESULT_FILES:
+        remove_whatever(out_dir / name)
 
 
 class App:
@@ -657,13 +784,13 @@ class App:
                 return False
             time.sleep(0.2)
         self.data_dir = Path(tempfile.mkdtemp(prefix="dodam-data-"))
-        if self.run_as:
-            subprocess.run(["chown", "-R", self.run_as, str(self.data_dir)], check=False)
+        side = Side.named(self.run_as) if self.run_as else None
+        if side:
+            os.chown(self.data_dir, side.uid, side.gid)
         self.env = {**os.environ, **self.extra_env, "PORT": str(self.port),
                     "DB_PATH": str(self.data_dir / "app.db"), "APP_SECRET": secrets.token_hex(32)}
         if self.run_as:
             # the served program is the agent's code: it runs confined, as the build does
-            side = Side.named(self.run_as)
             self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
                                          env=side.environment(self.env), preexec_fn=side.entering(),
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -687,37 +814,194 @@ class App:
                     os.killpg(self.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        if self.proc and self.run_as:
-            # the program may have left its process group
-            kill_user(self.run_as)
+        if self.proc and self.run_as and not Side.named(self.run_as).end():
+            # the program may have left its process group; nothing of it may run on
+            raise JudgeFault("processes of the served program could not be ended")
         self.proc = None
+        if self.data_dir is not None:
+            # what one start of the program wrote is given back before the next
+            try:
+                remove_tree(self.data_dir)
+            except TooMuchLeft as exc:
+                raise JudgeFault(f"the served program's data folder cannot be removed: {exc}") from None
+            except FileNotFoundError:
+                pass
+            self.data_dir = None
 
 
-def run_pytest(test_path: Path, env: dict[str, str], junit: Path, timeout: float) -> list[dict]:
-    # The command line of a process can be read by every user of the container, so it says nothing:
-    # which file of tests to run and where the report goes travel in the environment, which only
-    # root can read.
-    options = ["-q", "-p", "no:cacheprovider", f"--junitxml={junit}", str(test_path)]
-    env = {**env, "PYTEST_ADDOPTS": " ".join(shlex.quote(o) for o in options)}
+def read_progress(path: str) -> list[dict]:
+    """What the case runner wrote down so far. A line it was ended in the middle of is left out."""
+    records = []
     try:
-        subprocess.run([sys.executable, "-m", "pytest"], env=env, cwd=test_path.parent, timeout=timeout,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return [{"name": test_path.name, "outcome": "failed", "message": "timed out"}]
-    if not junit.is_file():
-        return [{"name": test_path.name, "outcome": "failed", "message": "no test report"}]
-    cases = []
-    for case in ET.parse(junit).iter("testcase"):
-        outcome = "passed"
-        message = ""
-        for tag in ("failure", "error"):
-            node = case.find(tag)
-            if node is not None:
-                outcome, message = "failed", (node.get("message") or "")[:300]
-        if case.find("skipped") is not None:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return records
+
+
+def _note_progress(record: dict) -> None:
+    with open(os.environ[PROGRESS_ENV], "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+# What follows up to run_cases runs inside the case runner: pytest loads this file as a plug-in. It
+# writes every case's outcome down the moment the case ends, so that the outcomes do not depend on
+# the runner living to the end of its file.
+_runner: dict = {"reports": {}, "kills": {}, "session": None}
+
+
+def pytest_sessionstart(session) -> None:
+    _runner["session"] = session
+
+
+def pytest_collectreport(report) -> None:
+    if PROGRESS_ENV in os.environ and report.failed:
+        _note_progress({"unlisted": str(report.longrepr)[-300:]})
+
+
+def pytest_collection_modifyitems(session, config, items) -> None:
+    if PROGRESS_ENV not in os.environ:
+        return
+    records = read_progress(os.environ[PROGRESS_ENV])
+    if not any("listed" in r for r in records):
+        _note_progress({"listed": [item.nodeid for item in items]})
+    decided = {r["case"] for r in records if "outcome" in r}
+    items[:] = [item for item in items if item.nodeid not in decided]
+
+
+def pytest_runtest_logstart(nodeid, location) -> None:
+    if PROGRESS_ENV in os.environ:
+        _runner["kills"][nodeid] = killed_for_memory()
+        _note_progress({"started": nodeid})
+
+
+def pytest_runtest_logreport(report) -> None:
+    _runner["reports"].setdefault(report.nodeid, []).append(report)
+
+
+def pytest_runtest_logfinish(nodeid, location) -> None:
+    if PROGRESS_ENV not in os.environ:
+        return
+    outcome, message = "passed", ""
+    for report in _runner["reports"].pop(nodeid, []):
+        if report.failed:
+            crash = getattr(report.longrepr, "reprcrash", None)
+            said = crash.message if crash is not None else str(report.longrepr)
+            outcome, message = "failed", message or said[:300]
+        elif report.skipped and outcome == "passed":
             outcome = "skipped"
-        cases.append({"name": case.get("name", ""), "outcome": outcome, "message": message})
-    return cases or [{"name": test_path.name, "outcome": "failed", "message": "no tests collected"}]
+    stop = killed_for_memory() > _runner["kills"].pop(nodeid, 0)
+    if stop:
+        # Whatever the kernel ended while this case ran, the case fails. The runner stops here; the
+        # judge gives back what the case took and runs the cases that are left with a new runner.
+        outcome, message = "failed", KERNEL_ENDED
+    _note_progress({"case": nodeid, "outcome": outcome, "message": message})
+    if stop and _runner["session"] is not None:
+        _runner["session"].shouldstop = KERNEL_ENDED
+
+
+def run_pytest(test_path: Path, env: dict[str, str], timeout: float, said: str) -> int | None:
+    """Run the case runner once; its exit code, or None when its time was up."""
+    # The command line of a process can be read by every user of the container, so it says nothing:
+    # which file of tests to run and where the outcomes go travel in the environment, which only
+    # root can read.
+    options = ["-q", "-p", "no:cacheprovider", "-p", Path(__file__).stem, str(test_path)]
+    here = str(Path(__file__).resolve().parent)
+    env = {**env, "PYTEST_ADDOPTS": " ".join(shlex.quote(o) for o in options),
+           "PYTHONPATH": os.pathsep.join(part for part in (here, env.get("PYTHONPATH", "")) if part)}
+    with open(said, "wb") as errors:
+        try:
+            return subprocess.run([sys.executable, "-m", "pytest"], env=env, cwd=test_path.parent, timeout=timeout,
+                                  stdout=subprocess.DEVNULL, stderr=errors).returncode
+        except subprocess.TimeoutExpired:
+            return None
+
+
+def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=None,
+              ended: list[dict] | None = None) -> list[dict]:
+    """Run one file of hidden tests and say how each case came out.
+
+    The runner writes each outcome down when the case ends. When the runner itself is ended, the
+    case that was running fails with that reason, the cases before it keep their outcome, and a new
+    runner goes on with the cases after it. Before a new runner starts, give_back() takes back what
+    the last one left; when it returns an outcome and a message, the cases that are left get those.
+    Every time a runner did not end by itself, `ended` gets a record of how."""
+    private = Path(tempfile.mkdtemp(prefix="dodam-run-"))
+    progress, said = str(private / "progress.jsonl"), str(private / "errors.txt")
+    env = {**env, PROGRESS_ENV: progress}
+    whole = lambda message: [{"name": test_path.name, "outcome": "failed", "message": message}]
+    fruitless = 0
+    try:
+        while True:
+            known = sum("outcome" in r for r in read_progress(progress))
+            kills = killed_for_memory()
+            code = run_pytest(test_path, env, timeout, said)
+            how = ""
+            if code is None:
+                how = TIMED_OUT
+            elif code < 0:
+                how = (KERNEL_ENDED.replace("a process", "the case runner") if killed_for_memory() > kills
+                       else f"the case runner was ended by signal {-code}")
+            elif code not in (0, 1, 2, 5):
+                how = f"the case runner ended with exit code {code}"
+            records = read_progress(progress)
+            listed = next((r["listed"] for r in records if "listed" in r), None)
+            decided = {r["case"]: r for r in records if "outcome" in r}
+            started = [r["started"] for r in records if "started" in r]
+            running = started[-1] if started and started[-1] not in decided else None
+            if how and ended is not None:
+                with open(said, "rb") as f:
+                    f.seek(max(os.path.getsize(said) - 1500, 0))
+                    tail = f.read().decode("utf-8", errors="replace")
+                ended.append({"file": test_path.name, "how": how, "exit_code": code, "case": running,
+                              "kernel_kills_before": kills, "kernel_kills_after": killed_for_memory(),
+                              "runner_said": tail})
+            unlisted = next((r["unlisted"] for r in records if "unlisted" in r), None)
+            if unlisted is not None:
+                return whole(f"the tests could not be listed: {unlisted}")
+            if listed is None:
+                fruitless += 1
+                if code is None or not how or fruitless >= 2:
+                    return whole(how or "no test report")
+            elif not listed:
+                return whole("no tests collected")
+            else:
+                def decide(case: str, outcome: str, message: str) -> None:
+                    decided[case] = {"case": case, "outcome": outcome, "message": message}
+                    _note_progress_to(progress, decided[case])
+
+                if running is not None:
+                    decide(running, "failed", how or "the case runner ended while this case ran")
+                left = [case for case in listed if case not in decided]
+                if left and code is None:
+                    for case in left:
+                        decide(case, "failed", TIMED_OUT)
+                    left = []
+                fruitless = 0 if len(decided) > known else fruitless + 1
+                if left and fruitless >= 2:
+                    decide(left[0], "failed", "the case runner ended twice before this case could be judged"
+                           + (f": {how}" if how else ""))
+                    left, fruitless = left[1:], 0
+                if not left:
+                    return [{"name": case.split("::")[-1], "outcome": decided[case]["outcome"],
+                             "message": decided[case]["message"]} for case in listed]
+            verdict = give_back() if give_back is not None else None
+            if verdict is not None and listed:
+                outcome, message = verdict
+                return [{"name": case.split("::")[-1], "outcome": decided.get(case, {}).get("outcome", outcome),
+                         "message": decided.get(case, {}).get("message", message)} for case in listed]
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def _note_progress_to(path: str, record: dict) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str = "",
@@ -746,20 +1030,29 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         # Before anything of the agent's runs: only root may enter the tests and the results.
         keep_private(tests_dir)
         keep_private(out_dir)
+    clear_results(out_dir)
+    refused = ""
+    if run_as:
+        # every kind of task: a container without caps that hold runs nothing of the program's side
+        report["caps"] = container_caps(CliRun.settings(app_dir, lang_env)[0]["disk_mb"] if is_cli else None)
         side = Side.named(run_as)
-        side.end()
-        give_app_to(app_dir, run_as)
-        if is_cli:
-            limits, _ = CliRun.settings(app_dir, lang_env)
-            report["caps"] = container_caps(limits["disk_mb"])
+        if not side.end():
+            raise JudgeFault("processes the working user left running could not be ended")
     deps_dir, links = lang_env.get("DEPS_DIR", ""), [n for n in lang_env.get("DEPS_LINKS", "").split(",") if n]
-    if deps_dir and links:
-        restore_deps(app_dir, Path(deps_dir), links)
+    try:
+        if run_as:
+            report["app_entries"] = give_app_to(app_dir, run_as)
+        if deps_dir and links:
+            restore_deps(app_dir, Path(deps_dir), links)
+    except TooMuchLeft as exc:
+        refused = str(exc)
 
     build_cmd = lang_env.get("BUILD_CMD", "").strip()
     started = time.monotonic()
-    if build_cmd:
-        report["build_ok"], report["build_log_tail"] = run_build(
+    if refused:
+        report["build_ended"] = refused
+    elif build_cmd:
+        report["build_ok"], report["build_log_tail"], report["build_ended"] = run_build(
             build_cmd, app_dir, side, {**os.environ, **(extra_env or {})},
             float(lang_env.get("BUILD_TIMEOUT_SEC", BUILD_SECONDS)))
     else:
@@ -768,7 +1061,11 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
 
     cli = None
     if is_cli and report["build_ok"]:
-        cli = CliRun(app_dir, lang_env, run_as, extra_env or {})
+        try:
+            cli = CliRun(app_dir, lang_env, run_as, extra_env or {})
+        except TooMuchLeft as exc:
+            report["build_ok"], report["build_ended"] = False, str(exc)
+    report["runner_ended"] = []
     app = App(app_dir, lang_env.get("START_CMD", ""), port, run_as, extra_env or {})
     shared_up = False
     for t in selected:
@@ -780,7 +1077,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             cases = [{"name": path.name, "outcome": not_run, "message": "build failed"}]
         elif cli is not None:
             try:
-                cases = cli.run_file(path, out_dir / ("junit-" + t["file"].replace("/", "-") + ".xml"))
+                cases = cli.run_file(path, report["runner_ended"])
             except JudgeFault:
                 cli.close()
                 raise
@@ -794,9 +1091,17 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             if not up:
                 cases = [{"name": path.name, "outcome": not_run, "message": "program did not start"}]
             else:
+                def again() -> tuple[str, str] | None:
+                    """A runner or the program was ended: the cases that are left get a program started afresh."""
+                    nonlocal shared_up
+                    up = app.start()
+                    shared_up = up and not fresh
+                    if up:
+                        env.update(app.env)
+                    return None if up else (not_run, "program did not start")
+
                 env = {**app.env, "BASE_URL": f"http://127.0.0.1:{port}", "DODAM_APP_DIR": str(app_dir)}
-                junit = out_dir / ("junit-" + t["file"].replace("/", "-") + ".xml")
-                cases = run_pytest(path, env, junit, timeout=300)
+                cases = run_cases(path, env, 300, again, report["runner_ended"])
                 if fresh:
                     app.stop()
         for c in cases:
@@ -806,7 +1111,10 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     if cli is not None:
         cli.close()
     if run_as:
-        kill_user(run_as)
+        # how near the container came to its cap: the most it held, how often it stood at the cap,
+        # and how many processes the kernel ended there
+        report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
+                            "ended_by_the_kernel": killed_for_memory()}
 
     judged = [c for c in report["tests"] if c["outcome"] != "skipped"]
     failed = [c for c in judged if c["outcome"] == "failed"]

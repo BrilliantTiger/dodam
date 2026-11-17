@@ -21,7 +21,7 @@ case_disk_mb = 64
 agent_timeout_sec = 3600
 verifier_timeout_sec = 1800
 cpus = 2
-memory_mb = 1536
+memory_mb = 1408
 
 [[steps]]
 name = "build"

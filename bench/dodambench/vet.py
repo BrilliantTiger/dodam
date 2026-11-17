@@ -177,8 +177,9 @@ def docker_create_cmd(name: str, image: str, step: str, room: dict) -> list[str]
 
     Every such container is capped in memory (with no swap beyond it), processors and processes, so
     that neither a build nor a program can take the Docker machine down."""
-    script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && exec /opt/judge/bin/python "
-              f"/tests/lib/dodam_judge.py --tests /tests --app /app --step {shlex.quote(step)} --out /logs/verifier")
+    # the script the verifier runs, so that a judge that is ended leaves the same account here as there
+    script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && "
+              f"printf 'DODAM_STEP=%s\\n' {shlex.quote(step)} > /tests/step.env && exec sh /tests/test.sh")
     caps = ["--memory", f"{room['memory_mb']}m", "--memory-swap", f"{room['memory_mb']}m",
             "--cpus", str(room["cpus"]), "--pids-limit", str(room["processes"])]
     if room.get("cases"):

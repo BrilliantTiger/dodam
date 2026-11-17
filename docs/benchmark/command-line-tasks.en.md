@@ -37,7 +37,7 @@ case_disk_mb = 64        # what can be written in the case's whole folder, and t
 agent_timeout_sec = 3600
 verifier_timeout_sec = 1800
 cpus = 2
-memory_mb = 1536         # at least the case's memory + its files + 256 for the judge
+memory_mb = 1408         # at least the case's memory + its files + 256 for the judge
 
 [[steps]]
 name = "build"
@@ -106,17 +106,36 @@ The format checker refuses a test of a command-line task that starts the program
 
 "The program's side" is everything the AI's work can make run: not the program alone, but also the build and whatever the build starts. The separation below holds from the first moment anything of the program's side is executed.
 
-1. It looks whether its container can bear the judging. Without a memory cap, with a memory cap above the memory of the machine the container runs on, without a cap on processes, or without the size-capped folder the cases live in, it runs nothing and refuses.
-2. It closes the tests folder and the results folder to everyone but root, and makes sure no other user can rename or replace them from the folder above. This comes before the build.
-3. It builds `/app`. The build runs as the plain user `agent`, confined as the program is: it cannot gain rights, the kernel ends it first when the container's memory runs out, and it cannot make anything in the kernel that outlives it. Of what the build prints only the end is kept. When the build ends, every process of that user is ended.
-4. It makes `/app` readable and runnable by everyone and changeable by nobody but its owner, and removes every mark that lends a file's owner's rights to whoever runs it. It takes write access away from every place in the container that any user could write (`/tmp`, `/var/tmp`, `/dev/shm` and others).
-5. It runs the test files one by one. For every case a test runs the program as **a user made for this judging alone**. The user's number is drawn at random from a wide range, so it is no user of the image. It owns no file, is in no group, and gains nothing by running a program that grants rights (such as `su`). The only place it can write is the folder of its case, and that folder lives in a memory-backed folder whose size the container caps.
-6. After every run it ends all processes of that user at once, and after every case it removes the case's folder. Removing takes one step for each entry however deep the folders go, whatever the names are, and whether there are closed folders, links or special files; it follows no link.
-7. It writes the pass rates of the functional, boundary and security tests, the number of tests it could not judge, the number of weaknesses found, the number of earlier steps' tests a change step broke, and whether the program ran separated from the judge, into the result file. Only the judge writes the result file.
+1. It closes the tests folder and the results folder to everyone but root, and makes sure no other user can rename or replace them from the folder above. It removes whatever lies where its own result files go. This comes before the build.
+2. It looks whether its container can bear the judging, for a web task as for a command-line task. Without a memory cap, with a memory cap above the memory of the machine the container runs on, without a cap on processes, or, for a command-line task, without the size-capped folder the cases live in, it runs nothing and refuses. It also reads how much the container may move out to swap and writes that into its result.
+3. It ends whatever the working user left running, hands `/app` to the plain user `agent` and puts the image's pinned copies where the dependency folders go, whatever the program brought there.
+4. It builds `/app`. The build runs as `agent`, confined as the program is: it cannot gain rights, the kernel ends it first when the container's memory runs out, and it cannot make anything in the kernel that outlives it. Of what the build prints only the end is kept. When the build ends, every process of that user is ended, also when the container holds so many processes that the judge cannot make one more. A build that was ended from outside (at its time limit, by a signal, or because the kernel ended one of its processes when memory ran out) has failed, and the result says by what.
+5. It makes `/app` readable and runnable by everyone and changeable by nobody but its owner, and removes every mark that lends a file's owner's rights to whoever runs it. It takes write access away from every place in the container that any user could write (`/tmp`, `/var/tmp`, `/dev/shm` and others).
+6. It runs the test files one by one. For every case a test runs the program as **a user made for this judging alone**. The user's number is drawn at random from a wide range, so it is no user of the image. It owns no file, is in no group, and gains nothing by running a program that grants rights (such as `su`). The only place it can write is the folder of its case, and that folder lives in a memory-backed folder whose size the container caps.
+7. After every run it ends all processes of that user at once, and after every case it removes the case's folder. The outcome of a case is written down the moment the case ends.
+8. It writes the pass rates of the functional, boundary and security tests, the number of tests it could not judge, the number of weaknesses found, the number of earlier steps' tests a change step broke, and whether the program ran separated from the judge, into the result file. Only the judge writes the result file.
 
-Nothing about the judging is on the command line of any process, because every user of the container can read command lines. Which test file is run, where its report goes and which step it is travel in the environment, which only root can read. The judge of web tasks is the same code, so step 2 and this paragraph hold for web tasks as well, and a web task's build and served program run under the same confinement.
+Nothing about the judging is on the command line of any process, because every user of the container can read command lines. Which test file is run, where the outcomes go and which step it is travel in the environment, which only root can read. The judge of web tasks is the same code, so steps 1 to 4 and this paragraph hold for web tasks as well, and a web task's build and served program run under the same confinement. Between two starts of a served program the judge ends every process it left, also one that moved out of the group of processes the judge started, and removes the data folder that start wrote.
 
-What a plain user can still see is that the judge's processes exist, the name of their program (`python3`), when they started and how much processor time they have used. None of that says which test is being run.
+What a plain user can still see of the judge's processes is that they exist, the name of their program (`python3`), their state (running or waiting), how much memory they hold, when they started, how much processor time they have used and how often the kernel switched them in and out, and the kernel limits they run under. It can also read the list of file systems mounted in the container. None of that names a test or says which test is being run.
+
+**Whatever the program's side left as files** (in `/app`, where the dependency folders go, in the temporary folders, in a case's folder, in a served program's data folder) the judge removes, hands over, opens for reading or searches with routines that take one step per entry, hold two folders open at a time however deep the tree is, and follow no link out of it. They give up after 500,000 entries, and the search for places any user may write gives up after 10,000 such places or 300 seconds. When they give up, the step fails with that reason and a result is written. A writable place so deep that no path can name it is closed all the same: the judge closes the folder above it that a path can still name to other users, who then reach nothing below it.
+
+## When something is ended while a case runs
+
+Whatever is ended, by the kernel because the container's memory ran out or by anything else, the judging ends in a judgement.
+
+| What is ended | What is reported |
+|---|---|
+| A process of the program | The case that was running fails, for memory when the kernel ended it. The cases before it keep their outcome and the cases after it are judged |
+| The served program of a web task, by the kernel | The case that was running fails with that reason, even when its test would have passed. The cases after it are judged against a program started afresh |
+| The process that runs the cases of a test file | The case that was running fails with the reason (the kernel ended it for memory, or the signal that ended it). The cases before it keep their outcome. The judge ends what that case left running, empties the cases' folder or starts the served program afresh, and a new process runs the cases after it. The other test files are judged as usual |
+| The build | The build has failed and the result says by what it was ended. Functional and boundary tests of the step fail, and its security tests are unjudged |
+| The judge itself, or the whole container | Nothing inside can write a result any more. The judge removed the result files of any earlier judging before it ran anything, and it writes a result under another name and moves it into place only when it is complete, so no file reads as a judgement. The exit code is not zero. The script that starts the judge outlives it where the container does, and then writes `judge-fault.json` saying that the judging ended without a result |
+
+The outcomes of a test file do not wait for the file to finish: each is written down when its case ends, in a place only root can enter. A process that runs the cases and is ended twice in a row without any case being decided costs the next case, which fails with that reason, so the judging always ends.
+
+On the path the real measurement uses, a step without a result file is a step with an error and no reward: Harbor records the error for that step and goes on to the next step. The measurement's runner reads the step's reward as missing, lists the step among the missing ones and gives the run a status other than "ok". It does not count such a step as passed. Harbor's own number for the whole run is the mean over the steps that have a result, so it leaves the step out; the runner's status is what tells that a step is missing.
 
 ## A check that could not be judged is no pass
 
@@ -146,15 +165,16 @@ Each rule has a test that fails when the rule is broken.
 | The program's side cannot learn which test is being run, or anything else about the judging | Nothing is on a command line, the program's environment carries nothing of the judge's, and the environment, working folder and open files of the judge's processes cannot be read |
 | No network while judging | The judging container is made without network. A program that tries to connect outside or to look up a name fails |
 | The program runs as an ordinary user who cannot become root | A user for this judging alone, in no group, with the kernel's mark that it can gain no rights. `setuid(0)`, `su` and a rights-lending file that the build prepared all fail |
-| The program cannot write, replace or remove the result file | Only root can enter the results folder, and nobody else can rename it from the folder above. The judge writes the result to a new file and renames it into place, so it never follows a planted link |
+| The program cannot write, replace or remove the result file | Only root can enter the results folder, and nobody else can rename it from the folder above. Whatever lay where a result goes is removed before anything runs. The judge writes the result to a new file and renames it into place, so it never follows a planted link |
 | A limit is a bound that holds whatever the program does | The section "The limits" says for each resource what enforces it and how far it can really be passed |
-| What one case takes is given back before the next case starts | Every process is ended and the case's folder removed. Shared memory and message queues that would stay after their processes cannot be made in the first place |
-| The judge survives whatever the program leaves behind | Removing what was left is bounded in time, memory and open files for any tree of folders. If it cannot be removed, that case fails; it is no fault of the judge, and the other cases are judged as usual |
+| What one case or one step takes is given back before the next starts | Every process is ended and the case's folder removed. Shared memory and message queues that would stay after their processes cannot be made in the first place. What the working user left running is ended before the build, what the build left running before the first case, and what a served program left running and wrote before its next start |
+| The judge survives whatever the program's side leaves behind | Every place where the judge removes, hands over, opens or searches what the program's side wrote is bounded in time, memory and open files for any tree of folders, and follows no link. If a case's folder cannot be removed, that case fails; it is no fault of the judge, and the other cases are judged as usual. A tree with more entries than the judge handles fails the step, with a result |
+| A kill ends in a judgement | The section "When something is ended while a case runs" |
 | What could not be judged never counts as passed | The three points of the section "A check that could not be judged is no pass" |
 | A fault of the judge itself is told apart from a failure of the program | On a fault the judge writes no result file, records the fault separately and ends with a different exit code |
 | Cases do not affect each other | A fresh folder for every case. Of the files, processes and kernel objects an earlier case tried to leave, the next case can see none |
 | One set of tests judges every language | The tests folder that goes into the judging container differs between languages in one file only, the one that names the commands. The environment the tests get is the same for every language |
-| Every container has caps | Every container that the checking tool, the tests and the experiment start is capped in memory (with no swap beyond it), processors and processes. The same goes for web tasks |
+| Every container has caps that hold | Every container that the checking tool, the tests and the experiments start is capped in memory (with no swap beyond it), processors and processes. A converted task of either kind carries the cap on processes and the swap setting to Harbor, and both tasks ask for a memory cap the measuring machine can hold. The judge checks the caps of its own container for every kind of task |
 | The format checker accepts the sample and refuses a malformed command-line task with a JSON diagnostic | The checker prints each problem as JSON with its file, key and message first; the lines a person reads are made from that JSON |
 
 ## The limits
@@ -167,21 +187,27 @@ A limit is a bound, not a measurement. For each resource there is a line that ca
 | Output | the output limit plus what one pipe holds | the judge keeps what fits in the limit, reads no more and ends the program | fails |
 | Processes and threads | the limit itself | the kernel refuses that user a process or thread beyond the limit; the user is this judging's alone | cannot be taken |
 | Files | the limit itself, and 20,000 entries | the container caps the memory-backed folder the case's folder lives in at that size. Many small files, deep folders, files deleted while open, the home and temporary folders are all inside it, so together they come to that size. One file cannot be made larger than the limit, not even a sparse one (the kernel) | cannot be taken. A program the kernel ended for making one file too large fails |
-| Memory | the container's memory cap | every 0.002 seconds the judge measures the memory of the whole container and ends the program above the limit, and also, whatever the limit, when the container has less than 128 MB left. What gets past it in between is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case whose program the kernel ended |
+| Memory | the container's memory cap, and beside it only the swap the container is allowed (none on every path of this repository) | as often as it gets to run, and at most every 0.002 seconds, the judge measures the memory of the whole container and ends the program above the limit. After the run it reads the highest value the kernel kept for the container, and a new high above the limit fails the case as well. What gets past the measuring is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case during which the kernel ended a process |
 
-**What counts as memory.** Not the memory of the processes alone but everything the kernel counts for the container: the memory of all processes, memory files that belong to no process, pipes and what the kernel keeps for them. The cache of files on disk and the files in the case's folder are taken out (the case's files count against the file limit). What was there when the run began is subtracted; the rest is the case's memory.
+**What counts as memory.** Not the memory of the processes alone but everything the kernel counts for the container: the memory of all processes, memory files that belong to no process, pipes and what the kernel keeps for them. Memory the kernel moved out to swap is counted as memory. The cache of files on disk and the files in the case's folder are taken out (the case's files count against the file limit). What was there when the run began is subtracted; the rest is the case's memory.
 
 **What cannot be made.** Memory that stays when its processes have ended, which is System V shared memory, message queues and semaphores, and POSIX message queues: the kernel refuses the calls themselves. The folder for POSIX shared memory is closed to writing. So once the program's processes are ended, nothing of its memory is left but the files in the case's folder.
 
-**How far memory can really be passed.** Memory alone can be passed between two measurements. The most it can be passed by is the container's memory cap less the limit and less what the judge uses. The judge ends the program when the container has less than 128 MB left, so the kernel has to choose what to end only when a program takes another 128 MB within 0.002 seconds. The values measured at an interval of 0.002 seconds are in "The numbers". A program that is above the limit and comes back below it between two measurements may not fail its case. Even then it cannot pass the container's cap.
+**How far memory can really be passed.** Memory alone can be passed between two measurements. The line that cannot be passed is the container's memory cap; the most a program can be above its limit is that cap less the limit and less what the judge uses. How far programs that try got, and how long the judge went without measuring while they kept both processors busy, is in "The numbers": the judge does not measure every 0.002 seconds under such a load.
 
-**The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that eats more memory than the container has and one that prints 400 MB are tests, and in all three the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
+**The highest value the kernel kept.** The kernel keeps the highest memory use of the container, whatever happens between two measurements. The judge reads it before and after every run. When the run made a new high, and that high lies further above what the container held at the start of the run than the case may take in memory and files together, the case fails for memory. This cannot see everything. The value never goes down, so a run that stays below an earlier high, for example below what the build took, is not seen this way. It counts the cache of files on disk, which is why the case's file limit is added before the comparison. And it does not count memory moved out to swap.
+
+**The stop at 128 MB.** Whatever the case's limit is, the judge ends a program when the container has less than 128 MB left. This is a second line of defence. A case during which the kernel ended a process fails anyway, and the other cases are judged whatever the kernel ends. What the stop does is keep the kernel from having to choose: in the runs of "The numbers" the kernel ended nothing with the stop in place, and without it ended a process in every run of the programs that fill the container. Without the stop the kernel's choice could one day be the judge itself, and then the judging ends without a result.
+
+**A machine with swap.** A container that may swap could hold more than its memory cap. The checking tool gives its containers no swap beyond the memory cap, and the container settings file of a converted task takes away the swap Harbor would otherwise allow (as much again as the memory cap). The judge does not rest on that: it reads at its start how much swap its container may use, writes it into the result (`swap_mb`, 0 on every path of this repository), and counts swapped memory as memory, so a program above its limit fails also when part of it was swapped out. Where a container is allowed swap, the line that cannot be passed is the memory cap plus that allowance.
+
+**The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that fills every process the container may hold, one that eats more memory than the container has and one that prints 400 MB are tests, and in all of them the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
 
 How long the judge can take over one step is known beforehand: 900 seconds for the build, 30 seconds for every test file, and for every test its case's time limit plus 2 seconds. The format checker refuses a task whose time limit for judging is below that sum. For the sample task the sum is 1,550 seconds and the time limit for judging is 1,800 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
 
 ## The container's caps, and the path the real measurement uses
 
-The judge checks four things about its container, and without any one of them it runs nothing of the program's side, prints a JSON diagnostic and ends.
+The judge checks these things about its container, for a web task as for a command-line task, and without any one of them it runs nothing of the program's side, prints a JSON diagnostic and ends. The last one is asked of a command-line task only, since a web task has no cases' folder.
 
 | What it checks | Without it |
 |---|---|
@@ -190,15 +216,17 @@ The judge checks four things about its container, and without any one of them it
 | There is a cap on processes, and it is not above 4,096 | nothing bounds a build that forks without end |
 | The memory-backed folder for the cases is there, at the size of the task's file limit and with 20,000 entries | nothing bounds what is written |
 
-Before it makes a container, the tool that checks prepared solutions asks Docker how much memory its machine has. When a task asks for more, the cap is lowered to three quarters of the machine's memory, and every result says so. A command-line task whose cases do not fit under the lowered cap is refused with a JSON diagnostic. On this repository's measuring machine the Docker machine has about 2 GB, so the web task, which asks for 4,096 MB, was judged under a cap of 1,469 MB.
+Before it makes a container, the tool that checks prepared solutions asks Docker how much memory its machine has. When a task asks for more, the cap is lowered to three quarters of the machine's memory, and every result says so. A command-line task whose cases do not fit under the lowered cap is refused with a JSON diagnostic. On this repository's measuring machine the Docker machine has 1,959 MB, so three quarters are 1,469 MB. Both tasks ask for 1,408 MB, which that machine can hold a container to, so there the cap is given as asked.
 
-In the real measurement Harbor makes the containers. What Harbor's task settings **can say** is memory and processors, no network, and a container of its own for judging. What they **cannot say** is a cap on processes and a size-capped memory-backed folder. These two go with the task in a container settings file that Harbor merges into its own. A converted command-line task holds that file, with the same values the checking tool gives its containers. The file applies to the container the AI works in as well. The converted web task does not hold such a file: through Harbor a web task gets the memory and processor caps only.
+In the real measurement Harbor makes the containers. What Harbor's task settings **can say** is memory and processors, no network, and a container of its own for judging. What they **cannot say** is a cap on processes, a size-capped memory-backed folder, and that a container gets no swap beyond its memory cap: Harbor sets the memory cap alone, and Docker then allows as much swap again. These go with the task in a container settings file that Harbor merges into its own. A converted task of either kind holds that file: the cap on processes and the swap setting for every task, and the cases' folder for a command-line task, with the same values the checking tool gives its containers. The file applies to the container the AI works in as well. Beside each of these containers Harbor runs a helper container of its own that has no caps; it runs nothing of the program's side.
 
 ## A fault of the judge
 
-A problem that is not the program's is a fault of the judge: it cannot make the case's folder, cannot start the program as the judging user, cannot end the program's processes, the task's settings are incomplete, the container has no caps, or a test file does not finish in its time. The judge then writes no result file (and removes one that is there), says what failed in `judge-fault.json` and ends with exit code 3. Without a result file the measuring harness treats the run as a failed judging and does not count it as a score of the program. The tool that checks prepared solutions also reports it separately, as "the judge itself failed".
+A problem that is not the program's is a fault of the judge: it cannot make the case's folder, cannot start the program as the judging user, cannot end the processes of the program's side, the task's settings are incomplete, the container has no caps that hold, the cases of a command-line test file cannot be listed, or such a file does not finish in its time. The judge then writes no result file (and removes one that is there), says what failed in `judge-fault.json` and ends with exit code 3. Without a result file the measuring harness treats the run as a failed judging and does not count it as a score of the program. The tool that checks prepared solutions also reports it separately, as "the judge itself failed".
 
-A problem that comes from what the program left is no fault of the judge. If the case's folder cannot be removed, that case fails, and what is left is removed again when the next case starts.
+A problem that comes from what the program left is no fault of the judge. If the case's folder cannot be removed, that case fails, and what is left is removed again when the next case starts. If the program's folder holds more than the judge handles, the step fails and a result is written.
+
+A judge that is ended from outside cannot write `judge-fault.json` itself. The script that starts it does, where it survives: it removes any result file, writes that the judging ended without a result, with the exit code, and ends with an exit code that is not zero. The message is JSON first, like every other diagnostic.
 
 ## The format checker
 
@@ -271,11 +299,11 @@ This task has no reason to call a shell, so it has no check of a file name or a 
 
 ### Repetition
 
-The 70 solutions of the seven languages were judged inside the images five times each, 350 judgings and 14,350 test outcomes. The number of solutions whose reward or any single test outcome differed between the five is 0.
+After the last change the 70 solutions of the seven languages were judged inside the images once: 70 of 70 as written, 2,870 test outcomes. Before that change they had been judged five times each, 350 judgings and 14,350 test outcomes, and no solution's reward or single test outcome differed between the five. The run after the change differs from those five in no reward and in no test outcome.
 
 ### The web task
 
-The judge of web tasks is the same code, so it changed here as well: it closes the tests before the build, puts nothing on a command line, and runs the build and the served program confined. The judgement of the 78 prepared solutions is the same as before in all seven languages.
+The judge of web tasks is the same code, so it changed here as well: it closes the tests before the build, puts nothing on a command line, runs the build and the served program confined, checks the caps of its container and ends in a judgement whatever is ended. The 78 prepared solutions were judged once more with the caps the converted task carries (1,408 MB of memory with no swap beyond it, 1,024 processes). Their judgement is the same as before in all seven languages.
 
 | Language | Solutions | Judged as written (before) | Judged as written (after) | Test outcomes | Solutions with a test whose outcome differs |
 |---|---|---|---|---|---|
@@ -290,26 +318,52 @@ The judge of web tasks is the same code, so it changed here as well: it closes t
 
 In the reward file only the two things decided beforehand differ. There is a new entry that says whether the program ran separated, and for the 7 solutions with an unjudged security check the security pass rate is lower (an unjudged check no longer counts as passed). The number of solutions with any other entry changed is 0.
 
-### On the path the real measurement uses
-
-The converted sample task was run through Harbor with a prepared solution in place of an AI (Python). The judging container Harbor made got the cap on processes and the size-capped folder from the settings file sent with the task, and the judge checked for them before it judged. The right solution, two vulnerable ones and one broken one were put in; five of their judgings have a counterpart in the direct check. In all 5 judgings no entry of the reward differed from the direct check. The right solution finished both steps in 68 seconds.
-
-### How far memory is really passed
-
-With a limit of 256 MB and a container cap of 1,024 MB, one process took memory as fast as it could, twenty times. At an interval of 0.002 seconds what it reached before it was ended was 256 MB at the least, 273 MB in the median and 280 MB at the most. Eight processes sharing it out were ended at 312 MB, memory files at 292 MB. In no case did the kernel have to step in, and the case failed.
-
-### How long judging takes
-
-The median time to judge the change step of the right solution (50 tests) inside the image. It includes making the container and building. One plain case takes 7.04 ms for the program alone and 8.54 ms as a whole case of the judge (median of 200, Python).
+**The web task's memory cap.** The task asked for 4,096 MB. The Docker machine of the measuring computer has 1,959 MB, so a cap of 4,096 MB bounded nothing there. The task now asks for 1,408 MB, which that machine can hold a container to. The value was chosen from the highest memory use of the container while a solution is built and judged, the cache of files on disk included, measured in these 78 judgings:
 
 | | Python | TypeScript | Java | C# | Go | Rust | C++ |
 |---|---|---|---|---|---|---|---|
-| The whole judging | 9.4 s | 3.8 s | 9.5 s | 5.5 s | 3.3 s | 3.7 s | 3.9 s |
-| Of which the build | 0.0 s | 0.18 s | 1.62 s | 1.31 s | 0.52 s | 0.34 s | 1.37 s |
+| The right solution, build step | 504 MB | 243 MB | 400 MB | 469 MB | 494 MB | 425 MB | 560 MB |
+| The right solution, change step | 503 MB | 167 MB | 249 MB | 274 MB | 340 MB | 210 MB | 506 MB |
+| Highest over all prepared solutions | 504 MB | 243 MB | 400 MB | 469 MB | 494 MB | 425 MB | 560 MB |
+| Room left under 1,408 MB | 904 MB | 1165 MB | 1008 MB | 939 MB | 914 MB | 983 MB | 848 MB |
+
+The highest value of all is 560 MB, which leaves 848 MB. In none of the 78 judgings did the container reach its cap, and the kernel ended nothing.
+
+### On the path the real measurement uses
+
+Converted tasks were run through Harbor with a prepared solution in place of an AI.
+
+**The web task, exactly as converted.** The right solution in Python, in Java and in C++, and one vulnerable solution in Python. Every container Harbor made for the task, the one the solution is put into and the one that judges, had a memory cap of 1,408 MB, the same value for memory and swap together (so no swap beyond the cap) and a cap of 1,024 processes. The judge wrote the same caps into its result. Harbor's helper container had no caps. Of the 8 judgings, 7 have a counterpart in the direct check, and all 7 gave the same reward file, entry by entry.
+
+**The command-line sample, in Python.** This was run before the last change to the judge and not again. The judging container Harbor made got the cap on processes and the size-capped folder from the settings file sent with the task, and the judge checked for them before it judged. The right solution, two vulnerable ones and one broken one were put in; five of their judgings have a counterpart in the direct check. In all 5 judgings no entry of the reward differed from the direct check.
+
+### How far memory is really passed
+
+Four programs that try to get past the limit were each judged twenty times in a fresh container, under a limit of 256 MB. The figure is the highest memory use the kernel kept for the container during the run, less everything the container held when the run began. It includes the cache of files on disk and the case's files.
+
+| Program | Container 1,024 MB: lowest, median, highest | Container 640 MB: lowest, median, highest | Longest time between two measurements |
+|---|---|---|---|
+| One process, block after block | 259 · 266 · 282 MB | 258 · 266 · 279 MB | 5.9 ms |
+| Eight processes, 64 MB each | 263 · 286 · 294 MB | 260 · 280 · 309 MB | 13.9 ms |
+| One process with two threads asking for memory the kernel fills at once | 260 · 271 · 288 MB | 257 · 272 · 293 MB | 4.0 ms |
+| Fifteen processes that take memory at the same moment | 265 · 280 · 334 MB | 260 · 288 · 337 MB | 18.3 ms |
+
+In all 160 runs the case failed for memory, the cases before and after it passed, and the kernel ended nothing. The programs reached 257 to 337 MB. While a program kept both processors busy the judge did not measure every 0.002 seconds: the longest time between two measurements was 18.3 ms, and in the shortest run the judge measured 8 times before the program was ended.
+
+Under a limit the container cannot give, in the container of 640 MB, the only stop is the judge's own line 128 MB below the cap, at 512 MB of the container's memory. There the same four programs reached 447 to 497 MB above what the container held before. The container's highest use was 563 MB, 51 MB past that line and 77 MB below the cap. The kernel ended nothing in 80 runs. With that line taken out, the three programs that take memory without end filled the container, and the kernel ended a process in 60 of 60 runs. In every one of them the case failed for memory and the cases before and after it were judged. The fourth program takes 512 MB and waits, so it does not fill that container; its case fails at the time limit.
+
+### How long judging takes
+
+The time to judge the change step of the right solution (50 tests) inside the image, in the run after the last change. It includes making the container and building. One plain case takes 7.04 ms for the program alone and 8.54 ms as a whole case of the judge (median of 200, Python, measured before the last change).
+
+| | Python | TypeScript | Java | C# | Go | Rust | C++ |
+|---|---|---|---|---|---|---|---|
+| The whole judging | 9.6 s | 3.9 s | 9.9 s | 5.5 s | 3.1 s | 3.6 s | 4.0 s |
+| Of which the build | 0.0 s | 0.18 s | 1.64 s | 1.29 s | 0.32 s | 0.37 s | 1.37 s |
 
 ## The design decisions and their numbers
 
-The list of attacks was written before the candidates were compared and is a file in the repository (`bench/experiments/attacks.toml`, 40 attacks). Every attack on it is a test, and a test of its own checks that. Every candidate met the same attacks in fresh containers of the Python image. Every container was capped at 1,024 MB of memory and 600 processes, and the limits of a case were 5 seconds, 256 MB of memory, 256 KB of output, 16 processes and 32 MB of files. Running `bench/experiments/cli_separation.py` gives the same tables again. The measured values differ a little from run to run.
+The list of attacks was written before the candidates were compared and is a file in the repository (`bench/experiments/attacks.toml`, 61 attacks). Every attack on it is a test, and a test of its own checks that. Every candidate met the same attacks in fresh containers of the Python image. Every container was capped at 1,024 MB of memory and 600 processes, and the limits of a case were 5 seconds, 256 MB of memory, 256 KB of output, 16 processes and 32 MB of files. Running `bench/experiments/cli_separation.py` gives the same tables again. The measured values differ a little from run to run.
 
 ### When the tests are closed
 
@@ -403,7 +457,7 @@ What one process taking memory as fast as it can reached before it was ended (li
 | **0.002 s** | 256 MB | 273 MB | 280 MB | 8.2% to 9.2% |
 | 0.001 s | 256 MB | 265 MB | 272 MB | 12.3% to 14.9% |
 
-0.002 seconds stays. Its largest value is below those of 0.010 and 0.005 seconds. 0.001 seconds lowers it only a little more and uses more processor. The choice matters less than it did, though: the line that cannot be passed is now the container's cap, not the interval.
+0.002 seconds stays. Its largest value is below those of 0.010 and 0.005 seconds. 0.001 seconds lowers it only a little more and uses more processor. The choice matters less than it did, though: the line that cannot be passed is now the container's cap, not the interval. The table compares intervals with one process that takes memory block after block. What programs that try harder reach is under "How far memory is really passed".
 
 ### Why memory is not bounded by address space
 
@@ -421,20 +475,20 @@ A kernel limit on address space would need a different value for each language. 
 
 ### What the chosen design does not stop
 
-- **Memory can pass the limit between two measurements.** The line that cannot be passed is the container's cap. A program that was above the limit and came back below it between measurements may not fail.
+- **Memory can pass the limit between two measurements.** The line that cannot be passed is the container's cap, plus the swap a container is allowed (none on any path here). A program that was above the limit and came back below it between two measurements fails only when it made a new high for the container.
 - **What a build writes into `/app` has no cap.** Only the size of one file and the build's 900 seconds bound it.
 - **A program that stopped at a cap does not fail.** Writing files up to the limit and being refused more, or making processes up to the limit and being refused more, is not by itself a failure.
-- **A plain user can see that the judge's processes exist, when they started and how much processor time they used.**
-- **Through Harbor a web task gets no cap on processes.** The containers the checking tool makes do.
+- **A plain user can see that the judge's processes exist, their state, how much memory they hold, when they started, their processor time and scheduling counters, the kernel limits they run under, and the list of mounted file systems.** None of it names a test.
+- **The helper container Harbor runs beside a task has no caps.** It runs nothing of the program's side.
 
 ## Every protection, and the test that fails without it
 
-For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 44 of them). `python experiments/check_protections.py` takes the protections out one at a time in a copy of the repository and runs that protection's tests; it fails when they all still pass. Today the tests catch all 44. A test also checks that this table and that file hold the same protections.
+For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 85 of them). `python experiments/check_protections.py` takes the protections out of a copy of the repository one at a time and runs that protection's tests. The tests catch 81 of them, and the check fails when a protection can be taken out without a test failing. The other 4 are second lines of defence: without them the attack still gets nothing, and the table says which other protections see to that. For those the check runs the attack tests without the protection and fails if one of them fails. A test also checks that this table and that file hold the same protections. The list was made from the code and not from this document: both judges, the converter and the script that starts the judge were read statement by statement, and every statement that is there only for separation, for a limit or for giving back got an entry.
 
 | Protection | The attack its test makes |
 |---|---|
 | Only root may enter the tests, from before the build | the build tries to copy the whole tests folder |
-| Only root may enter the results | the program tries to read, in the results folder, the reports of the tests that ran before |
+| Only root may enter the results | the program tries to read, in the results folder, the note a test that ran before left there |
 | The command line of a test run names no test and no report | the program reads the command line of every process |
 | The judge's own command line says nothing | the program reads the command line of every process |
 | The program's environment carries nothing of the judge's | the program looks through its own environment |
@@ -458,7 +512,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | The judge refuses a container without the cases' capped folder | the judge is started without that folder |
 | The judge measures all memory of the container and ends the program above the limit | the program takes memory as fast as it can; it must be ended before the kernel steps in |
 | A program the kernel ended for memory fails its case | the case runner is told that the kernel ended a process for memory during the run |
-| The judge ends a program that leaves the container too little memory | the case's limit is set above the container's cap and memory is taken to the end; it must be ended before the kernel steps in |
+| The judge ends a program that leaves the container too little memory | the case's limit is set above the container's cap and memory is taken to the end, with this stop and without it. **Second line of defence:** the attack gets nothing without it either, because a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose |
 | The program is ended at the case's time limit | the program hangs |
 | The judge stops reading output at the limit | the program prints without end |
 | A program that leaves a process behind fails its case | the program leaves a daemon and ends |
@@ -475,21 +529,62 @@ For every protection there is one variant of the code without it (`bench/experim
 | A result without separation says so | a result judged without separation is read |
 | Vetting without an image must be asked for | the checking tool is called without an image and without the request |
 | Every vetting container is capped in memory and processes | the command that makes the container is looked at |
-| A memory cap the Docker machine cannot hold is lowered and reported | the container of a task asking for 4,096 MB is settled on a machine with 2 GB |
+| A memory cap the Docker machine cannot hold is lowered and reported | the container of a task is settled on a machine with 1 GB |
 | Vetting containers have no network | the command that makes the container is looked at |
+| The dependency folders are the image's pinned copies, whatever the app brought | the app brings its own copy of a dependency folder |
+| Dropping what the app brought holds two folders open at any depth and takes any kind of file | 3,000 folders inside each other and a named pipe lie where dependency folders go, and the judge may hold 100 files open |
+| Handing the program's folder to the build's user reaches every entry at any depth | 3,000 folders inside each other are in the program's folder when the judging begins |
+| Removing gives up after a set number of entries | a folder of ten files is removed with a bound of five |
+| Walking a tree gives up after a set number of entries | a folder of ten files is walked with a bound of five |
+| A program's folder with too many entries fails the step, with a result | the program's folder holds more entries than the judge walks |
+| Whatever sits where the results go is removed before anything runs | a folder, a link and an earlier fault lie where the results go |
+| A result is moved into place, never written through a link | the program plants a link where the result goes. **Second line of defence:** the attack gets nothing without it either, because only root may enter the results, and whatever sat where a result goes is removed before anything runs |
+| Calls made the way another kind of machine makes them are refused | the filter is read line by line |
+| The second way of calling an x86-64 kernel is refused | the filter is read line by line |
+| The judge refuses a machine it has no call filter for | the judge is told it runs on a machine it has no filter for |
+| The judge refuses a cases' folder that may hold more than 20,000 entries | the judge is started with a cases' folder that has no cap on entries |
+| The container's caps are checked for a web task as for a command-line task | the judge of a web task is started without a cap on processes, and with a memory cap above the machine's memory |
+| The judge's result says how much its container may swap | the judge is given container descriptions with and without a swap allowance |
+| Memory moved out to swap counts as memory | the judge is given a container description with 50 MB moved out to swap |
+| A new high of the container's memory above the limit fails the case | the program takes 400 MB and gives it back while the judge does not measure |
+| A build during which the kernel ended a process fails | the build runs the container out of memory and then ends as if all were well |
+| Processes are ended even when no new process can be made | three processes are to be ended while no process can be made |
+| Each judging draws a user number of its own | twenty numbers are drawn |
+| The search for places any user may write gives up after a set number of places | six places any user may write, with a bound of three |
+| What a build left that the judge gives up on fails the step, with a result | a build leaves 10,200 files any user may write |
+| A writable place too deep for a path to name is closed off all the same | a build leaves a folder any user may write 3,000 folders down in the temporary folder |
+| After the build everyone may read and run the program | a build makes the program and its folder readable by its owner alone |
+| Opening the built program for reading follows no link out of it | a link in the program's folder points at a file outside it |
+| After the build nobody but its owner may change the program, and no file of it lends its owner's rights | a build leaves a folder any user may write and a file that lends its owner's rights, also 3,000 folders down. **Second line of defence:** the attack gets nothing without it either, because no place any user could write stays writable, and the program's side can gain no rights, so a file that lends its owner's rights lends nothing |
+| No user can rename or replace the tests and results folders from the folder above | the folder above the results is one any user may write, and the build tries to move the results folder aside |
+| What the working user left running is ended before the build | a process of the working user is running when the judging begins |
+| Between two runners and two files of tests the program's processes are ended | a case runner is ended while the program of its case still runs; the next case counts its user's processes |
+| Between two files of tests, and before the first, the cases' folder is emptied | a case leaves files, and a case runner is ended in the middle of a case. **Second line of defence:** the attack gets nothing without it either, because before every case anything left in the cases' folder is removed |
+| A served program that left its process group is ended before the next start | a served program moves its server out of the group of processes the judge started |
+| What one start of a served program wrote is removed before the next | a served program fills its data folder 3,000 folders deep; the next start looks for it |
+| A case during which the kernel ended a process fails, whatever its test says | a served program takes memory until the kernel ends it, in a test that would pass by itself |
+| The case that was running when its runner was ended fails with that reason | a case runner is ended in the middle of the second of three cases |
+| Before a new runner starts, what the last one left is taken back and a served program is started afresh | a case runner is ended while its program runs; a served program is ended by the kernel |
+| The converted task carries a cap on processes to Harbor, for every kind of task | the converted web task's container settings are read |
+| The converted task takes away the swap Harbor would allow beyond the memory cap | the converted web task's container settings are read |
+| The converted command-line task carries the cases' capped folder to Harbor | the converted command-line task's container settings are read |
+| The verifier's script says so when the judge ends without a result | the verifier's script is run with a judge that is ended |
+| A result the judge was ended over does not stay | the verifier's script is run with a judge that is ended after it wrote a result |
+| What a test reads of the program's files follows no link | the program leaves links where the test reads its files |
+| A case's file is never written through a link the program left | the program leaves a link where the test writes a file |
 
 ## Where each thing is checked
 
 | Check | Where | Numbers |
 |---|---|---|
-| All tests that need no image | automatically on every push | 477 tests pass, 4 min 59 s (time limit 15 minutes) |
-| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over | automatically on every push; the image is built on the spot | 55 tests pass, 5 min 26 s (time limit 30 minutes) |
-| Taking each of the 44 protections out in turn | automatically on every push | the tests catch all 44, 7 min 21 s (time limit 40 minutes) |
-| The sample's 60 solutions in the other six languages, five times over | on the measuring machine only (building six more images takes long) | all 60 as written |
-| The web task's 78 solutions in seven languages | on the measuring machine only | all 78 as before |
-| Judging through Harbor, the design experiment | on the measuring machine only | the numbers above |
+| All tests that need no image | automatically on every push | filled from the automatic check after the push (time limit 15 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over | automatically on every push; the image is built on the spot | filled from the automatic check after the push (time limit 30 minutes) |
+| Taking each of the 85 protections out in turn | automatically on every push | filled from the automatic check after the push (time limit 40 minutes) |
+| The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written, once after the last change and five times over before it |
+| The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
+| Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
 
-Before command-line tasks came in, the job that runs the tests took 1 min 9 s. That job now takes 4 min 59 s, together with other tests added since. The two jobs this change adds run beside it, and the longer one takes 7 min 21 s. Each job ends within half of its time limit.
+Before command-line tasks came in, the job that runs the tests took 1 min 9 s. The two jobs this change adds run beside it. On an ordinary run each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
 
 The commands that check these again on the measuring machine:
 
@@ -500,12 +595,15 @@ python -m dodambench.vet tasks/cli-csv-json --lang rust --image        # inside 
 python -m dodambench.vet tasks/cli-csv-json --lang python --unseparated   # without separation, the project's own solutions only
 python experiments/check_protections.py                                # taking each protection out in turn
 python experiments/cli_separation.py                                   # the numbers of the design decisions
+python experiments/memory_overshoot.py                                 # how far memory can be passed
 ```
 
 ## What is not checked yet, and the limits of this design
 
 - **The automatic check builds the Python image only.** The judging of the other six languages is a number from the measuring machine. A change to those six images or solutions shows only when they are run there again.
-- **Judging through Harbor was checked for one language, Python.** For the other languages only this is checked: the judge that runs inside the judging container is the same. The same settings file applies to the container the AI works in, and no real AI was run in such a container.
+- **Judging through Harbor was checked with the right solution of the web task in three languages and with the command-line sample in Python.** For the other languages only this is checked: the judge that runs inside the judging container is the same. The same settings file applies to the container the AI works in, and no real AI was run in such a container. Whether the caps are enough for what an AI builds there by itself is therefore not measured; it needs a real run.
+- **The design experiment and the time of one plain case were not measured again after the last change.** The sample, the web task, the memory experiment and the Harbor runs of the web task were.
+- **The highest memory use the kernel keeps cannot be set back on these kernels.** A run that stays below an earlier high of the same container is seen only by the judge's own measuring.
 - **The filter that refuses the calls for what outlives a process is known for two kinds of machine:** this repository's measuring machine (ARM) and the machine of the automatic check (x86). On any other kind the judge refuses.
 - **The way the container's memory is counted fits the kernel's current way (the second version of its group hierarchy).** On a machine with another way the judge cannot read its caps and refuses.
 - **No real AI was run.** That the task can be solved from what the AI is told rests only on the prepared solutions having been written to that text.

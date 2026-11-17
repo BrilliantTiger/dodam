@@ -108,14 +108,36 @@ mkdir -p /app
 cp -R "$here/variants/$variant/." /app/
 """
 
-TEST_SH = """#!/bin/sh
+TEST_SH = r"""#!/bin/sh
 # Judge one step: build the program from /app, start it, run the hidden tests, write /logs/verifier/reward.json.
 # The judge runs as root with its own Python; the program builds and runs as the plain user agent.
 set -u
 . /tests/step.env
-export DODAM_APP_USER="${DODAM_APP_USER:-agent}"
-exec /opt/judge/bin/python /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out /logs/verifier
+export DODAM_APP_USER="${DODAM_APP_USER-agent}"
+out=/logs/verifier
+/opt/judge/bin/python /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out "$out" "$@"
+code=$?
+# The judge leaves a result (exit code 0) or its own account of a fault (exit code 3). A judge that
+# was ended from outside leaves neither. Then nothing here may read as a judgement, and this says so.
+if [ "$code" -eq 0 ] && [ -f "$out/reward.json" ]; then exit 0; fi
+if [ "$code" -eq 3 ] && [ -f "$out/judge-fault.json" ]; then exit 3; fi
+rm -rf "$out/reward.json" "$out/reward.txt" "$out/judge-fault.json"
+set -C
+printf '{"judge_fault": "{\\"severity\\": \\"error\\", \\"file\\": \\"judge\\", \\"key\\": \\"ended\\", \\"message\\": \\"the judging ended without a result (exit code %s)\\"}"}\n' "$code" > "$out/judge-fault.json"
+if [ "$code" -eq 0 ]; then code=3; fi
+exit "$code"
 """
+
+
+def container_settings(task: Task) -> str:
+    """What Harbor's task settings cannot say, as a file Harbor merges into its own container
+    settings: a cap on processes, no swap beyond the memory cap, and for a command-line task the
+    capped memory-backed folder the cases live in. Every kind of task carries it."""
+    lines = ["services:", "  main:", f"    pids_limit: {PROCESS_CAP}",
+             f"    memswap_limit: {task.limits['memory_mb']}m"]
+    if task.meta.get("interface") == "cli":
+        lines += ["    tmpfs:", f"      - {cases_mount(task)}"]
+    return "\n".join(lines) + "\n"
 
 
 def _executable(path: Path, text: str) -> None:
@@ -179,13 +201,8 @@ def to_harbor(task: Task, lang_key: str, out_root: Path | str, image: str | None
     shutil.copy(JUDGE_SOURCE, tests / "lib" / "dodam_judge.py")
     if task.meta.get("interface") == "cli":
         shutil.copy(CLI_SOURCE, tests / "lib" / "dodam_cli.py")
-        # What Harbor's task settings cannot say goes into the container through a file Harbor merges
-        # into its own: a cap on processes, and the capped memory-backed folder the cases live in.
-        (out / "environment").mkdir()
-        (out / "environment" / "docker-compose.yaml").write_text(
-            "services:\n  main:\n"
-            f"    pids_limit: {PROCESS_CAP}\n"
-            f"    tmpfs:\n      - {cases_mount(task)}\n", encoding="utf-8")
+    (out / "environment").mkdir()
+    (out / "environment" / "docker-compose.yaml").write_text(container_settings(task), encoding="utf-8")
     env = verifier_env(task, lang_key)
     (tests / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
     _executable(tests / "test.sh", TEST_SH)

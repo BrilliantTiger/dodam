@@ -117,6 +117,8 @@ jobs:
   # verifier's container: the judge runs as root in a container of the Python image, without network
   # and under caps, as the verifier does. The other six images are checked on the project's own
   # machine, where they are already built.
+  # An ordinary run ends in less than half of the time limit. The rest is room for a run in which tests
+  # fail: a failing test in a container waits out its own time limit before it reports.
   attacks:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -140,6 +142,8 @@ jobs:
 
   # Every protection of the judging is broken in turn, in a copy; a test must then fail. A
   # protection that can be removed without a test noticing fails this job.
+  # An ordinary run ends in less than half of the time limit. The rest is room for a run in which a
+  # broken variant makes a container wait out the time limit its test sets.
   protections:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
