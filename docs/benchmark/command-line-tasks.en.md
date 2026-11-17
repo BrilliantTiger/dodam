@@ -273,90 +273,163 @@ This task has no reason to call a shell, so it has no check of a file name or a 
 
 The 70 solutions of the seven languages were judged inside the images five times each, 350 judgings and 14,350 test outcomes. The number of solutions whose reward or any single test outcome differed between the five is 0.
 
-### The web task is as it was
+### The web task
 
-| | Solutions | Judged as written | Test outcomes |
-|---|---|---|---|
-| Before the change | 78 (11 in each language, 12 in C++) | 78 | 3,231 |
-| After the change | 78 | 78 | 3,231 |
+The judge of web tasks is the same code, so it changed here as well: it closes the tests before the build, puts nothing on a command line, and runs the build and the served program confined. The judgement of the 78 prepared solutions is the same as before in all seven languages.
 
-The number of solutions whose reward or any single test outcome differs is 0. The files the web task converts to are the same byte for byte in all seven languages, but for the judge's own file.
+| Language | Solutions | Judged as written (before) | Judged as written (after) | Test outcomes | Solutions with a test whose outcome differs |
+|---|---|---|---|---|---|
+| Python | 11 | 11 | 11 | 456 | 0 |
+| TypeScript | 11 | 11 | 11 | 456 | 0 |
+| Java | 11 | 11 | 11 | 456 | 0 |
+| C# | 11 | 11 | 11 | 456 | 0 |
+| Go | 11 | 11 | 11 | 456 | 0 |
+| Rust | 11 | 11 | 11 | 456 | 0 |
+| C++ | 12 | 12 | 12 | 495 | 0 |
+| Total | 78 | 78 | 78 | 3,231 | 0 |
+
+In the reward file only the two things decided beforehand differ. There is a new entry that says whether the program ran separated, and for the 7 solutions with an unjudged security check the security pass rate is lower (an unjudged check no longer counts as passed). The number of solutions with any other entry changed is 0.
 
 ### On the path the real measurement uses
 
-The converted sample task was run through Harbor with a prepared solution in place of an AI (Python). The two steps of the right solution, the solution that ignores the size, the one that uses the value as the file name and the one that keeps the line-end character: in all five judgings no entry of the reward differed from the direct check. The right solution finished both steps in 1 minute 4 seconds.
+The converted sample task was run through Harbor with a prepared solution in place of an AI (Python). The judging container Harbor made got the cap on processes and the size-capped folder from the settings file sent with the task, and the judge checked for them before it judged. The right solution, two vulnerable ones and one broken one were put in; five of their judgings have a counterpart in the direct check. In all 5 judgings no entry of the reward differed from the direct check. The right solution finished both steps in 68 seconds.
+
+### How far memory is really passed
+
+With a limit of 256 MB and a container cap of 1,024 MB, one process took memory as fast as it could, twenty times. At an interval of 0.002 seconds what it reached before it was ended was 256 MB at the least, 273 MB in the median and 280 MB at the most. Eight processes sharing it out were ended at 312 MB, memory files at 292 MB. In no case did the kernel have to step in, and the case failed.
 
 ### How long judging takes
 
-The median time to judge the change step of the right solution (50 tests) inside the image. It includes making the container and building.
+The median time to judge the change step of the right solution (50 tests) inside the image. It includes making the container and building. One plain case takes 7.04 ms for the program alone and 8.54 ms as a whole case of the judge (median of 200, Python).
 
 | | Python | TypeScript | Java | C# | Go | Rust | C++ |
 |---|---|---|---|---|---|---|---|
-| The whole judging | 8.9 s | 3.8 s | 9.7 s | 6.3 s | 3.0 s | 3.8 s | 3.9 s |
-| Of which the build | 0.0 s | 0.2 s | 1.6 s | 1.3 s | 0.3 s | 0.4 s | 1.4 s |
+| The whole judging | 9.4 s | 3.8 s | 9.5 s | 5.5 s | 3.3 s | 3.7 s | 3.9 s |
+| Of which the build | 0.0 s | 0.18 s | 1.62 s | 1.31 s | 0.52 s | 0.34 s | 1.37 s |
 
 ## The design decisions and their numbers
 
-The list of attacks was written before any candidate was built: the program reads the tests, writes the result, becomes the build's user, leaves files or shared memory for a later case, leaves a process behind, fills the disk, floods its output, forks without end, uses up memory, hangs. Every candidate met the same attacks in fresh containers of the Python image. The limits of a case were 5 seconds, 256 MB of memory, 256 KB of output, 16 processes and 32 MB of files. Running `bench/experiments/cli_separation.py` gives the same numbers again.
+The list of attacks was written before the candidates were compared and is a file in the repository (`bench/experiments/attacks.toml`, 40 attacks). Every attack on it is a test, and a test of its own checks that. Every candidate met the same attacks in fresh containers of the Python image. Every container was capped at 1,024 MB of memory and 600 processes, and the limits of a case were 5 seconds, 256 MB of memory, 256 KB of output, 16 processes and 32 MB of files. Running `bench/experiments/cli_separation.py` gives the same tables again. The measured values differ a little from run to run.
+
+### When the tests are closed
+
+When the build tried to copy the tests folder, it took 1 hidden test file with the tests closed after the build, and 0 with the tests closed before anything runs. After the build was what was chosen before. It is now before anything runs.
+
+### Where things about the judging are written
+
+When the judge handed the name of the test file over as a command-line argument, the program read that name in the process list. Handed over in the environment, it did not. It is now the environment.
 
 ### Who the program runs as
 
 | Candidate | Attacks stopped (of 6) | What got through |
 |---|---|---|
-| The build's user, as it is | 2 | reading the tests, leaving a changed program for a later case, leaving a file in a shared temporary folder, leaving shared memory |
-| Only switching to a separate user | 2 | reading the tests, becoming the build's user, leaving a file in a temporary folder, leaving shared memory |
-| **Chosen**: a user with a random number for each judging + closing the tests and results folders + taking write access away from every place anyone could write + removing shared memory after a case | **6** | nothing |
+| The build's user, as it is | 1 | reading the tests, becoming the build's user, changing the program for a later case, leaving a file in a shared temporary folder, leaving shared memory |
+| Only switching to a separate user | 3 | reading the tests, leaving a file in a shared temporary folder, leaving shared memory |
+| **Chosen**: a user with a random number for each judging + closing the tests and results folders + taking write access away from every place anyone could write + refusing the calls for what outlives a process | 6 | nothing |
 
-All three stopped writing the result file. The time of one case (median of 200) is 6.91 ms for the program alone, 8.74 ms when it is run through `su` as the build's user, and 7.84 ms for a whole case the chosen way (making the folder, running, ending, removing). The chosen way stops the most and is faster than going through `su`.
+Letting the kernel count the limits for a group of processes made inside the container, and opening new namespaces, are allowed in 0 of the seven images, so they were no candidates.
 
-Two other ways were checked first: letting the kernel count the limits for a group of processes made inside the container, and opening new namespaces. They are allowed in 0 of the seven images, so they were no candidates.
+### What bounds files
 
-### Who enforces the limits
+The first part of a cell is what the program really wrote, the second the judgement of its case. The limit is 32 MB.
 
-"Stopped" means: no fault of the judge, within 1.25 times the limit, and ended within 3 seconds of the time limit.
-
-| Attack | Kernel limits only | The judge watching only | Chosen (both) |
+| Attack | The kernel's file-size limit only | The judge walking the folder (chosen before) | **Chosen**: a size-capped memory-backed folder |
 |---|---|---|---|
-| Forking without end | ended by the time limit after 5.03 s | **the judge could not end it: a fault of the judge** | 0.10 s |
-| Threads without end | ended by the time limit after 5.01 s | reached 230 (limit 16) | 0.07 s |
-| One process using up memory | 0.18 s | 0.15 s, 272 MB | 0.11 s, 261 MB |
-| Eight processes sharing it out | **reached 639 MB** (limit 256) | 423 MB | 0.09 s, 244 MB |
-| One huge file | 0.11 s, 32 MB | 59 MB (limit 32) | 0.07 s, 32 MB |
-| Very many small files | **wrote 4,680 MB** | 88 MB | 0.07 s, 43 MB |
-| Flood of output | **the judge's process was killed** | 0.11 s | 0.06 s |
-| Hanging, ignoring every signal | 5.01 s | 5.02 s | 5.01 s |
-| Stopped (of 8) | 5 | 3 | 7 |
+| One huge file | 32 MB, passes | 32 MB, passes | 32 MB, passes |
+| 400 files of 1 MB | 400 MB, passes | 37 MB, fails (files) | 32 MB, passes |
+| 240 MB in files deleted while open | 240 MB, passes | 240 MB, passes | 32 MB, passes |
+| 240 MB below 1,100 folders | 244 MB, passes | 244 MB, fails (files) | 32 MB, passes |
+| 200,000 empty files | 200,000 entries, passes | 200,000 entries, passes | 19,998 entries, passes |
 
-The chosen way ended all eight attacks without a fault of the judge. The one that does not count as "stopped" is very many small files: it wrote 43 MB (limit 32 MB) before it was ended. The kernel does not limit the size of the case's whole folder, so the program gets as far past the limit as it can write between two measurements.
+"Walking the folder", chosen before, did not see files deleted while open (240 MB written, and the case passed), and what got past it was bounded only by write speed and the case's time limit. 200,000 empty files passed with both of these candidates and used 452 MB of kernel memory. With the chosen one no attack writes more than the limit. The case of a program that stopped at the limit does not fail: it could not take more, so there is no need to fail it.
 
-### How often the judge measures
+### What counts as memory
 
-| Interval | Memory of one process (limit 256 MB) | Memory of eight processes | Many files (limit 32 MB) | One plain case | Processor the judge uses while a program runs |
-|---|---|---|---|---|---|
-| 0.010 s | 282 MB | 491 MB | 69 MB | 7.86 ms | 3.8% |
-| 0.005 s | 288 MB | 375 MB | 62 MB | 7.91 ms | 6.1% |
-| **0.002 s** | **266 MB** | 362 MB | 48 MB | 7.94 ms | 8.2% |
-| 0.001 s | 265 MB | 383 MB | 39 MB | 7.90 ms | 13.1% |
+The first part of a cell is the memory the container used more before the program was ended, the second the judgement of its case. The limit is 256 MB.
 
-Each number is the largest of five tries. 0.002 s is the longest interval at which one process taking memory as fast as it can gets less than 5% past the limit (266 MB, 3.9%). 0.001 s is no better and raises the judge's own processor use to 13.1%. The time of a plain case did not depend on the interval. Several processes taking memory at once got to 1.4 to 1.9 times the limit at every interval before they were ended. What protects the judge then is the memory limit of the container, and the setting that makes the kernel end the program first when memory runs out. An attack that asks for more memory than the container has is kept as a test: that case alone fails, and the cases before and after it pass.
+| Attack | Adding up the processes' memory (chosen before) | **Chosen**: the whole container |
+|---|---|---|
+| One process | 274 MB, fails (memory) | 263 MB, fails (memory) |
+| Eight processes, 64 MB each | 309 MB, fails (memory) | 312 MB, fails (memory) |
+| Memory files mapped by no process | up to the container's cap, where the kernel ended the judging process | 292 MB, fails (memory) |
+| 320 MB of shared memory filled by short-lived processes | 330 MB, passes | 268 MB, fails (memory) |
+
+"Adding up the processes' memory", chosen before, did not count memory that is in no process. Memory files went up to the container's cap, and shared memory passed above the limit. Counting the whole container, all four attacks are ended near the limit and fail. (This table was measured with shared memory allowed. In the chosen design it cannot be made.)
+
+### What outlives a process
+
+| Candidate | Shared memory: right after the case | Left for the next case | Message queues: right after the case | Left for the next case |
+|---|---|---|---|---|
+| left alone | 320 MB | 320 MB | 61 MB | 61 MB |
+| removed after the case | 320 MB | 0 MB | 61 MB | 0 MB |
+| **chosen**: the calls are refused | 0 MB | 0 MB | 0 MB | 0 MB |
+
+Removing after the case leaves nothing for the next case, but until then the memory is held although the program has ended. If the container's memory runs out in that time, the kernel has no program to end. With the calls refused it never comes to be. The sample solutions of all seven languages ran without these calls.
+
+### What bounds processes
+
+A cell holds the largest number of processes and threads seen, the time until the end, and the judgement of the case. The limit is 16.
+
+| Attack | The judge counting only | Kernel cap one above the limit, and counting (chosen before) | **Chosen**: the kernel cap |
+|---|---|---|---|
+| Forking without end | 1, 0.14 s, fails (processes) | 17, 0.08 s, fails (processes) | 16, 5.02 s, fails (time) |
+| Threads without end | 47, 0.06 s, fails (processes) | 16, 0.07 s, fails (processes) | 16, 5.02 s, fails (time) |
+
+Counting alone depends on the judge counting in time. In two runs of this experiment it ended the forking program at once in one, and in the other only after 12.6 seconds at 598 processes, nearly the container's cap of 600. A kernel cap holds it. What was chosen before was a kernel cap one above the limit, with the judge seeing that one and failing the case at once; it ended a program that forks without end within 0.1 seconds. Now only the kernel cap is left. Processes cannot pass the limit, and a program that tries without end is ended at its time limit (5 seconds) and fails. Judging it takes 5 seconds longer; in return one thing holds the bound, and a test fails without it.
 
 ### How a case is ended
 
 | Candidate | A process that made itself a daemon | A process that keeps making children | Time taken |
 |---|---|---|---|
-| Signalling the process group | **1 survived** | 0 | 0.000 s |
-| Walking the list of processes and ending each | 0 | 0 | 0.62 to 0.63 s |
-| **Chosen**: becoming that user and signalling all of its processes at once | 0 | 0 | 0.003 to 0.033 s |
+| Signalling the process group | 1 survived | 0 | 0.0 s |
+| Walking the list of processes and ending each | 0 | 0 | 0.013 to 0.014 s |
+| **Chosen**: becoming that user and signalling all of its processes at once | 0 | 0 | 0.016 to 0.016 s |
 
-### What memory is measured by
+### How what a case left is removed
 
-With a kernel limit on address space, at 512 MB only Python, Rust and C++ start; TypeScript, Java, C# and Go do not. At 1,024 MB Java and C# still do not start, and only at 4,096 MB do all seven run. A limit that must differ between languages would break "one set of tests judges every language", so it is not used, and the memory really occupied is measured.
+| Candidate | 1,100 folders inside each other | 20,000 empty files |
+|---|---|---|
+| The standard library's removal | fails: too many open files | 0.129 s |
+| **Chosen**: a removal that holds two folders open on its way down | removed, 0.067 s | 0.129 s |
 
-The limit on processes counts threads, so the threads a language's runtime uses while idle were measured: Java 19, C# 9, TypeScript 7, Go 4, and Python, Rust and C++ 1. The sample task's limit of 64 is more than three times the largest of these.
+### How often the judge measures
+
+What one process taking memory as fast as it can reached before it was ended (limit 256 MB, twenty tries), and the processor the judge uses. The processor use is the processor time the judging process used while a program slept for two seconds, divided by those two seconds; the smallest and the largest of five.
+
+| Interval | At the least | Median | At the most | Processor the judge uses |
+|---|---|---|---|---|
+| 0.010 s | 266 MB | 314 MB | 327 MB | 3.1% to 3.7% |
+| 0.005 s | 259 MB | 289 MB | 303 MB | 4.7% to 5.6% |
+| **0.002 s** | 256 MB | 273 MB | 280 MB | 8.2% to 9.2% |
+| 0.001 s | 256 MB | 265 MB | 272 MB | 12.3% to 14.9% |
+
+0.002 seconds stays. Its largest value is below those of 0.010 and 0.005 seconds. 0.001 seconds lowers it only a little more and uses more processor. The choice matters less than it did, though: the line that cannot be passed is now the container's cap, not the interval.
+
+### Why memory is not bounded by address space
+
+| Language | 512 MB | 1,024 MB | 4,096 MB | Threads while idle |
+|---|---|---|---|---|
+| Python | starts | starts | starts | 1 |
+| TypeScript | does not start | starts | starts | 7 |
+| Java | does not start | does not start | starts | 14 |
+| C# | does not start | does not start | starts | 9 |
+| Go | does not start | starts | starts | 4 |
+| Rust | starts | starts | starts | 1 |
+| C++ | starts | starts | starts | 1 |
+
+A kernel limit on address space would need a different value for each language. A limit that differs between languages would break "one set of tests judges every language", so it is not used. The sample task's limit of 64 processes is more than three times the idle threads of the language that has the most.
+
+### What the chosen design does not stop
+
+- **Memory can pass the limit between two measurements.** The line that cannot be passed is the container's cap. A program that was above the limit and came back below it between measurements may not fail.
+- **What a build writes into `/app` has no cap.** Only the size of one file and the build's 900 seconds bound it.
+- **A program that stopped at a cap does not fail.** Writing files up to the limit and being refused more, or making processes up to the limit and being refused more, is not by itself a failure.
+- **A plain user can see that the judge's processes exist, when they started and how much processor time they used.**
+- **Through Harbor a web task gets no cap on processes.** The containers the checking tool makes do.
 
 ## Every protection, and the test that fails without it
 
-For every protection there is one variant of the code without it (`bench/experiments/protections.toml`). `python experiments/check_protections.py` takes the protections out one at a time in a copy of the repository and runs that protection's tests; it fails when they all still pass.
+For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 44 of them). `python experiments/check_protections.py` takes the protections out one at a time in a copy of the repository and runs that protection's tests; it fails when they all still pass. Today the tests catch all 44. A test also checks that this table and that file hold the same protections.
 
 | Protection | The attack its test makes |
 |---|---|
@@ -409,30 +482,32 @@ For every protection there is one variant of the code without it (`bench/experim
 
 | Check | Where | Numbers |
 |---|---|---|
-| All tests of the format, the conversion and the judge | automatically on every push | 396 passed, 3 skipped |
-| Attacking programs judged inside the Python image (reading the tests, writing the result, becoming root, the network, leaving things behind, breaking limits) | automatically on every push; the automatic check builds the Python image itself (15 seconds) | 24 tests that run inside the image |
-| The sample's 10 Python solutions judged inside the image, and judged three times over to see that nothing differs | automatically on every push | all 10 as written |
-| The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written |
+| All tests that need no image | automatically on every push | 477 tests pass, 4 min 59 s (time limit 15 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over | automatically on every push; the image is built on the spot | 55 tests pass, 5 min 26 s (time limit 30 minutes) |
+| Taking each of the 44 protections out in turn | automatically on every push | the tests catch all 44, 7 min 21 s (time limit 40 minutes) |
+| The sample's 60 solutions in the other six languages, five times over | on the measuring machine only (building six more images takes long) | all 60 as written |
 | The web task's 78 solutions in seven languages | on the measuring machine only | all 78 as before |
-| Five repetitions, judging through Harbor, the design experiment | on the measuring machine only | the numbers above |
+| Judging through Harbor, the design experiment | on the measuring machine only | the numbers above |
 
-The test step of the automatic check took 1 minute 32 seconds before this change and 6 minutes 48 seconds after it.
+Before command-line tasks came in, the job that runs the tests took 1 min 9 s. That job now takes 4 min 59 s, together with other tests added since. The two jobs this change adds run beside it, and the longer one takes 7 min 21 s. Each job ends within half of its time limit.
 
 The commands that check these again on the measuring machine:
 
 ```
 cd bench
 python -m dodambench.task tasks/cli-csv-json                           # the format
-python -m dodambench.vet tasks/cli-csv-json --lang python              # without an image, quickly
-python -m dodambench.vet tasks/cli-csv-json --lang rust --image        # inside the image, with the real separation and limits
+python -m dodambench.vet tasks/cli-csv-json --lang rust --image        # inside the image, with the real separation and caps
+python -m dodambench.vet tasks/cli-csv-json --lang python --unseparated   # without separation, the project's own solutions only
+python experiments/check_protections.py                                # taking each protection out in turn
 python experiments/cli_separation.py                                   # the numbers of the design decisions
 ```
 
 ## What is not checked yet, and the limits of this design
 
-- **Memory and folder size overshoot by what happens between two measurements.** One process gets about 4% past the limit; several processes taking memory at once get to 1.4 to 1.9 times it; very many small files get to 1.2 to 1.5 times it, before they are ended. The case is recorded as failed every time. While the overshoot lasts, the container's memory limit protects the judge. The disk has no container limit, so the overshoot is what can be written in 0.002 seconds.
-- **Without the image there is no separation.** On a developer machine where the judge is not root the program runs as the developer, and only the limits on time, output and file size and the check for processes left behind hold. For Python the prepared solutions were judged the same both ways, but the numbers to trust are those from inside the image.
 - **The automatic check builds the Python image only.** The judging of the other six languages is a number from the measuring machine. A change to those six images or solutions shows only when they are run there again.
-- **Judging through Harbor was checked for one language, Python, with four solutions.** For the other languages only this is checked: the judge that runs inside the judging container is the same.
+- **Judging through Harbor was checked for one language, Python.** For the other languages only this is checked: the judge that runs inside the judging container is the same. The same settings file applies to the container the AI works in, and no real AI was run in such a container.
+- **The filter that refuses the calls for what outlives a process is known for two kinds of machine:** this repository's measuring machine (ARM) and the machine of the automatic check (x86). On any other kind the judge refuses.
+- **The way the container's memory is counted fits the kernel's current way (the second version of its group hierarchy).** On a machine with another way the judge cannot read its caps and refuses.
 - **No real AI was run.** That the task can be solved from what the AI is told rests only on the prepared solutions having been written to that text.
 - **The sample is one task.** Checks another subject needs, such as input reaching a shell in a log analyzer or a configuration checker, are added when that task is made.
+- **The Rust image holds one file under its toolchain that any user can write.** The judge closes it when it judges. The image was not changed.
