@@ -74,7 +74,7 @@ When the owner puts a token of the desk's own in the state folder (a file named 
 
 ## What enforces each rule, and what shows it
 
-"Tests" are the automatic checks in `bench/tests/test_desk_lock.py`, which run on every push without network and without a sign-in. "The live check" is `tools/desk/check_lock.py`: it starts the real locked session with the real start command against made-up data and tries each forbidden thing, asked plainly and asked by text planted in a made-up issue. Two further runs show the bounds inside one session (fourteen reading calls asked for at once, and more turns than a closed list of three allows) and a sign-in that the service refuses (a made-up token). Its last result is in `tools/desk/lock-check.json`.
+"Tests" are the automatic checks in `bench/tests/test_desk_lock.py`, which run on every push without network and without a sign-in. "The live check" is `tools/desk/check_lock.py`: it starts the real locked session with the real start command against made-up data and tries each forbidden thing, asked plainly and asked by text planted in a made-up issue. Two further runs show the bounds inside one session (fourteen reading calls asked for at once, and more turns than a closed list of three allows) and a sign-in that the service refuses (a made-up token). One more run, made by its name only, shows that what the relay says about who is held back reaches the reading tool through Claude Code: a made-up item carries a comment of an account that the relay's record holds back, a session for another account's arrival reads it, and the comment is left out and counted as not shown. Its last result is in `tools/desk/lock-check.json`.
 
 ### The rules that used to hold only because the model obeyed
 
