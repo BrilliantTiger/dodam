@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime, timezone
 import errno
 import fcntl
 import json
@@ -67,16 +68,18 @@ PER_PAGE = 100
 
 STATE_FOLDER_NAME = ".dodam-desk"
 STATE_FILE_NAME = "watch-state.json"
-STATE_VERSION = 4
+STATE_VERSION = 5
+LEGACY_STATE_KEYS = frozenset({"baseline_cutoff", "pull_max_review_id", "pull_latest_review_ids"})
 
 # Explicit upper bounds on state. Evictable caches/windows drop only entries that monotonic
-# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_SAME_SECOND_REVIEW_IDS,
+# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_WINDOW_REVIEW_IDS,
 # MAX_STATE_BYTES) end with exit code 8 instead of forgetting per-pull-request history, and
 # MAX_PENDING_EVENTS pauses polling without advancing watermarks past unqueued events.
+REVIEW_LAG_WINDOW_SECONDS = 300
 MAX_OPEN_PR_REVIEWS_POLLED = 25
 MAX_SEEN_IDS = 5_000
 MAX_TRACKED_PULLS = 10_000
-MAX_SAME_SECOND_REVIEW_IDS = 1_000
+MAX_WINDOW_REVIEW_IDS = 1_000
 MAX_REVIEW_ETAGS = 100
 MAX_PENDING_EVENTS = 1_000
 MAX_STATE_BYTES = 16 * 1024 * 1024
@@ -143,17 +146,21 @@ Notes:
   - When the waiting queue reaches MAX_PENDING_EVENTS (1,000), the watcher reports
     what is queued and asks GitHub for nothing more until there is room, without
     moving any watermark past unqueued events.
+  - Reviews sent up to 5 minutes before the latest review time seen on a pull request
+    remain candidates (remembered up to MAX_WINDOW_REVIEW_IDS = 1,000 per pull request).
+    Restarting from page 1 of reviews on a pull request with more than 100 reviews
+    relies on GitHub marking a pull request as updated when a review is sent.
 
 Exit codes:
   0    Normal exit: printed one JSON object (or --help text) and saved state.
   1    Unexpected internal error before printing any events.
   2    gh is not signed in, missing, or rejected with HTTP 401.
   3    Invalid command-line arguments or disallowed --state path.
-  4    Existing state file or its folder cannot be read or is damaged.
+  4    Existing state file or its folder cannot be read, is damaged, or is from an older version.
   5    State location cannot be written (checked before calling GitHub).
   6    Another watcher is already holding the lock on this --state file.
   7    Events JSON was printed on standard output, then saving state failed.
-  8    A non-evictable state capacity bound (tracked pull requests or state bytes) was reached.
+  8    A non-evictable state capacity bound (tracked pull requests, review window ids, or state bytes) was reached.
   130  Interrupted by signal (SIGINT).
 """
 
@@ -355,7 +362,7 @@ def _empty_state() -> dict[str, object]:
         "pull_draft": {},
         "pull_ready_seq": {},
         "pull_latest_review_time": {},
-        "pull_latest_review_ids": {},
+        "pull_recent_reviews": {},
         "pull_baseline_updated_at": {},
         "pull_reviews_checked": {},
         "pull_review_page": {},
@@ -381,18 +388,13 @@ def _check_and_bound_state(state: dict[str, object]) -> None:
     known_prs: list[int] = state["known_pr_numbers"]  # type: ignore[assignment]
     pull_heads: dict[str, str] = state["pull_heads"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = state["pull_latest_review_time"]  # type: ignore[assignment]
-    pull_rev_ids: dict[str, list[int]] = state["pull_latest_review_ids"]  # type: ignore[assignment]
-    for rk, rids in list(pull_rev_ids.items()):
-        dedup_rids = sorted(set(rids))
-        if len(dedup_rids) > MAX_SAME_SECOND_REVIEW_IDS:
-            raise StateFullError("Same-second review id set reached MAX_SAME_SECOND_REVIEW_IDS.")
-        pull_rev_ids[rk] = dedup_rids
+    pull_recent_revs: dict[str, dict[str, str]] = state["pull_recent_reviews"]  # type: ignore[assignment]
 
     all_pr_nums = (
         set(known_prs)
         | {int(k) for k in pull_heads if k.isdigit()}
         | {int(k) for k in pull_rev_time if k.isdigit()}
-        | {int(k) for k in pull_rev_ids if k.isdigit()}
+        | {int(k) for k in pull_recent_revs if k.isdigit()}
         | set(dedup_open)
     )
     if len(all_pr_nums) > MAX_TRACKED_PULLS:
@@ -447,10 +449,25 @@ def _load_state(path: Path) -> dict[str, object]:
         raise StateReadError("State file has an invalid root value.")
 
     base = _empty_state()
+    if "version" in raw:
+        raw_ver = raw["version"]
+        if isinstance(raw_ver, bool) or not isinstance(raw_ver, int):
+            raise StateReadError("State file has an invalid version.")
+        if raw_ver != STATE_VERSION:
+            raise StateReadError(
+                f"State file was written by watcher version {raw_ver} (expected version {STATE_VERSION}); "
+                "delete the old state file or pass a new --state path to start fresh "
+                "(nothing older than the first start is reported)."
+            )
+    elif any(k in raw for k in LEGACY_STATE_KEYS):
+        raise StateReadError(
+            f"State file was written by an earlier watcher version (expected version {STATE_VERSION}); "
+            "delete the old state file or pass a new --state path to start fresh "
+            "(nothing older than the first start is reported)."
+        )
+
     if not set(raw).issubset(set(base) | {"version"}):
         raise StateReadError("State file contains unrecognized fields.")
-    if "version" in raw and (isinstance(raw["version"], bool) or not isinstance(raw["version"], int)):
-        raise StateReadError("State file has an invalid version.")
     if "initialized" in raw and not isinstance(raw["initialized"], bool):
         raise StateReadError("State file has an invalid initialized flag.")
     base["initialized"] = bool(raw.get("initialized", False))
@@ -497,22 +514,41 @@ def _load_state(path: Path) -> dict[str, object]:
         for k, v in rev_time_map.items()
     ):
         raise StateReadError("State file has invalid pull_latest_review_time.")
+    for ts_val in rev_time_map.values():
+        try:
+            _iso_to_epoch_seconds(ts_val)
+        except MalformedItemError as exc:
+            raise StateReadError("State file has invalid pull_latest_review_time.") from exc
     base["pull_latest_review_time"] = dict(rev_time_map)
 
-    rev_ids_map = raw.get("pull_latest_review_ids", {})
-    if not isinstance(rev_ids_map, dict):
-        raise StateReadError("State file has invalid pull_latest_review_ids.")
-    parsed_rev_ids: dict[str, list[int]] = {}
-    for k, v in rev_ids_map.items():
+    recent_revs_map = raw.get("pull_recent_reviews", {})
+    if not isinstance(recent_revs_map, dict):
+        raise StateReadError("State file has invalid pull_recent_reviews.")
+    parsed_recent_revs: dict[str, dict[str, str]] = {}
+    for k, inner in recent_revs_map.items():
         if (
             not isinstance(k, str)
-            or not isinstance(v, list)
-            or len(v) > MAX_SAME_SECOND_REVIEW_IDS
-            or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in v)
+            or not isinstance(inner, dict)
+            or len(inner) > MAX_WINDOW_REVIEW_IDS
         ):
-            raise StateReadError("State file has invalid or oversized pull_latest_review_ids.")
-        parsed_rev_ids[k] = sorted(set(v))
-    base["pull_latest_review_ids"] = parsed_rev_ids
+            raise StateReadError("State file has invalid or oversized pull_recent_reviews.")
+        clean_inner: dict[str, str] = {}
+        for rk, rts in inner.items():
+            if (
+                not isinstance(rk, str)
+                or not rk.isdigit()
+                or int(rk) <= 0
+                or not isinstance(rts, str)
+                or not ISO_UTC_RE.fullmatch(rts)
+            ):
+                raise StateReadError("State file has invalid pull_recent_reviews entry.")
+            try:
+                _iso_to_epoch_seconds(rts)
+            except MalformedItemError as exc:
+                raise StateReadError("State file has invalid pull_recent_reviews timestamp.") from exc
+            clean_inner[rk] = rts
+        parsed_recent_revs[k] = clean_inner
+    base["pull_recent_reviews"] = parsed_recent_revs
 
     for int_map in ("pull_seq", "pull_ready_seq", "pull_review_page"):
         val = raw.get(int_map, {})
@@ -787,10 +823,54 @@ def _pos_int(value: object) -> int:
     return value
 
 
+def _iso_to_epoch_seconds(ts: str) -> int:
+    try:
+        dt = datetime(
+            int(ts[0:4]),
+            int(ts[5:7]),
+            int(ts[8:10]),
+            int(ts[11:13]),
+            int(ts[14:16]),
+            int(ts[17:19]),
+            tzinfo=timezone.utc,
+        )
+    except ValueError as exc:
+        raise MalformedItemError() from exc
+    return int(dt.timestamp())
+
+
 def _iso_utc(value: object) -> str:
     if not isinstance(value, str) or not ISO_UTC_RE.fullmatch(value):
         raise MalformedItemError()
+    _iso_to_epoch_seconds(value)
     return value
+
+
+def _record_seen_review(
+    rid: int,
+    submitted_at: str,
+    curr_latest_time: str,
+    curr_recent_map: dict[str, str],
+) -> tuple[str, dict[str, str]]:
+    """Advance latest review time if newer and remember review ids inside the 5-minute lag window."""
+    rev_sec = _iso_to_epoch_seconds(submitted_at)
+    if not curr_latest_time or submitted_at > curr_latest_time:
+        curr_latest_time = submitted_at
+        cutoff_sec = rev_sec - REVIEW_LAG_WINDOW_SECONDS
+        curr_recent_map = {
+            k: ts
+            for k, ts in curr_recent_map.items()
+            if _iso_to_epoch_seconds(ts) >= cutoff_sec
+        }
+    else:
+        cutoff_sec = _iso_to_epoch_seconds(curr_latest_time) - REVIEW_LAG_WINDOW_SECONDS
+        if rev_sec < cutoff_sec:
+            return (curr_latest_time, curr_recent_map)
+
+    curr_recent_map[str(rid)] = submitted_at
+    if len(curr_recent_map) > MAX_WINDOW_REVIEW_IDS:
+        raise StateFullError("Recent review window id set reached MAX_WINDOW_REVIEW_IDS.")
+    return (curr_latest_time, curr_recent_map)
 
 
 def _classify_actor(user_obj: object, own_login: str, include_own: bool) -> tuple[bool, str | None]:
@@ -1019,7 +1099,7 @@ def _initialize_baseline(
     pull_heads: dict[str, str] = working["pull_heads"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
-    pull_rev_ids: dict[str, list[int]] = working["pull_latest_review_ids"]  # type: ignore[assignment]
+    pull_recent_revs: dict[str, dict[str, str]] = working["pull_recent_reviews"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
@@ -1161,7 +1241,7 @@ def _initialize_baseline(
             max_rc_id = cid
     wm["max_review_comment_id"] = max_rc_id
 
-    # 6. Existing reviews on the polled open pull requests (recording latest sending time and same-second review ids)
+    # 6. Existing reviews on the polled open pull requests (recording latest time and 5-minute window ids)
     reviews_baselined: list[int] = []
     for num in polled_open_prs:
         _, tail_page, r_etag, r_items, hint = _fetch_reviews_from_tail(
@@ -1172,8 +1252,7 @@ def _initialize_baseline(
         pull_rev_page[num_key] = tail_page
         _set_review_etag(etags, num, tail_page, r_etag)
         reviews_baselined.append(num)
-        latest_time = pull_rev_time.get(num_key, "")
-        same_sec_ids: set[int] = set(pull_rev_ids.get(num_key, []))
+        baseline_revs: list[tuple[str, int]] = []
         for raw_rev in r_items:
             try:
                 rev = _item_dict(raw_rev)
@@ -1185,14 +1264,15 @@ def _initialize_baseline(
             except MalformedItemError:
                 skipped += 1
                 continue
-            if submitted_at > latest_time:
-                latest_time = submitted_at
-                same_sec_ids = {rid}
-            elif submitted_at == latest_time:
-                same_sec_ids.add(rid)
+            baseline_revs.append((submitted_at, rid))
+        baseline_revs.sort(key=lambda t: (t[0], t[1]))
+        latest_time = pull_rev_time.get(num_key, "")
+        recent_map: dict[str, str] = dict(pull_recent_revs.get(num_key, {}))
+        for submitted_at, rid in baseline_revs:
+            latest_time, recent_map = _record_seen_review(rid, submitted_at, latest_time, recent_map)
         if latest_time:
             pull_rev_time[num_key] = latest_time
-            pull_rev_ids[num_key] = sorted(same_sec_ids)
+            pull_recent_revs[num_key] = recent_map
 
     working["initialized"] = True
     working["known_pr_numbers"] = sorted(known_prs)
@@ -1222,7 +1302,7 @@ def _poll_once(
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_ready_seq: dict[str, int] = working["pull_ready_seq"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
-    pull_rev_ids: dict[str, list[int]] = working["pull_latest_review_ids"]  # type: ignore[assignment]
+    pull_recent_revs: dict[str, dict[str, str]] = working["pull_recent_reviews"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
@@ -1688,7 +1768,8 @@ def _poll_once(
         elif rc_etag:
             etags["pull_comments"] = rc_etag
 
-    # 6. Reviews on open or updated pull requests (recognised per PR by latest sending time + same-second review ids)
+    # 6. Reviews on open or updated pull requests (5-minute lag window up to MAX_WINDOW_REVIEW_IDS per PR;
+    #    restarting from page 1 when saved_tail_page > 1 relies on GitHub marking the PR updated when a review is sent)
     checked_review_prs: set[int] = set()
     for number in prs_to_check_reviews:
         if queue_filled or not has_room():
@@ -1717,7 +1798,7 @@ def _poll_once(
         pr_cutoff = pull_base_upd.get(num_key, "")
         was_baselined = number in reviews_baselined
         curr_latest_time = pull_rev_time.get(num_key, "")
-        curr_same_sec_ids: set[int] = set(pull_rev_ids.get(num_key, []))
+        curr_recent_map: dict[str, str] = dict(pull_recent_revs.get(num_key, {}))
 
         if r_changed:
             parsed_revs: list[tuple[str, int, bool, str | None]] = []
@@ -1738,16 +1819,15 @@ def _poll_once(
             parsed_revs.sort(key=lambda t: (t[0], t[1]))
             for submitted_at, rid, keep, actor in parsed_revs:
                 if curr_latest_time:
-                    if submitted_at < curr_latest_time:
+                    cutoff_sec = _iso_to_epoch_seconds(curr_latest_time) - REVIEW_LAG_WINDOW_SECONDS
+                    if _iso_to_epoch_seconds(submitted_at) < cutoff_sec:
                         continue
-                    if submitted_at == curr_latest_time and rid in curr_same_sec_ids:
+                    if str(rid) in curr_recent_map:
                         continue
                 if not was_baselined and pr_cutoff and submitted_at <= pr_cutoff:
-                    if submitted_at > curr_latest_time:
-                        curr_latest_time = submitted_at
-                        curr_same_sec_ids = {rid}
-                    else:
-                        curr_same_sec_ids.add(rid)
+                    curr_latest_time, curr_recent_map = _record_seen_review(
+                        rid, submitted_at, curr_latest_time, curr_recent_map
+                    )
                     continue
                 ev_id = f"pull_request_review:{rid}"
                 if keep and ev_id not in seen and ev_id not in pending_ids:
@@ -1765,17 +1845,13 @@ def _poll_once(
                             f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}",
                         )
                     )
-                if submitted_at > curr_latest_time:
-                    curr_latest_time = submitted_at
-                    curr_same_sec_ids = {rid}
-                else:
-                    curr_same_sec_ids.add(rid)
-                if len(curr_same_sec_ids) > MAX_SAME_SECOND_REVIEW_IDS:
-                    raise StateFullError("Same-second review id set reached MAX_SAME_SECOND_REVIEW_IDS.")
+                curr_latest_time, curr_recent_map = _record_seen_review(
+                    rid, submitted_at, curr_latest_time, curr_recent_map
+                )
 
             if curr_latest_time:
                 pull_rev_time[num_key] = curr_latest_time
-                pull_rev_ids[num_key] = sorted(curr_same_sec_ids)
+                pull_recent_revs[num_key] = curr_recent_map
             if not queue_filled:
                 reviews_baselined.add(number)
                 pull_rev_page[num_key] = tail_page
