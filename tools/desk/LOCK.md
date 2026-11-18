@@ -24,7 +24,7 @@ python3 tools/desk/start.py --coordinator ADDRESS
 
 The command is run in the terminal where the desk is to be watched. It checks everything it relies on, then runs the relay in that terminal, which starts Claude Code with the closed list once for every item, one session at a time. A fresh session takes in about 10,100 tokens before it does anything, the standing instructions included (measured once on the desk's model, with the real instructions).
 
-Without `--state` the state folder is `/Users/Shared/dodam-desk-` followed by the account's number, or `/var/tmp/dodam-desk-` and that number where there is no such shared folder. It is never in the home folder, because a session is shown paths of the state folder and the home folder's path names the account.
+Without `--state` the state folder is named `dodam-desk-` followed by the account's number and lies in the computer's folder for all accounts (the folder `Shared` beside the home folders), or in `/var/tmp` where there is no such folder. It is never in the home folder, because a session is shown paths of the state folder and the home folder's path names the account.
 
 It refuses to start, with one sentence that says why and never with a trace of an error, when
 
