@@ -323,6 +323,18 @@ def test_only_a_whole_number_names_an_item(place, tool, number):
     assert place.sent("comments") == [] and place.sent("labels") == []
 
 
+def test_a_session_started_for_one_item_reaches_no_other_item(place):
+    place.put(8, item(body="TEXT-OF-ANOTHER-OUTSIDER", files=[{"filename": "README.md"}]))
+    desk = place.desk(DESK_ITEM="7")
+    for tool in ("read_item", "answer", "add_label"):
+        message = refused(desk, tool, number=8, text="Hello.", label="bug")
+        assert "item 7" in message and "TEXT-OF-ANOTHER-OUTSIDER" not in message
+    refused(desk, "tell_coordinator", kind="spam", number=8, summary="x")
+    assert place.sent("comments") == [] and place.sent("labels") == [] and place.sent("coordinator") == []
+    assert json.loads(desk.read_item({"number": 7}))["number"] == 7
+    desk.answer({"number": 7, "text": "Hello."})
+
+
 def test_an_item_that_does_not_exist_is_refused(place):
     desk = place.desk()
     for tool in ("read_item", "answer", "add_label"):
@@ -523,7 +535,7 @@ got = Path(sys.argv[1])
 for line in sys.stdin:
     message = json.loads(line)
     with open(got, "a") as handle:
-        handle.write(json.dumps(message | {"process": os.getpid()}) + "\\n")
+        handle.write(json.dumps(message | {"process": os.getpid(), "item": os.environ.get("DESK_ITEM")}) + "\\n")
     if message.get("type") == "user":
         print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "noted"}]}}), flush=True)
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False}), flush=True)
@@ -609,6 +621,10 @@ def test_every_item_gets_a_fresh_session_that_hears_of_that_item_only(place):
     assert '"a1"' in item_7 and '"a2"' in item_7 and '"b1"' not in item_7 and "item 8" not in item_7
     assert '"b1"' in item_8 and '"a1"' not in item_8 and '"a2"' not in item_8 and "item 7" not in item_8
     assert "a typed line" in heard
+    # Each session is bound to its item for its tools; what was typed is bound to none.
+    assert {m["item"] for m in messages if "item 7" in m["message"]["content"]} == {"7"}
+    assert {m["item"] for m in messages if "item 8" in m["message"]["content"]} == {"8"}
+    assert {m["item"] for m in messages if m["message"]["content"] == "a typed line"} == {None}
 
 
 def test_the_watcher_is_started_again_only_after_the_session_dealt_with_the_news(place):
