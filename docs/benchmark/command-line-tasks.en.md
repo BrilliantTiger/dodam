@@ -657,7 +657,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
 | Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
 
-The counts and times are from the two runs of the automatic check on the commit that added the last tests, on 19 November; each time is the longer of the two. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the change that made pages of files count and gave a case one starting figure, the three jobs took at most 5 min 53 s, 14 min 47 s and 14 min 58 s; the count of the first includes the tests main gained meanwhile. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
+The counts and times are from the two runs of the automatic check on the commit 2d4b758 of 19 November; each time is the longer of the two. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the change that made pages of files count and gave a case one starting figure, the three jobs took at most 5 min 53 s, 14 min 47 s and 14 min 58 s; the count of the first includes the tests main gained meanwhile. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
 
 The commands that check these again on the measuring machine:
 
