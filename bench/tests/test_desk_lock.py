@@ -187,7 +187,7 @@ def test_a_missing_or_damaged_file_of_facts_is_a_refusal_not_a_guess(place, dama
         "it runs on somebodys macbook",
         "The account is somebody-local.",
         "See /Users/somebody-local/work/notes.md",
-        "See /home/another/.config",
+        "See /home/somebody-local/.config",
         "It is in ~/notes",
         "Look in the .dodam folder",
         "The server is at 192.168.0.12",
