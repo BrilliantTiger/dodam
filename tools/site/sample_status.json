@@ -1,5 +1,5 @@
 {
- "version": 1,
+ "version": 2,
  "built": "2027-01-05T09:07:00Z",
  "charter": {"version": "0.10", "date": "2026-11-18"},
  "step": {"index": 1, "of": 5, "gate_plan": "2027-02-24", "gate_today": "2027-06-23", "gate_today_chance": 4},
@@ -10,5 +10,11 @@
   {"date": "2027-01-03", "title": "A title long enough to wrap on a narrow phone: benchmark task for a rate-limited upload service with its hidden security tests", "url": "https://github.com/BrilliantTiger/dodam/pull/40"},
   {"date": "2026-12-30", "title": "Charter: the capacity measured from the session records", "url": "https://github.com/BrilliantTiger/dodam/pull/39"}
  ],
+ "desk": {
+  "github": {"open": false, "since": null},
+  "live": {"open": false, "since": null},
+  "limits": {"answers_per_item_per_hour": 3, "answers_per_day": 30, "code_uses": 1, "code_minutes": 60, "codes_per_author_per_day": 3, "live_sessions": 5},
+  "coworker_min_version": "0.13.0"
+ },
  "digest": "sample"
 }

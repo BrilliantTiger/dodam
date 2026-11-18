@@ -26,7 +26,7 @@ Dates in this file are estimates from a schedule simulation, not promises. The p
 2. {{rule_start}} The open issues are at {{repo}}/issues?q=is%3Aopen+label%3A{{welcome}}.
 3. Write a test that fails before your change, then the change that makes it pass.
 4. Send a pull request. An agent that did not write it reviews it in a fresh session, and it is judged by tests and benchmark numbers, exactly like the project's own work.
-
+{{desk}}
 ## Rules an agent must keep
 
 {{rules}}
@@ -49,6 +49,10 @@ Dates in this file are estimates from a schedule simulation, not promises. The p
 - tasks.ready, tasks.first: benchmark tasks ready, and how many the first set has.
 - open_issues: issues open for outside contributors.
 - changes: the latest changes merged to main, newest first, each with date, title and url.
+- desk.github.open, desk.github.since: whether the project's desk, an AI session of the project that talks with sessions from outside, answers issues and comments on GitHub, and the date since which it does; false and null while that way is not open.
+- desk.live.open, desk.live.since: whether an outside session can connect with the desk session to session over AI coworker, and since which date; false and null while that way is not open.
+- desk.limits: the desk's limits. answers_per_item_per_hour and answers_per_day: how often it answers on one issue or pull request in an hour, and in a day. code_uses and code_minutes: how many times and for how many minutes a connection code works. codes_per_author_per_day: connection codes one author can get in a day. live_sessions: live sessions at once.
+- desk.coworker_min_version: the lowest version of AI coworker an outside session needs for the live way.
 - digest: changes when anything the page shows changes.
 
 ## Addresses

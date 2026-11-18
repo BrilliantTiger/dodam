@@ -25,6 +25,14 @@ llms.txt, the guide for AI agents. Whatever comes from outside the template is e
         --status FILE  use this status instead of computing one (the layout check does)
         --compare      print "changed=false" when the published status.json shows the same digest
         --analytics ID build with this measurement ID instead of the setting ANALYTICS_ID (the layout check does)
+        --open WAYS    build as if these ways to the desk were open, github or github,live, with made-up
+                       dates and times (the layout check does; what is published is never built this way)
+
+Talking with the project's AI in real time is on the page only while a way to do it is open. The facts
+of the desk (which way is open and since when, its limits, the measured time to its first answer) live
+in tools/desk/desk.toml and nowhere else. The page's section, the question about it, the part of the
+guide and the part of the status file are built from that file; with no way open the pages and the
+guide say nothing about it, and the status file says that both ways are closed.
 """
 
 import datetime as dt
@@ -36,6 +44,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,6 +54,9 @@ ROOT = HERE.parents[1]
 OUT = ROOT / "site"
 CHARTER = ROOT / "docs" / "charter.ko.md"
 TASKS = ROOT / "bench" / "tasks"
+DESK = ROOT / "tools" / "desk" / "desk.toml"      # the public facts of the desk, and the only place they are written
+FORMS = ROOT / ".github" / "ISSUE_TEMPLATE"
+WAYS = ["github", "live"]                          # on GitHub; session to session over AI coworker
 SITE_URL = "https://brillianttigercorp.com/dodam/"
 REPO_URL = "https://github.com/BrilliantTiger/dodam"
 # The measurement ID of Google Analytics: this one setting, the owner's property. Google's tag is loaded
@@ -53,6 +65,8 @@ REPO_URL = "https://github.com/BrilliantTiger/dodam"
 # name no other host.
 ANALYTICS_ID = "G-DHJKG68707"
 MEASURED = re.compile(r"<!--measured-->\n(.*?)<!--/measured-->\n", re.S)   # parts of the template that exist only with an ID
+# Parts of the template that exist only while a way to the desk is open: any way, the one on GitHub, the live one.
+OPEN_ONLY = {name: re.compile(rf"<!--{name}-->\n(.*?)<!--/{name}-->\n", re.S) for name in ("desk", "github", "live")}
 # What Google's measurement needs, from Google's guide to content security policies for the Google tag.
 GOOGLE_NEEDS = {
     "script-src": ["https://www.googletagmanager.com"],
@@ -61,7 +75,7 @@ GOOGLE_NEEDS = {
 }
 REPO = REPO_URL.split("github.com/", 1)[1]
 WELCOME = "ai-welcome"   # the label of issues open to outside contributors
-STATUS_VERSION = 1
+STATUS_VERSION = 2
 CHANGES_SHOWN = 5
 QUESTIONS = 6
 CARD = (1200, 630)       # the image shown when the page is shared
@@ -75,10 +89,28 @@ MONTHS = {
 
 KEY = re.compile(r"\{\{([a-z0-9_]+)\}\}")
 PLACE = re.compile(r"\{(?:(d|m|n):([0-9-]+)|(repo))\}")
+FACT = re.compile(r"\{desk:([a-z_.]+)\}")   # a fact of the desk, as {desk:code_minutes}
+LIMITS = ["answers_per_item_per_hour", "answers_per_day", "code_uses", "code_minutes", "codes_per_author_per_day", "live_sessions"]
+MEASURES = ["median_seconds", "longest_seconds", "trials", "date"]
+FACT_NAMES = set(LIMITS) - {"code_uses"} | {"name", "min_version", "label"} | {
+    f"{way}.{part}" for way in WAYS for part in ("since", "median", "longest", "trials", "measured")}
 LIVE = re.compile(r"\[([a-z_]+(?:\.[a-z_]+)?)\]")   # a value of the status, as [tasks.ready]
 LIVE_DATES = {"charter.date", "step.gate_plan", "step.gate_today"}
 LIVE_NUMBERS = {"charter.version", "step.gate_today_chance", "tasks.ready", "tasks.first", "open_issues"}
-COMPUTED = {"changes", "gate_today_hidden", "live_hidden", "structured", "csp", "analytics_id"}   # filled in by render()
+COMPUTED = {"changes", "gate_today_hidden", "live_hidden", "structured", "csp", "analytics_id",
+            "a7", "desk_form", "coworker_repo"}   # filled in by render()
+# The sentences about the desk: those that hold in every open state, and those of each way. The page's
+# section holds exactly these, the guide repeats them, and the answer to the question is put together
+# from its three parts.
+DESK_TEXT = {
+    "desk": ["desk_k", "desk_h", "desk_p1", "desk_p2", "desk_limits_h", "desk_limit1", "desk_know_h",
+             "desk_know1", "desk_know2", "desk_know3", "desk_know4", "desk_know5", "q7"],
+    "github": ["desk_gh_n", "desk_gh_h", "desk_gh_state", "desk_gh_s1", "desk_gh_s2", "desk_gh_s3", "desk_gh_link"],
+    "live": ["desk_live_n", "desk_live_h", "desk_live_state", "desk_live_s1", "desk_live_s2", "desk_live_s3", "desk_live_s4",
+             "desk_live_s5", "desk_live_s6", "desk_live_form", "desk_live_cw", "desk_limit2", "desk_limit3",
+             "desk_know6", "desk_know7", "desk_know8", "desk_know9"],
+}
+ANSWER_PARTS = {"desk": "a7_desk", "github": "a7_github", "live": "a7_live"}
 LIVE_NAMES = LIVE_DATES | LIVE_NUMBERS | {"step.name", "built"}
 ALLOWED_TAGS = {"strong", "code", "span"}
 # Counts are written in digits so that a differing count shows up as a differing number.
@@ -129,8 +161,199 @@ def spell(lang: str, kind: str, value: str) -> str:
     return f"{name} {day}, {year}" if day else f"{name} {year}"
 
 
-def expand(lang: str, text: str) -> str:
+def expand(lang: str, text: str, desk: dict | None = None) -> str:
+    if "{desk:" in text:
+        facts = desk_facts(lang, desk if desk is not None else load_desk())
+        text = FACT.sub(lambda m: html.escape(facts[m.group(1)]), text)
     return PLACE.sub(lambda m: REPO_URL if m.group(3) else spell(lang, m.group(1), m.group(2)), text)
+
+
+# --- the desk: the project's AI session that talks with sessions from outside ---------------------
+
+
+def load_desk(path: Path | str | None = None) -> dict:
+    """The facts of the desk as tools/desk/desk.toml states them."""
+    return tomllib.loads(Path(path or DESK).read_text(encoding="utf-8"))
+
+
+def is_day(value) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d\d-\d\d", value):
+        return False
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def is_count(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def form_labels(text: str) -> list[str]:
+    """The labels an issue form puts on its issue, from its `labels:` entry at the top level."""
+    found = re.search(r"(?m)^labels:[ \t]*(.*)\n((?:[ \t]+-.*\n?)*)", text)
+    if not found:
+        return []
+    inline, listed = found.groups()
+    names = inline.strip().strip("[]").split(",") if inline.strip() else [row.split("-", 1)[1] for row in listed.splitlines()]
+    return [name.strip().strip("\"'") for name in names if name.strip().strip("\"'")]
+
+
+def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: bool = False) -> list[str]:
+    """Everything that keeps the facts of the desk from being stated: a missing or misshapen value, a
+    way that is open without what it needs, a closed way that carries an opening date. Made-up facts,
+    which the layout check builds with, are not asked for the request form."""
+    desk = desk if desk is not None else load_desk()
+    forms = forms if forms is not None else FORMS
+    found = []
+    if set(desk) != {"name", "ways", "limits", "coworker", "form"}:
+        return ["the facts of the desk are: name, ways, limits, coworker, form"]
+    ways, limits, coworker, form = desk["ways"], desk["limits"], desk["coworker"], desk["form"]
+    if not all(isinstance(part, dict) for part in (ways, limits, coworker, form)) or set(ways) != set(WAYS):
+        return ["the desk has two ways, github and live, and its limits, coworker and form are tables"]
+    if not isinstance(desk["name"], str) or not desk["name"].strip():
+        found.append("the desk has no name")
+    if set(limits) != set(LIMITS) or not all(is_count(limits[name]) for name in limits):
+        found.append("the limits are whole numbers above zero: " + ", ".join(LIMITS))
+    elif limits["code_uses"] != 1:
+        found.append("a connection code of AI coworker works once, and the page says once")
+    if set(coworker) != {"min_version", "repository"} or not re.fullmatch(r"\d+\.\d+\.\d+", str(coworker.get("min_version"))) \
+            or not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+", str(coworker.get("repository"))):
+        found.append("coworker names the lowest version, as 0.13.0, and the address of its repository on GitHub")
+    if set(form) != {"file", "label"} or not re.fullmatch(r"[a-z0-9-]+\.yml", str(form.get("file"))) \
+            or not re.fullmatch(r"[a-z0-9-]+", str(form.get("label"))):
+        found.append("form names the file of the request form, as live-session.yml, and its label")
+    for way in WAYS:
+        facts = ways[way]
+        if not isinstance(facts, dict) or set(facts) != {"open", "since", "first_answer"} or not isinstance(facts["open"], bool) \
+                or not isinstance(facts["since"], str) or not isinstance(facts["first_answer"], dict):
+            found.append(f"the {way} way states open (true or false), since (a date or empty) and first_answer")
+            continue
+        measured = facts["first_answer"]
+        whole = set(measured) == set(MEASURES) and all(is_count(measured[name]) for name in MEASURES[:3]) \
+            and is_day(measured["date"]) and measured["longest_seconds"] >= measured["median_seconds"]
+        if measured and not whole:
+            found.append(f"the {way} way's measured time to the first answer is all of {', '.join(MEASURES)}, or empty")
+        if facts["open"]:
+            if not is_day(facts["since"]):
+                found.append(f"the {way} way is open without the date it opened")
+            if not whole:
+                found.append(f"the {way} way is open without a measured time to the first answer")
+            elif is_day(facts["since"]) and measured["date"] > facts["since"]:
+                found.append(f"the {way} way opened before its time to the first answer was measured")
+        elif facts["since"]:
+            found.append(f"the {way} way is closed and yet carries an opening date")
+    if found:
+        return found
+    if ways["live"]["open"]:
+        if not ways["github"]["open"]:
+            found.append("the live way is open while the github way is closed: a connection code is asked for on GitHub")
+        elif ways["live"]["since"] < ways["github"]["since"]:
+            found.append("the live way opened before the github way")
+        path = forms / form["file"]
+        if made_up:
+            pass
+        elif not path.is_file():
+            found.append(f"the live way is open without the request form {form['file']} in .github/ISSUE_TEMPLATE")
+        elif form["label"] not in form_labels(path.read_text(encoding="utf-8")):
+            found.append(f"the request form {form['file']} does not carry the label {form['label']}")
+    return found
+
+
+# The layout check lays the page out with a way open before any way is. Only what cannot be known yet
+# is made up, the dates and the measured times; every other fact stays the one in tools/desk/desk.toml.
+MADE_UP = {"github": ("2026-12-01", {"median_seconds": 32, "longest_seconds": 58, "trials": 12, "date": "2026-11-28"}),
+           "live": ("2026-12-15", {"median_seconds": 47, "longest_seconds": 95, "trials": 10, "date": "2026-12-12"})}
+
+
+def as_if_open(desk: dict, ways: list[str]) -> dict:
+    """The facts of the desk with these ways open, for the layout check. A way that is really open keeps its own facts."""
+    if not ways or set(ways) - set(WAYS) or ("live" in ways and "github" not in ways):
+        raise ValueError("--open takes github or github,live")
+    made = {way: dict(desk["ways"][way]) for way in WAYS}
+    for way in ways:
+        if not made[way]["open"]:
+            made[way] = {"open": True, "since": MADE_UP[way][0], "first_answer": dict(MADE_UP[way][1])}
+    return desk | {"ways": made}
+
+
+def open_ways(desk: dict) -> list[str]:
+    return [way for way in WAYS if desk["ways"][way]["open"]]
+
+
+def shown_parts(desk: dict) -> list[str]:
+    """Which parts about the desk exist: none while no way is open, else "desk" and each open way."""
+    ways = open_ways(desk)
+    return ["desk"] + ways if ways else []
+
+
+def desk_facts(lang: str, desk: dict) -> dict:
+    """Every fact of the desk a sentence can name, as text in this language."""
+    facts = {name: str(desk["limits"][name]) for name in LIMITS if name != "code_uses"}
+    facts |= {"name": desk["name"], "min_version": desk["coworker"]["min_version"], "label": desk["form"]["label"]}
+    for way in WAYS:
+        since, measured = desk["ways"][way]["since"], desk["ways"][way]["first_answer"]
+        facts[f"{way}.since"] = spell(lang, "d", since) if since else ""
+        facts[f"{way}.measured"] = spell(lang, "d", measured["date"]) if measured else ""
+        for short in ("median", "longest"):
+            facts[f"{way}.{short}"] = str(measured[f"{short}_seconds"]) if measured else ""
+        facts[f"{way}.trials"] = str(measured["trials"]) if measured else ""
+    return facts
+
+
+def desk_status(desk: dict | None = None) -> dict:
+    """The desk's part of the status file, the same in every state: per way whether it is open and
+    since when, the limits, and the lowest version of AI coworker."""
+    desk = desk if desk is not None else load_desk()
+    ways = {way: {"open": desk["ways"][way]["open"], "since": desk["ways"][way]["since"] or None} for way in WAYS}
+    return ways | {"limits": {name: desk["limits"][name] for name in LIMITS}, "coworker_min_version": desk["coworker"]["min_version"]}
+
+
+def desk_links(desk: dict) -> dict:
+    """The addresses the section links to: where an issue is written, the request form, AI coworker."""
+    return {"github": f"{REPO_URL}/issues/new", "form": f"{REPO_URL}/issues/new?template={desk['form']['file']}",
+            "coworker": desk["coworker"]["repository"]}
+
+
+def desk_answer(lang: str, strings: dict, desk: dict) -> str:
+    """The answer to the question about talking in real time: one sentence on the desk, one per open way."""
+    glue = "" if lang == "ja" else " "   # Japanese puts no space between sentences
+    return glue.join(expand(lang, strings[ANSWER_PARTS[part]], desk) for part in shown_parts(desk))
+
+
+def desk_rule_state(desk: dict, way: str) -> str:
+    """How the working rules state whether a way is open."""
+    facts = desk["ways"][way]
+    return f"open since {spell('en', 'd', facts['since'])}" if facts["open"] else "not open yet"
+
+
+def desk_guide(desk: dict) -> str:
+    """The guide's part about talking in real time, in the page's own sentences: empty while no way is
+    open, else what the desk is, each open way with its steps and addresses, the limits, and what an
+    outside agent should know before it writes."""
+    parts = shown_parts(desk)
+    if not parts:
+        return ""
+    strings, links = load_strings("en"), desk_links(desk)
+    say = lambda key: plain("en", strings[key], desk)
+    rows = ["", "## Talking with the project in real time", "", f"{say('desk_p1')} {say('desk_p2')}"]
+    for way, addresses in (("github", [("desk_gh_link", links["github"])]),
+                           ("live", [("desk_live_form", links["form"]), ("desk_live_cw", links["coworker"])])):
+        if way not in parts:
+            continue
+        short = {"github": "gh", "live": "live"}[way]
+        rows += ["", f"### {say(f'desk_{short}_n')}: {say(f'desk_{short}_h')}", "", say(f"desk_{short}_state"), ""]
+        rows += [f"{number}. {say(key)}" for number, key in
+                 enumerate((key for key in DESK_TEXT[way] if re.fullmatch(rf"desk_{short}_s\d", key)), 1)]
+        rows += [""] + [f"- {say(label)}: {address}" for label, address in addresses]
+        if way == "live":
+            rows += [f"- Label of the request form: {desk['form']['label']}",
+                     f"- Lowest version of AI coworker: {desk['coworker']['min_version']}"]
+    for head, start in (("desk_limits_h", "desk_limit"), ("desk_know_h", "desk_know")):
+        keys = [key for part in parts for key in DESK_TEXT[part] if re.fullmatch(rf"{start}\d", key)]
+        rows += ["", f"### {say(head)}", ""] + [f"- {say(key)}" for key in sorted(keys)]
+    return "\n".join(rows) + "\n"
 
 
 def headline(lang: str, parts: list[str]) -> str:
@@ -238,7 +461,7 @@ def inputs_digest(status: dict) -> str:
     file the pages are built from. The scheduled build deploys only when it differs from the published one."""
     shown = {key: value for key, value in status.items() if key not in {"built", "digest"}}
     sha = hashlib.sha256(json.dumps(shown, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    sources = [HERE / "template.html", HERE / "guide.txt", Path(__file__)] + sorted((HERE / "strings").glob("*.json"))
+    sources = [HERE / "template.html", HERE / "guide.txt", Path(__file__), DESK] + sorted((HERE / "strings").glob("*.json"))
     sources += sorted(p for p in OUT.rglob("*") if p.is_file() and p.name != "index.html")
     for path in sources:
         sha.update(path.name.encode("utf-8") + b"\0" + path.read_bytes())
@@ -246,7 +469,7 @@ def inputs_digest(status: dict) -> str:
 
 
 def status(now: dt.datetime | None = None, issues: int | None = None, charter: str | None = None,
-           changes: list[dict] | None = None, ready: int | None = None) -> dict:
+           changes: list[dict] | None = None, ready: int | None = None, desk: dict | None = None) -> dict:
     now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc).replace(microsecond=0)
     text = charter if charter is not None else CHARTER.read_text(encoding="utf-8")
     said = charter_status(text, now.date().isoformat())
@@ -258,6 +481,7 @@ def status(now: dt.datetime | None = None, issues: int | None = None, charter: s
         "tasks": {"ready": tasks_ready() if ready is None else ready, "first": said["tasks_first"]},
         "open_issues": open_issues() if issues is None else int(issues),
         "changes": merged_changes() if changes is None else changes,
+        "desk": desk_status(desk),
     }
     result["digest"] = inputs_digest(result)
     return result
@@ -311,13 +535,22 @@ def changes_list(lang: str, status: dict | None) -> str:
 # --- what search engines, answer engines and AI agents read -------------------------------------
 
 
-def plain(lang: str, text: str) -> str:
+def plain(lang: str, text: str, desk: dict | None = None) -> str:
     """A string as the text a reader sees: dates spelled, markup removed."""
-    return html.unescape(re.sub(r"<[^>]+>", "", expand(lang, text)))
+    return html.unescape(re.sub(r"<[^>]+>", "", expand(lang, text, desk)))
 
 
-def structured(lang: str, strings: dict) -> dict:
+def questions(lang: str, strings: dict, desk: dict) -> list[tuple[str, str]]:
+    """The questions and answers as text. The one about talking in real time exists only while a way is open."""
+    asked = [(plain(lang, strings[f"q{i}"]), plain(lang, strings[f"a{i}"])) for i in range(1, QUESTIONS + 1)]
+    if shown_parts(desk):
+        asked.append((plain(lang, strings["q7"], desk), plain(lang, desk_answer(lang, strings, desk))))
+    return asked
+
+
+def structured(lang: str, strings: dict, desk: dict | None = None) -> dict:
     """Structured data, made from the strings the visible text is made from."""
+    desk = desk if desk is not None else load_desk()
     site, page = SITE_URL + "#site", page_url(lang) + "#page"
     return {
         "@context": "https://schema.org",
@@ -331,9 +564,8 @@ def structured(lang: str, strings: dict) -> dict:
              "license": [f"{REPO_URL}/blob/main/LICENSE-MIT", f"{REPO_URL}/blob/main/LICENSE-APACHE"],
              "creativeWorkStatus": plain(lang, strings["status"])},
             {"@type": "FAQPage", "@id": page_url(lang) + "#faq", "inLanguage": lang, "isPartOf": {"@id": page},
-             "mainEntity": [{"@type": "Question", "name": plain(lang, strings[f"q{i}"]),
-                             "acceptedAnswer": {"@type": "Answer", "text": plain(lang, strings[f"a{i}"])}}
-                            for i in range(1, QUESTIONS + 1)]},
+             "mainEntity": [{"@type": "Question", "name": question, "acceptedAnswer": {"@type": "Answer", "text": answer}}
+                            for question, answer in questions(lang, strings, desk)]},
         ],
     }
 
@@ -368,12 +600,13 @@ def working_rule(words: str) -> str:
     return found[0]
 
 
-def guide(status: dict) -> str:
-    """The guide for AI agents (llms.txt), in English: the page's own strings, the status, and two rules
-    in the working rules' own words."""
+def guide(status: dict, desk: dict | None = None) -> str:
+    """The guide for AI agents (llms.txt), in English: the page's own strings, the status, two rules
+    in the working rules' own words, and while a way to the desk is open the page's sentences about it."""
+    desk = desk if desk is not None else load_desk()
     strings = load_strings("en")
     step = status["step"]
-    values = {key: plain("en", text) for key, text in strings.items() if isinstance(text, str)}
+    values = {key: plain("en", text, desk) for key, text in strings.items() if isinstance(text, str)}
     values |= {
         "site": SITE_URL, "repo": REPO_URL, "welcome": WELCOME,
         "rule_start": working_rule("before sending a large change"), "rule_share": working_rule("no right to share"),
@@ -389,7 +622,8 @@ def guide(status: dict) -> str:
         "open_issues": str(status["open_issues"]), "status_version": str(status["version"]),
         "changes": "\n".join(f"- {spell('en', 'd', c['date'])}: {c['title']} ({c['url']})" for c in status["changes"]) or "- none yet",
         "rules": "\n".join(f"- {values[f'rule{i}_h']}. {values[f'rule{i}_p']}" for i in range(1, 8)),
-        "questions": "\n\n".join(f"### {values[f'q{i}']}\n\n{values[f'a{i}']}" for i in range(1, QUESTIONS + 1)),
+        "questions": "\n\n".join(f"### {question}\n\n{answer}" for question, answer in questions("en", strings, desk)),
+        "desk": desk_guide(desk),
     }
     return KEY.sub(lambda m: values[m.group(1)], (HERE / "guide.txt").read_text(encoding="utf-8"))
 
@@ -443,41 +677,53 @@ def policy(ident: str) -> str:
     return "; ".join(f"{name} 'none'" if extra is None else " ".join([name, "'self'"] + extra) for name, extra in rules.items())
 
 
-def render(lang: str, strings: dict | None = None, status: dict | None = None, analytics: str | None = None) -> str:
+def render(lang: str, strings: dict | None = None, status: dict | None = None, analytics: str | None = None,
+           desk: dict | None = None) -> str:
     strings = strings if strings is not None else load_strings(lang)
+    desk = desk if desk is not None else load_desk()
     ident = measurement(analytics)
     values = specials(lang)
     values["analytics_id"] = ident
     values["csp"] = policy(ident)
+    parts = shown_parts(desk)
     for key, text in strings.items():
-        values[key] = headline(lang, text) if isinstance(text, list) else live(lang, expand(lang, text), status, strings)
+        values[key] = headline(lang, text) if isinstance(text, list) else live(lang, expand(lang, text, desk), status, strings)
+    values["a7"] = desk_answer(lang, strings, desk) if parts else ""
+    values["desk_form"] = html.escape(desk_links(desk)["form"], quote=True)
+    values["coworker_repo"] = html.escape(desk_links(desk)["coworker"], quote=True)
     values["live_hidden"] = "" if status else " hidden"
     values["gate_today_hidden"] = "" if status and status["step"]["gate_today"] else " hidden"
     values["changes"] = changes_list(lang, status)
-    values["structured"] = json.dumps(structured(lang, strings), ensure_ascii=False, indent=1).replace("<", "\\u003c")
-    return KEY.sub(lambda m: values[m.group(1)], MEASURED.sub(r"\1" if ident else "", template()))
+    values["structured"] = json.dumps(structured(lang, strings, desk), ensure_ascii=False, indent=1).replace("<", "\\u003c")
+    text = MEASURED.sub(r"\1" if ident else "", template())
+    for name, block in OPEN_ONLY.items():
+        text = block.sub(r"\1" if name in parts else "", text)
+    return KEY.sub(lambda m: values[m.group(1)], text)
 
 
-def pages(status: dict | None = None, analytics: str | None = None) -> dict[str, str]:
-    built = {page_file(lang): render(lang, status=status, analytics=analytics) for lang in LANGS}
+def pages(status: dict | None = None, analytics: str | None = None, desk: dict | None = None) -> dict[str, str]:
+    built = {page_file(lang): render(lang, status=status, analytics=analytics, desk=desk) for lang in LANGS}
     if status is None:
         built["sitemap.xml"] = sitemap()
     return built
 
 
-def publish(out: Path, status: dict, analytics: str | None = None) -> None:
+def publish(out: Path, status: dict, analytics: str | None = None, desk: dict | None = None) -> None:
     """What is deployed: the files of site/, the pages with the section about now filled in, the status
-    file and the guide for AI agents. The measurement script is among them only with a measurement ID."""
+    file and the guide for AI agents. The measurement script is among them only with a measurement ID.
+    The desk's part of the status file is always what the facts of the desk say, whatever status is given."""
     ident = measurement(analytics)
+    desk = desk if desk is not None else load_desk()
+    status = status | {"desk": desk_status(desk)}
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(OUT, out, ignore=shutil.ignore_patterns("__pycache__"))
-    for name, text in pages(status, ident).items():
+    for name, text in pages(status, ident, desk).items():
         (out / name).write_text(text, encoding="utf-8")
     if not ident:
         (out / "analytics.js").unlink()
     (out / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    (out / "llms.txt").write_text(guide(status), encoding="utf-8")
+    (out / "llms.txt").write_text(guide(status, desk), encoding="utf-8")
 
 
 def published_digest() -> str | None:
@@ -502,11 +748,11 @@ def shape(value) -> dict:
     """What must be the same in every language: dates, numbers, markup and emphasis."""
     if isinstance(value, list):
         return {"kind": "list", "emphasis": any(p.startswith("*") for p in value), "digits": sorted(re.findall(r"\d+", "".join(value)))}
-    rest = PLACE.sub(" ", value)
+    rest = FACT.sub(" ", PLACE.sub(" ", value))
     return {
         "kind": "text",
         "live": sorted(LIVE.findall(value)),
-        "placeholders": sorted(m.group(0) for m in PLACE.finditer(value)),
+        "placeholders": sorted(m.group(0) for m in PLACE.finditer(value)) + sorted(FACT.findall(value)),
         "digits": sorted(re.findall(r"\d+(?:[.,]\d+)*", rest)),
         "tags": sorted(re.findall(r"</?([a-z]+)", rest)),
     }
@@ -515,7 +761,11 @@ def shape(value) -> dict:
 def problems(strings: dict[str, dict] | None = None) -> list[str]:
     strings = strings if strings is not None else {lang: load_strings(lang) for lang in LANGS}
     found = []
-    used = set(KEY.findall(template())) - set(specials("en")) - COMPUTED
+    used = set(KEY.findall(template())) - set(specials("en")) - COMPUTED | set(ANSWER_PARTS.values())
+    about_desk = {key for keys in DESK_TEXT.values() for key in keys} | set(ANSWER_PARTS.values())
+    found += [f"the template lacks the sentence about the desk {key}" for key in sorted(about_desk - used)]
+    found += [f"the template has a sentence about the desk that no state shows: {key}"
+              for key in sorted(key for key in used - about_desk if key.startswith(("desk_", "a7", "q7")))]
     for lang in LANGS:
         have = set(strings[lang])
         found += [f"{lang}: missing string {key}" for key in sorted(used - have)]
@@ -534,6 +784,12 @@ def problems(strings: dict[str, dict] | None = None) -> list[str]:
                 found.append(f"{lang}: {key} names a value the status does not have")
             if LIVE.search(text) and re.search(r"\d", PLACE.sub("", text)):
                 found.append(f"{lang}: {key} mixes a figure typed by hand with values of the status")
+            if set(FACT.findall(text)) - FACT_NAMES:
+                found.append(f"{lang}: {key} names a fact the desk does not have")
+            if key in about_desk and re.search(r"\d", FACT.sub("", text)):
+                found.append(f"{lang}: {key} types a figure about the desk by hand; name the fact, as {{desk:code_minutes}}")
+            if key not in about_desk and FACT.search(text):
+                found.append(f"{lang}: {key} names a fact of the desk outside the sentences about the desk")
             if set(re.findall(r"</?([a-z]+)", text)) - ALLOWED_TAGS:
                 found.append(f"{lang}: {key} uses markup that belongs in the template")
             if lang != "en" and key in strings["en"] and shape(value) != shape(strings["en"][key]):
@@ -546,7 +802,11 @@ def option(argv: list[str], name: str) -> str | None:
 
 
 def main(argv: list[str]) -> int:
-    issues = problems()
+    desk, as_if = load_desk(), option(argv, "--open")
+    issues = problems() + desk_problems(desk)
+    if as_if and not issues:
+        desk = as_if_open(desk, as_if.split(","))
+        issues = desk_problems(desk, made_up=True)
     for issue in issues:
         print(issue, file=sys.stderr)
     if issues:
@@ -556,13 +816,13 @@ def main(argv: list[str]) -> int:
         if given:
             now = json.loads(Path(given).read_text(encoding="utf-8"))
         else:
-            now = status(issues=None if count is None else int(count))
-        publish(Path(option(argv, "--live")), now, option(argv, "--analytics"))
+            now = status(issues=None if count is None else int(count), desk=desk)
+        publish(Path(option(argv, "--live")), now, option(argv, "--analytics"), desk)
         if "--compare" in argv:
             print("changed=" + ("false" if published_digest() == now["digest"] else "true"))
         return 0
     stale = 0
-    for name, text in pages().items():
+    for name, text in pages(desk=desk).items():
         path = OUT / name
         if "--check" in argv:
             if not path.is_file() or path.read_text(encoding="utf-8") != text:
