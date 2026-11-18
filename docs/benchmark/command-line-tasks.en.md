@@ -614,9 +614,9 @@ For every protection there is one variant of the code without it (`bench/experim
 
 | Check | Where | Numbers |
 |---|---|---|
-| All tests that need no image | automatically on every push | 742 tests pass, 4 min 59 s (time limit 15 minutes) |
-| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that only read files that are not in the cache, of three kinds; programs that hold on to the kernel's records in five ways; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 110 tests pass, 15 min 46 s (time limit 40 minutes) |
-| Taking each of the 96 protections out in turn | automatically on every push | the tests catch 89, the 7 second lines hold, 13 min 28 s (time limit 40 minutes) |
+| All tests that need no image | automatically on every push | 861 tests pass, 5 min 53 s (time limit 15 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that only read files that are not in the cache, of three kinds; programs that hold on to the kernel's records in five ways; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 125 tests pass, 14 min 47 s (time limit 40 minutes) |
+| Taking each of the 96 protections out in turn | automatically on every push | the tests catch 89, the 7 second lines hold, 14 min 58 s (time limit 40 minutes) |
 | The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written, once after the last change and five times over before it |
 | The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
 | Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
