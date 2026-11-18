@@ -1244,18 +1244,18 @@ def test_nothing_that_judges_names_the_tests_helper_or_the_files_it_writes(cli_t
 
 
 def test_the_tests_helper_is_given_the_judged_containers_folder_and_nothing_else_of_the_machine():
+    """The command that starts the helper, word for word. Every word of it is compared, so that
+    nothing can be added to it under any spelling: it has a name, no network, a memory cap and a
+    process cap, and three folders, which are the judged container's folder of the kernel's, the
+    machine's file for letting go of unused records, and the folder it is asked through."""
     from test_cli_isolation import IMAGE, READER, reader_command
-    command = reader_command("judged", "docker/0123abcd")
-    given = [command[i + 1] for i, word in enumerate(command) if word == "--volume"]
-    assert given == ["/sys/fs/cgroup/docker/0123abcd:/group", "/proc/sys/vm/drop" + "_caches:/drop", "judged-asked:/reading"], (
-        f"the helper is given other things than the judged container's folder, the file for letting go and the asking folder: {given}")
-    assert command[:3] == ["docker", "run", "--detach"] and command[-4:] == [IMAGE, "python3", "-c", READER]
-    options = command[3:-4]
-    assert [options[i + 1] for i, word in enumerate(options) if word == "--network"] == ["none"]
-    assert "--memory" in options and "--pids-limit" in options
-    allowed = {"--name", "--network", "--user", "--memory", "--pids-limit", "--volume"}
-    assert {word for word in options if word.startswith("--")} == allowed, (
-        f"the helper is started with more than its caps and its three folders: {options}")
+    assert reader_command("judged", "docker/0123abcd") == [
+        "docker", "run", "--detach", "--name", "judged-reader", "--network", "none", "--user", "0",
+        "--memory", "256m", "--pids-limit", "64",
+        "--volume", "/sys/fs/cgroup/docker/0123abcd:/group",
+        "--volume", "/proc/sys/vm/drop" + "_caches:/drop",
+        "--volume", "judged-asked:/reading",
+        IMAGE, "python3", "-c", READER], "the helper is started with other words than its caps and its three folders"
 
 
 WATCHED = r'''
