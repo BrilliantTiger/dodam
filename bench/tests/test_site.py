@@ -510,12 +510,12 @@ def test_styles_and_script_reach_no_other_host():
             continue
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"@import|url\(\s*['\"]?(?:https?:)?//", text), path.name
-        if path.suffix == ".js":
+        if path.suffix == ".js" and path.name != "analytics.js":   # the measurement script has a test of its own
             assert not re.search(r"https?://|XMLHttpRequest|sendBeacon|WebSocket|import\(", text), path.name
 
 
 def test_script_is_one_small_file_of_our_own():
-    assert [p.name for p in site_files() if p.suffix == ".js"] == ["motion.js"]
+    assert sorted(p.name for p in site_files() if p.suffix == ".js") == ["analytics.js", "motion.js"]
 
 
 def test_site_respects_reduced_motion_color_schemes_and_each_script():
@@ -1152,36 +1152,52 @@ def measured(lang: str) -> str:
     return render(lang, analytics=SAMPLE_ID)
 
 
-def test_the_measurement_id_is_one_setting_and_it_is_empty():
+MEASUREMENT_ID = "G-DHJKG68707"   # the owner's property, created on 2026-11-18
+
+
+def unmeasured(lang: str) -> str:
+    render = need("render")
+    assert "analytics" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a measurement ID"
+    return render(lang, analytics="")
+
+
+def test_the_measurement_id_is_one_setting_and_the_tag_is_loaded_by_it():
     build = builder()
     assert hasattr(build, "ANALYTICS_ID"), "the build script has no setting for the measurement ID"
-    assert build.ANALYTICS_ID == "", "the owner has not created the property yet"
+    assert build.ANALYTICS_ID == MEASUREMENT_ID, "the setting is not the owner's property"
+    assert (ROOT / "tools" / "site" / "build.py").read_text(encoding="utf-8").count(MEASUREMENT_ID) == 1, "the ID is set in more than one place"
     for folder in ("tools/site", "site", ".github"):
         for path in sorted((ROOT / folder).rglob("*")):
             if path.is_file() and path.suffix in {".py", ".html", ".js", ".json", ".yml", ".txt", ".css"}:
-                ids = set(re.findall(r"\bG-[A-Z0-9]{6,}\b", path.read_text(encoding="utf-8")))
-                assert ids <= {SAMPLE_ID}, f"{path.name} holds a measurement ID of its own"
+                text = path.read_text(encoding="utf-8")
+                assert set(re.findall(r"\bG-[A-Z0-9]{6,}\b", text)) <= {SAMPLE_ID, MEASUREMENT_ID}, f"{path.name} holds another measurement ID"
+                # A container can be given other tags later; the page promises measurement without advertising.
+                assert not re.search(r"\bGTM-[A-Z0-9]+|gtm\.js|googletagmanager\.com/ns", text), f"{path.name} uses a container"
+    for lang in LANGS:
+        scripts = [a for a in page(lang).all("script") if a.get("src")]
+        assert [a.get("data-id") for a in scripts if a["src"].endswith("analytics.js")] == [MEASUREMENT_ID], lang
 
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_without_a_measurement_id_the_page_has_no_analytics_code_and_may_reach_no_other_host(lang):
-    html_text = page_path(lang).read_text(encoding="utf-8")
+    html_text = unmeasured(lang)
     assert not re.search(r"google|gtag|analytics|consent|cookie|dataLayer", html_text, re.I), "the page carries analytics code"
     assert [a.get("src") for a in Page(html_text).all("script") if a.get("src")] == [("" if lang == "en" else "../") + "motion.js"]
     policy = policy_of(html_text)
     assert policy["default-src"] == {"'self'"} and other_hosts(policy) == {}
     assert not re.search(r"google|gtag|dataLayer", (SITE / "motion.js").read_text(encoding="utf-8"), re.I)
-    assert not (SITE / "analytics.js").exists(), "the measurement script is served although nothing uses it"
 
 
 def test_what_is_published_carries_the_measurement_script_only_with_an_id(tmp_path):
     publish = need("publish")
-    publish(tmp_path / "plain", sample())
-    assert not (tmp_path / "plain" / "analytics.js").exists()
     assert "analytics" in publish.__code__.co_varnames[:publish.__code__.co_argcount], "what is published cannot be built with a measurement ID"
+    publish(tmp_path / "plain", sample(), analytics="")
+    assert not (tmp_path / "plain" / "analytics.js").exists(), "the measurement script is published although nothing uses it"
     publish(tmp_path / "measured", sample(), analytics=SAMPLE_ID)
     assert (tmp_path / "measured" / "analytics.js").is_file()
     assert SAMPLE_ID in (tmp_path / "measured" / "index.html").read_text(encoding="utf-8")
+    publish(tmp_path / "set", sample())
+    assert (tmp_path / "set" / "analytics.js").is_file() and MEASUREMENT_ID in (tmp_path / "set" / "index.html").read_text(encoding="utf-8")
     with pytest.raises(ValueError):
         publish(tmp_path / "wrong", sample(), analytics='G-X"><script>')
 
@@ -1220,8 +1236,8 @@ def test_with_a_measurement_id_the_page_asks_in_the_visitor_s_language_and_says_
 
 
 def test_the_measurement_script_loads_nothing_by_itself_and_no_advertising_features():
-    path = ROOT / "tools" / "site" / "analytics.js"
-    assert path.is_file(), "there is no measurement script"
+    path = SITE / "analytics.js"
+    assert path.is_file(), "the measurement script is not among the files of the site"
     script = path.read_text(encoding="utf-8")
     code = re.sub(r"(?m)^\s*//.*$", "", script)
     assert re.findall(r"https?://[^\"' ]+", code) == ["https://www.googletagmanager.com/gtag/js?id="]
@@ -1246,3 +1262,94 @@ def test_sharing_images_were_drawn_from_the_headline_status_line_and_colors_of_n
     strings = builder().load_strings("en")
     assert source("en", dict(strings, h1=strings["h1"][:-1] + ["*slow."])) != source("en")
     assert source("en", dict(strings, status="Released")) != source("en")
+
+
+# What the owner's property measures (set on 2026-11-18): page views, scrolling to the end of a page and
+# clicks on links that leave the site. The paragraph on the page lists these beside what it listed before.
+MEASURED_WORDS = {
+    "en": ["which pages are opened", "end of a page", "links that leave", "kind of device", "country", "where the visit came from", "Advertising features are off"],
+    "ko": ["어떤 페이지를 열었는지", "끝까지", "바깥으로 나가는 링크", "기기", "나라", "어디를 거쳐", "광고 기능은 꺼져"],
+    "ja": ["開かれたページ", "最後までスクロール", "サイトの外へ出るリンク", "端末の種類", "国", "どこから来たか", "広告機能はオフ"],
+    "es": ["qué páginas se abren", "hasta el final", "enlaces que salen", "tipo de dispositivo", "país", "de dónde llegó", "funciones publicitarias están desactivadas"],
+}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_paragraph_says_what_the_property_measures(lang):
+    paragraph = builder().load_strings(lang)["measure_p"]
+    for words in MEASURED_WORDS[lang]:
+        assert words in paragraph, f"{lang}: the paragraph does not say “{words}”"
+    assert " ".join(paragraph.split()) in " ".join(page(lang).text.split()), "the published page does not carry the paragraph"
+
+
+def test_working_rules_say_what_the_public_page_may_contact():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    line = next((l for l in rules.splitlines() if "no other host" in l), "")
+    for words in ("Before the visitor agrees", "no cookie", "without advertising features", "owner's decision"):
+        assert words in line, words
+
+
+class Answer:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, *args):
+        return self.body
+
+
+def digest_when(monkeypatch, outcome):
+    import urllib.error
+    import urllib.request
+
+    def fake(request, timeout=None):
+        assert request.full_url == SITE_URL + "status.json"
+        if isinstance(outcome, Exception):
+            raise outcome
+        return Answer(outcome)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return need("published_digest")()
+
+
+def test_only_a_missing_status_file_counts_as_nothing_published(monkeypatch):
+    import urllib.error
+
+    assert digest_when(monkeypatch, b'{"version": 1, "digest": "abc"}') == "abc"
+    missing = urllib.error.HTTPError(SITE_URL + "status.json", 404, "Not Found", None, None)
+    assert digest_when(monkeypatch, missing) is None
+    for fault in (urllib.error.HTTPError(SITE_URL + "status.json", 500, "Server Error", None, None),
+                  urllib.error.HTTPError(SITE_URL + "status.json", 403, "Forbidden", None, None),
+                  urllib.error.URLError("no route"), TimeoutError("timed out"), b"<html>not a status</html>", b'{"version": 1}'):
+        with pytest.raises(Exception):
+            digest_when(monkeypatch, fault)   # the run fails and nothing is deployed, instead of deploying every hour unseen
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_sharing_locale_is_a_language_with_its_territory(lang):
+    metas = {m.get("property"): m.get("content") for m in page(lang).all("meta") if m.get("property")}
+    assert metas.get("og:locale") == {"en": "en_US", "ko": "ko_KR", "ja": "ja_JP", "es": "es_ES"}[lang]
+
+
+def test_rules_the_guide_takes_from_the_working_rules_are_the_working_rules_words():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace("`", "")
+    wanted = [line[2:] for line in rules.splitlines()
+              if line.startswith("- ") and ("before sending a large change" in line or "no right to share" in line)]
+    assert len(wanted) == 2
+    guide = need("guide")(sample())
+    for line in wanted:
+        assert line in guide, f"the guide does not say, in the working rules' words: {line}"
+    template = (ROOT / "tools" / "site" / "guide.txt").read_text(encoding="utf-8")
+    assert "large change" not in template and "no right to share" not in template, "the guide writes a working rule in words of its own"
+
+
+def test_each_language_uses_one_word_for_an_issue():
+    build = builder()
+    text = lambda lang: json.dumps(build.load_strings(lang), ensure_ascii=False)
+    assert "イシュー" in text("ja") and not re.search(r"Issue", text("ja")), "Japanese writes an issue in more than one way"
+    assert not re.search(r"\b(?:una issue|issues? abiertas?|las issues)\b", text("es"), re.I), "Spanish gives an issue more than one gender"
