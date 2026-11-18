@@ -94,6 +94,14 @@ def charged():
     return number("memory.current") + number("memory.swap.current")
 
 
+def machine():
+    # the memory the whole machine has in use: everything but what is free and what the machine
+    # can give back; memory that is charged to no container shows here and nowhere else
+    with open("/proc/meminfo") as f:
+        kb = {line.split(":")[0]: int(line.split()[1]) for line in f}
+    return (kb["MemTotal"] - kb["MemFree"] - kb["Buffers"] - kb["Cached"] + kb["Shmem"] - kb["SReclaimable"]) * 1024
+
+
 def give_back(first):
     try:
         with open(f"{held}/memory.reclaim", "wb", buffering=0) as f:
@@ -157,7 +165,7 @@ def standing_still():
         last = min(last, now)
     with open(f"{held}/memory.stat") as f:
         stat = dict(line.split()[:2] for line in f.read().splitlines())
-    return {"charged": charged(), "charged_before": first, "passes": passes, "dropped": dropped,
+    return {"charged": charged(), "machine": machine(), "charged_before": first, "passes": passes, "dropped": dropped,
             "seconds": time.monotonic() - started,
             "stat": {name: int(stat.get(name, 0)) for name in (
                 "anon", "file", "shmem", "kernel", "slab_reclaimable", "slab_unreclaimable", "sock", "pagetables",
@@ -254,6 +262,14 @@ def really_mb(seen: dict) -> float:
     assert seen["held"], f"no reading was taken while the program held: {seen}"
     assert seen["held"]["dropped"] and seen["start"]["dropped"], f"the kernel was not asked to let go of everything: {seen}"
     return (seen["held"]["charged"] - seen["start"]["charged"] - seen["held"]["files"]) / 2**20
+
+
+def charged_to_nobody_mb(seen: dict) -> float:
+    """How much more the whole machine has in use while the program holds than when the case
+    began, beyond what is charged to the judged container. Memory the kernel charges to no
+    container would show here. Other things on the machine move this figure too, so it is
+    printed and nothing is asserted on it."""
+    return ((seen["held"]["machine"] - seen["start"]["machine"]) - (seen["held"]["charged"] - seen["start"]["charged"])) / 2**20
 
 
 def left_out_mb(limit_mb: int) -> float:
@@ -1750,6 +1766,8 @@ def test_the_reading_from_outside_shows_what_a_program_holds_and_nothing_the_ker
     again = really_mb(seen["reads again"]) - nothing
     kept = (seen["only reads"]["held"]["charged_before"] - seen["only reads"]["start"]["charged"]) / 2**20
     note_figures(f"the reading itself, turn {turn}", nothing=nothing, holds_100=holds, only_reads_200=reads, reads_again=again, kept_before_asking=kept,
+                 charged_to_nobody_when_nothing_is_held=charged_to_nobody_mb(seen["nothing"]),
+                 charged_to_nobody_when_100_are_held=charged_to_nobody_mb(seen["holds"]),
                  seconds_while_held=seen["holds"]["held"]["seconds"], seconds_at_start=seen["holds"]["start"]["seconds"])
     assert abs(holds - 100) <= TOLERANCE_MB, f"100 MB of ordinary memory read as {holds:.1f} MB: {seen['holds']}"
     assert kept >= 150, f"the file was to be in memory before the kernel was asked; {kept:.1f} MB were: {seen['only reads']}"
@@ -1933,7 +1951,8 @@ def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_
     counted = within["measured"].get("memory_highest")
     assert counted is not None, f"the case does not say the most the judge counted: {within['measured']}"
     really = really_mb(within)
-    note_figures(f"{way}, limit {limit_mb} MB", really=really, counted=counted / 2**20, beyond=really - counted / 2**20)
+    note_figures(f"{way}, limit {limit_mb} MB", really=really, counted=counted / 2**20, beyond=really - counted / 2**20,
+                 charged_to_nobody=charged_to_nobody_mb(seen))
     assert really - counted / 2**20 <= left_out + TOLERANCE_MB, (
         f"the container really held {really:.1f} MB more than when the case began and the judge counted "
         f"{counted / 2**20:.1f} MB: {within}")
@@ -1956,7 +1975,7 @@ def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:
         return
     assert seen["limit"] is None and seen["exit_code"] == 0, f"{what}: the attempt did not run as written: {seen}"
     really, counted = really_mb(seen), seen["measured"]["memory_highest"] / 2**20
-    note_figures(what, really=really, counted=counted, beyond=really - counted)
+    note_figures(what, really=really, counted=counted, beyond=really - counted, charged_to_nobody=charged_to_nobody_mb(seen))
     assert really - counted <= left_out_mb(limit_mb) + TOLERANCE_MB, (
         f"{what}: the case passed while the container really held {really:.1f} MB more than when the case began "
         f"and the judge counted {counted:.1f} MB: {seen}")
@@ -2009,6 +2028,13 @@ def tries():
     said["setting up asynchronous work"] = call(425, 8, ctypes.create_string_buffer(120))
     said["entering asynchronous work"] = call(426, -1, 0, 0, 0, None, 0)
     said["registering for asynchronous work"] = call(427, -1, 0, None, 0)
+    said["setting up the older asynchronous work"] = call(0 if ARM else 206, 8, ctypes.byref(ctypes.c_ulong(0)))
+    try:
+        for fd in os.openpty():
+            os.close(fd)
+        said["a pair of terminals"] = "done"
+    except OSError as error:
+        said["a pair of terminals"] = "refused: " + errno.errorcode.get(error.errno, str(error.errno))
     for name, family in (("a cryptography socket", 38), ("a local socket", socket.AF_UNIX), ("a network socket", socket.AF_INET)):
         try:
             socket.socket(family, socket.SOCK_SEQPACKET if family == 38 else socket.SOCK_STREAM).close()
@@ -2025,7 +2051,7 @@ def tries():
     return said
 """
 
-NOT_PERMITTED, CANNOT_MOVE = "refused: EPERM", "refused: EINVAL"
+NOT_PERMITTED, CANNOT_MOVE, NO_SUCH_CALL, NO_ACCESS = "refused: EPERM", "refused: EINVAL", "refused: ENOSYS", "refused: EACCES"
 TRIED = {"locking a range": NOT_PERMITTED, "locking a range, the newer call": NOT_PERMITTED,
          "locking everything": NOT_PERMITTED, "a mapping asked for as locked": NOT_PERMITTED,
          "locking shared memory of the old family": NOT_PERMITTED,
@@ -2033,6 +2059,7 @@ TRIED = {"locking a range": NOT_PERMITTED, "locking a range, the newer call": NO
          "duplicating what a pipe holds": CANNOT_MOVE, "giving pages to a pipe": CANNOT_MOVE,
          "setting up asynchronous work": NOT_PERMITTED, "entering asynchronous work": NOT_PERMITTED,
          "registering for asynchronous work": NOT_PERMITTED, "a cryptography socket": NOT_PERMITTED,
+         "setting up the older asynchronous work": NO_SUCH_CALL, "a pair of terminals": NO_ACCESS,
          "a local socket": "done", "a network socket": "done"}
 THE_32_BIT_WAY = "sending a file, asked the 32-bit way"     # only a machine of the check's kind has it
 
@@ -2044,18 +2071,23 @@ def test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_o
     which is what makes a program copy instead. This holds for the build and for a run, and it
     is the judge's own doing: the container here has no call filter but the judge's. Ordinary
     sockets still work. On a machine that knows a 32-bit way of calling, a call made that way is
-    refused whatever it is."""
+    refused whatever it is. The rings of the kernel's older asynchronous input and output cannot
+    be made either: the call answers that the kernel has no such call. And no pair of terminals
+    can be made: what such a pair buffers is memory the kernel charges to no container. The
+    machine's caps on both are printed."""
     (tmp_path / "solution").mkdir()
     (tmp_path / "solution/tries.py").write_text(
         "import ctypes, errno, json, os, sys\nlibc = ctypes.CDLL(None, use_errno=True)\n" + TRIES
         + "json.dump(tries(), open('/app/tried-by-the-build.json', 'w'))\n", encoding="utf-8")
-    program = PLAIN + TRIES + "print(json.dumps({'run': tries(), 'build': json.load(open('/app/tried-by-the-build.json'))}))\n"
+    program = PLAIN + TRIES + ("print(json.dumps({'run': tries(), 'build': json.load(open('/app/tried-by-the-build.json')), 'caps': "
+                               "[int(open(name).read()) for name in ('/proc/sys/fs/aio-max-nr', '/proc/sys/kernel/pty/max')]}))\n")
     result = judge_attack(tmp_path, program, {"functional/test_tries.py": REPORT}, {"own_filter_only": True},
                           BUILD_CMD="python3 tries.py")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
     assert seen["exit_code"] == 0, seen
     tried = json.loads(seen["out"])
+    note_figures("the machine's caps (counts, not MB)", older_asynchronous_events=tried["caps"][0], terminals=tried["caps"][1])
     for who in ("build", "run"):
         wrong = {name: said for name, said in tried[who].items() if said != {**TRIED, THE_32_BIT_WAY: NOT_PERMITTED}.get(name)}
         assert not wrong and set(tried[who]) - {THE_32_BIT_WAY} == set(TRIED), f"in the {who}: {wrong}"

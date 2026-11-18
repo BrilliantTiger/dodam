@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import shutil
+import stat
 import struct
 import sys
 import time
@@ -1004,7 +1005,7 @@ def answer_of(raw: bytes, machine_name: int, call: int, first_argument: int = 0)
         elif code == 0x05:                                 # go on further down
             at += 1 + value
         elif code == 0x06:                                 # the answer
-            return {0x7FFF0000: "goes on", 0x00050001: "not permitted", 0x00050016: "invalid argument"}.get(value, hex(value))
+            return {0x7FFF0000: "goes on", 0x00050001: "not permitted", 0x00050016: "invalid argument", 0x00050026: "no such call"}.get(value, hex(value))
         else:
             raise AssertionError(f"the filter holds a step this test does not know: {lines[at]}")
     raise AssertionError("the filter gives no answer")
@@ -1013,17 +1014,19 @@ def answer_of(raw: bytes, machine_name: int, call: int, first_argument: int = 0)
 def test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages():
     """The four calls that move pages into a pipe or a socket without copying answer "invalid
     argument"; the calls for asynchronous work and the making of a cryptography socket are not
-    permitted; every other socket and every ordinary call goes on. A call made the way another
+    permitted; the making of a ring of the older asynchronous work answers that there is no such
+    call; every other socket and every ordinary call goes on. A call made the way another
     kind of machine makes it is not permitted whatever it is, one of the four included."""
     build = judge_module.refusing_filter
-    numbers = {"x86_64": {"name": 0xC000003E, "moving": (40, 275, 276, 278), "socket": 41, "read": 0, "outliving": 29},
-               "aarch64": {"name": 0xC00000B7, "moving": (71, 76, 77, 75), "socket": 198, "read": 63, "outliving": 194}}
+    numbers = {"x86_64": {"name": 0xC000003E, "moving": (40, 275, 276, 278), "socket": 41, "read": 0, "outliving": 29, "rings": 206},
+               "aarch64": {"name": 0xC00000B7, "moving": (71, 76, 77, 75), "socket": 198, "read": 63, "outliving": 194, "rings": 0}}
     for machine, known in numbers.items():
         raw = build(machine)
         for call in known["moving"]:
             assert answer_of(raw, known["name"], call) == "invalid argument", (machine, call)
         for call in (425, 426, 427, known["outliving"]):
             assert answer_of(raw, known["name"], call) == "not permitted", (machine, call)
+        assert answer_of(raw, known["name"], known["rings"]) == "no such call", "the rings of the older asynchronous work"
         assert answer_of(raw, known["name"], known["socket"], 38) == "not permitted", "a cryptography socket"
         for family in (1, 2, 10):
             assert answer_of(raw, known["name"], known["socket"], family) == "goes on", (machine, family)
@@ -1038,6 +1041,22 @@ def test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages():
     raw = build("x86_64")
     for call in numbers["x86_64"]["moving"]:
         assert answer_of(raw, 0xC000003E, 0x40000000 + call) == "not permitted"
+
+
+def test_no_user_but_root_can_make_a_pair_of_terminals(tmp_path):
+    """What a pair of terminals buffers is memory the kernel charges to no container. Before
+    anything of the program's side runs, the judge closes the device that makes such pairs to
+    every user; a link to it is left alone, and so is a container that has none."""
+    close = getattr(judge_module, "close_terminals", None)
+    assert close is not None, "the judge leaves the device that makes pairs of terminals open to every user"
+    device, link = tmp_path / "ptmx", tmp_path / "link"
+    device.write_text("")
+    device.chmod(0o666)
+    link.symlink_to(device)
+    close(devices=(link, tmp_path / "none"))
+    assert stat.S_IMODE(device.stat().st_mode) == 0o666, "a link is not followed"
+    close(devices=(device, link))
+    assert stat.S_IMODE(device.stat().st_mode) == 0
 
 
 def test_the_judge_refuses_a_machine_it_has_no_call_filter_for(tmp_path, monkeypatch):
