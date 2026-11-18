@@ -178,8 +178,9 @@ def parse_gh_call(args: list[str]) -> tuple[str, dict[str, str]]:
 class FakeGitHub:
     """In-memory GitHub REST API responder with per-page ETags and pagination."""
 
-    def __init__(self, own_login: str = "project-account"):
+    def __init__(self, own_login: str = "project-account", own_id: int = 9000):
         self.own_login = own_login
+        self.own_id = own_id
         self.pulls: list[object] = []
         self.issues: list[object] = []
         self.issue_events: list[object] = []
@@ -204,7 +205,7 @@ class FakeGitHub:
             return step(endpoint, req_headers) if callable(step) else step
 
         if endpoint == "user":
-            return http_response(200, {"login": self.own_login, "type": "User"})
+            return http_response(200, {"login": self.own_login, "id": self.own_id, "type": "User"})
 
         base_hdrs: dict[str, str] = {}
         if self.poll_interval is not None:
@@ -279,6 +280,13 @@ def run_watch(
     return (code, out_buf.getvalue(), err_buf.getvalue(), clk)
 
 
+def _user_dict(login: str, user_type: str, user_id: int | None) -> dict[str, object]:
+    d: dict[str, object] = {"login": login, "type": user_type}
+    if user_id is not None:
+        d["id"] = user_id
+    return d
+
+
 def make_issue(
     issue_id: int,
     number: int,
@@ -286,6 +294,7 @@ def make_issue(
     user_type: str = "User",
     created_at: str = "2026-11-18T05:00:10Z",
     is_pr: bool = False,
+    user_id: int | None = 1001,
 ) -> dict[str, object]:
     item: dict[str, object] = {
         "id": issue_id,
@@ -293,7 +302,7 @@ def make_issue(
         "title": POISON_TITLE,
         "body": POISON_BODY,
         "state": "open",
-        "user": {"login": login, "type": user_type},
+        "user": _user_dict(login, user_type, user_id),
         "created_at": created_at,
         "updated_at": created_at,
         "html_url": f"https://github.com/{REPO}/{'pull' if is_pr else 'issues'}/{number}",
@@ -313,6 +322,7 @@ def make_pr(
     draft: bool = False,
     created_at: str = "2026-11-18T05:00:10Z",
     updated_at: str = "2026-11-18T05:00:10Z",
+    user_id: int | None = 1002,
 ) -> dict[str, object]:
     return {
         "id": pr_id,
@@ -321,7 +331,7 @@ def make_pr(
         "draft": draft,
         "title": POISON_TITLE,
         "body": POISON_BODY,
-        "user": {"login": login, "type": user_type},
+        "user": _user_dict(login, user_type, user_id),
         "head": {"sha": sha, "ref": POISON_BRANCH},
         "base": {"sha": "0000000abcdef0", "ref": "main"},
         "created_at": created_at,
@@ -338,6 +348,7 @@ def make_issue_event(
     user_type: str = "User",
     created_at: str = "2026-11-18T05:00:20Z",
     is_pr: bool = False,
+    user_id: int | None = 1003,
 ) -> dict[str, object]:
     issue_obj: dict[str, object] = {"number": number, "title": POISON_TITLE, "body": POISON_BODY}
     if is_pr:
@@ -345,7 +356,7 @@ def make_issue_event(
     return {
         "id": ev_id,
         "event": event_name,
-        "actor": {"login": login, "type": user_type},
+        "actor": _user_dict(login, user_type, user_id),
         "created_at": created_at,
         "issue": issue_obj,
     }
@@ -358,12 +369,13 @@ def make_issue_comment(
     user_type: str = "User",
     created_at: str = "2026-11-18T05:00:30Z",
     is_pr: bool = False,
+    user_id: int | None = 1004,
 ) -> dict[str, object]:
     kind_seg = "pull" if is_pr else "issues"
     return {
         "id": cid,
         "body": POISON_BODY,
-        "user": {"login": login, "type": user_type},
+        "user": _user_dict(login, user_type, user_id),
         "created_at": created_at,
         "updated_at": created_at,
         "issue_url": f"https://api.github.com/repos/{REPO}/issues/{number}",
@@ -378,12 +390,13 @@ def make_review(
     login: str = "alice",
     user_type: str = "User",
     submitted_at: str = "2026-11-18T05:00:40Z",
+    user_id: int | None = 1005,
 ) -> dict[str, object]:
     return {
         "id": rid,
         "state": state,
         "body": POISON_BODY,
-        "user": {"login": login, "type": user_type},
+        "user": _user_dict(login, user_type, user_id),
         "submitted_at": submitted_at,
         "pull_request_url": f"https://api.github.com/repos/{REPO}/pulls/{number}",
         "html_url": f"https://github.com/{REPO}/pull/{number}#pullrequestreview-{rid}",
@@ -396,13 +409,14 @@ def make_review_comment(
     login: str = "alice",
     user_type: str = "User",
     created_at: str = "2026-11-18T05:00:50Z",
+    user_id: int | None = 1006,
 ) -> dict[str, object]:
     return {
         "id": cid,
         "body": POISON_BODY,
         "path": POISON_FILE,
         "diff_hunk": POISON_DIFF,
-        "user": {"login": login, "type": user_type},
+        "user": _user_dict(login, user_type, user_id),
         "created_at": created_at,
         "updated_at": created_at,
         "pull_request_url": f"https://api.github.com/repos/{REPO}/pulls/{number}",
@@ -511,6 +525,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "kind": "issue_opened",
                 "number": 2,
                 "actor": "fresh-outsider",
+                "actor_id": 1001,
                 "time": "2026-11-18T06:00:00Z",
                 "url": f"https://github.com/{REPO}/issues/2",
             }
@@ -526,12 +541,15 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
     [
         (
             "issue_opened",
-            lambda gh: gh.issues.insert(0, make_issue(301, 11, login="alice", created_at="2026-11-18T07:01:00Z")),
+            lambda gh: gh.issues.insert(
+                0, make_issue(301, 11, login="alice", user_id=2101, created_at="2026-11-18T07:01:00Z")
+            ),
             {
                 "id": "issue_opened:301",
                 "kind": "issue_opened",
                 "number": 11,
                 "actor": "alice",
+                "actor_id": 2101,
                 "time": "2026-11-18T07:01:00Z",
                 "url": f"https://github.com/{REPO}/issues/11",
             },
@@ -539,13 +557,17 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "issue_reopened",
             lambda gh: gh.issue_events.insert(
-                0, make_issue_event(401, 3, "reopened", login="bob", created_at="2026-11-18T07:02:00Z", is_pr=False)
+                0,
+                make_issue_event(
+                    401, 3, "reopened", login="bob", user_id=2102, created_at="2026-11-18T07:02:00Z", is_pr=False
+                ),
             ),
             {
                 "id": "issue_reopened:401",
                 "kind": "issue_reopened",
                 "number": 3,
                 "actor": "bob",
+                "actor_id": 2102,
                 "time": "2026-11-18T07:02:00Z",
                 "url": f"https://github.com/{REPO}/issues/3",
             },
@@ -553,13 +575,17 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "issue_comment",
             lambda gh: gh.issue_comments.insert(
-                0, make_issue_comment(501, 3, login="carol", created_at="2026-11-18T07:03:00Z", is_pr=False)
+                0,
+                make_issue_comment(
+                    501, 3, login="carol", user_id=2103, created_at="2026-11-18T07:03:00Z", is_pr=False
+                ),
             ),
             {
                 "id": "issue_comment:501",
                 "kind": "issue_comment",
                 "number": 3,
                 "actor": "carol",
+                "actor_id": 2103,
                 "time": "2026-11-18T07:03:00Z",
                 "url": f"https://github.com/{REPO}/issues/3#issuecomment-501",
             },
@@ -567,13 +593,17 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "pull_request_comment",
             lambda gh: gh.issue_comments.insert(
-                0, make_issue_comment(502, 5, login="dave", created_at="2026-11-18T07:04:00Z", is_pr=True)
+                0,
+                make_issue_comment(
+                    502, 5, login="dave", user_id=2104, created_at="2026-11-18T07:04:00Z", is_pr=True
+                ),
             ),
             {
                 "id": "pull_request_comment:502",
                 "kind": "pull_request_comment",
                 "number": 5,
                 "actor": "dave",
+                "actor_id": 2104,
                 "time": "2026-11-18T07:04:00Z",
                 "url": f"https://github.com/{REPO}/pull/5#issuecomment-502",
             },
@@ -584,12 +614,13 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 gh.pulls.insert(
                     0,
                     make_pr(
-                        610, 12, sha="aaaa1111bbbb2222", login="erin",
+                        610, 12, sha="aaaa1111bbbb2222", login="erin", user_id=2105,
                         created_at="2026-11-18T07:05:00Z", updated_at="2026-11-18T07:05:00Z",
                     ),
                 ),
                 gh.issues.insert(
-                    0, make_issue(611, 12, login="erin", created_at="2026-11-18T07:05:00Z", is_pr=True)
+                    0,
+                    make_issue(611, 12, login="erin", user_id=2105, created_at="2026-11-18T07:05:00Z", is_pr=True),
                 ),
             ),
             {
@@ -597,6 +628,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "kind": "pull_request_opened",
                 "number": 12,
                 "actor": "erin",
+                "actor_id": 2105,
                 "time": "2026-11-18T07:05:00Z",
                 "url": f"https://github.com/{REPO}/pull/12",
             },
@@ -606,7 +638,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
             lambda gh: gh.pulls.__setitem__(
                 1,
                 make_pr(
-                    605, 6, sha="5555666677778888", login="nia", draft=False,
+                    605, 6, sha="5555666677778888", login="nia", user_id=2106, draft=False,
                     created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T07:05:30Z",
                 ),
             ),
@@ -615,6 +647,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "kind": "pull_request_ready",
                 "number": 6,
                 "actor": "nia",
+                "actor_id": 2106,
                 "time": "2026-11-18T07:05:30Z",
                 "url": f"https://github.com/{REPO}/pull/6",
             },
@@ -622,13 +655,17 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "pull_request_reopened",
             lambda gh: gh.issue_events.insert(
-                0, make_issue_event(402, 5, "reopened", login="frank", created_at="2026-11-18T07:06:00Z", is_pr=True)
+                0,
+                make_issue_event(
+                    402, 5, "reopened", login="frank", user_id=2107, created_at="2026-11-18T07:06:00Z", is_pr=True
+                ),
             ),
             {
                 "id": "pull_request_reopened:402",
                 "kind": "pull_request_reopened",
                 "number": 5,
                 "actor": "frank",
+                "actor_id": 2107,
                 "time": "2026-11-18T07:06:00Z",
                 "url": f"https://github.com/{REPO}/pull/5",
             },
@@ -638,7 +675,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
             lambda gh: gh.pulls.__setitem__(
                 0,
                 make_pr(
-                    600, 5, sha="deadbeef99990000", login="grace",
+                    600, 5, sha="deadbeef99990000", login="grace", user_id=2108,
                     created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T07:07:00Z",
                 ),
             ),
@@ -647,6 +684,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "kind": "pull_request_commits",
                 "number": 5,
                 "actor": "grace",
+                "actor_id": 2108,
                 "time": "2026-11-18T07:07:00Z",
                 "url": f"https://github.com/{REPO}/pull/5",
             },
@@ -654,13 +692,20 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "pull_request_review",
             lambda gh: gh.reviews.__setitem__(
-                5, [make_review(701, 5, state="CHANGES_REQUESTED", login="heidi", submitted_at="2026-11-18T07:08:00Z")]
+                5,
+                [
+                    make_review(
+                        701, 5, state="CHANGES_REQUESTED", login="heidi", user_id=2109,
+                        submitted_at="2026-11-18T07:08:00Z",
+                    )
+                ],
             ),
             {
                 "id": "pull_request_review:701",
                 "kind": "pull_request_review",
                 "number": 5,
                 "actor": "heidi",
+                "actor_id": 2109,
                 "time": "2026-11-18T07:08:00Z",
                 "url": f"https://github.com/{REPO}/pull/5#pullrequestreview-701",
             },
@@ -668,13 +713,14 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         (
             "pull_request_review_comment",
             lambda gh: gh.pull_comments.insert(
-                0, make_review_comment(801, 5, login="ivan", created_at="2026-11-18T07:09:00Z")
+                0, make_review_comment(801, 5, login="ivan", user_id=2110, created_at="2026-11-18T07:09:00Z")
             ),
             {
                 "id": "pull_request_review_comment:801",
                 "kind": "pull_request_review_comment",
                 "number": 5,
                 "actor": "ivan",
+                "actor_id": 2110,
                 "time": "2026-11-18T07:09:00Z",
                 "url": f"https://github.com/{REPO}/pull/5#discussion_r801",
             },
@@ -837,7 +883,7 @@ def test_pull_request_head_moving_back_to_an_earlier_commit_is_reported_again(mo
 def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_include_own_for_trials(
     monkeypatch, tmp_path
 ):
-    gh = FakeGitHub(own_login="DodamDesk")
+    gh = FakeGitHub(own_login="DodamDesk", own_id=9000)
     state_file = tmp_path / "state.json"
 
     poll_round = 0
@@ -847,7 +893,9 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
         if args[-1].startswith(f"repos/{REPO}/pulls?"):
             poll_round += 1
             if poll_round == 3:
-                gh.issues.insert(0, make_issue(101, 1, login="dodamdesk", created_at="2026-11-18T08:00:01Z"))
+                gh.issues.insert(
+                    0, make_issue(101, 1, login="dodamdesk", user_id=9000, created_at="2026-11-18T08:00:01Z")
+                )
                 gh.issues.insert(
                     0, make_issue(102, 2, login="dependabot[bot]", user_type="Bot", created_at="2026-11-18T08:00:02Z")
                 )
@@ -855,7 +903,10 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
                     0, make_issue(103, 3, login="helper-app", user_type="Bot", created_at="2026-11-18T08:00:03Z")
                 )
                 gh.issues.insert(
-                    0, make_issue(104, 4, login="real-outsider", user_type="User", created_at="2026-11-18T08:00:04Z")
+                    0,
+                    make_issue(
+                        104, 4, login="real-outsider", user_type="User", user_id=4104, created_at="2026-11-18T08:00:04Z"
+                    ),
                 )
         return gh(args)
 
@@ -870,13 +921,14 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
                 "kind": "issue_opened",
                 "number": 4,
                 "actor": "real-outsider",
+                "actor_id": 4104,
                 "time": "2026-11-18T08:00:04Z",
                 "url": f"https://github.com/{REPO}/issues/4",
             }
         ]
     }
 
-    gh.issues.insert(0, make_issue(105, 5, login="DodamDesk", created_at="2026-11-18T08:05:00Z"))
+    gh.issues.insert(0, make_issue(105, 5, login="DodamDesk", user_id=9000, created_at="2026-11-18T08:05:00Z"))
     gh.issues.insert(
         0, make_issue(106, 6, login="github-actions[bot]", user_type="Bot", created_at="2026-11-18T08:05:05Z")
     )
@@ -891,6 +943,7 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
                 "kind": "issue_opened",
                 "number": 5,
                 "actor": "DodamDesk",
+                "actor_id": 9000,
                 "time": "2026-11-18T08:05:00Z",
                 "url": f"https://github.com/{REPO}/issues/5",
             }
@@ -935,7 +988,7 @@ def test_outsider_titles_bodies_branches_filenames_markup_and_orders_never_appea
     data = json.loads(out)
     assert len(data["events"]) == 5
     for ev in data["events"]:
-        assert set(ev) == {"id", "kind", "number", "actor", "time", "url"}
+        assert set(ev) == {"id", "kind", "number", "actor", "actor_id", "time", "url"}
 
     saved_state = state_file.read_text(encoding="utf-8")
     combined = out + "\n" + err + "\n" + saved_state
@@ -1000,6 +1053,7 @@ def test_disallowed_github_login_is_omitted_while_event_is_still_reported(monkey
                 "id": "issue_opened:333",
                 "kind": "issue_opened",
                 "number": 14,
+                "actor_id": 0,
                 "time": "2026-11-18T09:30:00Z",
                 "url": f"https://github.com/{REPO}/issues/14",
             }
@@ -1008,6 +1062,150 @@ def test_disallowed_github_login_is_omitted_while_event_is_still_reported(monkey
     assert "actor" not in data["events"][0]
     if isinstance(bad_user, dict) and bad_user["login"]:
         assert bad_user["login"] not in out and bad_user["login"] not in state_file.read_text(encoding="utf-8")
+
+
+def test_actor_id_is_present_for_every_event_kind_comes_from_github_data_not_login_and_is_zero_when_missing(
+    monkeypatch, tmp_path
+):
+    # 1. Every one of the ten counted event kinds carries actor_id as a whole number (int, never bool)
+    #    placed right next to actor, taken from GitHub's user id (and PR author's id on pull_request_commits).
+    gh_all = FakeGitHub(own_login="project-account", own_id=9000)
+    gh_all.issues.append(make_issue(10, 3, login="seed-issue", user_id=3000, created_at="2026-11-17T01:00:00Z"))
+    gh_all.pulls.append(
+        make_pr(
+            600, 5, sha="1111222233334444", login="pr5-author", user_id=50555, draft=False,
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    gh_all.pulls.append(
+        make_pr(
+            605, 6, sha="5555666677778888", login="pr6-author", user_id=60666, draft=True,
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    gh_all.reviews[5] = []
+    gh_all.reviews[6] = []
+    state_all = tmp_path / "all-kinds-actor-id.json"
+    c0, _, e0, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_all)], gh_all)
+    assert c0 == 0 and e0 == ""
+
+    gh_all.issues.insert(0, make_issue(301, 11, login="u-open", user_id=40101, created_at="2026-11-18T07:01:00Z"))
+    gh_all.issue_events.insert(
+        0, make_issue_event(401, 3, "reopened", login="u-ireopen", user_id=40102, created_at="2026-11-18T07:02:00Z", is_pr=False)
+    )
+    gh_all.issue_comments.insert(
+        0, make_issue_comment(501, 3, login="u-ic", user_id=40103, created_at="2026-11-18T07:03:00Z", is_pr=False)
+    )
+    gh_all.issue_comments.insert(
+        0, make_issue_comment(502, 5, login="u-prc", user_id=40104, created_at="2026-11-18T07:04:00Z", is_pr=True)
+    )
+    gh_all.pulls.insert(
+        0,
+        make_pr(
+            610, 12, sha="aaaa1111bbbb2222", login="u-propen", user_id=40105,
+            created_at="2026-11-18T07:05:00Z", updated_at="2026-11-18T07:05:00Z",
+        ),
+    )
+    gh_all.pulls[2] = make_pr(
+        605, 6, sha="5555666677778888", login="pr6-author", user_id=60666, draft=False,
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T07:05:30Z",
+    )
+    gh_all.issue_events.insert(
+        0, make_issue_event(402, 5, "reopened", login="u-prreopen", user_id=40107, created_at="2026-11-18T07:06:00Z", is_pr=True)
+    )
+    gh_all.pulls[1] = make_pr(
+        600, 5, sha="deadbeef99990000", login="pr5-author", user_id=50555,
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T07:07:00Z",
+    )
+    gh_all.reviews[5] = [
+        make_review(701, 5, state="COMMENTED", login="u-rev", user_id=40109, submitted_at="2026-11-18T07:08:00Z")
+    ]
+    gh_all.pull_comments.insert(
+        0, make_review_comment(801, 5, login="u-rc", user_id=40110, created_at="2026-11-18T07:09:00Z")
+    )
+
+    c_all, o_all, e_all, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_all)], gh_all)
+    assert c_all == 0 and e_all == ""
+    evs_all = json.loads(o_all)["events"]
+    want_by_kind = {
+        "issue_opened": 40101,
+        "issue_reopened": 40102,
+        "issue_comment": 40103,
+        "pull_request_comment": 40104,
+        "pull_request_opened": 40105,
+        "pull_request_ready": 60666,
+        "pull_request_reopened": 40107,
+        "pull_request_commits": 50555,
+        "pull_request_review": 40109,
+        "pull_request_review_comment": 40110,
+    }
+    assert {ev["kind"] for ev in evs_all} == set(want_by_kind)
+    for ev in evs_all:
+        assert "actor_id" in ev
+        assert type(ev["actor_id"]) is int
+        assert ev["actor_id"] == want_by_kind[ev["kind"]]
+        assert list(ev.keys()) == ["id", "kind", "number", "actor", "actor_id", "time", "url"]
+
+    # 2. actor_id comes from GitHub's data and NOT from login:
+    #    - same login (and differently capitalised login) with different ids keeps the distinct ids;
+    #    - renamed login with the same id keeps the same id;
+    #    - disallowed login with a valid id omits actor while keeping actor_id;
+    #    - signed-in own account renamed on GitHub is still filtered by own_id unless --include-own.
+    gh_id = FakeGitHub(own_login="DodamDesk", own_id=9000)
+    state_id = tmp_path / "data-not-login.json"
+    c_i0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_id)], gh_id)
+    assert c_i0 == 0
+
+    bad_login_with_id = make_issue(915, 25, created_at="2026-11-18T08:00:05Z")
+    bad_login_with_id["user"] = {"login": "has_underscore", "id": 555444, "type": "User"}
+    gh_id.issues = [
+        bad_login_with_id,
+        make_issue(914, 24, login="DodamDeskRenamed", user_id=9000, created_at="2026-11-18T08:00:04Z"),
+        make_issue(913, 23, login="after-rename", user_id=888777, created_at="2026-11-18T08:00:03Z"),
+        make_issue(912, 22, login="before-rename", user_id=888777, created_at="2026-11-18T08:00:02Z"),
+        make_issue(911, 21, login="ALICE", user_id=70002, created_at="2026-11-18T08:00:01Z"),
+        make_issue(910, 20, login="alice", user_id=70001, created_at="2026-11-18T08:00:00Z"),
+    ]
+    c_id, o_id, e_id, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_id)], gh_id)
+    assert c_id == 0 and e_id == ""
+    evs_id = json.loads(o_id)["events"]
+    assert [(ev["number"], ev.get("actor"), ev["actor_id"], type(ev["actor_id"]) is int) for ev in evs_id] == [
+        (20, "alice", 70001, True),
+        (21, "ALICE", 70002, True),
+        (22, "before-rename", 888777, True),
+        (23, "after-rename", 888777, True),
+        (25, None, 555444, True),
+    ]
+    assert "actor" not in evs_id[-1]
+    assert list(evs_id[-1].keys()) == ["id", "kind", "number", "actor_id", "time", "url"]
+
+    # 3. Missing or non-positive / non-integer id (e.g. deleted account user=None) carries actor_id 0.
+    gh_zero = FakeGitHub()
+    gh_zero.issues.append(make_issue(10, 3, login="seed", user_id=3000, created_at="2026-11-17T01:00:00Z"))
+    state_zero = tmp_path / "missing-actor-id.json"
+    cz0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_zero)], gh_zero)
+    assert cz0 == 0
+
+    deleted_issue = make_issue(951, 31, created_at="2026-11-18T09:00:01Z")
+    deleted_issue["user"] = None
+    no_id_issue = make_issue(952, 32, login="ghost-like", user_id=None, created_at="2026-11-18T09:00:02Z")
+    bool_id_issue = make_issue(953, 33, login="bool-id", created_at="2026-11-18T09:00:03Z")
+    bool_id_issue["user"] = {"login": "bool-id", "id": True, "type": "User"}
+    neg_id_issue = make_issue(954, 34, login="neg-id", user_id=-7, created_at="2026-11-18T09:00:04Z")
+    str_id_issue = make_issue(955, 35, login="str-id", created_at="2026-11-18T09:00:05Z")
+    str_id_issue["user"] = {"login": "str-id", "id": "12345", "type": "User"}
+    deleted_reopen = make_issue_event(956, 3, "reopened", created_at="2026-11-18T09:00:06Z", is_pr=False)
+    deleted_reopen["actor"] = None
+
+    gh_zero.issues = [str_id_issue, neg_id_issue, bool_id_issue, no_id_issue, deleted_issue, gh_zero.issues[0]]
+    gh_zero.issue_events = [deleted_reopen]
+    cz1, oz1, ez1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_zero)], gh_zero)
+    assert cz1 == 0 and ez1 == ""
+    evs_zero = json.loads(oz1)["events"]
+    assert len(evs_zero) == 6
+    for ev in evs_zero:
+        assert "actor_id" in ev
+        assert type(ev["actor_id"]) is int and ev["actor_id"] == 0
 
 
 # --- State path guards, damaged startup states, locking, bounds, and exit codes ---------------
@@ -1338,8 +1536,10 @@ def test_full_waiting_queue_loses_nothing_asks_github_for_nothing_more_and_holds
     # reports from the queue right away and asks GitHub for NOTHING.
     full_queue_file = tmp_path / "already-full.json"
     pre_full = json.loads(state_file.read_text(encoding="utf-8"))
+    template_ev = dict(pre_full["pending"][0])
     pre_full["pending"] = [
         {
+            **template_ev,
             "id": "issue_opened:201",
             "kind": "issue_opened",
             "number": 21,
@@ -1348,6 +1548,7 @@ def test_full_waiting_queue_loses_nothing_asks_github_for_nothing_more_and_holds
             "url": f"https://github.com/{REPO}/issues/21",
         },
         {
+            **template_ev,
             "id": "issue_opened:202",
             "kind": "issue_opened",
             "number": 22,
@@ -2004,6 +2205,7 @@ def test_reviews_on_later_pages_are_not_missed_even_when_page_one_etag_is_unchan
                 "kind": "pull_request_review",
                 "number": 5,
                 "actor": "page-two-reviewer",
+                "actor_id": 1005,
                 "time": "2026-11-18T10:00:00Z",
                 "url": f"https://github.com/{REPO}/pull/5#pullrequestreview-2101",
             }
@@ -2367,6 +2569,7 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
     low = text.lower()
     assert "pull_request_ready" in text
     assert "pull_request_commits" in text
+    assert "actor_id" in text and "deleted account" in low and "`0`" in text
     assert "author" in low and "pushed" in low, (
         "brief.md must state that for pull_request_commits the login is the PR author, not the pusher"
     )
