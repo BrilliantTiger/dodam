@@ -743,6 +743,20 @@ def test_memory_the_kernel_gives_back_like_the_cache_is_not_counted_as_memory(tm
     assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
 
 
+def test_the_kernels_records_are_left_out_only_up_to_a_bound():
+    """A quarter of the case's memory limit, never more than 16 MB; what the records grew by beyond
+    that counts as the case's memory. A fall of the records gives nothing back."""
+    from dodambench import dodam_cli as runner
+    bound, counted = getattr(runner, "_records_left_out_at_most", None), getattr(runner, "_records_counted", None)
+    assert bound is not None and counted is not None, "the case runner leaves the kernel's records out without a bound"
+    mb = 2**20
+    assert [bound(limit) for limit in (512, 256, 64, 32, 8)] == [16 * mb, 16 * mb, 16 * mb, 8 * mb, 2 * mb]
+    assert counted(10 * mb, 16 * mb) == 0
+    assert counted(16 * mb, 16 * mb) == 0
+    assert counted(200 * mb, 16 * mb) == 184 * mb
+    assert counted(10 * mb, 2 * mb) == 8 * mb
+
+
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():
     """How far a new high of the container's memory lies above what the case may take, counted
     from the memory that could not be given back when the run began. It is the most the program

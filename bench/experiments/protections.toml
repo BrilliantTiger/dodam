@@ -575,7 +575,7 @@ put = ''' + int(stat_lines["shmem"]) - gives_back,'''
 [[protection]]
 what = "The records the kernel keeps of files that were only looked at are not counted as the program's memory"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_isolation.py::test_a_program_that_only_looks_at_files_never_fails_for_memory"]
+tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it"]
 [[protection.change]]
 find = '''    gives_back = int(stat_lines.get("slab_reclaimable", 0))
 '''

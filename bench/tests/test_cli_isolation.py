@@ -1369,14 +1369,17 @@ print("done")
     assert named(said, "test_the_reader")["above_the_limit_mb"] >= 100, said
 
 
-# A hidden test that says how much memory the kernel held for names and file records before a
-# program that only looks at files, and hands back how the run was judged. The program says the
-# most the kernel held of them while it ran: the kernel gives them back whenever it likes, so what
-# is left after the run shows nothing.
-LOOK_TESTS = '''
-def given_back_mb():
-    stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
-    return int(stat["slab_reclaimable"]) // 2**20
+# A hidden test for a program that only looks at files: once at about as many as are left out of a
+# case's memory, once at far more. It hands back how each run was judged and what the judge noted.
+LOOK_TESTS = """
+def look(how):
+    with case() as c:
+        r = c.run(["look", how])
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[how] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:], "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.exit_code == 0 and r.out.startswith("done"), r
 
 
 def test_before():
@@ -1384,53 +1387,252 @@ def test_before():
         assert c.run(["plain"]).out == "plain\\n"
 
 
-def test_the_one_that_looks():
-    with case() as c:
-        before = given_back_mb()
-        r = c.run(["look"])
-        with open("/logs/verifier/attack.json", "w") as f:
-            json.dump({"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:],
-                       "before_mb": before, "after_mb": given_back_mb()}, f)
-        assert r.exit_code == 0 and r.out.startswith("done "), r
+def test_looks_at_many_files():
+    look("many")
+
+
+def test_looks_at_far_more():
+    look("far more")
 
 
 def test_after():
     with case() as c:
         assert c.run(["plain"]).out == "plain\\n"
-'''
+"""
 
 
-def test_a_program_that_only_looks_at_files_never_fails_for_memory(tmp_path):
-    """A program that holds a few MB looks at every file of the image and asks for 400,000 names
-    that are not there. It reads nothing and takes nothing; the kernel keeps a record of every
-    name, well above the case's limit of 64 MB, and gives those records back when memory is needed."""
-    program = PLAIN + r'''
-def given_back_mb():
+def test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it(tmp_path):
+    """A program that holds 44 MB under a limit of 64 MB looks at every file of the image and asks
+    for names that are not there until the kernel's records have grown by 13 MB. Those records are
+    left out of its memory, and it passes; counted, they would put it above its limit. The same
+    program asking for 400,000 such names makes the kernel hold some 300 MB of records. What goes
+    beyond the 16 MB that are left out counts, and it fails for memory."""
+    program = PLAIN + r"""
+def records():
     stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
-    return int(stat["slab_reclaimable"]) // MB
+    return int(stat["slab_reclaimable"])
 
 
+first, block = records(), bytearray(b"x") * (44 * MB)
 for top, folders, files in os.walk("/"):
     if top.startswith(("/proc", "/sys", "/dev")):
         folders[:] = []
-most = 0
 for number in range(400000):
     try:
         os.lstat(f"/usr/lib/not-there-{number}")
     except OSError:
         pass
-    if number % 10000 == 9999:
-        most = max(most, given_back_mb())
-print("done", most)
-'''
+    if sys.argv[2] == "many" and number % 500 == 499 and records() - first >= 13 * MB:
+        break
+print("done", number)
+time.sleep(0.2)
+"""
     result = judge_attack(tmp_path, program, {"functional/test_look.py": LOOK_TESTS}, CASE_MEMORY_MB="64",
                           CASE_TIMEOUT_SEC="60")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
-    assert seen["limit"] is None and seen["exit_code"] == 0, f"a program inside its limits failed for {seen['limit']}: {seen}"
-    assert outcomes(result) == {"test_before": "passed", "test_the_one_that_looks": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
-    # the test shows something only when the kernel held more than the limit for the names
-    assert int(seen["out"].split()[1]) >= seen["before_mb"] + 64, f"the kernel was to hold more than the limit for the names: {seen}"
+    many, far_more = seen["many"], seen["far more"]
+    assert many["limit"] is None and many["exit_code"] == 0, f"a program within what is left out failed for {many['limit']}: {many}"
+    assert 10 * 2**20 <= many["measured"].get("records_left_out", 0) <= 16 * 2**20 and many["measured"]["records_counted"] <= 2**20, many
+    assert far_more["limit"] == "memory", f"records far beyond what is left out were to count: {far_more}"
+    assert far_more["measured"]["records_left_out"] == 16 * 2**20 and far_more["measured"]["records_counted"] > 0, far_more
+    assert outcomes(result) == {"test_before": "passed", "test_looks_at_many_files": "passed", "test_looks_at_far_more": "failed",
+                                "test_after": "passed"}, lost(result, tmp_path / "out")
+    failed = next(c for c in result["report"]["tests"] if c["name"] == "test_looks_at_far_more")
+    assert failed.get("records_counted_bytes", 0) > 0 and failed["records_left_out_bytes"] == 16 * 2**20, failed
+
+
+# The kernel's records of names and files are left out of a case's memory only up to a bound: a
+# quarter of the case's memory limit, and never more than 16 MB. Everything beyond counts. Some of
+# these records the kernel cannot give back while a program holds on to what they describe. The
+# programs below hold on to as many as they can in five ways, and say what the container really
+# held at the end; the hidden test says what the judge counted.
+HOLDS = r"""
+import ctypes, resource
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+STAT, NOW = open("/sys/fs/cgroup/memory.stat"), open("/sys/fs/cgroup/memory.current")
+way, aim, limit_mb, left_out_mb, files_mb = sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
+
+
+def held():
+    # what the container holds that is no cache of files and no file of the case, and the kernel's records in it
+    STAT.seek(0)
+    NOW.seek(0)
+    stat = dict(line.split()[:2] for line in STAT.read().splitlines())
+    room = os.statvfs(".")
+    files = (room.f_blocks - room.f_bfree) * room.f_frsize
+    return int(NOW.read()) - int(stat["file"]) + int(stat["shmem"]) - files, int(stat["slab_reclaimable"])
+
+
+def mapped(fd, shared):
+    got = libc.mmap(None, 4096, 1, (1 if shared else 2) | (0x20 if fd < 0 else 0), fd, 0)
+    if got is None or got == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_errno(), "no more mappings")
+
+
+def open_files():
+    most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+    while True:
+        yield os.memfd_create("m" * 249)
+
+
+def memory_files_mapped_and_closed():
+    while True:
+        fd = os.memfd_create("m" * 249)
+        os.ftruncate(fd, 4096)
+        mapped(fd, True)
+        os.close(fd)
+        yield
+
+
+def shared_mappings_without_a_file():
+    while True:
+        mapped(-1, True)
+        yield
+
+
+def the_images_files_mapped():
+    for top, folders, files in os.walk("/"):
+        if top.startswith(("/proc", "/sys", "/dev")):
+            folders[:] = []
+            continue
+        for name in files:
+            try:
+                fd = os.open(os.path.join(top, name), os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                if os.fstat(fd).st_size:
+                    mapped(fd, False)
+                    yield
+            finally:
+                os.close(fd)
+
+
+def far_apart_pages_in_the_case_folder():
+    number, last_page = 0, files_mb * MB - 4096
+    try:
+        while True:
+            fd = os.open("f" * 240 + str(number), os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                os.pwrite(fd, b"x", last_page)
+            finally:
+                os.close(fd)
+            number += 1
+            yield
+    except OSError:
+        pass
+    while True:
+        os.link("f" * 240 + "0", "l" * 240 + str(number))
+        number += 1
+        yield
+
+
+ways = {"open files": open_files, "memory files, mapped and closed": memory_files_mapped_and_closed,
+        "shared mappings without a file": shared_mappings_without_a_file,
+        "the image's files, mapped": the_images_files_mapped,
+        "far-apart pages in the case folder": far_apart_pages_in_the_case_folder}
+held_first, records_first = held()
+left_out, kept, steps = left_out_mb * MB, [], 0
+# "within": as many records as are left out and a little more, then ordinary memory up to just below
+# the limit and what was left out. "beyond": the same way up to well above the limit and that amount.
+goal = (limit_mb + left_out_mb + 48) * MB if aim == "beyond" else None
+try:
+    for step in ways[way]():
+        kept.append(step)
+        steps += 1
+        if steps % 500 == 0:
+            now, records = held()
+            if goal is None and (records - records_first > left_out + 4 * MB or now - held_first > (limit_mb - 30) * MB):
+                break
+            if goal is not None and now - held_first > goal:
+                break
+except OSError:
+    pass
+now, records = held()
+if goal is None:
+    goal = (limit_mb - 26) * MB + min(max(records - records_first, 0), left_out)
+block = bytearray(b"x") * max(goal - (now - held_first), 0)
+now, records = held()
+print(json.dumps({"held_mb": now / MB, "records_mb": records / MB, "steps": steps}), flush=True)
+time.sleep(0.3)
+"""
+
+HOLD_TESTS = """
+def numbers():
+    stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat"))
+    return {"held_mb": (int(open("/sys/fs/cgroup/memory.current").read()) - int(stat["file"]) + int(stat["shmem"])) / 2**20,
+            "records_mb": int(stat["slab_reclaimable"]) / 2**20}
+
+
+def hold(aim):
+    with case() as c:
+        before = numbers()
+        r = c.run(["hold", WAY, aim, LIMIT_MB, LEFT_OUT_MB, FILES_MB])
+        said = json.loads(r.out) if r.out.startswith("{") else {}
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[aim] = {"exit_code": r.exit_code, "limit": r.limit, "err": r.err[-300:], "before": before, "program": said,
+                     "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.exit_code == 0, r
+
+
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_within():
+    hold("within")
+
+
+def test_beyond():
+    hold("beyond")
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+WAYS = ("open files", "memory files, mapped and closed", "shared mappings without a file", "the image's files, mapped",
+        "far-apart pages in the case folder")
+LEFT_OUT_MB = 16      # the most of the kernel's records that is left out of a case's memory
+TOLERANCE_MB = 6      # how far the kernel's own figures, read at two moments, may lie apart
+
+
+@pytest.mark.parametrize("limit_mb", [64, 256, 512])
+@pytest.mark.parametrize("way", WAYS)
+def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out(tmp_path, way, limit_mb):
+    """However a program holds on to the kernel's records, the judge leaves at most 16 MB of them
+    out of the case's memory. A program that holds its limit and that amount passes, and what the
+    container then holds beyond the judge's count is no more than that amount. A program that
+    holds clearly more fails for memory."""
+    tests = HOLD_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
+        .replace("LEFT_OUT_MB", repr(str(LEFT_OUT_MB))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + HOLDS, {"functional/test_hold.py": tests}, CASE_MEMORY_MB=str(limit_mb),
+                          CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    within, beyond = seen["within"], seen["beyond"]
+    assert within["limit"] is None and within["exit_code"] == 0, f"a program within its limit and the amount left out failed: {within}"
+    counted = within["measured"].get("memory_highest")
+    assert counted is not None, f"the case does not say the most the judge counted: {within['measured']}"
+    really = within["program"]["held_mb"] - within["before"]["held_mb"]
+    assert really - counted / 2**20 <= LEFT_OUT_MB + TOLERANCE_MB, (
+        f"the container held {really:.1f} MB more than before the run and the judge counted {counted / 2**20:.1f} MB: {within}")
+    assert within["measured"]["records_left_out"] <= LEFT_OUT_MB * 2**20, within["measured"]
+    assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
+    assert outcomes(result) == {"test_before": "passed", "test_within": "passed", "test_beyond": "failed",
+                                "test_after": "passed"}, lost(result, tmp_path / "out")
+    # the result says for each case how much of the kernel's records was left out and how much was counted
+    cases = {c["name"]: c for c in result["report"]["tests"]}
+    assert cases["test_within"].get("records_left_out_bytes") == within["measured"]["records_left_out"], cases["test_within"]
+    assert cases["test_beyond"].get("records_counted_bytes", 0) >= 0 and "records_left_out_bytes" in cases["test_beyond"], cases["test_beyond"]
 
 
 # What the kernel ends first when the container's memory runs out is the judge's decision, not a
