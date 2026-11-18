@@ -24,6 +24,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WATCH = ROOT / "tools" / "desk" / "watch.py"
+PR_FILES = ROOT / "tools" / "desk" / "pr_files.py"
 BRIEF = ROOT / "tools" / "desk" / "brief.md"
 AGENTS = ROOT / "AGENTS.md"
 REPO = "BrilliantTiger/dodam"
@@ -54,6 +55,34 @@ def load_watcher():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_pr_files():
+    if not PR_FILES.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("desk_pr_files", PR_FILES)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _BytesStdin:
+    def __init__(self, data: bytes):
+        self.buffer = io.BytesIO(data)
+
+
+def run_pr_files(monkeypatch, raw_stdin: str | bytes, argv: list[str] | None = None) -> tuple[int, str, str]:
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    assert hasattr(mod, "main"), "pr_files.py must expose main(argv)"
+    data = raw_stdin.encode("utf-8") if isinstance(raw_stdin, str) else raw_stdin
+    monkeypatch.setattr(sys, "stdin", _BytesStdin(data))
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+        code = mod.main([] if argv is None else argv)
+    return (code, out_buf.getvalue(), err_buf.getvalue())
 
 
 def read_brief() -> str:
@@ -1548,6 +1577,179 @@ def test_late_submitted_review_with_low_numbered_inline_comments_is_reported(mon
     assert [e["id"] for e in json.loads(o2)["events"]] == ["pull_request_review:6400"]
 
 
+def test_review_appearing_one_poll_late_with_earlier_sending_time_within_five_minutes_is_reported_once(
+    monkeypatch, tmp_path
+):
+    module = load_watcher()
+    assert module is not None
+    monkeypatch.setattr(module, "MAX_SEEN_IDS", 2)
+
+    gh = FakeGitHub(own_login="project-account")
+    gh.pulls.append(
+        make_pr(
+            600, 5, sha="1111222233334444", login="grace", state="open",
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    # Seed two pre-start reviews two minutes apart so baseline must also remember both in the 5-minute window.
+    gh.reviews[5] = [
+        make_review(501, 5, login="old-a", submitted_at="2026-11-17T00:58:00Z"),
+        make_review(502, 5, login="old-b", submitted_at="2026-11-17T01:00:00Z"),
+    ]
+    state_file = tmp_path / "lag-window.json"
+    code0, _, err0, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0 and err0 == ""
+
+    # Poll 1: review 710 sent at 10:10:00Z appears first and is reported once.
+    gh.reviews[5].append(make_review(710, 5, login="fast-visible", submitted_at="2026-11-18T10:10:00Z"))
+    c1, o1, e1, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "40", "--state", str(state_file)], gh, module=module
+    )
+    assert c1 == 0 and e1 == ""
+    assert [e["id"] for e in json.loads(o1)["events"]] == ["pull_request_review:710"]
+
+    # Poll 2 (one poll later): review 708 sent 90 seconds earlier (10:08:30Z, inside the 5-minute window)
+    # finally becomes visible on GitHub. It must be reported once, and 710 must not repeat!
+    gh.reviews[5].insert(0, make_review(708, 5, login="lagged-visible", submitted_at="2026-11-18T10:08:30Z"))
+    c2, o2, e2, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "40", "--state", str(state_file)], gh, module=module
+    )
+    assert c2 == 0 and e2 == ""
+    assert [e["id"] for e in json.loads(o2)["events"]] == ["pull_request_review:708"]
+
+    # Evict seen_ids completely, clear ETags, and also place an ancient review (> 5 minutes before 10:10:00Z):
+    # nothing is reported twice, and the out-of-window ancient review is ignored.
+    for idx in (1, 2, 3):
+        gh.issues.insert(
+            0, make_issue(9100 + idx, 110 + idx, login="outsider", created_at=f"2026-11-18T10:12:0{idx}Z")
+        )
+    c3, o3, e3, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c3 == 0 and e3 == ""
+    assert len(json.loads(o3)["events"]) == 3
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert not any(sid.startswith("pull_request_review:") for sid in saved["seen_ids"])
+    saved["etags"] = {}
+    state_file.write_text(json.dumps(saved), encoding="utf-8")
+    gh.reviews[5].insert(0, make_review(699, 5, login="too-old", submitted_at="2026-11-18T10:04:59Z"))
+
+    c4, o4, e4, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "20", "--state", str(state_file)], gh, module=module
+    )
+    assert c4 == 0 and e4 == ""
+    assert json.loads(o4) == {"events": [], "reason": "timeout"}
+
+
+def test_multi_page_reviews_restart_from_page_one_when_pull_request_is_updated(monkeypatch, tmp_path):
+    gh = FakeGitHub()
+    gh.pulls.append(
+        make_pr(
+            600, 5, sha="1111222233334444", login="grace", state="open",
+            created_at="2026-11-17T00:00:00Z", updated_at="2026-11-17T03:00:00Z",
+        )
+    )
+    # Seed 105 reviews on PR #5 so saved_tail_page is 2 after baseline.
+    gh.reviews[5] = [
+        make_review(2001 + i, 5, login="old-rev", submitted_at=f"2026-11-17T01:{i // 60:02d}:{i % 60:02d}Z")
+        for i in range(105)
+    ]
+    state_file = tmp_path / "multipage-restart.json"
+    code0, _, err0, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0 and err0 == ""
+    saved0 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved0["pull_review_page"]["5"] == 2
+
+    # Reviewer who began review 1950 before those 105 reviews now submits it on page 1 (index 0),
+    # and GitHub marks PR #5 updated. Without restarting from page 1 on updated_at, page 2 only has
+    # already-seen reviews 2100..2105 and review 1950 would be missed!
+    gh.pulls[0] = make_pr(
+        600, 5, sha="1111222233334444", login="grace", state="open",
+        created_at="2026-11-17T00:00:00Z", updated_at="2026-11-18T10:30:00Z",
+    )
+    gh.reviews[5].insert(0, make_review(1950, 5, login="page-one-late", submitted_at="2026-11-18T10:30:00Z"))
+
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "40", "--state", str(state_file)], gh)
+    assert c1 == 0 and e1 == ""
+    assert [e["id"] for e in json.loads(o1)["events"]] == ["pull_request_review:1950"]
+
+
+def test_review_window_id_limit_while_asking_exits_with_code_8_immediately(monkeypatch, tmp_path):
+    module = load_watcher()
+    assert module is not None
+    assert hasattr(module, "MAX_WINDOW_REVIEW_IDS"), "watch.py must expose MAX_WINDOW_REVIEW_IDS"
+    monkeypatch.setattr(module, "MAX_WINDOW_REVIEW_IDS", 2)
+
+    gh = FakeGitHub()
+    gh.pulls = [
+        make_pr(102, 2, sha="2222222200000000", login="a", state="open", created_at="2026-11-17T01:00:02Z", updated_at="2026-11-17T01:00:02Z"),
+        make_pr(101, 1, sha="1111111100000000", login="a", state="open", created_at="2026-11-17T01:00:01Z", updated_at="2026-11-17T01:00:01Z"),
+    ]
+    gh.reviews[2] = []
+    gh.reviews[1] = []
+
+    state_file = tmp_path / "win-cap.json"
+    code0, _, err0, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0 and err0 == ""
+
+    # Three reviews in the same second on PR #2 (polled before PR #1) exceed MAX_WINDOW_REVIEW_IDS=2
+    # while asking: watcher exits 8 at once before asking GitHub for PR #1's reviews.
+    gh.reviews[2] = [
+        make_review(801, 2, login="r1", submitted_at="2026-11-18T11:00:00Z"),
+        make_review(802, 2, login="r2", submitted_at="2026-11-18T11:00:00Z"),
+        make_review(803, 2, login="r3", submitted_at="2026-11-18T11:00:00Z"),
+    ]
+    calls_before = len(gh.calls)
+    c_cap, o_cap, e_cap, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c_cap == 8 and o_cap == ""
+    assert len(e_cap.strip().splitlines()) == 1 and "Traceback" not in e_cap
+    recent_endpoints = [ep for ep, _ in gh.calls[calls_before:]]
+    assert not any("/pulls/1/reviews" in ep for ep in recent_endpoints), (
+        "watcher kept polling later PRs instead of enforcing MAX_WINDOW_REVIEW_IDS while asking"
+    )
+
+    # Once the limit is raised, all three reviews are reported once and nothing is lost.
+    monkeypatch.setattr(module, "MAX_WINDOW_REVIEW_IDS", 10)
+    c_ok, o_ok, e_ok, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c_ok == 0 and e_ok == ""
+    assert [e["id"] for e in json.loads(o_ok)["events"]] == [
+        "pull_request_review:801",
+        "pull_request_review:802",
+        "pull_request_review:803",
+    ]
+
+
+def test_older_version_state_file_is_refused_with_actionable_message_and_first_start_guarantee(
+    monkeypatch, tmp_path
+):
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    legacy_cases = [
+        {"version": 3, "initialized": True, "pull_max_review_id": {"5": 702}},
+        {"version": 4, "initialized": True, "pull_latest_review_ids": {"5": [702]}},
+        {"initialized": True, "baseline_cutoff": "2026-11-18T00:00:00Z"},
+    ]
+    for idx, payload in enumerate(legacy_cases):
+        gh_called = False
+        old_file = tmp_path / f"old-v-{idx}.json"
+        old_file.write_text(json.dumps(payload), encoding="utf-8")
+        code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(old_file)], never_call_gh)
+        assert not gh_called and code == 4 and out == ""
+        lines = err.strip().splitlines()
+        assert len(lines) == 1 and "Traceback" not in err
+        low = lines[0].lower()
+        assert ("delete" in low or "remove" in low) and "--state" in low
+        assert "nothing older than the first start is reported" in low
+
+
 def test_review_etag_cache_bound_and_open_pr_poll_cap_neither_lose_nor_repeat_reviews(
     monkeypatch, tmp_path
 ):
@@ -2076,7 +2278,7 @@ def test_brief_is_plain_self_contained_english_without_codes_section_numbers_or_
 
 
 def test_desk_files_and_tests_carry_no_private_task_section_labels():
-    for path in (Path(__file__), WATCH, BRIEF):
+    for path in (Path(__file__), WATCH, PR_FILES, BRIEF):
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8")
@@ -2130,6 +2332,8 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
     # Comments of a review sent late reach the desk through the review's event when the desk reads the item.
     assert "comments of a review reach the desk through the review's" in low
     assert "reads the review and its inline comments when it reads the item" in low
+    # Multi-page review restart relies on GitHub marking a pull request as updated when a review is sent.
+    assert "marking a pull request as updated when a review is sent" in low
     # What the desk does not see, stated in place: edits after answering, discussions, comments on commits.
     assert "edits" in low and "discussions" in low and "commits" in low
 
@@ -2137,8 +2341,10 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
 def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_general_rules():
     text = read_brief()
     low = text.lower()
-    # Settling sentence right after AGENTS.md's three general rules.
+    # Settling sentence right after AGENTS.md's outside-input rules, plus explanation of live session.
     assert "agents in general" in low and "never builds, runs, or merges" in low
+    assert "a live session is a direct session-to-session conversation over ai coworker" in low
+    assert "not open yet" in low
     # Login (up to 39 chars, can spell a short phrase), url, and file paths are outside text too.
     assert "39" in text and "phrase" in low and "outside text too" in low
     for required in (
@@ -2151,130 +2357,283 @@ def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_ge
         assert required in low, f"brief.md is missing: {required}"
 
 
-def _parse_pr_file_rules_from_brief(brief_text: str) -> tuple[list[str], list[str], set[str], str]:
-    """Extract the protected-folder rules and ready-for-review test folder directly from brief.md."""
-    m_all = re.search(r"(?im)^\s*-\s*Any change at all is protected in ([^\n]+)\.$", brief_text)
-    assert m_all is not None, "brief.md is missing the 'Any change at all is protected in ...' rule"
-    all_change_folders = re.findall(r"`([^`]+)`", m_all.group(1))
+def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(monkeypatch):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    assert hasattr(mod, "classify_pr_files"), "pr_files.py must expose classify_pr_files()"
 
-    m_existing = re.search(
-        r"(?im)^\s*-\s*In ([^\n]+?), only changes to what exists are protected:\s*([^\n]+?)\.\s*`added` files are not\.$",
-        brief_text,
+    source = PR_FILES.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(PR_FILES))
+    forbidden_imports = {"urllib", "http", "socket", "ssl", "subprocess", "ftplib", "xmlrpc"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                assert top in sys.stdlib_module_names, f"non-stdlib import in pr_files.py: {top}"
+                assert top not in forbidden_imports, f"forbidden network/subprocess import in pr_files.py: {top}"
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top = node.module.split(".")[0]
+            assert top in sys.stdlib_module_names, f"non-stdlib import in pr_files.py: {top}"
+            assert top not in forbidden_imports, f"forbidden network/subprocess import in pr_files.py: {top}"
+
+    # Multi-page concatenated JSON arrays (as emitted by `gh api --paginate`) and `--draft` flag:
+    paginated_stdin = (
+        json.dumps([{"status": "modified", "filename": "docs/guide.md", "patch": POISON_DIFF}])
+        + "\n"
+        + json.dumps([{"status": "added", "filename": "bench/tests/test_guide.py", "patch": POISON_DIFF}])
     )
-    assert m_existing is not None, "brief.md is missing the 'only changes to what exists are protected' rule"
-    existing_only_folders = re.findall(r"`([^`]+)`", m_existing.group(1))
-    existing_statuses = set(re.findall(r"`([^`]+)`", m_existing.group(2)))
+    c1, o1, e1 = run_pr_files(monkeypatch, paginated_stdin)
+    assert c1 == 0 and e1 == ""
+    assert json.loads(o1) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": True,
+    }
+    assert "guide" not in o1 and POISON_DIFF not in o1
 
-    m_ready = re.search(
-        r"(?im)^\s*-\s*\*\*Ready for review\*\*\s*means:\s*not a draft,\s*adds at least one file under `([^`]+)`,\s*and touches nothing protected by the two rules above\.$",
-        brief_text,
-    )
-    assert m_ready is not None, "brief.md is missing the exact 'Ready for review' definition"
-    ready_test_folder = m_ready.group(1)
-    return (all_change_folders, existing_only_folders, existing_statuses, ready_test_folder)
-
-
-def _classify_pr_from_brief(
-    brief_text: str, files: list[tuple[str, str]], *, draft: bool = False
-) -> tuple[bool, list[str]]:
-    """Return (ready_for_review, touched_protected_folders_from_fixed_list) using rules parsed from brief.md."""
-    all_change_folders, existing_only_folders, existing_statuses, ready_test_folder = _parse_pr_file_rules_from_brief(
-        brief_text
-    )
-    protected_folders: list[str] = []
-    adds_test = False
-    for status, path in files:
-        if status == "added" and path.startswith(ready_test_folder):
-            adds_test = True
-        for folder in all_change_folders:
-            if path.startswith(folder) and folder not in protected_folders:
-                protected_folders.append(folder)
-        for folder in existing_only_folders:
-            if path.startswith(folder) and status in existing_statuses and folder not in protected_folders:
-                protected_folders.append(folder)
-    ready = (not draft) and adds_test and (not protected_folders)
-    return (ready, protected_folders)
+    c_draft, o_draft, e_draft = run_pr_files(monkeypatch, paginated_stdin, ["--draft"])
+    assert c_draft == 0 and e_draft == ""
+    assert json.loads(o_draft) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
 
 
-def test_brief_protected_folder_naming_and_ready_for_review_rules_pin_all_three_cases():
-    text = read_brief()
-    low = text.lower()
+def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tasks_lookalikes_and_weird_names(
+    monkeypatch,
+):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    classify = mod.classify_pr_files
 
-    # Request returns GitHub's status word (added, modified, removed, renamed) and the path.
-    assert "pulls/<number>/files" in text and "--jq" in text
-    assert ".status" in text and ".filename" in text
-    for status_word in ("added", "modified", "removed", "renamed"):
-        assert status_word in low
-    assert "the status word comes from github, not from the outsider" in low
+    # Local checkout at main has bench/tasks/web-signup as an existing benchmark task folder.
+    assert "web-signup" in mod.existing_task_folders()
 
-    # Public reply and coordinator message name only the folder from the fixed list, never the file's own path.
-    assert "only the folder from the fixed list" in low
-    assert low.count("never the file's own path") >= 3
-    assert "mention or markup" in low
+    # 1. Three core cases: new test only (ready); changed existing test (protected); new file in bench/images/ (protected).
+    assert classify([{"status": "added", "filename": "bench/tests/test_new_case.py"}]) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": True,
+    }
+    assert classify([{"status": "modified", "filename": "bench/tests/test_desk.py"}]) == {
+        "protected_folders": ["bench/tests/"],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/images/@owner-mention.Dockerfile"},
+            {"status": "added", "filename": "bench/tests/test_img.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/images/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
 
-    all_change_folders, existing_only_folders, existing_statuses, ready_test_folder = _parse_pr_file_rules_from_brief(
-        text
-    )
-    assert set(all_change_folders) == {"bench/dodambench/", "bench/images/", ".github/"}
-    assert set(existing_only_folders) == {"bench/tests/", "bench/tasks/"}
-    assert existing_statuses == {"modified", "removed", "renamed"}
-    assert ready_test_folder == "bench/tests/"
+    # 2. Moved file in EACH direction (out of a protected folder, and into a protected folder).
+    for old_path, expected_folder in (
+        ("bench/dodambench/runner.py", "bench/dodambench/"),
+        ("bench/images/base.Dockerfile", "bench/images/"),
+        (".github/workflows/ci.yml", ".github/"),
+        ("bench/tests/test_desk.py", "bench/tests/"),
+        ("bench/tasks/web-signup/task.yaml", "bench/tasks/"),
+    ):
+        res_out = classify(
+            [
+                {"status": "renamed", "previous_filename": old_path, "filename": "docs/harmless.txt"},
+                {"status": "added", "filename": "bench/tests/test_accompanying.py"},
+            ]
+        )
+        assert res_out == {
+            "protected_folders": [expected_folder],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
 
-    # Case 1: a new test file only -> ready for review, nothing protected.
-    ready_1, prot_1 = _classify_pr_from_brief(text, [("added", "bench/tests/test_new_case.py")])
-    assert ready_1 is True and prot_1 == []
+    for new_path, expected_folder in (
+        ("bench/dodambench/moved_in.py", "bench/dodambench/"),
+        ("bench/images/moved_in.Dockerfile", "bench/images/"),
+        (".github/moved_in.yml", ".github/"),
+        ("bench/tests/test_moved_in.py", "bench/tests/"),
+        ("bench/tasks/brand-new-task/task.yaml", "bench/tasks/"),
+    ):
+        res_in = classify(
+            [
+                {"status": "renamed", "previous_filename": "docs/source.txt", "filename": new_path},
+            ]
+        )
+        assert res_in == {
+            "protected_folders": [expected_folder],
+            "adds_new_test": False,
+            "ready_for_review": False,
+        }
 
-    # Case 2: a changed existing test -> protected (names folder bench/tests/, never file path), not ready.
-    ready_2, prot_2 = _classify_pr_from_brief(text, [("modified", "bench/tests/test_desk.py")])
-    assert ready_2 is False and prot_2 == ["bench/tests/"]
-    assert "bench/tests/test_desk.py" not in prot_2
+    # 3. Copied file (both into bench/tests/ and out of bench/tests/ or bench/images/).
+    assert classify(
+        [{"status": "copied", "previous_filename": "docs/src.py", "filename": "bench/tests/test_copied.py"}]
+    ) == {
+        "protected_folders": ["bench/tests/"],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+    assert classify(
+        [
+            {"status": "copied", "previous_filename": "bench/tests/test_desk.py", "filename": "docs/copy.py"},
+            {"status": "added", "filename": "bench/tests/test_real_add.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/tests/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
 
-    # Case 3: a new file under bench/images/ -> protected (names folder bench/images/, never file path), not ready.
-    ready_3, prot_3 = _classify_pr_from_brief(
-        text, [("added", "bench/images/@owner-mention.Dockerfile"), ("added", "bench/tests/test_img.py")]
-    )
-    assert ready_3 is False and prot_3 == ["bench/images/"]
-    assert "bench/images/@owner-mention.Dockerfile" not in prot_3
+    # 4. Unknown status word counts as a change of something that exists.
+    for unknown_status in ("changed", "chmod", "typechange", "future_github_status"):
+        assert classify(
+            [
+                {"status": unknown_status, "filename": "bench/tests/test_desk.py"},
+                {"status": "added", "filename": "bench/tests/test_extra.py"},
+            ]
+        ) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
+        assert classify(
+            [
+                {"status": unknown_status, "filename": "bench/tasks/brand-new/task.yaml"},
+                {"status": "added", "filename": "bench/tests/test_extra.py"},
+            ]
+        ) == {
+            "protected_folders": ["bench/tasks/"],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
 
-    # Additional boundary checks: new benchmark task + new test is ready; draft or missing test is not ready;
-    # removed/renamed under bench/tasks/ is protected.
-    assert _classify_pr_from_brief(
-        text, [("added", "bench/tasks/new-task/task.yaml"), ("added", "bench/tests/test_new_task.py")]
-    ) == (True, [])
-    assert _classify_pr_from_brief(text, [("added", "bench/tests/test_new_case.py")], draft=True) == (False, [])
-    assert _classify_pr_from_brief(text, [("modified", "docs/note.md")]) == (False, [])
-    assert _classify_pr_from_brief(text, [("renamed", "bench/tasks/web-signup/task.yaml")]) == (
-        False,
-        ["bench/tasks/"],
-    )
+    # 5. Helper, configuration file, or nested file added to bench/tests/ is protected and not a new test.
+    for helper_path in (
+        "bench/tests/conftest.py",
+        "bench/tests/helper_utils.py",
+        "bench/tests/__init__.py",
+        "bench/tests/test_.py",
+        "bench/tests/subdir/test_nested.py",
+    ):
+        assert classify([{"status": "added", "filename": helper_path}]) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": False,
+            "ready_for_review": False,
+        }
 
-    # Mutating any of the three rule sentences in brief.md flips the result or fails parsing.
-    dropped_images = text.replace("`bench/images/`, ", "")
-    assert _classify_pr_from_brief(dropped_images, [("added", "bench/images/x"), ("added", "bench/tests/t.py")]) == (
-        True,
-        [],
-    )
+    # 6. File added inside an existing task folder on main (bench/tasks/web-signup/) or directly in bench/tasks/ is protected.
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/tasks/web-signup/extra_check.py"},
+            {"status": "added", "filename": "bench/tests/test_ws_extra.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/tasks/loose_file.txt"},
+            {"status": "added", "filename": "bench/tests/test_loose.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+
+    # 7. Whole new task folder not on main (+ a new test file) is NOT protected and IS ready for review.
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/tasks/brand-new-task/task.yaml"},
+            {"status": "added", "filename": "bench/tasks/brand-new-task/tests/check.py"},
+            {"status": "added", "filename": "bench/tests/test_brand_new_task.py"},
+        ]
+    ) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": True,
+    }
+
+    # 8. Look-alike folder names are not mistaken for protected folders.
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/dodambenchmark/note.md"},
+            {"status": "added", "filename": "bench/images_extra/pic.png"},
+            {"status": "added", "filename": ".github-notes/readme.md"},
+            {"status": "added", "filename": "bench/tests_extra/helper.py"},
+            {"status": "added", "filename": "bench/tasks_archive/old.txt"},
+            {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
+        ]
+    ) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": True,
+    }
+
+    # 9. File names with a line break, with a tab, and with quotes:
+    #    - cannot fake a second line / new test,
+    #    - cannot pass as a clean test_<something>.py when containing newline/tab,
+    #    - never appear anywhere in pr_files.py's JSON output.
+    faked_second_line = [{"status": "modified", "filename": "docs/a.md\nadded\tbench/tests/test_fake.py"}]
+    assert classify(faked_second_line) == {
+        "protected_folders": [],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+    for bad_test_name in ("bench/tests/test_line\nbreak.py", "bench/tests/test_with\ttab.py"):
+        assert classify([{"status": "added", "filename": bad_test_name}]) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": False,
+            "ready_for_review": False,
+        }
+
+    weird_protected = [
+        {"status": "added", "filename": 'bench/images/evil\nline\ttab"quotes"@owner'},
+        {"status": "added", "filename": 'docs/with\nnewline\tand"quotes".md'},
+    ]
+    code_w, out_w, err_w = run_pr_files(monkeypatch, json.dumps(weird_protected))
+    assert code_w == 0 and err_w == ""
+    assert json.loads(out_w) == {
+        "protected_folders": ["bench/images/"],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+    for leaked_piece in ("evil", "quotes", "@owner", "\t"):
+        assert leaked_piece not in out_w
 
 
-def test_brief_states_what_the_desk_does_with_one_protected_path_list_no_claims_and_unlisted_arrivals():
+def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
     # Question
     assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
     assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Outside PR: status word + path without changed lines, fixed folder list, never calling protected PR ready.
-    assert "pulls/<number>/files" in text and "--jq" in text and "filename" in text
-    assert "without changed lines" in low
+    # Outside PR: pipes GitHub JSON straight into tools/desk/pr_files.py, tells desk never to work it out from file names itself,
+    # states how existing task folders on main are learned, and names only folders from protected_folders.
+    assert "gh api --paginate repos/BrilliantTiger/dodam/pulls/<number>/files | python3 tools/desk/pr_files.py" in text
+    assert "never work out protected folders, new tests, or readiness from file names yourself" in low
+    assert "protected_folders" in text and "adds_new_test" in text and "ready_for_review" in text
+    assert "previous_filename" in text and "test_<something>.py" in text
+    assert "directory names under `bench/tasks/` in the desk's own checkout" in low
     for path_prefix in ("bench/dodambench/", "bench/images/", "bench/tests/", "bench/tasks/", ".github/"):
         assert path_prefix in text, f"brief.md must name {path_prefix} in the fixed folder list"
+    assert "only the folder from the fixed list" in low
+    assert low.count("never the file's own path") >= 3
+    assert "mention or markup" in low
     assert "never** called ready for review" in low or "never called ready for review" in low
     assert "does not judge" in low
     assert (
         "outside pull requests do not change the measuring tools, existing benchmark tasks, security tests or approval locks; new tests and new benchmark tasks are welcome"
         in low
     )
-    assert "naming only the folders from the fixed list that it touches (never the file's own path)" in low
     assert "isolated container" in low and "did not write" in low
     # Vulnerability in public
     assert "do not repeat" in low and "Security tab" in text
