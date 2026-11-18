@@ -4378,3 +4378,65 @@ def test_the_check_keeps_the_stream_of_every_run_outside_the_repository(tmp_path
     # Without a folder given, they are kept in a folder of the check's own: not in the repository, not in the home folder.
     default = check.streams_folder()
     assert not default.is_relative_to(ROOT) and not default.is_relative_to(Path.home())
+
+
+# --- A sign-in lies in one place only ------------------------------------------------------------
+
+OWN_SIGN_IN = b"made-up-sign-in-of-the-desk-" + b"0123456789abcdef\n"
+
+
+def files_holding(folder: Path, what: bytes, but: Path) -> list[str]:
+    found = []
+    for path in sorted(folder.rglob("*")):
+        if path.is_file() and not path.is_symlink() and path != but and what.strip() in path.read_bytes():
+            found.append(str(path.relative_to(folder)))
+    return found
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("how", ["passes", "fails", "is interrupted", "the session prints the sign-in"])
+def test_the_copy_of_the_desks_sign_in_is_gone_when_the_check_ends_and_nothing_kept_holds_it(tmp_path, monkeypatch, capsys, keep, how):
+    check = module("check_lock")
+    token = tmp_path / "given-sign-in"
+    token.write_bytes(OWN_SIGN_IN)
+    token.chmod(0o600)
+    record = tmp_path / "record.json"
+    record.write_text((DESK / "lock-check.json").read_text(encoding="utf-8"), encoding="utf-8")
+    roots = []
+
+    def temporary(prefix=""):
+        roots.append(tmp_path / f"root-{len(roots)}")
+        roots[-1].mkdir()
+        return str(roots[-1])
+
+    monkeypatch.setattr(check.tempfile, "mkdtemp", temporary)
+    was_there = []
+
+    def session(places, prompt, timeout, news=False):
+        # The stand-in for a real session: the sign-in is where the start command would look for it.
+        was_there.append((places["state"] / "claude-token").read_bytes() == OWN_SIGN_IN)
+        if how == "fails":
+            raise SystemExit("The start command refused: made up.")
+        if how == "is interrupted":
+            raise KeyboardInterrupt
+        (places["state"] / "session").mkdir(parents=True, exist_ok=True)
+        (places["state"] / "session" / "known.json").write_text("[]", encoding="utf-8")
+        said = "nothing" if how == "passes" else OWN_SIGN_IN.decode().strip()
+        return check.parse(json.dumps({"type": "result", "result": said, "num_turns": 1, "usage": {"input_tokens": 5}}) + "\n")
+
+    monkeypatch.setattr(check, "session", session)
+    argv = ["--record", str(record), "--streams", str(tmp_path / "streams"), "--claude-token", str(token),
+            "--repeat-later-runs", "--only", "what the session knows"] + (["--keep"] if keep else [])  # fmt: skip
+    try:
+        code = check.main(argv)
+    except (SystemExit, KeyboardInterrupt) as ended:
+        code = ended
+    assert was_there == [True], "the check did not run on the sign-in it was given"
+    assert (code == 0) is (how == "passes")
+    # The folder of the check is still there with --keep; the copy of the sign-in is not, and nothing else holds it.
+    assert roots[0].is_dir() is keep
+    assert files_holding(tmp_path, OWN_SIGN_IN, but=token) == []
+    assert not list(tmp_path.rglob("claude-token"))
+    # The sign-in that was given is where it was, as it was.
+    assert token.read_bytes() == OWN_SIGN_IN and stat.S_IMODE(token.stat().st_mode) == 0o600
+    assert OWN_SIGN_IN.decode().strip() not in capsys.readouterr().out
