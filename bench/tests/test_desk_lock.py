@@ -2533,6 +2533,13 @@ def the_opening(day) -> None:
     assert names(day.handles) == [31] and (900_402, 31) in kept_places() and {(952_000, 150), (952_001, 151)} <= set(kept_places())
     assert counted_for(before, (31, 130, 131)) == {31: 0, 130: 1, 131: 1}
     all_that_is_kept_gets_its_session()
+    # Every place is taken by an account that holds no other. A newcomer gets none: no account loses its last place to it.
+    go(lambda: day.take([ev(960_000 + a, a, "one") for a in range(200, 200 + spending["arrivals_kept"])]))
+    assert len(day.relay.kept.entries()) == spending["arrivals_kept"]
+    before, places_before = day.dropped(), kept_places()
+    go(lambda: day.take([ev(961_000, 400, "a newcomer")]))
+    assert kept_places() == places_before and counted_for(before, [400] + list(range(200, 300))) == {400: 1} | {a: 0 for a in range(200, 300)}
+    all_that_is_kept_gets_its_session()
     # One account in eight sessions: its labels, its kept reports and its answers of the day, and then one more of each.
     kinds = [k for k in lock["coordinator"]["kinds"] if k != "vulnerability"]
     refusals = []
@@ -2637,6 +2644,8 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     missing = [name for name in REACHED if not day.reach[name]]
     assert not missing, (missing, dict(day.reach))
     opening = dict(day.reach)
+    # The random steps begin from the seed itself, so that what they reach does not depend on how long the opening is.
+    day.random.seed(seed)
     for _ in range(1500):
         day.step()
         day.check()
