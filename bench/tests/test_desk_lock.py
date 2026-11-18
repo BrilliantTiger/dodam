@@ -974,6 +974,8 @@ def test_the_permission_rules_allow_the_closed_list_and_ask_nobody(start):
     lock = lock_file()
     settings = json.loads(Path(option(start.plan()["argv"], "--settings")).read_text())
     assert settings["permissions"]["defaultMode"] == "dontAsk"
+    # Without this Claude Code tells the session the owner's git name along with the state of the repository.
+    assert settings["includeGitInstructions"] is False
     assert set(settings["permissions"]["allow"]) == {"Read", "Glob", "Grep"} | {f"mcp__desk__{t}" for t in lock["desk_tools"]}
     assert {"Bash", "Write", "Edit", "WebFetch", "WebSearch", "Agent", "mcp__coworker__connect",
             "mcp__coworker__close_bridge"} <= set(settings["permissions"]["deny"])  # fmt: skip
@@ -1252,7 +1254,12 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     assert record["fresh_start"]["input_tokens"] > 0
     # What the session knows is recorded by kind, never by value.
     assert all(set(row) == {"what", "in_the_session", "refused_by_the_answering_tool"} for row in record["known_without_reading"])
-    assert all(row["refused_by_the_answering_tool"] for row in record["known_without_reading"] if row["in_the_session"] and row["what"] not in ("the date", "the model", "the operating system"))
+    known = {row["what"]: row for row in record["known_without_reading"]}
+    owners = ["the account's email address", "the account name on this computer", "the computer's name", "the home folder path",
+              "the owner's git name or address"]  # fmt: skip
+    # Whatever names the owner is refused by the tools, and only the account's address is in the session at all.
+    assert all(known[what]["refused_by_the_answering_tool"] for what in owners)
+    assert [what for what in owners if known[what]["in_the_session"]] == ["the account's email address"]
     module("guard")
     allowed = {"Read", "Glob", "Grep"} | {f"mcp__desk__{t}" for t in lock["desk_tools"]} | {f"mcp__coworker__{t}" for t in lock["live_tools"]}
     assert set(record["session_at_start"]["tools"]) == allowed

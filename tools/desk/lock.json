@@ -5,7 +5,6 @@
   "builtin_tools": ["Read", "Glob", "Grep"],
   "desk_tools": ["read_item", "answer", "add_label", "tell_coordinator"],
   "live_server": "coworker",
-  "live_wait": "wait_for_message",
   "live_tools": ["open_bridge", "wait_for_message", "inbox", "read_conversation", "reply", "list_connections", "write_agreement"],
   "live_tools_never": ["connect", "close_bridge"],
   "labels": ["bug", "enhancement", "duplicate", "invalid", "question"],

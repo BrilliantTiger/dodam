@@ -4,7 +4,8 @@ Two uses, one rule:
 
 - The desk's own tools call leaks() on every text before it leaves (an answer on GitHub).
 - Claude Code runs this file before every tool call of the desk's session
-  (python3 guard.py hook --lock FILE --facts FILE). It refuses any tool that is not on the
+  (python3 guard.py hook --lock FILE --facts FILE, wrapped by the start command so that any
+  ending other than a clean "allowed" refuses the call). It refuses any tool that is not on the
   closed list in lock.json, and applies leaks() to everything the session hands to a tool of
   a live session, where the text goes straight to an outsider.
 
@@ -68,9 +69,17 @@ def _command_line(*argv: str) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def machine_words() -> list[tuple[str, str]]:
-    """What names this computer and this account, read from the computer itself."""
+def machine_words(known: str | os.PathLike | None = None) -> list[tuple[str, str]]:
+    """What names this computer and this account, read from the computer itself.
+
+    known is a file the start command writes outside the session's reach, with the values that
+    Claude Code itself puts into a session's context (the account's address, for one).
+    """
     words: list[tuple[str, str]] = []
+    if known:
+        for kind, word in json.loads(Path(known).read_text(encoding="utf-8")):
+            if isinstance(kind, str) and isinstance(word, str) and len(word) >= 3:
+                words.append((kind, word))
     hosts = {socket.gethostname(), os.uname().nodename}
     for key in ("ComputerName", "LocalHostName", "HostName"):
         hosts.add(_command_line("/usr/sbin/scutil", "--get", key))
@@ -103,7 +112,19 @@ def _plain(text: str) -> str:
 
 
 def _squeezed(text: str) -> str:
-    return re.sub(r"[\s\-_.’']+", "", text).casefold()
+    """Letters and digits only, so that a value spelled with anything between its letters is still found."""
+    return re.sub(r"[\W_]+", "", text).casefold()
+
+
+def names(text: str, machine: list[tuple[str, str]]) -> list[str]:
+    """Which of the known values are in the text, in any letter case and with anything between the letters."""
+    folded, squeezed = _plain(text).casefold(), _squeezed(_plain(text))
+    found: list[str] = []
+    for kind, word in machine:
+        if word.casefold() in folded or (len(_squeezed(word)) >= 4 and _squeezed(word) in squeezed):
+            if kind not in found:
+                found.append(kind)
+    return found
 
 
 def leaks(text: str, machine: list[tuple[str, str]] | None = None) -> list[str]:
@@ -111,17 +132,14 @@ def leaks(text: str, machine: list[tuple[str, str]] | None = None) -> list[str]:
     if machine is None:
         machine = machine_words()
     plain = _plain(text)
-    folded = plain.casefold()
-    squeezed = _squeezed(plain)
     found: list[str] = []
 
     def note(kind: str) -> None:
         if kind not in found:
             found.append(kind)
 
-    for kind, word in machine:
-        if word.casefold() in folded or (len(_squeezed(word)) >= 5 and _squeezed(word) in squeezed):
-            note(kind)
+    for kind in names(plain, machine):
+        note(kind)
     for kind, shape in (*SECRET_SHAPES, *INTERNAL_ADDRESSES):
         if shape.search(plain):
             note(kind)
@@ -182,7 +200,7 @@ def hook(argv: list[str]) -> int:
         lock = json.loads(Path(options["--lock"]).read_text(encoding="utf-8"))
         facts = facts_file.load(options["--facts"])
         call = json.loads(sys.stdin.read())
-        reason = judge_call(call, lock, facts)
+        reason = judge_call(call, lock, facts, machine_words(options.get("--known")))
     except Exception:  # Anything that goes wrong here refuses the call.
         reason = "The desk's lock could not be checked, so the call is refused."
     if reason is None:
@@ -194,5 +212,5 @@ def hook(argv: list[str]) -> int:
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "hook":
         raise SystemExit(hook(sys.argv[2:]))
-    sys.stderr.write("usage: guard.py hook --lock FILE --facts FILE\n")
+    sys.stderr.write("usage: guard.py hook --lock FILE --facts FILE [--known FILE]\n")
     raise SystemExit(2)

@@ -220,7 +220,9 @@ class Desk:
             if not env.get("DESK_GH") or not self.orca:
                 raise Refused("The desk's tools were not started by the desk's start command.")
             self.backend = GitHub(self.repository, env["DESK_GH"], self.state, self.lock["path"])
-        self.machine = guard.machine_words()
+        self.machine = guard.machine_words(env.get("DESK_KNOWN") or None)
+        # A session started for one item works on that item only, so no other outsider's text enters it.
+        self.only_item = int(env["DESK_ITEM"]) if env.get("DESK_ITEM") else None
 
     # -- shared checks ------------------------------------------------------
 
@@ -237,10 +239,11 @@ class Desk:
             raise Refused("The way in through GitHub is closed, so the desk does nothing on GitHub.")
         return facts
 
-    @staticmethod
-    def number(value) -> int:
+    def number(self, value) -> int:
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_NUMBER:
             raise Refused("Give the number of one issue or pull request of the repository, as a whole number.")
+        if self.only_item is not None and value != self.only_item:
+            raise Refused(f"This session was started for item {self.only_item} and works on no other item.")
         return value
 
     @staticmethod

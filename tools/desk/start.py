@@ -50,7 +50,7 @@ DEFAULT_STATE = Path.home() / ".dodam-desk"
 LIVE_SERVER_FILE = "live-server.json"
 ADDRESS = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9_:@.-]{0,119}$")
 LOCK_KEYS = (
-    "claude_version", "model", "repository", "builtin_tools", "desk_tools", "live_server", "live_wait", "live_tools",
+    "claude_version", "model", "repository", "builtin_tools", "desk_tools", "live_server", "live_tools",
     "live_tools_never", "labels", "labels_per_day", "answer", "read", "coordinator", "environment", "path",
 )  # fmt: skip
 # Named again here so that they stay refused even if a later change puts one back among the tools.
@@ -59,6 +59,48 @@ NEVER = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agen
 
 class Problem(Exception):
     """A reason not to start the desk."""
+
+
+CHECK_SECONDS = 20
+# Runs the check before a tool call so that every ending but a clean "allowed" refuses the call: a crash, a
+# missing interpreter, a check that hangs. Claude Code blocks a call only on exit code 2, so everything becomes 2.
+CHECK_WRAPPER = (
+    '"$@" <&0 & check=$!; (sleep {seconds}; kill -9 $check 2>/dev/null) >/dev/null 2>&1 & dog=$!; '
+    "wait $check; code=$?; kill $dog 2>/dev/null; "
+    '[ "$code" -eq 0 ] && exit 0; '
+    "[ \"$code\" -eq 2 ] || echo \"The desk's lock could not be checked, so the call is refused.\" >&2; exit 2"
+)
+
+
+def check_command(interpreter: str, desk_folder: Path, known: Path, seconds: float = CHECK_SECONDS) -> str:
+    """The command Claude Code runs before every tool call of the session."""
+    check = [interpreter, "-I", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
+             "--facts", str(desk_folder / "desk.toml"), "--known", str(known)]  # fmt: skip
+    return shlex.join(["/bin/sh", "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
+
+
+def check_answers(command: str, call: dict) -> int:
+    try:
+        done = subprocess.run(command, shell=True, input=json.dumps(call), capture_output=True, text=True, timeout=CHECK_SECONDS + 10)
+    except (OSError, subprocess.SubprocessError):
+        return -1
+    return done.returncode
+
+
+def known_values(claude: str, copy: Path) -> list[list[str]]:
+    """What Claude Code puts into a session's context about the owner, so that the tools can refuse to send it."""
+    code, output = run([claude, "auth", "status"])
+    try:
+        email = json.loads(output)["email"]
+        assert code == 0 and isinstance(email, str) and "@" in email
+    except (ValueError, KeyError, TypeError, AssertionError):
+        raise Problem("The address of the signed-in account could not be read, so it could not be kept out of answers.") from None
+    known = [["the account's email address", email]]
+    for key in ("user.name", "user.email"):
+        code, output = run(["git", "config", "--global", key])
+        if code == 0 and len(output.strip()) >= 3:
+            known.append(["the owner's git name or address", output.strip()])
+    return known
 
 
 def run(argv: list[str], timeout: float = 30) -> tuple[int, str]:
@@ -132,9 +174,15 @@ def live_server(state: Path, lock: dict, facts: facts_file.Facts) -> dict:
     return {"command": command, "args": arguments, "env": env}
 
 
-def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: dict[str, str] | None = None, copy: Path = COPY) -> dict:
-    """Check everything, write the session's two configuration files, and say what to start."""
+def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: dict[str, str] | None = None, copy: Path = COPY,
+         machine: list[tuple[str, str]] | None = None) -> dict:  # fmt: skip
+    """Check everything, write the session's configuration files, and say what to start."""
     environ = dict(os.environ) if environ is None else environ
+    # Claude Code tells a session the path of its working folder. A path with the account's or the computer's name
+    # in it would put that name into every session, so the desk does not start from such a path.
+    found = guard.names(str(copy), guard.machine_words() if machine is None else machine)
+    if found:
+        raise Problem("The path of the desk's copy holds " + ", ".join(found) + ". Put the copy in a folder whose path names neither.")
     desk_folder = copy / "tools" / "desk"
     lock = load_lock(copy)
     facts_path = desk_folder / "desk.toml"
@@ -151,6 +199,9 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         brief = ""
     if not brief:
         raise Problem("The desk's standing instructions (brief.md) are missing.")
+    if facts.live_open and stand_in is None:
+        # The limits on connection codes and on live sessions at once are in the facts, but no tool keeps them yet.
+        raise Problem("The way in through a live session is open, but its limits are not enforced yet. The desk does not start with that way open.")
     if facts.github_open and not (desk_folder / "watch.py").is_file():
         raise Problem("The way in through GitHub is open, but the watcher (watch.py) is missing.")
 
@@ -194,22 +245,26 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     if facts.live_open:
         servers[lock["live_server"]] = live_server(state, lock, facts)
 
-    hook = shlex.join([python, "-I", str(desk_folder / "guard.py"), "hook", "--lock", desk_env["DESK_LOCK"], "--facts", desk_env["DESK_FACTS"]])
+    session = state / "session"
+    session.mkdir(mode=0o700, exist_ok=True)
+    known_path = session / "known.json"
+    desk_env["DESK_KNOWN"] = str(known_path)
+    hook = check_command(python, desk_folder, known_path)
     live = lock["live_server"]
     settings = {
+        # Claude Code otherwise describes the repository to the session, the owner's git name included.
+        "includeGitInstructions": False,
         "permissions": {
             "defaultMode": "dontAsk",
             "allow": sorted(guard.allowed_tools(lock, facts.live_open)),
             "deny": NEVER + [f"mcp__{live}__{name}" for name in lock["live_tools_never"]],
         },
-        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook}]}]},
+        "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook, "timeout": CHECK_SECONDS + 40}]}]},
     }
 
-    # The two files hold paths and, for a live session, a key. They go to the state folder, not to the command line.
-    session = state / "session"
-    session.mkdir(mode=0o700, exist_ok=True)
+    # The files hold paths, the owner's address and, for a live session, a key. They go to the state folder, not to the command line.
     files = {}
-    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings)):
+    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(claude, copy))):
         files[name] = session / name
         descriptor = os.open(files[name], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -230,9 +285,16 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "--model", lock["model"],
         "--append-system-prompt", brief,
     ]  # fmt: skip
+    # The check is run once here, as Claude Code will run it. A check that does not answer is a reason not to start.
+    if check_answers(hook, {"tool_name": "Read", "tool_input": {}}) != 0 or check_answers(hook, {"tool_name": "Bash", "tool_input": {}}) != 2:
+        raise Problem("The check that runs before every tool call does not answer as it must.")
+
     env = {key: environ[key] for key in lock["environment"] if key in environ}
     env["PATH"] = lock["path"]
     env["DISABLE_AUTOUPDATER"] = "1"
+    # The owner's git name and address stay out of what Claude Code tells the session about the folder.
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     # The watcher gets the same sign-in as the tools: the desk's own token when there is one.
     if stand_in is not None:
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}
@@ -243,7 +305,6 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "env": env,
         "cwd": str(copy),
         "state": str(state),
-        "live_wait": f"mcp__{live}__{lock['live_wait']}",
         "settings": settings,
         "servers": sorted(servers),
         "watcher_env": watcher_env,

@@ -1,20 +1,20 @@
-"""Stands between the terminal and the desk's session, and does the desk's waiting.
+"""Stands between the terminal and the desk's sessions, and does the desk's waiting.
 
-The desk's session is Claude Code without its terminal interface: it takes messages as data on
-its input and reports what it does as data on its output. The relay is the program in the
-terminal. It does three things and nothing else.
+A session of the desk is Claude Code without its terminal interface: it takes a message as
+data on its input and reports what it does as data on its output. The relay is the program in
+the terminal. It does three things and nothing else.
 
-- It shows, in the terminal, what the session says and which tools it calls, so that a person
-  can watch.
-- It passes every line typed into the terminal to the session as a message, as plain text.
-  Nothing typed is ever treated as a command: no line runs a program, whatever it starts with.
 - It runs the watcher, one at a time, with the state path the desk was started with and no
-  other switch. When the watcher reports something new, the relay tells the session, passing
-  only a kind and an item's number, and starts the watcher again once the session has dealt
-  with it. While nothing arrives the session rests and uses nothing.
-
-The session itself has no part in the waiting, so there is nothing for it to start twice, to
-start with a switch of its own, or to forget.
+  other switch. A watcher that ends any other way than with news is not started again.
+- For every item the watcher reports, it starts a fresh session, tells it the kind of each
+  arrival and the number of that one item, lets it finish, and ends it. What one outsider wrote
+  is therefore never in the conversation in which another outsider's item is handled, and no
+  conversation grows. The tools of such a session refuse every other item. Several arrivals on one item go to one session together; several items
+  are handled one after the other, each in a session of its own. What has to last between
+  sessions (the counts and limits) is kept by the tools, and GitHub is the memory of a thread.
+- It passes what is typed into the terminal to a fresh session as a message, as plain text.
+  Nothing typed is ever treated as a command: no line runs a program, whatever it starts with.
+  It shows, in the terminal, what each session says and which tools it calls.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ import re
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -85,17 +84,27 @@ def read_events(code: int, output: bytes) -> list[dict] | None:
     return [kept for kept in map(address_only, events) if kept]
 
 
+def by_item(events: list[dict]) -> list[list[dict]]:
+    """The arrivals of each item together, items in the order of their first arrival."""
+    groups: dict[int, list[dict]] = {}
+    for event in events:
+        groups.setdefault(event["number"], []).append(event)
+    return list(groups.values())
+
+
 def news_message(events: list[dict]) -> str:
+    number = events[0]["number"]
     return (
-        "From the desk's relay: something new arrived on GitHub. Each line below is one arrival, with its kind and the "
-        "number of the item. Read each item with read_item and handle it as your standing instructions say.\n"
+        f"From the desk's relay: something new arrived on GitHub on item {number}. Each line below is one arrival, with its "
+        "kind. Read the item with read_item and handle it as your standing instructions say. Handle no other item.\n"
         + "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
     )
 
 
 class Relay:
     def __init__(self, plan: dict, watcher_env: dict[str, str], *, typed=None, shown=None, say: str | None = None,
-                 exit_when_idle: bool = False, retry_seconds: float = 60.0, quiet_seconds: float = 3.0):  # fmt: skip
+                 exit_when_idle: bool = False, retry_seconds: float = 60.0, quiet_seconds: float = 3.0,
+                 session_seconds: float = 1800.0):  # fmt: skip
         self.plan = plan
         self.copy = Path(plan["cwd"])
         self.state = Path(plan["state"])
@@ -107,16 +116,14 @@ class Relay:
         self.exit_when_idle = exit_when_idle
         self.retry_seconds = retry_seconds
         self.quiet_seconds = quiet_seconds
-        self.live_wait = plan["live_wait"]
-        self.outgoing: queue.Queue = queue.Queue()
-        self.idle = threading.Event()
+        self.session_seconds = session_seconds
+        self.jobs: queue.Queue = queue.Queue()
         self.stopping = threading.Event()
-        self.waiting_calls: set[str] = set()
+        self.typing_ended = threading.Event()
         self.session: subprocess.Popen | None = None
         self.watcher: subprocess.Popen | None = None
         self.guard = threading.Lock()
-        self.last_sent = 0.0
-        self.results = 0
+        self.handled = 0
 
     # -- the terminal -------------------------------------------------------
 
@@ -135,7 +142,7 @@ class Relay:
             text = "\n".join(pending).strip()
             pending.clear()
             if text:
-                self.outgoing.put(("typed", text))
+                self.jobs.put(("typed", text))
 
         timer: threading.Timer | None = None
         for line in self.typed:
@@ -148,62 +155,76 @@ class Relay:
         if timer is not None:
             timer.cancel()
         flush()
-        self.outgoing.put(("end of typing", ""))
+        self.typing_ended.set()
 
-    # -- the session --------------------------------------------------------
+    # -- one session for one message ----------------------------------------
 
-    def write(self, message: dict) -> None:
-        with self.guard:
-            if self.session is None or self.session.poll() is not None:
-                return
-            try:
-                self.session.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-                self.session.stdin.flush()
-            except (OSError, ValueError):
-                pass
-
-    def send(self, text: str) -> None:
-        if self.waiting_calls:
-            # The session is inside a long wait for a live session. End that wait so that it hears this now.
-            self.write({"type": "control_request", "request_id": f"relay-{time.monotonic_ns()}", "request": {"subtype": "interrupt"}})
-            self.idle.wait(timeout=15)
-        self.idle.clear()
-        self.last_sent = time.monotonic()
-        # Always a message with plain text in it. Nothing here is a command to Claude Code or to a shell.
-        self.write({"type": "user", "message": {"role": "user", "content": text}})
-
-    def read_session(self, log) -> None:
-        for line in self.session.stdout:
-            if log is not None:
+    def handle(self, about: str, text: str, log) -> None:
+        """Start a fresh session, give it this one message, show what it does, and end it."""
+        env = dict(self.plan["env"])
+        if about.startswith("item "):
+            # The tools of this session refuse every other item.
+            env["DESK_ITEM"] = about.removeprefix("item ")
+        self.handled += 1
+        log.write(json.dumps({"type": "relay", "session": self.handled, "about": about}) + "\n")
+        log.flush()
+        self.show(f"relay: session {self.handled} ({about})")
+        try:
+            with self.guard:
+                if self.stopping.is_set():
+                    return
+                self.session = subprocess.Popen(
+                    self.plan["argv"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, encoding="utf-8", errors="replace", env=env, cwd=self.plan["cwd"],
+                )  # fmt: skip
+        except OSError:
+            self.show("relay: the session could not be started")
+            return
+        session = self.session
+        # A session that does not finish is ended, so that one item cannot hold up the desk.
+        timer = threading.Timer(self.session_seconds, session.terminate)
+        timer.daemon = True
+        timer.start()
+        try:
+            # Always a message with plain text in it. Nothing here is a command to Claude Code or to a shell.
+            session.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n")
+            session.stdin.flush()
+            for line in session.stdout:
                 log.write(line)
                 log.flush()
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            kind = event.get("type")
-            content = event.get("message", {}).get("content") if isinstance(event.get("message"), dict) else None
-            if kind in ("assistant", "user") and isinstance(content, list):
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    if part.get("type") == "text" and kind == "assistant":
-                        self.show("desk: " + str(part.get("text", "")))
-                    elif part.get("type") == "tool_use":
-                        self.show("desk calls " + str(part.get("name")))
-                        if part.get("name") == self.live_wait:
-                            self.waiting_calls.add(part.get("id"))
-                    elif part.get("type") == "tool_result":
-                        self.waiting_calls.discard(part.get("tool_use_id"))
-                        if part.get("is_error"):
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                kind = event.get("type")
+                content = event.get("message", {}).get("content") if isinstance(event.get("message"), dict) else None
+                if kind in ("assistant", "user") and isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") == "text" and kind == "assistant":
+                            self.show("desk: " + str(part.get("text", "")))
+                        elif part.get("type") == "tool_use":
+                            self.show("desk calls " + str(part.get("name")))
+                        elif part.get("type") == "tool_result" and part.get("is_error"):
                             self.show("  refused: " + json.dumps(part.get("content"), ensure_ascii=False)[:300])
-            elif kind == "result":
-                self.waiting_calls.clear()
-                self.results += 1
-                self.idle.set()
-        self.stopping.set()
-        self.idle.set()
-        self.outgoing.put(("session ended", ""))
+                elif kind == "result":
+                    break
+        except (OSError, ValueError):
+            pass
+        finally:
+            timer.cancel()
+            try:
+                session.stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                session.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                session.kill()
+                session.wait()
+            with self.guard:
+                self.session = None
 
     # -- the watcher --------------------------------------------------------
 
@@ -213,20 +234,16 @@ class Relay:
         except facts_file.FactsProblem:
             return False
 
-    def pause(self, seconds: float) -> None:
-        self.stopping.wait(timeout=seconds)
-
     def watch(self) -> None:
         while not self.stopping.is_set():
             # The facts are read before every wait: closing the way in the file stops the watching.
             if not self.github_open():
-                self.pause(self.retry_seconds)
+                self.stopping.wait(timeout=self.retry_seconds)
                 continue
-            self.idle.wait()
-            if self.stopping.is_set():
-                return
             try:
                 with self.guard:
+                    if self.stopping.is_set():
+                        return
                     self.watcher = subprocess.Popen(
                         watcher_command(self.copy, self.state), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL, env=self.watcher_env, cwd=str(self.copy),
@@ -239,26 +256,27 @@ class Relay:
                 return
             if code == 2:
                 self.show("relay: the watcher says GitHub is not signed in; watching has stopped")
-                self.outgoing.put(("relay", NOT_SIGNED_IN))
+                self.jobs.put(("the watcher", NOT_SIGNED_IN))
                 return
             events = read_events(code, output)
             if events is None:
                 # Every way of ending other than with news means: do not start it again.
                 self.show(f"relay: the watcher ended with code {code}; watching has stopped")
-                self.outgoing.put(("relay", WATCHER_FAILED))
+                self.jobs.put(("the watcher", WATCHER_FAILED))
                 return
             if events:
-                self.show(f"relay: {len(events)} new on GitHub")
-                self.idle.clear()
-                self.outgoing.put(("news", news_message(events)))
-                # Not again until the session has taken this in and finished with it.
-                while not self.stopping.is_set() and not self.idle.wait(timeout=1):
-                    pass
+                groups = by_item(events)
+                self.show(f"relay: news on {len(groups)} item(s) on GitHub")
+                for group in groups:
+                    self.jobs.put((f"item {group[0]['number']}", news_message(group)))
+                # Not again until every one of them has been dealt with.
+                self.jobs.join()
 
     # -- everything together ------------------------------------------------
 
     def run(self) -> int:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (self.state / "session").mkdir(mode=0o700, exist_ok=True)
         with open(self.state / "desk.lock", "w") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -270,56 +288,34 @@ class Relay:
                 os.replace(log_path, log_path.with_suffix(".jsonl.1"))
             descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as log:
-                self.session = subprocess.Popen(
-                    self.plan["argv"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    text=True, encoding="utf-8", errors="replace", env=self.plan["env"], cwd=self.plan["cwd"],
-                )  # fmt: skip
-                self.show("relay: the desk's session is running, locked. Lines typed here are passed to it as messages.")
-                self.idle.set()
-                threads = [threading.Thread(target=self.read_session, args=(log,), daemon=True)]
+                self.show("relay: the desk is running, locked. What is typed here is passed to a session as a message.")
                 if self.first:
-                    self.send(self.first)
-                threads.append(threading.Thread(target=self.read_typed, daemon=True))
-                threads.append(threading.Thread(target=self.watch, daemon=True))
-                for thread in threads:
-                    thread.start()
+                    self.jobs.put(("first message", self.first))
+                for target in (self.read_typed, self.watch):
+                    threading.Thread(target=target, daemon=True).start()
                 try:
-                    self.loop()
+                    while not self.stopping.is_set():
+                        try:
+                            about, text = self.jobs.get(timeout=min(1.0, self.quiet_seconds))
+                        except queue.Empty:
+                            if self.exit_when_idle and self.typing_ended.is_set() and self.handled > 0:
+                                break
+                            continue
+                        if about == "typed":
+                            self.show("typed: " + text[:200])
+                        try:
+                            self.handle(about, text, log)
+                        finally:
+                            self.jobs.task_done()
                 except KeyboardInterrupt:
                     pass
                 finally:
                     self.stop()
-                    threads[0].join(timeout=10)
-            return self.session.returncode if self.session.returncode is not None else 0
-
-    def loop(self) -> None:
-        typing_ended = False
-        while True:
-            try:
-                kind, text = self.outgoing.get(timeout=min(1.0, self.quiet_seconds))
-            except queue.Empty:
-                quiet = self.idle.is_set() and time.monotonic() - self.last_sent > self.quiet_seconds and self.outgoing.empty()
-                if self.exit_when_idle and typing_ended and quiet and self.results > 0:
-                    return
-                continue
-            if kind == "session ended":
-                return
-            if kind == "end of typing":
-                typing_ended = True
-                continue
-            if kind == "typed":
-                self.show("typed: " + text[:200])
-            self.send(text)
+        return 0
 
     def stop(self) -> None:
         self.stopping.set()
-        self.idle.set()
         with self.guard:
             for process in (self.watcher, self.session):
                 if process is not None and process.poll() is None:
                     process.terminate()
-        if self.session is not None:
-            try:
-                self.session.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.session.kill()
