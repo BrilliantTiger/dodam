@@ -29,7 +29,7 @@ It refuses to start, with one sentence that says why and never with a trace of a
 - the file of facts, the standing instructions or the watcher is missing;
 - the installed Claude Code is not the version the lock was checked on;
 - the closed list (`lock.json`) is damaged, holds an entry of the wrong kind, or names anything beyond the widest list written into the start command itself: a tool, a live-session tool, a name let into the environment, a longer search path;
-- the copy of the repository differs from what is committed, holds a file that is not part of it (ignored files count), or has its git folder inside the copy, where a session could read the names and addresses in it;
+- the copy of the repository differs from what is committed, holds a file that is not part of it (ignored files count), or has its git folder inside the copy, where a session could read the names and addresses in it, or keeps that folder at a path that holds the account's or the computer's name;
 - the path of the copy holds the account's or the computer's name;
 - the state folder is inside the copy, is reached through a link, is inside the hidden project folder (its name compared without regard to capital letters), or is open to other accounts;
 - a token file is readable by other accounts or is a link;

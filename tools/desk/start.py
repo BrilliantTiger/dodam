@@ -343,6 +343,14 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         # The copy's git folder holds the names and addresses of whoever worked in it. It is kept outside the copy.
         if (copy / ".git").is_dir():
             raise Problem("The copy's git folder is inside the copy, where a session can read it. Make the copy with its git folder outside (git clone --separate-git-dir).")
+        # The copy holds one line that says where its git folder is, and a session can read that line.
+        try:
+            pointer = (copy / ".git").read_text(encoding="utf-8")
+        except OSError:
+            pointer = ""
+        named = guard.names(pointer, guard.machine_words() if machine is None else machine)
+        if named:
+            raise Problem("The path of the copy's git folder holds " + ", ".join(named) + ". Keep it in a folder whose path names neither.")
         # Ignored files are looked for too: a session can read them like any other file.
         code, output = run(["git", "-C", str(copy), "status", "--porcelain", "--ignored"])
         if code != 0 or output.strip():
@@ -415,6 +423,8 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}
     else:
         watcher_env = tools.GitHub(lock["repository"], desk_env["DESK_GH"], state, lock["path"]).environment()
+    # The watcher is run from the copy and must leave no compiled file in it.
+    watcher_env["PYTHONDONTWRITEBYTECODE"] = "1"
     return {
         "argv": argv,
         "env": env,
