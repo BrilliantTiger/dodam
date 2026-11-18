@@ -1143,19 +1143,29 @@ def test_the_command_says_why_it_did_not_start_and_starts_nothing(start, capsys,
 LIVE_CALL = {"tool_name": "mcp__coworker__reply", "tool_input": {"thread": "t", "text": "Hello."}}
 
 
-def check(start, interpreter: str, call: dict, seconds: float = 20, live: bool = True):
+def check(start, interpreter: str, call: dict, seconds: float = 20, live: bool = True, shell: str = "/bin/sh"):
     desk = start.copy / "tools" / "desk"
     if live:
         (desk / "desk.toml").write_text(LIVE_FACTS, encoding="utf-8")
     known = start.state / "known.json"
     known.write_text("[]", encoding="utf-8")
-    command = start.start.check_command(interpreter, desk, known, seconds)
+    command = start.start.check_command(interpreter, desk, known, seconds, shell)
     return subprocess.run(command, shell=True, input=json.dumps(call), capture_output=True, text=True, timeout=60)
 
 
 def test_the_check_allows_a_live_session_call_only_with_a_clean_answer(start):
     assert check(start, sys.executable, LIVE_CALL).returncode == 0
     assert check(start, sys.executable, {"tool_name": "Bash", "tool_input": {}}).returncode == 2
+
+
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/dash", "/bin/bash"])
+def test_the_wrapped_check_reads_the_call_under_every_common_shell(start, shell):
+    if not Path(shell).exists():
+        pytest.skip(f"{shell} is not on this computer")
+    assert check(start, sys.executable, LIVE_CALL, shell=shell).returncode == 0
+    assert check(start, sys.executable, {"tool_name": "Bash", "tool_input": {}}, shell=shell).returncode == 2
+    start.command("hangs", "sleep 30")
+    assert check(start, str(start.bin / "hangs"), LIVE_CALL, 1, shell=shell).returncode == 2
 
 
 def test_with_the_interpreter_pointing_nowhere_a_live_session_call_is_blocked(start, tmp_path):

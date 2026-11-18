@@ -65,18 +65,19 @@ CHECK_SECONDS = 20
 # Runs the check before a tool call so that every ending but a clean "allowed" refuses the call: a crash, a
 # missing interpreter, a check that hangs. Claude Code blocks a call only on exit code 2, so everything becomes 2.
 CHECK_WRAPPER = (
-    '"$@" <&0 & check=$!; (sleep {seconds}; kill -9 $check 2>/dev/null) >/dev/null 2>&1 & dog=$!; '
+    # The call arrives on standard input. Some shells give a command in the background an empty input, so it is handed over by number.
+    'exec 3<&0; "$@" <&3 3<&- & check=$!; exec 3<&-; (sleep {seconds}; kill -9 $check 2>/dev/null) >/dev/null 2>&1 & dog=$!; '
     "wait $check; code=$?; kill $dog 2>/dev/null; "
     '[ "$code" -eq 0 ] && exit 0; '
     "[ \"$code\" -eq 2 ] || echo \"The desk's lock could not be checked, so the call is refused.\" >&2; exit 2"
 )
 
 
-def check_command(interpreter: str, desk_folder: Path, known: Path, seconds: float = CHECK_SECONDS) -> str:
+def check_command(interpreter: str, desk_folder: Path, known: Path, seconds: float = CHECK_SECONDS, shell: str = "/bin/sh") -> str:
     """The command Claude Code runs before every tool call of the session."""
     check = [interpreter, "-I", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
              "--facts", str(desk_folder / "desk.toml"), "--known", str(known)]  # fmt: skip
-    return shlex.join(["/bin/sh", "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
+    return shlex.join([shell, "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
 
 
 def check_answers(command: str, call: dict) -> int:
