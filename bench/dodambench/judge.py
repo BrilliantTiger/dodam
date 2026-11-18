@@ -181,7 +181,30 @@ OUTLIVING_CALLS = {
     "x86_64": (0xC000003E, (29, 30, 31, 64, 65, 66, 67, 68, 69, 70, 71, 220, 240, 241, 242, 243, 244, 245)),
     "aarch64": (0xC00000B7, tuple(range(180, 198))),
 }
+# Calls that hand pages to a pipe or a socket without copying them: sendfile, splice, tee, vmsplice.
+# A page of a file that a pipe or a socket holds this way cannot be given back by the kernel, and no
+# figure of the kernel says how many there are. For a judged program these calls answer "invalid
+# argument", which is what the kernel itself answers for a kind of file whose pages it cannot move:
+# the answer on which the libraries of the runtimes copy instead.
+PAGE_MOVING_CALLS = {"x86_64": (40, 275, 276, 278), "aarch64": (71, 76, 77, 75)}
+# Calls that register buffers and files with the kernel for asynchronous work, on every kind of
+# machine, and the call that makes a socket, which is refused for the kernel's cryptography sockets:
+# both hold pages for a program in the same way.
+ASYNC_CALLS = (425, 426, 427)
+SOCKET_CALL = {"x86_64": 41, "aarch64": 198}
+CRYPTO_SOCKETS = 38
+INVALID_ARGUMENT = 22              # the error number the page-moving calls are answered with
+# The call that makes a ring of the kernel's older asynchronous input and output. The pages of such
+# a ring are charged as pages of a file and stand on the lists of pages that can be given back,
+# but cannot be given back while the ring is there. The call answers that the kernel has no such
+# call, as a kernel built without it does.
+OLDER_ASYNC_CALL = {"x86_64": 206, "aarch64": 0}
+NO_SUCH_CALL = 38                  # the error number of a call the kernel does not have
+# Where a pair of terminals is made. What such a pair buffers is memory the kernel charges to no
+# container, so no figure of the container shows it.
+TERMINAL_DEVICES = (Path("/dev/pts/ptmx"), Path("/dev/ptmx"))
 CASES_DIR = Path("/dodam-cases")   # the memory-backed, size-capped folder the verifier's container gives the cases
+MEMORY_FOLDER = Path("/dev/shm")   # the other memory-backed folder of a container; what a build leaves there is memory
 JUDGE_ROOM_MB = 256
 RECORDS_LEFT_OUT_MB = 16           # the most of the kernel's records that is left out of a case's memory
 HIGHS_KEPT = 10                    # how many runs with a new high above the limit the result names
@@ -198,21 +221,37 @@ PROGRESS_ENV = "DODAM_JUDGE_PROGRESS"
 
 
 def refusing_filter(machine: str | None = None) -> bytes | None:
-    """A kernel filter under which the calls in OUTLIVING_CALLS are refused; None on an unknown machine.
+    """A kernel filter for the program's side; None on an unknown machine. Under it the calls in
+    OUTLIVING_CALLS and ASYNC_CALLS are refused as not permitted, the calls in PAGE_MOVING_CALLS
+    answer "invalid argument", the call in OLDER_ASYNC_CALL answers that there is no such call,
+    and a cryptography socket cannot be made.
 
     Calls made the way another kind of machine makes them (32-bit calls on a 64-bit kernel) are
     refused altogether, since their numbers mean something else."""
-    known = OUTLIVING_CALLS.get(machine or platform.machine())
+    machine = machine or platform.machine()
+    known = OUTLIVING_CALLS.get(machine)
     if known is None:
         return None
     arch, calls = known
     refuse, allow = (0x06, 0, 0, 0x00050000 | 1), (0x06, 0, 0, 0x7FFF0000)   # return "not permitted" / go on
-    checks = [(0x35, 0x40000000)] if arch == 0xC000003E else []               # the x32 way of calling
-    checks += [(0x15, nr) for nr in calls]
+    cannot_move = (0x06, 0, 0, 0x00050000 | INVALID_ARGUMENT)
+    # each check: the comparison, the value, and how far behind the last check its answer lies
+    no_such_call = (0x06, 0, 0, 0x00050000 | NO_SUCH_CALL)
+    to_refusal, to_cannot_move, to_no_such_call, to_socket = 5, 0, 1, 2
+    checks = [(0x35, 0x40000000, to_refusal)] if arch == 0xC000003E else []   # the x32 way of calling
+    checks += [(0x15, nr, to_refusal) for nr in (*calls, *ASYNC_CALLS)]
+    checks += [(0x15, nr, to_cannot_move) for nr in PAGE_MOVING_CALLS[machine]]
+    checks += [(0x15, OLDER_ASYNC_CALL[machine], to_no_such_call)]
+    checks += [(0x15, SOCKET_CALL[machine], to_socket)]
     program = [(0x20, 0, 0, 4), (0x15, 1, 0, arch), refuse, (0x20, 0, 0, 0)]
-    for at, (code, value) in enumerate(checks):
-        program.append((code, len(checks) - at, 0, value))                    # found: jump to the refusal
-    program += [allow, refuse]
+    for at, (code, value, behind) in enumerate(checks):
+        program.append((code, len(checks) - at + behind, 0, value))           # found: jump to its answer
+    program += [(0x05, 0, 0, 4),                # no check found the call: go on
+                cannot_move,
+                no_such_call,
+                (0x20, 0, 0, 16),               # a socket: of which family
+                (0x15, 1, 0, CRYPTO_SOCKETS),
+                allow, refuse]
     return b"".join(struct.pack("HBBI", *line) for line in program)
 
 
@@ -224,7 +263,8 @@ def confine(uid: int, gid: int, groups: list[int], limits: dict[str, int], filte
     """Called in a new process just before it becomes the program's side. From here on it is a plain
     user that cannot gain rights, is the first to go when the container runs out of memory, cannot
     make anything in the kernel that outlives it, and is held by the kernel's limits it is given."""
-    for name, value in limits.items():
+    # no memory can be locked: locked pages of files are pages the kernel cannot give back
+    for name, value in {"RLIMIT_MEMLOCK": 0, **limits}.items():
         resource.setrlimit(getattr(resource, name), (value, value))
     with open("/proc/self/oom_score_adj", "w") as f:
         f.write("1000")
@@ -346,15 +386,17 @@ def container_memory(group: Path = GROUP) -> dict[str, int]:
     """What the kernel counts for this container, in bytes. "taken" is the memory that cannot be
     given back, together with what was moved out to swap: memory in shared memory and in
     memory-backed folders is counted, and so is memory the kernel swapped out. Two things are taken
-    out, because the kernel gives them back whenever memory is needed: the cache of files on disk,
-    and the records the kernel keeps of the names and files that were looked at and of the pages of
-    that cache. "all" is everything in memory, those included, which is what the kernel's own
-    highest value counts."""
+    out, because the kernel gives them back whenever memory is needed: the pages of files on disk
+    that stand on the kernel's two lists of pages it can give back, and the records the kernel
+    keeps of the names and files that were looked at and of the pages of that cache. A page of a
+    file that stands on neither list counts, whatever keeps it off them. "all" is everything in
+    memory, those included, which is what the kernel's own highest value counts."""
     current = int((group / "memory.current").read_text())
     stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
     swapped = _group_number(group, "memory.swap.current") or 0
     gives_back = int(stat_lines.get("slab_reclaimable", 0))
-    return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"]) + swapped - gives_back,
+    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))
+    return {"taken": current - can_be_given_back + swapped - gives_back,
             "all": current, "cap": _group_number(group, "memory.max") or 0, "records": gives_back}
 
 
@@ -643,6 +685,18 @@ def close_writable_places() -> int:
     return closed
 
 
+def close_terminals(devices: tuple[Path, ...] = TERMINAL_DEVICES) -> None:
+    """No user but root can make a pair of terminals. The device that makes them is closed to
+    every user; root, which the judge is, opens it all the same. A link is not followed, and a
+    container that has no such device needs nothing."""
+    for device in devices:
+        try:
+            if not device.is_symlink() and device.exists():
+                os.chmod(device, 0)
+        except OSError as exc:
+            raise JudgeFault(f"cannot close {device} to the program: {exc}") from None
+
+
 def open_for_reading(app_dir: Path) -> None:
     """After the build: everyone may read and run the program, nobody but its owner may change it,
     and no file of it lends its owner's rights to whoever runs it. Every entry is reached, at any
@@ -706,6 +760,13 @@ class CliRun:
             open_for_reading(app_dir)
             self.uid = free_user_id()
             self.closed = close_writable_places()
+            # what the build left in the container's memory-backed folder would stay charged to the
+            # container through every case: it is removed before the first case begins
+            if MEMORY_FOLDER.is_dir() and not MEMORY_FOLDER.is_symlink():
+                try:
+                    remove_tree(MEMORY_FOLDER, keep_top=True)
+                except OSError as exc:
+                    raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
             # the cases live in the folder the container caps; it is closed to others above
             self.work_root = CASES_DIR
             remove_tree(self.work_root, keep_top=True)
@@ -1091,6 +1152,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         side = Side.named(run_as)
         if not side.end():
             raise JudgeFault("processes the working user left running could not be ended")
+        close_terminals()
         # the kernel's records of names and files, before anything of the program's side has run here
         records = {"at_start": container_memory()["records"]}
     deps_dir, links = lang_env.get("DEPS_DIR", ""), [n for n in lang_env.get("DEPS_LINKS", "").split(",") if n]

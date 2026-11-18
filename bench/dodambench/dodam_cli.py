@@ -25,15 +25,19 @@ Every case has limits. In the verifier each is a bound that holds whatever the p
   no more can be written, whether in many files, deep trees or files deleted while open; one file
   cannot be made larger than the limit either, not even a sparse one;
 - memory: the judge measures, as often as it gets to run and at most every two thousandths of a
-  second, everything the kernel counts for the container beyond what was there when the run began,
-  memory moved out to swap included, and ends the program above the limit. Between two
-  measurements the program can be above it. After the run the judge also reads the highest value
-  the kernel itself kept for the container. That value counts the cache of files on disk, so the
-  judge takes out of a new high everything the container read from disk during the run; what is
-  left above the limit fails the case even when no measurement saw it. A program that only reads
-  files, cached or not, never fails this way. The program can never be above the container's memory cap,
-  where the kernel ends it first, and that fails the case as well. Memory that would outlive the
-  program's processes cannot be taken: the calls for it are refused.
+  second, what the container holds that the kernel cannot give back, memory moved out to swap
+  included, and ends the program above the limit. Pages of files that the kernel can give back
+  are left out, so a program that only reads files never fails this way; a page of a file that
+  it cannot give back counts. The kernel's records of names and files are left out up to a
+  quarter of the limit and at most 16 MB, and count beyond that. The cases' files, which have a
+  limit of their own, and this runner's own memory are left out. A case has one starting figure,
+  read before its first run, and is counted from the lowest figure it reached since. Between two
+  measurements the program can be above its limit. The highest value the kernel itself kept for
+  the container is read before and after every run and written into the result; it fails no
+  case. The program can never be above the container's memory cap, where the kernel ends it
+  first, and that fails the case. Memory that would outlive the program's processes cannot be
+  taken, memory cannot be locked, and pages cannot be handed to a pipe or a socket without
+  copying: the calls for these are refused or answer that it cannot be done.
 
 A case that broke a limit fails, whatever the test asserts and even when the test would have been
 left unjudged; so does a program that leaves processes behind, and a case whose folder cannot be
@@ -119,6 +123,29 @@ def _records_grown(grown: int, last: int | None, now: int) -> int:
 def _records_counted(grown: int, left_out_at_most: int) -> int:
     """What of the growth of the kernel's records during a case counts as the case's memory."""
     return max(grown - left_out_at_most, 0)
+
+
+def _own_memory(status: str = "/proc/self/status") -> int:
+    """The ordinary memory of this process, the case runner, in memory and moved out to swap; 0
+    where the kernel does not say. It is taken out of every figure of a case, so that what the
+    runner itself holds from one run to the next, the input it feeds and the output it has read,
+    is no memory of the program's. Pages of files are not in it: they are left out already."""
+    own = 0
+    try:
+        with open(status, encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith(("RssAnon:", "VmSwap:")):
+                    own += int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return 0
+    return own
+
+
+def _lowest(lowest: int | None, figure: int) -> int:
+    """The lowest figure a case has reached, with the figure read now. A case's memory is counted
+    from there: from one starting figure for all its runs, and when memory that was there at the
+    start goes away during the case, from the lower figure, so that its going makes no room."""
+    return figure if lowest is None else min(lowest, figure)
 
 
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
@@ -227,6 +254,9 @@ class Case:
         self._records_last: int | None = None
         self._records_grown = 0
         self._left_out_at_most = _records_left_out_at_most(self._limits["memory_mb"])
+        # what the container held besides the cases' files and the runner's own memory: the lowest
+        # figure since the case's first run began, from which the case's memory is counted
+        self._lowest: int | None = None
         self._side = _judge.Side(self._uid, self._gid) if self._uid is not None else None
         try:
             # cases run one after another, so whatever is in the cases' folder now is not this case's
@@ -380,8 +410,10 @@ class Case:
         killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
         held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
-        memory_before = held_before["taken"] - _files_held(self._cfg["work_root"]) if separated else 0
         if separated:
+            # one starting figure for the whole case, read before its first run, when the test's
+            # own files are written; a later run of the case is measured against it as well
+            self._lowest = _lowest(self._lowest, self._figure(held_before))
             self._records(held_before)
         started = time.monotonic()
         try:
@@ -395,7 +427,7 @@ class Case:
             # the program is not there or cannot be run as built: the program's failure
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
         try:
-            result = self._watch(proc, stdin, started, left, memory_before)
+            result = self._watch(proc, stdin, started, left)
             if result.limit is None and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
@@ -405,6 +437,8 @@ class Case:
         high_now = _judge.highest_memory() if separated else 0
         above = _above_in_a_new_high(high_before, high_now, held_before["taken"],
                                      (limits["memory_mb"] + limits["disk_mb"]) * 2**20)
+        if separated:
+            self.measured["lowest"] = self._lowest
         self.measured.update(records_grown=self._records_grown,
                              records_left_out=min(self._records_grown, self._left_out_at_most),
                              records_counted=_records_counted(self._records_grown, self._left_out_at_most))
@@ -447,23 +481,28 @@ class Case:
         self._records_last = records
         return _records_counted(self._records_grown, self._left_out_at_most)
 
-    def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float,
-               memory_before: int) -> Result:
+    def _figure(self, now: dict) -> int:
+        """What the container holds that cannot be given back, less the cases' files, which have
+        a limit of their own, and less the case runner's own memory."""
+        return now["taken"] - _files_held(self._cfg["work_root"]) - _own_memory()
+
+    def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float) -> Result:
         limits = self._limits
         max_out = limits["output_kb"] * 1024
         max_memory = limits["memory_mb"] * 1024 * 1024
-        work_root = self._cfg["work_root"]
 
         def above_a_line() -> bool:
             """One measurement. The case's memory is everything the kernel counts for the container
-            that cannot be given back, less the cases' files and what was there before the run,
-            and of the kernel's records what grew beyond the amount that is left out. Above the
-            limit the program is ended. It is ended as well when the container is about to run out
-            of memory, whatever the case's limit says: that keeps the kernel from having to choose
-            what to end."""
+            that cannot be given back, less the cases' files and the runner's own memory, counted
+            from the lowest such figure since the case's first run began, and of the kernel's
+            records what grew beyond the amount that is left out. Above the limit the program is
+            ended. It is ended as well when the container is about to run out of memory, whatever
+            the case's limit says: that keeps the kernel from having to choose what to end."""
             now = _judge.container_memory()
             records = self._records(now)
-            taken = now["taken"] - _files_held(work_root) - memory_before + records
+            figure = self._figure(now)
+            self._lowest = _lowest(self._lowest, figure)
+            taken = figure - self._lowest + records
             self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
             runs_out = bool(now["cap"]) and now["taken"] + records > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
             return taken > max_memory or runs_out

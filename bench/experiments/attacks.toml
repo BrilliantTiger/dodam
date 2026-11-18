@@ -614,3 +614,64 @@ tests = [
     "tests/test_cli_isolation.py::test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out",
     "tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it",
 ]
+
+[[attack]]
+class = "memory"
+name = "locking pages of files in memory"
+tries = "the program, alone or with many processes, locks pages in memory: a range, everything it has, a mapping asked for as locked, shared memory; a locked page of a file cannot be given back by the kernel"
+must = "nothing of the program's side, in the build or in a run, can lock memory; and a page of a file that the kernel cannot give back counts as memory whatever keeps it"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case",
+    "tests/test_cli_judge.py::test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory",
+]
+
+[[attack]]
+class = "memory"
+name = "handing pages of files to pipes and sockets"
+tries = "the program hands pages of a file to the kernel without copying them: a file spliced into pipes, a mapped file given to pipes, a file sent into local sockets and into network sockets; or it registers memory and files for asynchronous work, or uses the kernel's cryptography sockets"
+must = "for the program's side these calls answer that the pages cannot be moved, or are refused, by the judge's own filter; what a program then holds is copied memory, which counts"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_isolation.py::test_pages_of_a_file_handed_to_pipes_or_sockets_are_within_the_bound_or_fail_the_case",
+    "tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages",
+]
+
+[[attack]]
+class = "memory"
+name = "what an earlier run of the same case left"
+tries = "the first run of a case leaves kernel memory that is no file's content in the case folder (attributes of files, tens of thousands of empty folders) and the second run holds memory beside it, or removes it and holds that much more; or a run deletes the many files the test itself put there"
+must = "a case has one starting figure, read before its first run, and is counted from the lowest figure it reached: what a run left counts, and what goes away during the case makes no room"
+tests = [
+    "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it",
+    "tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached",
+]
+
+[[attack]]
+class = "leaving things for a later case"
+name = "memory left where the next case would start from"
+tries = "the build fills the container's memory-backed folder, or a case leaves memory behind in the places it can write and in objects that outlive a process, so that it is part of the figure the next case starts from"
+must = "the judge empties the memory-backed folder after the build, a case can write only its own folder, which is removed, and what outlives a process cannot be made; a case that follows starts from a figure with nothing of it"
+tests = [
+    "tests/test_cli_isolation.py::test_nothing_is_carried_into_the_starting_figure_of_the_next_case",
+]
+
+[[attack]]
+class = "memory"
+name = "rings of the kernel's older asynchronous input and output"
+tries = "the program makes as many rings of the older asynchronous input and output as the machine's cap on their events allows; the pages of a ring are charged as pages of a file that can be given back, and cannot be given back while the ring is there"
+must = "for the program's side the call that makes such a ring answers that the kernel has no such call"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages",
+]
+
+[[attack]]
+class = "memory"
+name = "memory the kernel charges to no container"
+tries = "the program opens as many pairs of terminals as the machine allows and fills both directions without reading; what such a pair buffers is charged to no container, so no figure of the container shows it"
+must = "no user but root can make a pair of terminals: the judge closes the device that makes them before anything of the program's side runs"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_judge.py::test_no_user_but_root_can_make_a_pair_of_terminals",
+]

@@ -1952,7 +1952,7 @@ def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_
     assert counted is not None, f"the case does not say the most the judge counted: {within['measured']}"
     really = really_mb(within)
     note_figures(f"{way}, limit {limit_mb} MB", really=really, counted=counted / 2**20, beyond=really - counted / 2**20,
-                 charged_to_nobody=charged_to_nobody_mb(seen))
+                 charged_to_nobody=charged_to_nobody_mb(within))
     assert really - counted / 2**20 <= left_out + TOLERANCE_MB, (
         f"the container really held {really:.1f} MB more than when the case began and the judge counted "
         f"{counted / 2**20:.1f} MB: {within}")

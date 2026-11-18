@@ -522,7 +522,7 @@ what = "The second way of calling an x86-64 kernel is refused"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_the_filter_refuses_the_calls_that_make_what_outlives_a_process"]
 [[protection.change]]
-find = '''    checks = [(0x35, 0x40000000)] if arch == 0xC000003E else []'''
+find = '''    checks = [(0x35, 0x40000000, to_refusal)] if arch == 0xC000003E else []'''
 put = '''    checks = []'''
 
 [[protection]]
@@ -569,8 +569,8 @@ what = "Memory moved out to swap counts as memory"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_memory_moved_out_to_swap_is_counted_as_memory"]
 [[protection.change]]
-find = ''' + int(stat_lines["shmem"]) + swapped - gives_back,'''
-put = ''' + int(stat_lines["shmem"]) - gives_back,'''
+find = '''    return {"taken": current - can_be_given_back + swapped - gives_back,'''
+put = '''    return {"taken": current - can_be_given_back - gives_back,'''
 
 [[protection]]
 what = "The kernel's records of files that were looked at are left out of a case's memory"
@@ -635,13 +635,15 @@ tests = ["tests/test_cli_judge.py::test_a_run_reads_its_starting_values_before_t
 find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
         held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
-        memory_before = held_before["taken"] - _files_held(self._cfg["work_root"]) if separated else 0
         if separated:
+            # one starting figure for the whole case, read before its first run, when the test's
+            # own files are written; a later run of the case is measured against it as well
+            self._lowest = _lowest(self._lowest, self._figure(held_before))
             self._records(held_before)
         started = time.monotonic()
 '''
 put = '''        started = time.monotonic()
-        killed_before = high_before = memory_before = 0
+        killed_before = high_before = 0
         held_before = {"taken": 0, "all": 0}
 '''
 
@@ -944,3 +946,87 @@ find = '''        if os.path.commonpath([real, os.path.realpath(self.root)]) != 
 '''
 put = '''        if False:
 '''
+
+[[protection]]
+what = "Nothing of the program's side can lock memory"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run"]
+[[protection.change]]
+find = '''    for name, value in {"RLIMIT_MEMLOCK": 0, **limits}.items():'''
+put = '''    for name, value in limits.items():'''
+
+[[protection]]
+what = "The calls that hand pages to a pipe or a socket without copying answer invalid argument"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages", "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run", "tests/test_cli_isolation.py::test_pages_of_a_file_handed_to_pipes_or_sockets_are_within_the_bound_or_fail_the_case"]
+[[protection.change]]
+find = '''    checks += [(0x15, nr, to_cannot_move) for nr in PAGE_MOVING_CALLS[machine]]
+'''
+put = ''''''
+
+[[protection]]
+what = "The calls for asynchronous work are refused by the judge's own filter"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages", "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run"]
+[[protection.change]]
+find = '''    checks += [(0x15, nr, to_refusal) for nr in (*calls, *ASYNC_CALLS)]'''
+put = '''    checks += [(0x15, nr, to_refusal) for nr in calls]'''
+
+[[protection]]
+what = "A cryptography socket of the kernel cannot be made"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages", "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run"]
+[[protection.change]]
+find = '''                (0x15, 1, 0, CRYPTO_SOCKETS),'''
+put = '''                (0x15, 0, 0, CRYPTO_SOCKETS),'''
+
+[[protection]]
+what = "A page of a file that the kernel cannot give back counts as memory"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory", "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case"]
+[[protection.change]]
+find = '''    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))'''
+put = '''    can_be_given_back = int(stat_lines["file"]) - int(stat_lines["shmem"])'''
+
+[[protection]]
+what = "A case has one starting figure for all its runs"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached", "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it"]
+[[protection.change]]
+find = '''            self._lowest = _lowest(self._lowest, self._figure(held_before))'''
+put = '''            self._lowest = self._figure(held_before)'''
+
+[[protection]]
+what = "A case is counted from the lowest figure it reached"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached", "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it"]
+[[protection.change]]
+find = '''            self._lowest = _lowest(self._lowest, figure)
+'''
+put = ''''''
+
+[[protection]]
+what = "What the build left in the container's memory-backed folder is removed before the first case"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_nothing_is_carried_into_the_starting_figure_of_the_next_case"]
+[[protection.change]]
+find = '''            if MEMORY_FOLDER.is_dir() and not MEMORY_FOLDER.is_symlink():'''
+put = '''            if False:'''
+
+[[protection]]
+what = "The making of a ring of the older asynchronous work answers that there is no such call"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages", "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run"]
+[[protection.change]]
+find = '''    checks += [(0x15, OLDER_ASYNC_CALL[machine], to_no_such_call)]
+'''
+put = ''''''
+
+[[protection]]
+what = "No user but root can make a pair of terminals"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run"]
+[[protection.change]]
+find = '''        close_terminals()
+'''
+put = ''''''
