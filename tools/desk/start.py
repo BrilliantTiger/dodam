@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
-"""Starts the desk's session, locked, in the terminal this command is run in.
+"""Starts the desk, locked, in the terminal this command is run in.
 
     python3 tools/desk/start.py --coordinator ADDRESS [--state FOLDER] [--print]
 
-The session it starts is Claude Code without its terminal interface, run by a relay (relay.py)
-that shows in this terminal what the session does, passes typed lines to it as plain messages,
-and runs the watcher. The session has nothing but the closed list in lock.json:
+It runs a relay (relay.py) in this terminal. For every item with something new the relay starts
+a session of Claude Code without its terminal interface, and that session has nothing but the
+closed list in lock.json:
 
 - the three tools that read files, confined to this copy of the repository;
-- the desk's own tools (tools.py), and the tools of a live session when that way is open;
+- the desk's own tools (tools.py);
 - no shell, no tool that writes a file, no tool that fetches from the web, no agents;
 - none of the settings, instructions, hooks, plugins or connected services of the person
-  whose computer this is;
+  whose computer this is, and, with a sign-in of the desk's own, nothing that names that person;
 - an environment with nothing in it but a handful of names;
 - every tool call that is not on the list refused at once, with nobody asked.
 
-The command refuses to start when anything it relies on is missing or different: the file of
-facts, the standing instructions, the watcher, the pinned version of Claude Code, a clean copy
-of the repository, a safe state folder. It changes nothing outside the state folder.
+The command refuses to start when anything it relies on is missing or different, and says why
+in one sentence. It never starts half-checked: any error it did not expect is a refusal too.
 
 --coordinator is the one address the desk can send a message to. --state is the folder, outside
-the repository, where the tools keep what they must remember and where the desk's own GitHub
-token is read from (a file named github-token that only this account can read). --print shows
-what would be started and starts nothing.
+the repository, where the tools keep what they must remember and where the owner puts what the
+desk needs of the owner: github-token (the desk's own token for GitHub) and claude-token (the
+desk's own sign-in to Claude), each readable by this account only. --print shows what would be
+started and starts nothing.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import re
-import shlex
-import shutil
-import subprocess
 import sys
-from pathlib import Path
+
+# Nothing is written into the copy of the repository, not even a compiled file.
+sys.dont_write_bytecode = True
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import re  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 COPY = HERE.parents[1]
@@ -48,13 +52,33 @@ import tools  # noqa: E402
 
 DEFAULT_STATE = Path.home() / ".dodam-desk"
 LIVE_SERVER_FILE = "live-server.json"
+CLAUDE_TOKEN_FILE = "claude-token"
+CLAUDE_CONFIG_FOLDER = "claude-config"
 ADDRESS = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9_:@.-]{0,119}$")
-LOCK_KEYS = (
-    "claude_version", "model", "repository", "builtin_tools", "desk_tools", "live_server", "live_tools",
-    "live_tools_never", "labels", "labels_per_day", "answer", "read", "coordinator", "environment", "path",
-)  # fmt: skip
+VERSION = re.compile(r"\d+(?:\.\d+)+")
+
+# The widest the closed list may ever be. lock.json may name less, never more.
+BUILTIN_TOOLS = {"Read", "Glob", "Grep"}
+LIVE_TOOLS = {"open_bridge", "wait_for_message", "inbox", "read_conversation", "reply", "list_connections", "write_agreement"}
+LIVE_TOOLS_NEVER = {"connect", "close_bridge"}
+ENVIRONMENT = {"HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR"}
+PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Named again here so that they stay refused even if a later change puts one back among the tools.
 NEVER = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Skill"]
+
+NAME = {"type": str}
+NAMES = {"type": list, "of": str}
+COUNT = {"type": int}
+LOCK_SHAPE = {
+    "claude_version": NAME, "model": NAME, "repository": NAME, "live_server": NAME, "path": NAME,
+    "builtin_tools": NAMES, "desk_tools": NAMES, "live_tools": NAMES, "live_tools_never": NAMES, "labels": NAMES, "environment": NAMES,
+    "labels_per_day": COUNT,
+    "answer": {"first_line": NAME, "max_chars": COUNT, "per_author_per_day": COUNT},
+    "read": {"max_field_chars": COUNT, "max_comments": COUNT, "max_paths": COUNT, "max_path_chars": COUNT, "max_labels": COUNT, "max_label_chars": COUNT},
+    "coordinator": {"first_line": NAME, "max_chars": COUNT, "limit_notices_per_day": COUNT, "budgets": {"type": dict, "of": int}},
+    "spending": {"turns_per_session": COUNT, "seconds_per_session": COUNT, "reads_per_session": COUNT, "tokens_per_session": COUNT,
+                 "sessions_per_item_per_day": COUNT, "sessions_per_day": COUNT, "tokens_per_day": COUNT, "events_kept": COUNT},
+}  # fmt: skip
 
 
 class Problem(Exception):
@@ -75,7 +99,7 @@ CHECK_WRAPPER = (
 
 def check_command(interpreter: str, desk_folder: Path, known: Path, seconds: float = CHECK_SECONDS, shell: str = "/bin/sh") -> str:
     """The command Claude Code runs before every tool call of the session."""
-    check = [interpreter, "-I", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
+    check = [interpreter, "-I", "-B", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
              "--facts", str(desk_folder / "desk.toml"), "--known", str(known)]  # fmt: skip
     return shlex.join([shell, "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
 
@@ -88,25 +112,9 @@ def check_answers(command: str, call: dict) -> int:
     return done.returncode
 
 
-def known_values(claude: str, copy: Path) -> list[list[str]]:
-    """What Claude Code puts into a session's context about the owner, so that the tools can refuse to send it."""
-    code, output = run([claude, "auth", "status"])
+def run(argv: list[str], timeout: float = 30, env: dict[str, str] | None = None) -> tuple[int, str]:
     try:
-        email = json.loads(output)["email"]
-        assert code == 0 and isinstance(email, str) and "@" in email
-    except (ValueError, KeyError, TypeError, AssertionError):
-        raise Problem("The address of the signed-in account could not be read, so it could not be kept out of answers.") from None
-    known = [["the account's email address", email]]
-    for key in ("user.name", "user.email"):
-        code, output = run(["git", "config", "--global", key])
-        if code == 0 and len(output.strip()) >= 3:
-            known.append(["the owner's git name or address", output.strip()])
-    return known
-
-
-def run(argv: list[str], timeout: float = 30) -> tuple[int, str]:
-    try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError):
         return (127, "")
     return (done.returncode, done.stdout)
@@ -120,10 +128,11 @@ def which(name: str) -> str:
 
 
 def version_tuple(text: str) -> tuple[int, ...]:
-    match = re.search(r"\d+(?:\.\d+)+", text)
-    if not match:
-        raise Problem("A version number could not be read.")
-    return tuple(int(part) for part in match.group(0).split("."))
+    """A released version: numbers and dots and nothing else. A version with a suffix is not a release."""
+    word = text.strip().split()[0] if text.strip() else ""
+    if not VERSION.fullmatch(word):
+        raise Problem("A version is not a released version, or could not be read.")
+    return tuple(int(part) for part in word.split("."))
 
 
 def private(path: Path, what: str) -> None:
@@ -133,8 +142,13 @@ def private(path: Path, what: str) -> None:
 
 
 def state_folder(raw: Path, copy: Path) -> Path:
-    state = raw.expanduser().resolve()
-    if ".dodam" in state.parts:
+    given = Path(os.path.abspath(raw.expanduser()))
+    # Looked at before the path is followed: a link here would send the desk's secrets and counts somewhere else.
+    if given.is_symlink():
+        raise Problem("The state folder must be a real folder, not a link to one.")
+    state = given.resolve()
+    # The file system of this computer does not tell capital letters from small ones.
+    if ".dodam" in [part.casefold() for part in (*given.parts, *state.parts)]:
         raise Problem("The state folder must not be inside .dodam.")
     if state == copy or state.is_relative_to(copy) or copy.is_relative_to(state):
         raise Problem("The state folder must be outside the desk's copy of the repository, where the session cannot read it.")
@@ -143,15 +157,37 @@ def state_folder(raw: Path, copy: Path) -> Path:
     return state
 
 
+def fits(value, shape) -> bool:
+    if "type" not in shape:
+        return isinstance(value, dict) and set(value) == set(shape) and all(fits(value[key], shape[key]) for key in shape)
+    kind = shape["type"]
+    if kind is int:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+    if kind is str:
+        return isinstance(value, str) and bool(value.strip())
+    if kind is list:
+        return isinstance(value, list) and all(isinstance(entry, str) and entry for entry in value) and len(set(value)) == len(value)
+    return isinstance(value, dict) and bool(value) and all(isinstance(k, str) and fits(v, {"type": shape["of"]}) for k, v in value.items())
+
+
 def load_lock(copy: Path) -> dict:
     try:
         lock = json.loads((copy / "tools" / "desk" / "lock.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise Problem("The closed list of what the desk may do (lock.json) is missing or damaged.") from None
-    if not isinstance(lock, dict) or any(key not in lock for key in LOCK_KEYS):
-        raise Problem("The closed list of what the desk may do (lock.json) is incomplete.")
-    if set(lock["builtin_tools"]) - {"Read", "Glob", "Grep"} or set(lock["live_tools"]) & set(lock["live_tools_never"]):
-        raise Problem("The closed list of what the desk may do (lock.json) names a tool the desk must not have.")
+    if not fits(lock, LOCK_SHAPE):
+        raise Problem("The closed list of what the desk may do (lock.json) is incomplete, or holds something of the wrong kind.")
+    wider = (
+        set(lock["builtin_tools"]) - BUILTIN_TOOLS
+        or set(lock["desk_tools"]) - set(tools.TOOLS)
+        or set(lock["live_tools"]) - LIVE_TOOLS
+        or LIVE_TOOLS_NEVER - set(lock["live_tools_never"])
+        or set(lock["environment"]) - ENVIRONMENT
+        or lock["path"] != PATH
+        or lock["live_server"] != "coworker"
+    )
+    if wider:
+        raise Problem("The closed list of what the desk may do (lock.json) names something the desk must not have.")
     return lock
 
 
@@ -163,16 +199,80 @@ def live_server(state: Path, lock: dict, facts: facts_file.Facts) -> dict:
     private(path, f"The file {LIVE_SERVER_FILE}")
     try:
         server = json.loads(path.read_text(encoding="utf-8"))
-        command, arguments, env = server["command"], server.get("args", []), server.get("env", {})
-        assert isinstance(command, str) and Path(command).is_absolute()
-        assert isinstance(arguments, list) and all(isinstance(a, str) for a in arguments)
-        assert isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
-    except (OSError, ValueError, KeyError, AssertionError):
-        raise Problem(f"The file {LIVE_SERVER_FILE} is damaged.") from None
+    except (OSError, ValueError):
+        server = None
+    good = (
+        isinstance(server, dict)
+        and isinstance(server.get("command"), str)
+        and Path(server["command"]).is_absolute()
+        and isinstance(server.get("args", []), list)
+        and all(isinstance(a, str) for a in server.get("args", []))
+        and isinstance(server.get("env", {}), dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in server.get("env", {}).items())
+    )
+    if not good:
+        raise Problem(f"The file {LIVE_SERVER_FILE} is damaged.")
+    command, arguments, env = server["command"], server.get("args", []), server.get("env", {})
     code, output = run([command, *arguments, "version"])
-    if code != 0 or version_tuple(output) < version_tuple(facts.coworker_min_version):
-        raise Problem(f"The live-session tools are older than {facts.coworker_min_version}, the oldest version the facts allow.")
+    try:
+        old = code != 0 or version_tuple(output) < version_tuple(facts.coworker_min_version)
+    except Problem:
+        old = True
+    if old:
+        raise Problem(f"The live-session tools are not a released version of at least {facts.coworker_min_version}, the oldest the facts allow.")
     return {"command": command, "args": arguments, "env": env}
+
+
+def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str, str], str | None, str | None]:
+    """The desk's own sign-in to Claude when the owner made one, and the address each sign-in shows.
+
+    Returns what to add to a session's environment, the address the session's sign-in shows (None when
+    it shows none), and the address of the owner's own sign-in (to be refused in outgoing text).
+    """
+
+    def shown_by(env: dict[str, str]) -> tuple[bool, str | None]:
+        code, output = run([claude, "auth", "status"], env=env)
+        try:
+            status = json.loads(output)
+        except ValueError:
+            status = None
+        if code != 0 or not isinstance(status, dict) or status.get("loggedIn") is not True:
+            return (False, None)
+        email = status.get("email")
+        return (True, email if isinstance(email, str) and email.strip() else None)
+
+    base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
+    owner_signed_in, owner = shown_by(base)
+    token_path = state / CLAUDE_TOKEN_FILE
+    if not token_path.exists() and not token_path.is_symlink():
+        if not owner_signed_in:
+            raise Problem("Claude Code is not signed in.")
+        return ({}, owner, owner)
+    private(token_path, "The desk's sign-in to Claude (claude-token)")
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token or any(character.isspace() for character in token):
+        raise Problem("The desk's sign-in to Claude (claude-token) is empty or damaged.")
+    config = state / CLAUDE_CONFIG_FOLDER
+    config.mkdir(mode=0o700, exist_ok=True)
+    private(config, "The desk's own configuration folder for Claude")
+    # The token reaches a session through its environment only, with a configuration folder of the desk's own,
+    # so that nothing of the owner's sign-in or settings is read.
+    extra = {"CLAUDE_CODE_OAUTH_TOKEN": token, "CLAUDE_CONFIG_DIR": str(config)}
+    signed_in, email = shown_by(base | extra)
+    if not signed_in:
+        raise Problem("The desk's sign-in to Claude (claude-token) was not accepted.")
+    return (extra, email, owner)
+
+
+def known_values(owner_email: str | None, session_email: str | None, environ: dict[str, str]) -> list[list[str]]:
+    """Values of the owner that the tools refuse to send, beyond what the computer itself tells them."""
+    known = [["the address of a sign-in", email] for email in sorted({owner_email, session_email} - {None})]
+    base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
+    for key in ("user.name", "user.email"):
+        code, output = run(["git", "config", "--global", key], env=base)
+        if code == 0 and len(output.strip()) >= 3:
+            known.append(["the owner's git name or address", output.strip()])
+    return known
 
 
 def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: dict[str, str] | None = None, copy: Path = COPY,
@@ -219,6 +319,13 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
             f"The lock was checked against Claude Code {lock['claude_version']}; another version is installed. "
             "Run the lock check on the new version and change the pinned version with it."
         )
+    own_sign_in, session_email, owner_email = sign_in(claude, state, environ)
+    if stand_in is None and (facts.github_open or facts.live_open) and session_email:
+        # A session cannot give away what it does not hold. With the owner's sign-in it holds the owner's address.
+        raise Problem(
+            "A way in is open, but the sign-in the sessions would use shows an email address, which Claude Code tells every "
+            "session. Put a sign-in of the desk's own in the state folder (claude-token), or close every way in."
+        )
 
     desk_env = {
         "DESK_LOCK": str(desk_folder / "lock.json"),
@@ -233,23 +340,28 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
             raise Problem("The stand-in folder has no items.")
         desk_env["DESK_STAND_IN"] = str(stand_in)
     else:
-        code, output = run(["git", "-C", str(copy), "status", "--porcelain"])
+        # The copy's git folder holds the names and addresses of whoever worked in it. It is kept outside the copy.
+        if (copy / ".git").is_dir():
+            raise Problem("The copy's git folder is inside the copy, where a session can read it. Make the copy with its git folder outside (git clone --separate-git-dir).")
+        # Ignored files are looked for too: a session can read them like any other file.
+        code, output = run(["git", "-C", str(copy), "status", "--porcelain", "--ignored"])
         if code != 0 or output.strip():
-            raise Problem("The desk's copy of the repository differs from what is committed. Start the desk from a clean copy.")
+            raise Problem("The desk's copy of the repository differs from what is committed, or holds files that are not part of it. Start the desk from a clean copy.")
         desk_env["DESK_GH"] = which("gh")
         desk_env["DESK_ORCA"] = which("orca")
         if environ.get("ORCA_TERMINAL_HANDLE") and ADDRESS.fullmatch(environ["ORCA_TERMINAL_HANDLE"]):
             desk_env["DESK_SENDER"] = environ["ORCA_TERMINAL_HANDLE"]
 
-    python = str(Path(sys.executable).resolve())
-    servers = {"desk": {"command": python, "args": ["-I", str(desk_folder / "tools.py"), "serve"], "env": desk_env}}
-    if facts.live_open:
-        servers[lock["live_server"]] = live_server(state, lock, facts)
-
     session = state / "session"
     session.mkdir(mode=0o700, exist_ok=True)
     known_path = session / "known.json"
     desk_env["DESK_KNOWN"] = str(known_path)
+
+    python = str(Path(sys.executable).resolve())
+    servers = {"desk": {"command": python, "args": ["-I", "-B", str(desk_folder / "tools.py"), "serve"], "env": desk_env}}
+    if facts.live_open:
+        servers[lock["live_server"]] = live_server(state, lock, facts)
+
     hook = check_command(python, desk_folder, known_path)
     live = lock["live_server"]
     settings = {
@@ -263,9 +375,9 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": hook, "timeout": CHECK_SECONDS + 40}]}]},
     }
 
-    # The files hold paths, the owner's address and, for a live session, a key. They go to the state folder, not to the command line.
+    # The files hold paths, values of the owner and, for a live session, a key. They go to the state folder, not to the command line.
     files = {}
-    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(claude, copy))):
+    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(owner_email, session_email, environ))):
         files[name] = session / name
         descriptor = os.open(files[name], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -293,10 +405,12 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     env = {key: environ[key] for key in lock["environment"] if key in environ}
     env["PATH"] = lock["path"]
     env["DISABLE_AUTOUPDATER"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     # The owner's git name and address stay out of what Claude Code tells the session about the folder.
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
-    # The watcher gets the same sign-in as the tools: the desk's own token when there is one.
+    env.update(own_sign_in)
+    # The watcher gets the same sign-in to GitHub as the tools: the desk's own token when there is one.
     if stand_in is not None:
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}
     else:
@@ -306,28 +420,35 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "env": env,
         "cwd": str(copy),
         "state": str(state),
+        "desk_env": desk_env,
         "settings": settings,
         "servers": sorted(servers),
+        "own_sign_in": bool(own_sign_in),
         "watcher_env": watcher_env,
     }
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="start.py", description="Start the Dodam desk's locked session.")
+    parser = argparse.ArgumentParser(prog="start.py", description="Start the Dodam desk, locked.")
     parser.add_argument("--coordinator", required=True, help="the one address the desk can send a message to")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="folder outside the repository for the tools' state")
     parser.add_argument("--stand-in", type=Path, default=None, help="a folder of made-up items in place of GitHub (for the lock check)")
     parser.add_argument("--print", action="store_true", dest="show", help="show what would be started and start nothing")
-    parser.add_argument("--say", default=None, help="a first message for the session (for the lock check)")
-    parser.add_argument("--exit-when-idle", action="store_true", help="end once the session has nothing left to do (for the lock check)")
+    parser.add_argument("--say", default=None, help="a first message for a session (for the lock check)")
+    parser.add_argument("--exit-when-idle", action="store_true", help="end once there is nothing left to do (for the lock check)")
     options = parser.parse_args(argv)
     try:
         planned = plan(options.coordinator, options.state, options.stand_in)
     except Problem as problem:
         sys.stderr.write(f"The desk was not started. {problem}\n")
         return 1
+    except Exception as error:  # Whatever was not expected is a reason not to start, said in one line.
+        sys.stderr.write(f"The desk was not started. Something it relies on could not be checked ({type(error).__name__}).\n")
+        return 1
     watcher_env = planned.pop("watcher_env")
     if options.show:
+        # What is shown holds no token.
+        planned["env"] = {key: ("<kept out of what is shown>" if key == "CLAUDE_CODE_OAUTH_TOKEN" else value) for key, value in planned["env"].items()}
         json.dump(planned, sys.stdout, indent=1)
         sys.stdout.write("\n")
         return 0
