@@ -252,7 +252,12 @@ def held_until_read():
 """
 
 
-TOLERANCE_MB = 2      # how far two readings of the same thing may lie apart
+# How far a reading may lie from what it should be. The rule: take the largest use of tolerance
+# over every turn of the reading's own test and of the bound tests on the machine of the
+# automatic check; the tolerance is twice that, rounded up to a whole MB, and not under 2. Above 6
+# it is not set: the reading is then not good enough. In the two runs on the commit that brought
+# the reading that stands still, the largest uses were 1.46 and 1.32 MB, so the tolerance is 3.
+TOLERANCE_MB = 3
 
 
 def really_mb(seen: dict) -> float:
