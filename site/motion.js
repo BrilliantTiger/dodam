@@ -2,8 +2,8 @@
    The page is complete without this file. It only reveals sections as they scroll in,
    counts numbers up, draws the timeline (again whenever the screen changes size, as when a
    phone is folded or unfolded), fills the progress bar where CSS cannot, rests in a hidden tab,
-   pauses loops that are off screen, switches the color theme and closes the language
-   menu on an outside click. Languages are plain links and are never chosen for the reader. */
+   pauses loops that are off screen, switches the color theme, closes the language
+   menu on an outside click and reads the status file again for the section about now. Languages are plain links and are never chosen for the reader. */
 (function () {
   "use strict";
 
@@ -177,10 +177,103 @@
     set();
   }
 
+  // The section about now. Its values are in the page already; an open page reads the status file
+  // from its own address again and sets them as text, never as markup. Nothing is sent anywhere else.
+  function live() {
+    var box = document.getElementById("live");
+    if (!box || !window.fetch || !box.getAttribute("data-status")) return;
+    var lang = root.lang || "en";
+    var repo = box.getAttribute("data-repo") + "/pull/";
+
+    function read(status, name) {
+      return name.split(".").reduce(function (found, part) {
+        return found == null ? found : found[part];
+      }, status);
+    }
+    function day(stamp) {
+      var date = new Date(String(stamp).slice(0, 10) + "T00:00:00Z");
+      if (isNaN(date)) return "";
+      try {
+        return new Intl.DateTimeFormat(lang, { dateStyle: "long", timeZone: "UTC" }).format(date);
+      } catch (e) {
+        return String(stamp).slice(0, 10);
+      }
+    }
+    function each(attribute, set) {
+      Array.prototype.slice.call(box.querySelectorAll("[" + attribute + "]")).forEach(function (el) {
+        set(el, el.getAttribute(attribute));
+      });
+    }
+    function show(status) {
+      if (!status || status.version !== 1 || !status.step || !status.charter || !status.tasks) return;
+      each("data-live", function (el, name) {
+        var found = read(status, name);
+        if (found != null) el.textContent = String(found);
+      });
+      each("data-live-date", function (el, name) {
+        var found = read(status, name);
+        if (found && day(found)) {
+          el.setAttribute("datetime", String(found));
+          el.textContent = day(found);
+        }
+      });
+      each("data-live-time", function (el, name) {
+        var found = read(status, name);
+        if (found && day(found)) {
+          el.setAttribute("datetime", String(found));
+          el.textContent = day(found) + " " + String(found).slice(11, 16) + " UTC";
+        }
+      });
+      each("data-live-pick", function (el, name) {
+        var option = el.getAttribute("data-options").split("|")[read(status, name) - 1];
+        if (option) el.textContent = option;
+      });
+      each("data-live-show", function (el, name) {
+        el.hidden = read(status, name) == null;
+      });
+      each("data-live-list", function (list, name) {
+        var rows = read(status, name);
+        if (!Array.isArray(rows)) return;
+        while (list.firstChild) list.removeChild(list.firstChild);
+        rows.slice(0, 5).forEach(function (row) {
+          if (!row || typeof row.title !== "string" || !day(row.date)) return;
+          var item = document.createElement("li");
+          var when = document.createElement("time");
+          var link = document.createElement("a");
+          when.setAttribute("datetime", String(row.date));
+          when.textContent = day(row.date);
+          link.className = "link";
+          link.lang = "en";
+          if (String(row.url).indexOf(repo) === 0) link.href = row.url;
+          link.textContent = row.title;
+          item.appendChild(when);
+          item.appendChild(document.createTextNode(" "));
+          item.appendChild(link);
+          list.appendChild(item);
+        });
+      });
+      box.hidden = false;
+    }
+    function load() {
+      if (document.hidden) return;
+      window
+        .fetch(box.getAttribute("data-status"), { cache: "no-store", credentials: "omit" })
+        .then(function (response) {
+          return response.ok ? response.json() : null;
+        })
+        .then(show)
+        .catch(function () {});
+    }
+    load();
+    window.setInterval(load, 10 * 60 * 1000);
+    document.addEventListener("visibilitychange", load);
+  }
+
   function start() {
     try {
       theme();
       languages();
+      live();
       if (!canObserve || reduce.matches) {
         root.classList.remove("js");
         return;

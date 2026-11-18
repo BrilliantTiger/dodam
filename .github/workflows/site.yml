@@ -31,5 +31,7 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
       - name: The committed pages are what the template builds
         run: python tools/site/build.py --check
+      - name: Build what would be published, with a made-up status that carries markup in a title
+        run: python tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json
       - name: Lay the page out at every size (uses the Chrome already on the runner)
-        run: python tools/site/sweep.py
+        run: python tools/site/sweep.py --site "$RUNNER_TEMP/site"

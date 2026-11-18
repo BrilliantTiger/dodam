@@ -10,15 +10,129 @@
   <meta property="og:title" content="Dodam — a language for AI to write correctly, secure and fast (design phase)">
   <meta property="og:description" content="In its design phase: there is no compiler yet. The goal is a language whose compiler enforces the security rules, where people read a security report instead of code, and which AI agents build too. Open to people and AI agents.">
   <meta property="og:url" content="https://brillianttigercorp.com/dodam/">
+  <meta property="og:site_name" content="Dodam">
+  <meta property="og:locale" content="en">
+  <meta property="og:image" content="https://brillianttigercorp.com/dodam/card-en.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Dodam — a language for AI to write correctly, secure and fast (design phase)">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="canonical" href="https://brillianttigercorp.com/dodam/">
   <link rel="alternate" hreflang="en" href="https://brillianttigercorp.com/dodam/">
   <link rel="alternate" hreflang="ko" href="https://brillianttigercorp.com/dodam/ko/">
   <link rel="alternate" hreflang="ja" href="https://brillianttigercorp.com/dodam/ja/">
   <link rel="alternate" hreflang="es" href="https://brillianttigercorp.com/dodam/es/">
   <link rel="alternate" hreflang="x-default" href="https://brillianttigercorp.com/dodam/">
+  <link rel="alternate" type="text/plain" href="llms.txt" title="Guide for AI agents (plain text)">
+  <link rel="sitemap" type="application/xml" href="sitemap.xml">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
   <script src="motion.js"></script>
+  <script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "WebSite",
+   "@id": "https://brillianttigercorp.com/dodam/#site",
+   "name": "Dodam",
+   "url": "https://brillianttigercorp.com/dodam/",
+   "inLanguage": [
+    "en",
+    "ko",
+    "ja",
+    "es"
+   ]
+  },
+  {
+   "@type": "WebPage",
+   "@id": "https://brillianttigercorp.com/dodam/#page",
+   "url": "https://brillianttigercorp.com/dodam/",
+   "name": "Dodam — a language for AI to write correctly, secure and fast (design phase)",
+   "description": "Dodam is a general-purpose language being designed for AI to write correctly and robustly: secure and fast. It is in its design phase, and there is no compiler yet. By design the compiler enforces the security rules, people read a security report instead of code, and AI agents build the language too. Open to people and AI agents.",
+   "inLanguage": "en",
+   "isPartOf": {
+    "@id": "https://brillianttigercorp.com/dodam/#site"
+   },
+   "primaryImageOfPage": "https://brillianttigercorp.com/dodam/card-en.png",
+   "about": {
+    "@id": "https://brillianttigercorp.com/dodam/#project"
+   }
+  },
+  {
+   "@type": "SoftwareSourceCode",
+   "@id": "https://brillianttigercorp.com/dodam/#project",
+   "name": "Dodam",
+   "description": "Dodam is a general-purpose language being designed for AI coding agents. People will not read the code: they look at the result and a security report. The compiler will enforce the security rules, and those rules only ever tighten.",
+   "url": "https://brillianttigercorp.com/dodam/",
+   "codeRepository": "https://github.com/BrilliantTiger/dodam",
+   "license": [
+    "https://github.com/BrilliantTiger/dodam/blob/main/LICENSE-MIT",
+    "https://github.com/BrilliantTiger/dodam/blob/main/LICENSE-APACHE"
+   ],
+   "creativeWorkStatus": "Design phase · no compiler yet"
+  },
+  {
+   "@type": "FAQPage",
+   "@id": "https://brillianttigercorp.com/dodam/#faq",
+   "inLanguage": "en",
+   "isPartOf": {
+    "@id": "https://brillianttigercorp.com/dodam/#page"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "What is Dodam?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Dodam is a general-purpose programming language being designed for AI coding agents to write correctly and robustly: secure and fast. In Dodam the compiler enforces the security rules, and people read the result and a security report instead of the code. Dodam is in its design phase and has no compiler yet."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Who is Dodam for?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Dodam is for AI coding agents, which write the code, and for the people who rely on what those agents build without reading it. Dodam’s first domain is the web, with one codebase for server and browser, and the design is general-purpose from the start."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Can Dodam be used today?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "No. Dodam is in its design phase and there is no compiler yet. The current work is the design charter and a benchmark of common programming tasks, measured first in 7 existing languages, which sets the numbers Dodam must beat."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "How does a person or an AI agent take part in Dodam?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Dodam is open to people and to AI agents under the same rules. A person or an agent picks an open issue labeled ai-welcome in the Dodam repository on GitHub and sends a pull request with a test that fails before the change and passes after it. An agent reads the file AGENTS.md in the repository, which holds the working rules."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "When will Dodam be ready?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Dodam 1.0 is estimated for around February 25, 2032 at the plan’s capacity, which is one subscription from each of 3 AI companies; that date is the median of a schedule simulation, not a promise. Under today’s conditions, one Claude subscription shared with the owner’s other work, the same simulation puts the median for Dodam 1.0 between May 2040 and January 2041. The first public release, 0.1, is planned for around April 4, 2029 at the plan’s capacity."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "How does Dodam differ from making AI write existing languages more carefully?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Careful prompting and review leave security to chance: in Veracode’s report of July 2026, AI-written code passed on security 56% of the time on average. Dodam moves the rules into the language, so code that breaks a security rule does not compile, whichever model wrote it. Dodam’s rules can only tighten over time, and relaxing one needs the owner’s approval."
+     }
+    }
+   ]
+  }
+ ]
+}
+  </script>
 </head>
 <body>
   <a class="skip" href="#what">Skip to content</a>
@@ -199,6 +313,22 @@
           <h2>No compiler yet. First, the bar to beat.</h2>
           <p class="lead">Dodam is in its design phase. The current work is a benchmark: common programming tasks such as web services, command-line tools and data processing, each with hidden tests for function, edge cases and security. AI writes those programs in 7 existing languages, and the benchmark measures how well. <strong>Those numbers are the bar Dodam must beat.</strong></p>
         </header>
+        <div class="live reveal" id="live" data-status="status.json" data-repo="https://github.com/BrilliantTiger/dodam" hidden>
+          <h3>Right now</h3>
+          <p>These values are worked out from the Dodam repository each time this page is built, and an open page reads them again by itself.</p>
+          <ul class="plain">
+            <li>Dodam’s design charter is at version <span data-live="charter.version"></span>, dated <time data-live-date="charter.date" datetime=""></time>.</li>
+            <li>Dodam is in the step “<span data-live-pick="step.index" data-options="Fixing the direction|A minimal language|First public release, 0.1|Real use|1.0"></span>”.</li>
+            <li>The gate that ends this step is planned for <time data-live-date="step.gate_plan" datetime=""></time> at the plan’s capacity.</li>
+            <li data-live-show="step.gate_today" hidden>Under today’s conditions, with the values measured in the trial run entered, the charter’s median estimate for that gate is <time data-live-date="step.gate_today" datetime=""></time>, and the chance of reaching it by the plan’s date is <span data-live="step.gate_today_chance"></span>%.</li>
+            <li>Benchmark tasks ready: <span data-live="tasks.ready"></span> of the first <span data-live="tasks.first"></span>.</li>
+            <li>Issues open for outside contributors: <span data-live="open_issues"></span>.</li>
+            <li>This page was last built on <time data-live-time="built" datetime=""></time>.</li>
+          </ul>
+          <h4>Latest changes merged into Dodam</h4>
+          <ol class="changes" data-live-list="changes"></ol>
+          <p class="src">Titles are shown as written in the repository.</p>
+        </div>
         <div class="marquee reveal" data-loop>
           <ul class="track" aria-label="The 7 existing languages"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
           <ul class="track" aria-hidden="true"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
@@ -243,6 +373,7 @@
             <p class="more">
               <a class="link" href="https://github.com/BrilliantTiger/dodam/blob/main/AGENTS.md">Rules for agents <span class="arr" aria-hidden="true">→</span></a>
               <a class="link" href="https://github.com/BrilliantTiger/dodam">Repository <span class="arr" aria-hidden="true">→</span></a>
+              <a class="link" href="llms.txt">Guide for AI agents (plain text) <span class="arr" aria-hidden="true">→</span></a>
             </p>
           </div></li>
         </ul>
@@ -265,6 +396,22 @@
           <li><strong>Vulnerabilities go to the Security tab</strong><span>Report them privately, never in public. <a class="link" href="https://github.com/BrilliantTiger/dodam/security/policy">Security policy <span class="arr" aria-hidden="true">→</span></a></span></li>
           <li><strong>Relaxing a rule or weakening a guarantee needs the owner’s approval</strong><span>With a written reason and a benchmark comparison showing that security does not get worse.</span></li>
         </ul>
+      </div>
+    </section>
+    <section id="faq">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">Questions</p>
+          <h2>Short answers.</h2>
+        </header>
+        <div class="faq" data-stagger>
+          <div><h3>What is Dodam?</h3><p>Dodam is a general-purpose programming language being designed for AI coding agents to write correctly and robustly: secure and fast. In Dodam the compiler enforces the security rules, and people read the result and a security report instead of the code. Dodam is in its design phase and has no compiler yet.</p></div>
+          <div><h3>Who is Dodam for?</h3><p>Dodam is for AI coding agents, which write the code, and for the people who rely on what those agents build without reading it. Dodam’s first domain is the web, with one codebase for server and browser, and the design is general-purpose from the start.</p></div>
+          <div><h3>Can Dodam be used today?</h3><p>No. Dodam is in its design phase and there is no compiler yet. The current work is the design charter and a benchmark of common programming tasks, measured first in 7 existing languages, which sets the numbers Dodam must beat.</p></div>
+          <div><h3>How does a person or an AI agent take part in Dodam?</h3><p>Dodam is open to people and to AI agents under the same rules. A person or an agent picks an open issue labeled ai-welcome in the Dodam repository on GitHub and sends a pull request with a test that fails before the change and passes after it. An agent reads the file AGENTS.md in the repository, which holds the working rules.</p></div>
+          <div><h3>When will Dodam be ready?</h3><p>Dodam 1.0 is estimated for around February 25, 2032 at the plan’s capacity, which is one subscription from each of 3 AI companies; that date is the median of a schedule simulation, not a promise. Under today’s conditions, one Claude subscription shared with the owner’s other work, the same simulation puts the median for Dodam 1.0 between May 2040 and January 2041. The first public release, 0.1, is planned for around April 4, 2029 at the plan’s capacity.</p></div>
+          <div><h3>How does Dodam differ from making AI write existing languages more carefully?</h3><p>Careful prompting and review leave security to chance: in Veracode’s report of July 2026, AI-written code passed on security 56% of the time on average. Dodam moves the rules into the language, so code that breaks a security rule does not compile, whichever model wrote it. Dodam’s rules can only tighten over time, and relaxing one needs the owner’s approval.</p></div>
+        </div>
       </div>
     </section>
   </main>
