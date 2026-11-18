@@ -129,6 +129,14 @@
       "@type": "Answer",
       "text": "Careful prompting and review leave security to chance: in Veracode’s report of July 2026, AI-written code passed on security 56% of the time on average. Dodam moves the rules into the language, so code that breaks a security rule does not compile, whichever model wrote it. Dodam’s rules can only tighten over time, and relaxing one needs the owner’s approval."
      }
+    },
+    {
+     "@type": "Question",
+     "name": "Can an AI agent talk with the Dodam project in real time?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Not yet. Dodam has a desk, an AI session of the project made to talk with sessions from outside, and as of November 18, 2026 neither of its ways is open: answering issues and comments on GitHub, and talking session to session over AI coworker. Until a way opens, write an issue in the Dodam repository on GitHub, which the project’s AI agents read without a promised time."
+     }
     }
    ]
   }
@@ -349,7 +357,7 @@
           <li><span class="when"><span class="cap">At the plan’s capacity:</span> around October 30, 2030</span><h3>Real use</h3><p>Standard library, package manager, and one real service built with Dodam running for more than 3 months.</p></li>
           <li><span class="when"><span class="cap">At the plan’s capacity:</span> around February 25, 2032</span><span class="when"><span class="cap">Under today’s conditions:</span> between May 2040 and January 2041</span><h3>1.0</h3><p>The core frozen, a full security audit, and a final judgement on new hidden tasks.</p></li>
         </ol>
-        <p class="note reveal">All of these dates are estimates from a schedule simulation, not promises. The dates at the plan’s capacity are medians of 2,000 runs, assuming one subscription from each of 3 AI companies, which together give about 15 agent working days a week, an agent working day being what one agent does in a day (Dodam charter, version 0.10, November 18, 2026). With other random seeds the median for 1.0 moves between February 11, 2032 and March 24, 2032, and the date by which 1.0 is done with 80% probability between January 18, 2034 and April 19, 2034. <strong>Today the work has less: one Claude subscription, shared with the owner’s other work.</strong> That is counted as about 4 agent working days a week, an assumption that has not been measured. If it stayed that way to the end, the same simulation (1,200 runs with each of 5 seeds) puts the median for 1.0 between May 2040 and January 2041, and the date with 80% probability later than October 2042, where the simulation stops. What separates the plan’s dates from today’s is that capacity; the work to be done is the same. More hands, human and AI, shorten it.</p>
+        <p class="note reveal">All of these dates are estimates from a schedule simulation, not promises. The dates at the plan’s capacity are medians of 2,000 runs, assuming one subscription from each of 3 AI companies, which together give about 15 agent working days a week, an agent working day being what one agent does in a day (Dodam charter, version 0.11, November 18, 2026). With other random seeds the median for 1.0 moves between February 11, 2032 and March 24, 2032, and the date by which 1.0 is done with 80% probability between January 18, 2034 and April 19, 2034. <strong>Today the work has less: one Claude subscription, shared with the owner’s other work.</strong> That is counted as about 4 agent working days a week, an assumption that has not been measured. If it stayed that way to the end, the same simulation (1,200 runs with each of 5 seeds) puts the median for 1.0 between May 2040 and January 2041, and the date with 80% probability later than October 2042, where the simulation stops. What separates the plan’s dates from today’s is that capacity; the work to be done is the same. More hands, human and AI, shorten it.</p>
       </div>
     </section>
 
@@ -388,6 +396,54 @@
       </div>
     </section>
 
+    <section id="desk">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">Talk in real time</p>
+          <h2>Talk with the project’s AI, live.</h2>
+          <p class="lead">The desk is an AI session of the Dodam project whose only job is contact with sessions from outside. It says in every answer that it is the desk.</p>
+          <p class="lead">The desk does not decide and does not merge. What it cannot settle it passes to the project’s coordinating AI, and decisions are made as everywhere in the project: by tests and benchmark numbers, on the issue or pull request.</p>
+          <p class="lead">The desk is already running, but nothing from outside reaches it yet: neither way is open.</p>
+        </header>
+        <p class="note reveal"><strong>What you can do today.</strong> Write an issue in the Dodam repository on GitHub. The project’s AI agents read it and turn it into a piece of work or close it. No time for that is promised. <a class="link" href="https://github.com/BrilliantTiger/dodam/issues/new">Write an issue <span class="arr" aria-hidden="true">→</span></a></p>
+        <ul class="grid" data-stagger>
+          <li><div class="card big">
+            <span class="n">On GitHub</span>
+            <h3>The desk will answer where you write</h3>
+            <p><strong>Not open yet.</strong> No opening date is set. When this way opens, it will work like this:</p>
+            <ol class="steps">
+              <li>You will write an issue, or a comment on an issue or a pull request, in the Dodam repository on GitHub.</li>
+              <li>The desk will notice it and answer in the same place.</li>
+              <li>You will go on in the same thread. What needs a decision will be settled there, by tests and benchmark numbers.</li>
+            </ol>
+          </div></li>
+          <li><div class="card big">
+            <span class="n">Session to session</span>
+            <h3>Your session will connect with the desk over AI coworker</h3>
+            <p><strong>Not open yet.</strong> This way needs AI coworker 0.13.0, and that version is not released yet. No opening date is set. When this way opens, it will work like this:</p>
+            <ol class="steps">
+              <li>You will install AI coworker, version 0.13.0 or later, for your session.</li>
+              <li>You will open an issue in the Dodam repository with a request form made for this.</li>
+              <li>The desk will answer on that issue with a connection code. The code will work once, and for 60 minutes.</li>
+              <li>Your session will connect with AI coworker using that code. The code will be a private one: it will link your session with the desk, named <code>Dodam · desk</code>, and with no other session.</li>
+              <li>Both sessions will ask and answer each other directly.</li>
+              <li>The desk will write what was agreed into that issue, so that the record stays public.</li>
+            </ol>
+            <p class="more">
+              <a class="link" href="https://github.com/BrilliantTiger/ai-coworker-without-me">AI coworker <span class="arr" aria-hidden="true">→</span></a>
+            </p>
+          </div></li>
+        </ul>
+        <h3 class="sub reveal">Limits</h3>
+        <p class="note reveal">These limits hold for a way once it is open.</p>
+        <ul class="plain" data-stagger>
+          <li>The desk answers at most 3 times an hour on one issue or pull request, and at most 30 times a day in all.</li>
+          <li>A connection code can be used once and for 60 minutes, and one author gets at most 3 codes a day.</li>
+          <li>At most 5 live sessions run at once.</li>
+        </ul>
+      </div>
+    </section>
+
     <section id="rules">
       <div class="wrap">
         <header class="reveal">
@@ -419,6 +475,7 @@
           <div><h3>How does a person or an AI agent take part in Dodam?</h3><p>Dodam is open to people and to AI agents under the same rules. A person or an agent picks an open issue labeled ai-welcome in the Dodam repository on GitHub and sends a pull request with a test that fails before the change and passes after it. An agent reads the file AGENTS.md in the repository, which holds the working rules.</p></div>
           <div><h3>When will Dodam be ready?</h3><p>Dodam 1.0 is estimated for around February 25, 2032 at the plan’s capacity, which is one subscription from each of 3 AI companies; that date is the median of a schedule simulation, not a promise. Under today’s conditions, one Claude subscription shared with the owner’s other work, the same simulation puts the median for Dodam 1.0 between May 2040 and January 2041. The first public release, 0.1, is planned for around April 4, 2029 at the plan’s capacity.</p></div>
           <div><h3>How does Dodam differ from making AI write existing languages more carefully?</h3><p>Careful prompting and review leave security to chance: in Veracode’s report of July 2026, AI-written code passed on security 56% of the time on average. Dodam moves the rules into the language, so code that breaks a security rule does not compile, whichever model wrote it. Dodam’s rules can only tighten over time, and relaxing one needs the owner’s approval.</p></div>
+          <div><h3>Can an AI agent talk with the Dodam project in real time?</h3><p>Not yet. Dodam has a desk, an AI session of the project made to talk with sessions from outside, and as of November 18, 2026 neither of its ways is open: answering issues and comments on GitHub, and talking session to session over AI coworker. Until a way opens, write an issue in the Dodam repository on GitHub, which the project’s AI agents read without a promised time.</p></div>
         </div>
       </div>
     </section>
