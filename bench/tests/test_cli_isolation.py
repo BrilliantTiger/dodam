@@ -10,6 +10,7 @@ missing; CI builds the image and runs them.
 import json
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1184,6 +1185,190 @@ def test_memory_taken_and_given_back_between_two_measurements_still_fails_the_ca
     assert seen["limit"] == "memory", seen
 
 
+# A hidden test that puts a file of 400 MB on the container's disk without leaving it in the cache of
+# files, says what the container's cache and highest memory use were before the program ran, and
+# hands back how the run was judged. The file is written and dropped piece by piece, so that the
+# container's highest use stays low and the program's reading must make a new high.
+COLD_TESTS = '''
+BIG, MB = "/app/big.bin", 2**20
+
+
+def numbers():
+    stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
+    return {"cache_mb": (int(stat["file"]) - int(stat["shmem"])) // MB,
+            "high_mb": int(open("/sys/fs/cgroup/memory.peak").read()) // MB}
+
+
+def put_on_disk_uncached(path, mb):
+    block = os.urandom(MB)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+    for done in range(1, mb + 1):
+        os.write(fd, block)
+        if done % 8 == 0 or done == mb:
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    os.close(fd)
+
+
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_the_reader():
+    put_on_disk_uncached(BIG, 400)
+    with case() as c:
+        before = numbers()
+        r = c.run(["read", BIG])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:],
+                       "before": before, "after": numbers(), "measured": c.measured}, f)
+        assert r.exit_code == 0 and r.out == "done\\n", r
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+'''
+
+READERS = {
+    "reads a file of 400 MB in blocks of 1 MB and holds about 10 MB": r'''
+held = bytearray(b"x") * (10 * MB)
+with open(sys.argv[2], "rb", buffering=0) as f:
+    while f.read(MB):
+        pass
+print("done")
+''',
+    "maps a file of 400 MB and touches every page of it, as a language's runtime does with its libraries": r'''
+import mmap
+with open(sys.argv[2], "rb") as f:
+    mapped = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+    total = 0
+    for at in range(0, len(mapped), 4096):
+        total += mapped[at]
+    mapped.close()
+print("done")
+''',
+    "reads a file of 400 MB and drops it from the cache again, three times": r'''
+for _ in range(3):
+    fd = os.open(sys.argv[2], os.O_RDONLY)
+    while os.read(fd, MB):
+        pass
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    os.close(fd)
+print("done")
+''',
+}
+
+
+def reads_from_disk(tmp_path: Path, body: str, **changes) -> tuple[dict, dict]:
+    """Judge a program whose case first gets an uncached file of 400 MB; the judging and what the
+    hidden test saw. Fails when the file was in the cache after all, or when the container's
+    highest memory use was not low before the run: then the test would show nothing."""
+    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_cold.py": COLD_TESTS}, **changes)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["before"]["cache_mb"] < 200, f"the file was to be out of the cache before the run: {seen}"
+    assert seen["before"]["high_mb"] < 300, f"the container's highest use was to be low before the run: {seen}"
+    return result, seen
+
+
+@pytest.mark.parametrize("memory_mb", ["256", "64"])
+@pytest.mark.parametrize("reader", list(READERS))
+def test_a_program_inside_its_limits_that_reads_uncached_files_never_fails_for_memory(tmp_path, reader, memory_mb):
+    """What a program reads from disk lands in the cache of files, which the kernel counts into the
+    container's highest memory use and gives back whenever memory is needed. It is no memory of
+    the program's, whether the file was in the cache before or not."""
+    result, seen = reads_from_disk(tmp_path, READERS[reader], CASE_MEMORY_MB=memory_mb)
+    assert seen["after"]["high_mb"] >= seen["before"]["high_mb"] + 200, f"the reading was to make a new high: {seen}"
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"a program inside its limits failed for {seen['limit']}: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    check = result["report"]["memory"].get("new_high_check")
+    assert check and check["available"] is True, f"the check on the container's highest memory use: {check}"
+    assert seen["measured"]["from_disk"] >= 380 * 2**20, f"the kernel's count of what the container read from disk: {seen}"
+
+
+def test_memory_taken_for_a_moment_fails_the_case_however_little_was_read_from_disk_meanwhile(tmp_path):
+    """Reading from disk buys no room: 400 MB taken and given back at once under a limit of 256 MB,
+    by a program that reads 50 MB of an uncached file before."""
+    program = r"""
+with open(sys.argv[2], "rb", buffering=0) as f:
+    for _ in range(50):
+        f.read(MB)
+block = bytearray(b'x') * (400 * MB)
+del block
+print("done")
+"""
+    result, seen = reads_from_disk(tmp_path, program, room={"changed": NO_STOPS[1:]})
+    assert seen["limit"] == "memory", f"the case was to fail for memory: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "failed", "test_after": "passed"}, lost(result, tmp_path / "out")
+
+
+def test_where_the_kernel_keeps_no_count_of_what_was_read_the_check_fails_no_case_and_the_result_says_so(tmp_path):
+    """A judge that finds no count of what its container read from disk cannot tell cache from
+    memory in the highest value. There the check is not used, and the result says that and why."""
+    result, seen = reads_from_disk(tmp_path, READERS["reads a file of 400 MB in blocks of 1 MB and holds about 10 MB"],
+                                   room={"changed": (("dodam_judge.py", '"io.stat"', '"io.none"'),)})
+    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    check = result["report"]["memory"].get("new_high_check")
+    assert check and check["available"] is False and "no count" in check["why_not"], check
+
+
+# The listing of a case's files, which a hidden test asks for, against what a program can leave.
+LISTING_TESTS = '''
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_lists_what_the_program_left():
+    with case() as c:
+        r = c.run(["dig"])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:]}, f)
+        assert c.files() == []
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n" and c.files() == []
+'''
+
+LEAVES = {
+    "a chain of folders as deep as a program can make": r'''
+made = 0
+try:
+    while True:
+        os.mkdir("d")
+        os.chdir("d")
+        made += 1
+except OSError:
+    pass
+print(made)
+''',
+    "names of 250 letters, 32 folders deep": r'''
+made = 0
+for _ in range(32):
+    os.mkdir("n" * 250)
+    os.chdir("n" * 250)
+    made += 1
+print(made)
+''',
+}
+
+
+@pytest.mark.parametrize("leaves", list(LEAVES))
+def test_listing_what_a_program_left_fails_that_case_by_its_assertion_and_never_the_judge(tmp_path, leaves):
+    result = judge_attack(tmp_path, PLAIN + LEAVES[leaves], {"functional/test_listing.py": LISTING_TESTS})
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["limit"] is None and int(seen["out"] or 0) >= 32, f"the program was to leave its folders: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_lists_what_the_program_left": "failed",
+                                "test_after": "passed"}, lost(result, tmp_path / "out")
+    assert "cannot be listed" in message(result, "test_lists_what_the_program_left") \
+        or "too deep to list" in message(result, "test_lists_what_the_program_left"), lost(result, tmp_path / "out")
+
+
 @pytest.mark.parametrize("build, by", [
     ("python3 -c \"b=[bytearray(b'x')*(16*2**20) for _ in range(400)]\"; true", "ran out of memory"),
     ("kill -9 $$", "signal 9"),
@@ -1271,6 +1456,73 @@ def test_a_build_that_leaves_too_many_places_any_user_may_write_fails_the_step(t
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     assert result["reward"]["build_ok"] == 0.0 and outcomes(result) == {"test_ground.py": "skipped"}
     assert "places any user may write" in result["report"].get("build_ended", ""), lost(result, tmp_path / "out")
+
+
+REFORK = r'''
+import os, time
+while True:
+    try:
+        if os.fork() == 0:
+            os.setsid()
+    except OSError:
+        pass
+'''
+
+
+def test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same(tmp_path):
+    """Every process the container may hold is taken, and each keeps trying to make another: a
+    place that comes free is taken again at once. The judge still ends them all and says the
+    build failed."""
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/bomb.py").write_text(REFORK, encoding="utf-8")
+    started = time.monotonic()
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, BUILD_CMD="python3 bomb.py",
+                          BUILD_TIMEOUT_SEC="8")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert result["reward"]["build_ok"] == 0.0 and outcomes(result) == {"test_ground.py": "skipped"}
+    assert time.monotonic() - started < 120
+
+
+# ---------------------------------------------------------------------------------------------
+# The documents cite tables that two scripts give. Each script has a quick mode that goes once
+# through every table; when a table no longer comes out, these fail.
+# ---------------------------------------------------------------------------------------------
+
+def quick_run(script: str, seconds: int) -> tuple[int | None, dict, str]:
+    """Run an experiment script in its quick mode: its exit code (None when it did not end in
+    time), what it printed as JSON, and the end of what it said beside."""
+    try:
+        done = subprocess.run([sys.executable, f"experiments/{script}", "--quick"], cwd=BENCH, capture_output=True,
+                              text=True, timeout=seconds)
+    except subprocess.TimeoutExpired:
+        return None, {}, ""
+    try:
+        printed = json.loads(done.stdout)
+    except ValueError:
+        printed = {}
+    return done.returncode, printed if isinstance(printed, dict) else {}, done.stderr[-1500:]
+
+
+def test_the_design_experiment_gives_every_table_the_document_cites():
+    code, report, said = quick_run("cli_separation.py", 600)
+    assert code is not None, "the design experiment did not end in 600 seconds"
+    assert report.get("tables_that_did_not_come_out") == [], (report.get("tables_that_did_not_come_out"), said)
+    assert code == 0, said
+    for table in ("when_the_tests_are_closed", "what_a_command_line_says", "who_the_program_runs_as",
+                  "what_bounds_files", "what_counts_as_memory", "what_outlives_a_process", "what_bounds_processes",
+                  "how_a_case_is_ended", "how_what_a_case_left_is_removed", "how_often_the_judge_measures",
+                  "time_of_a_plain_case", "each_language"):
+        assert report.get(table), f"the table {table} is empty"
+    closed = report["when_the_tests_are_closed"]
+    assert closed["before-anything-runs"]["the build reads the tests"] == {"hidden_files_the_build_took": 0}, closed
+    assert closed["after-the-build"]["the build reads the tests"]["hidden_files_the_build_took"] > 0, closed
+
+
+def test_the_memory_experiment_gives_every_row_the_document_cites():
+    code, report, said = quick_run("memory_overshoot.py", 300)
+    assert code is not None, "the memory experiment did not end in 300 seconds"
+    assert report.get("rows_that_did_not_come_out") == [], (report.get("rows_that_did_not_come_out"), said)
+    assert code == 0 and len(report["rows"]) == 16, said
 
 
 # ---------------------------------------------------------------------------------------------
