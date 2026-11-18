@@ -1915,6 +1915,9 @@ class Day:
         if number is not None:
             self.act(number, env)
         how = rng.random()
+        if number is not None and number <= 12 and self.shown:
+            # Twelve items hold a text that gets every session ended that is shown it.
+            return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
         if how < 0.08:
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
@@ -2172,8 +2175,11 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     assert {kind for _, kind in day.messages} == {"vulnerability", "desk_down", "limit_reached", "digest"}
     # Sessions were ended at a bound, payers did wait, and accounts that are held back did write on other accounts' items.
     assert sum(1 for s in day.sessions if s[3]) > 5 and sum(1 for s in day.sessions if s[4]) > 2 and day.bursts > 5
-    # Items were closed, and closed items did open again.
-    assert day.closings > 0 and day.openings > 0, (day.closings, day.openings)
+    # Items were closed; eight days on, every one of them is open again.
+    assert day.closings > 0
+    day.pass_time(8 * day.DAY)
+    day.check()
+    assert day.openings == day.closings and day.relay.closed_items() == set()
     # What the share of a day's units costs: no account with a few items of its own ever waited for it.
     assert [waited for waited in day.waited_for_units if waited[0] >= 100] == [], sorted(day.waited_for_units)
     print(f"seed {seed}: {len(day.started)} sessions; places that waited for the share of units alone: {len(day.waited_for_units)} "

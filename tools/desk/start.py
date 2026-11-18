@@ -99,7 +99,7 @@ LOCK_SHAPE = {
                  "content_bytes_per_session": COUNT, "output_tokens_per_turn": COUNT, "brief_bytes": COUNT, "base_tokens": COUNT,
                  "weights": {"input": WEIGHT, "cache_written": WEIGHT, "cache_read": WEIGHT, "output": WEIGHT},
                  "units_per_session": COUNT, "units_per_turn": COUNT, "units_per_day": COUNT,
-                 "sessions_per_item_per_day": COUNT, "sessions_per_account_per_day": COUNT, "units_per_account_per_day": COUNT, "ended_in_a_row_per_item": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
+                 "sessions_per_item_per_day": COUNT, "sessions_per_account_per_day": COUNT, "units_per_account_per_day": COUNT, "ended_in_a_row_per_item": COUNT, "item_closed_days": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
                  "sign_in_failures": COUNT},
 }  # fmt: skip
 

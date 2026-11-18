@@ -327,7 +327,7 @@ class Relay:
 
     def item_bound(self, record: dict, number: int) -> str | None:
         """What holds one item back now, whoever wrote on it."""
-        if record["ended_in_a_row"].get(str(number), 0) >= self.spending["ended_in_a_row_per_item"]:
+        if str(number) in record["closed_items"]:
             return "an item on which two sessions in a row had to be ended"
         # A session that the service did not let in was nobody's doing: it counts against no item and no account.
         on_item = [s for s in record["sessions"] if s["number"] == number and s.get("let_in", True)]
@@ -423,11 +423,12 @@ class Relay:
         except tools.Refused:
             return (None, DAMAGED, [], {})
 
-    def settle(self, entry: dict, counts: list[int] | None, charged: float | None, ended: bool = False, waits=()) -> None:
+    def settle(self, entry: dict, counts: list[int] | None, charged: float | None, ended: bool = False, waits=(), read: bool = False) -> None:
         """Write what the session cost. Without a count from the service it is charged everything that was set aside.
 
         ended says that the relay had to end the session at a bound: its item gets no further session for a day, and
-        neither do the accounts in waits: the payer, when the session was shown its text.
+        neither do the accounts in waits: the payer, when the session was shown its text. read says that the session was
+        shown text of its item: only then does a session that had to be ended count toward closing the item.
         """
         try:
             with self.desk.counts() as record:
@@ -440,11 +441,17 @@ class Relay:
                         session["waits"] = list(waits) if ended else []
                         session["let_in"] = bool(entry.get("let_in", True))
                         if entry["number"] is not None and session["let_in"]:
-                            # Sessions that had to be ended on one item, one after the other; a session that was not ended begins the count anew.
-                            row = record["ended_in_a_row"]
-                            row[str(entry["number"])] = row.get(str(entry["number"]), 0) + 1 if ended else 0
-                            if not row[str(entry["number"])]:
-                                del row[str(entry["number"])]
+                            # Sessions that had to be ended on one item and were shown its text, one after the other. A session that
+                            # was not ended begins the count anew; one that was ended before it was shown anything says nothing about the item.
+                            row, name = record["ended_in_a_row"], str(entry["number"])
+                            if not ended:
+                                row.pop(name, None)
+                            elif read:
+                                row[name] = row.get(name, 0) + 1
+                                if row[name] >= self.spending["ended_in_a_row_per_item"]:
+                                    # Closed from now on, for a fixed number of days. When it opens again its count stands at one.
+                                    record["closed_items"][name] = record["clock"]
+                                    row[name] = self.spending["ended_in_a_row_per_item"] - 1
         except tools.Refused:
             pass
 
@@ -461,7 +468,7 @@ class Relay:
         on_closed = [event for event in events if event["number"] in closed]
         if on_closed:
             # No session is started for such an item any more, so nothing waits for one.
-            self.desk.count("arrivals on items for which no session is started any more", by=len(on_closed))
+            self.desk.count("arrivals on items for which no session is started now", by=len(on_closed))
         before = len(self.kept.entries())
         for account in self.kept.put_all(by_place([event for event in events if event["number"] not in closed]), self.held_back()):
             dropped[account] = dropped.get(account, 0) + 1
@@ -483,11 +490,16 @@ class Relay:
         return len(events)
 
     def closed_items(self) -> set[int]:
+        """The items for which no session is started now."""
+        return set(self.closed_since())
+
+    def closed_since(self) -> dict[int, float]:
+        """Those items, each with the moment it was closed."""
         try:
             with self.desk.counts() as record:
-                return {int(number) for number, count in record["ended_in_a_row"].items() if count >= self.spending["ended_in_a_row_per_item"]}
+                return {int(number): at for number, at in record["closed_items"].items()}
         except tools.Refused:
-            return set()
+            return {}
 
     def start_one(self) -> bool:
         """Start one session: for what was typed, or for the oldest kept arrival that the bounds leave room for."""
@@ -518,10 +530,12 @@ class Relay:
         # The arrival stays in the kept list until a session has dealt with it.
         if self.handle(f"item {number}", news_message(told(places)), number, entry["accounts"], entry):
             self.kept.done(places)
-            if number in self.closed_items():
+            closed = self.closed_since()
+            if number in closed:
                 gone = self.kept.forget(number)
-                self.desk.note("item_closed", "Two sessions in a row had to be ended on this item. No further session is started for it; "
-                               f"{gone} arrival(s) that waited on it are not handled.", number)  # fmt: skip
+                opens = time.strftime("%Y-%m-%d", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
+                self.desk.note("item_closed", f"Two sessions in a row that were shown this item had to be ended. No session is started for it until {opens}, "
+                               f"by the desk's clock; {gone} arrival(s) that waited on it are not handled.", number)  # fmt: skip
         return True
 
     # -- one session for one message ----------------------------------------
@@ -693,8 +707,8 @@ class Relay:
             # A session the relay had to end is charged everything that was set aside for it. Its payer waits a day
             # when the session was shown the payer's text, and nobody else does.
             ended = bool(seen.get("at_a_bound"))
-            waits = [a for a in accounts[:1] if a in self.shown_accounts()] if ended else []
-            self.settle(entry, counts, max(cost, entry["reserved"]), ended=ended, waits=waits)
+            shown = self.shown_accounts() if ended and number is not None else []
+            self.settle(entry, counts, max(cost, entry["reserved"]), ended=ended, waits=[a for a in accounts[:1] if a in shown], read=bool(shown))
             self.desk.note("session_ended", f"The relay ended a session early ({seen['ended_by']}). It was about: {about}.", number)
         else:
             self.settle(entry, counts, cost)

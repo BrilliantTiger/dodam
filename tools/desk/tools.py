@@ -108,14 +108,16 @@ def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
 
 def empty_record() -> dict:
     return {"answers": [], "labels": [], "reports": [], "sent": [], "sessions": [], "uncounted": {}, "last_digest": 0.0, "clock": 0.0,
-            "ended_in_a_row": {}, "closed": {}}  # fmt: skip
+            "ended_in_a_row": {}, "closed": {}, "closed_items": {}}  # fmt: skip
 
 
 def checked_record(data) -> dict:
     """The record as it was written, or an error when it is not what the tools write."""
     # The desk's time was added later; a record written before it starts at nothing.
-    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed") else data[key] for key, default in empty_record().items()}
-    if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict):
+    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed", "closed_items") else data[key] for key, default in empty_record().items()}
+    if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict) or not isinstance(record["closed_items"], dict):
+        raise ValueError("items")
+    if not all(isinstance(at, (int, float)) for at in record["closed_items"].values()):
         raise ValueError("items")
     for key in ("answers", "labels", "reports", "sent", "sessions"):
         if not isinstance(record[key], list) or not all(isinstance(entry, dict) and isinstance(entry["t"], (int, float)) for entry in record[key]):
@@ -427,6 +429,9 @@ class Desk:
                 record["clock"] = moment = max(record["clock"], now())
                 for key in ("answers", "labels", "sent", "sessions"):
                     record[key] = [entry for entry in record[key] if moment - entry["t"] < DAY]
+                # An item that was closed opens again by itself, so many days after the session that closed it.
+                closed_for = self.lock["spending"]["item_closed_days"] * DAY
+                record["closed_items"] = {number: at for number, at in record["closed_items"].items() if moment - at < closed_for}
                 # A report is kept until a digest has carried it, however old it is.
                 record["reports"] = [entry for entry in record["reports"] if not entry["digested"] or moment - entry["t"] < DAY]
                 try:
