@@ -1243,72 +1243,300 @@ def test_state_file_persists_across_restarts_and_save_failure_after_printing_exi
     assert [e["id"] for e in json.loads(out_next)["events"]] == ["issue_comment:403"]
 
 
-def test_state_collections_stay_within_stated_bounds(monkeypatch, tmp_path):
-    module = load_watcher()
-    max_seen = getattr(module, "MAX_SEEN_IDS", 5_000) if module is not None else 5_000
-    max_pulls = getattr(module, "MAX_TRACKED_PULLS", 500) if module is not None else 500
-    max_etags = getattr(module, "MAX_REVIEW_ETAGS", 100) if module is not None else 100
-    max_pending = getattr(module, "MAX_PENDING_EVENTS", 1_000) if module is not None else 1_000
+def test_state_path_inside_nonexistent_dot_dodam_folder_is_refused(monkeypatch, tmp_path):
+    empty_home = tmp_path / "home-with-no-dot-dodam"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+    assert not (empty_home / ".dodam").exists()
 
-    state_file = tmp_path / "bounded-state.json"
-    oversized = {
-        "version": 2,
-        "initialized": True,
-        "seen_ids": [f"issue_opened:{i}" for i in range(1, max_seen + 250)],
-        "pending": [
-            {
-                "id": f"issue_comment:{i}",
-                "kind": "issue_comment",
-                "number": 1,
-                "actor": "alice",
-                "time": "2026-11-18T10:00:00Z",
-                "url": f"https://github.com/{REPO}/issues/1#issuecomment-{i}",
-            }
-            for i in range(1, max_pending + 120)
-        ],
-        "etags": {
-            "pulls": 'W/"p"',
-            **{f"reviews:{i}:p1": f'W/"{i}"' for i in range(1, max_etags + 40)},
-        },
-        "watermarks": {
-            "baseline_cutoff": "2026-11-17T00:00:00Z",
-            "max_issue_id": max_seen + 250,
-            "max_issue_event_id": 0,
-            "max_issue_comment_id": max_pending + 120,
-            "max_pull_id": max_pulls + 50,
-            "max_pull_updated_at": "2026-11-18T00:00:00Z",
-            "max_review_comment_id": 0,
-        },
-        "known_pr_numbers": list(range(1, max_pulls + 60)),
-        "open_pr_numbers": [3, 7],
-        "reviews_baselined": list(range(1, max_pulls + 60)),
-        "pull_heads": {str(i): "aaaa1111bbbb2222" for i in range(1, max_pulls + 60)},
-        "pull_seq": {str(i): 1 for i in range(1, max_pulls + 60)},
-        "pull_draft": {str(i): False for i in range(1, max_pulls + 60)},
-        "pull_ready_seq": {str(i): 0 for i in range(1, max_pulls + 60)},
-        "pull_baseline_updated_at": {str(i): "2026-11-17T00:00:00Z" for i in range(1, max_pulls + 60)},
-        "pull_reviews_checked": {str(i): "2026-11-17T00:00:00Z" for i in range(1, max_pulls + 60)},
-        "pull_review_page": {str(i): 1 for i in range(1, max_pulls + 60)},
-    }
-    state_file.write_text(json.dumps(oversized), encoding="utf-8")
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    dangling_link = tmp_path / "dangling-dodam-link"
+    dangling_link.symlink_to(empty_home / ".dodam")
+
+    for forbidden in (
+        empty_home / ".dodam" / "state.json",
+        empty_home / ".DoDaM" / "nested" / "state.json",
+        dangling_link / "state.json",
+    ):
+        gh_called = False
+        code, out, err, _ = run_watch(
+            monkeypatch,
+            ["--wait", "--state", str(forbidden)],
+            never_call_gh,
+            fake_clock=FakeClock(max_sleeps=3),
+        )
+        assert not gh_called and code == 3 and out == ""
+        assert len(err.strip().splitlines()) == 1 and "Traceback" not in err
+        assert not (empty_home / ".dodam").exists(), ".dodam folder must not be created"
+
+
+def test_full_waiting_queue_loses_nothing_asks_github_for_nothing_more_and_holds_watermarks(
+    monkeypatch, tmp_path
+):
+    module = load_watcher()
+    assert module is not None
+    monkeypatch.setattr(module, "MAX_PENDING_EVENTS", 2)
 
     gh = FakeGitHub()
-    code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
-    assert code == 0 and err == ""
-    assert len(json.loads(out)["events"]) == 20
+    state_file = tmp_path / "queue-edge.json"
+    code0, _, _, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0
 
+    # Five issues arrive at once while the waiting queue limit is 2.
+    for num in (1, 2, 3, 4, 5):
+        gh.issues.insert(
+            0, make_issue(100 + num, num, login="burst-user", created_at=f"2026-11-18T10:00:0{num}Z")
+        )
+
+    # Call 1 with --max-events 1 fills the 2-item queue, prints 1, leaves 1 in pending, and keeps
+    # max_issue_id at issue #2 (never moving past #3, #4, #5).
+    c1, o1, e1, _ = run_watch(
+        monkeypatch, ["--wait", "--max-events", "1", "--state", str(state_file)], gh, module=module
+    )
+    assert c1 == 0 and e1 == ""
+    assert [e["number"] for e in json.loads(o1)["events"]] == [1]
+
+    # When the queue is already full (2 pending items == MAX_PENDING_EVENTS), starting the watcher
+    # reports from the queue right away and asks GitHub for NOTHING.
+    full_queue_file = tmp_path / "already-full.json"
+    pre_full = json.loads(state_file.read_text(encoding="utf-8"))
+    pre_full["pending"] = [
+        {
+            "id": "issue_opened:201",
+            "kind": "issue_opened",
+            "number": 21,
+            "actor": "u",
+            "time": "2026-11-18T10:00:01Z",
+            "url": f"https://github.com/{REPO}/issues/21",
+        },
+        {
+            "id": "issue_opened:202",
+            "kind": "issue_opened",
+            "number": 22,
+            "actor": "u",
+            "time": "2026-11-18T10:00:02Z",
+            "url": f"https://github.com/{REPO}/issues/22",
+        },
+    ]
+    full_queue_file.write_text(json.dumps(pre_full), encoding="utf-8")
+    gh_calls_before = len(gh.calls)
+    cf, of, ef, _ = run_watch(
+        monkeypatch, ["--wait", "--max-events", "1", "--state", str(full_queue_file)], gh, module=module
+    )
+    assert cf == 0 and ef == ""
+    assert len(gh.calls) == gh_calls_before, "watcher asked GitHub although the waiting queue was already full"
+    assert [e["number"] for e in json.loads(of)["events"]] == [21]
+
+    # Drain the rest of the 5-issue burst on state_file with --max-events 2:
+    # #2 was still in pending, then #3, #4, #5 come from GitHub with nothing lost and nothing repeated!
+    reported_numbers = [1]
+    for _ in range(4):
+        cx, ox, ex, _ = run_watch(
+            monkeypatch,
+            ["--wait", "--max-events", "2", "--max-wait", "5", "--state", str(state_file)],
+            gh,
+            module=module,
+        )
+        assert cx == 0 and ex == ""
+        evs = json.loads(ox)["events"]
+        if not evs:
+            break
+        reported_numbers.extend(e["number"] for e in evs)
+    assert reported_numbers == [1, 2, 3, 4, 5]
+
+
+def test_seen_ids_rollover_never_repeats_a_review_or_any_other_event_kind(monkeypatch, tmp_path):
+    module = load_watcher()
+    assert module is not None
+    monkeypatch.setattr(module, "MAX_SEEN_IDS", 4)
+
+    gh = FakeGitHub(own_login="project-account")
+    gh.issues.append(make_issue(10, 3, login="grace", created_at="2026-11-17T01:00:00Z"))
+    gh.pulls.append(
+        make_pr(
+            600, 5, sha="1111222233334444", login="grace", state="open", draft=True,
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    gh.reviews[5] = []
+    state_file = tmp_path / "seen-edge.json"
+    code0, _, _, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0
+
+    # Report a first review on PR #5, plus one of each other kind, so all of them will soon fall out of MAX_SEEN_IDS=4.
+    gh.reviews[5].append(make_review(701, 5, login="rev-one", submitted_at="2026-11-18T08:00:01Z"))
+    gh.pulls[0] = make_pr(
+        600, 5, sha="aaaa222233334444", login="grace", state="open", draft=False,
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T08:00:02Z",
+    )
+    gh.issue_events.insert(0, make_issue_event(801, 3, "reopened", login="bob", created_at="2026-11-18T08:00:03Z"))
+    gh.issue_comments.insert(0, make_issue_comment(901, 3, login="carol", created_at="2026-11-18T08:00:04Z"))
+    gh.pull_comments.insert(0, make_review_comment(951, 5, login="dave", created_at="2026-11-18T08:00:05Z"))
+
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c1 == 0 and e1 == ""
+    first_ids = [e["id"] for e in json.loads(o1)["events"]]
+    assert "pull_request_review:701" in first_ids and len(first_ids) == 6
+
+    # Six of the project's own issues plus six outside issues arrive, evicting all earlier entries from seen_ids.
+    for idx in range(1, 7):
+        gh.issues.insert(
+            0, make_issue(2000 + idx, 50 + idx, login="project-account", created_at=f"2026-11-18T08:01:{idx:02d}Z")
+        )
+    for idx in range(1, 7):
+        gh.issues.insert(
+            0, make_issue(3000 + idx, 80 + idx, login="outsider-many", created_at=f"2026-11-18T08:02:{idx:02d}Z")
+        )
+
+    c2, o2, e2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c2 == 0 and e2 == ""
+    assert len(json.loads(o2)["events"]) == 6
     saved = json.loads(state_file.read_text(encoding="utf-8"))
-    assert len(saved["seen_ids"]) <= max_seen
-    # Newest seen ids and just-reported ids are preserved while oldest were trimmed.
-    assert "issue_comment:1" in saved["seen_ids"]
-    assert f"issue_opened:{max_seen + 249}" in saved["seen_ids"]
-    assert len(saved["pending"]) <= max_pending - 20
-    assert len(saved["known_pr_numbers"]) <= max_pulls
-    assert len(saved["pull_heads"]) <= max_pulls
-    # Open PRs (#3, #7) are retained even though their numbers are low.
-    assert "3" in saved["pull_heads"] and "7" in saved["pull_heads"]
-    review_etags = [k for k in saved["etags"] if k.startswith("reviews:")]
-    assert len(review_etags) <= max_etags
+    assert len(saved["seen_ids"]) == 4
+    assert "pull_request_review:701" not in saved["seen_ids"]
+    assert not any("200" in sid for sid in saved["seen_ids"]), "own events must not consume seen_ids"
+
+    # Second review arrives on PR #5 (and force-clear ETags so every endpoint returns 200 OK again!):
+    # ONLY the new review 702 may be printed — neither review 701 nor any earlier event may repeat!
+    saved["etags"] = {}
+    state_file.write_text(json.dumps(saved), encoding="utf-8")
+    gh.reviews[5].append(make_review(702, 5, login="rev-two", submitted_at="2026-11-18T08:10:00Z"))
+
+    c3, o3, e3, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c3 == 0 and e3 == ""
+    assert [e["id"] for e in json.loads(o3)["events"]] == ["pull_request_review:702"]
+
+
+def test_review_etag_cache_bound_and_open_pr_poll_cap_neither_lose_nor_repeat_reviews(
+    monkeypatch, tmp_path
+):
+    module = load_watcher()
+    assert module is not None
+    monkeypatch.setattr(module, "MAX_REVIEW_ETAGS", 2)
+    monkeypatch.setattr(module, "MAX_OPEN_PR_REVIEWS_POLLED", 2)
+    monkeypatch.setattr(module, "MAX_SEEN_IDS", 2)
+
+    gh = FakeGitHub()
+    for num in (1, 2, 3):
+        ts = f"2026-11-17T01:00:0{num}Z"
+        gh.pulls.insert(
+            0, make_pr(100 + num, num, sha=f"{num:016x}", login="author", state="open", created_at=ts, updated_at=ts)
+        )
+        gh.reviews[num] = [make_review(500 + num, num, login="old-rev", submitted_at=ts)]
+
+    state_file = tmp_path / "etag-poll-edge.json"
+    code0, _, err0, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0 and err0 == ""
+    saved0 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert len([k for k in saved0["etags"] if k.startswith("reviews:")]) <= 2
+
+    # PR #1 (outside the top-2 open PRs #3 and #2, and with its review ETag evicted) gets a new review
+    # and an updated_at bump (moving to the top of sort=updated&direction=desc): its pre-start review
+    # 501 is NOT repeated, and new review 601 IS reported!
+    gh.pulls.pop()
+    gh.pulls.insert(
+        0,
+        make_pr(
+            101, 1, sha=f"{1:016x}", login="author", state="open",
+            created_at="2026-11-17T01:00:01Z", updated_at="2026-11-18T09:00:00Z",
+        ),
+    )
+    gh.reviews[1].append(make_review(601, 1, login="fresh-rev", submitted_at="2026-11-18T09:00:00Z"))
+
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c1 == 0 and e1 == ""
+    assert [e["id"] for e in json.loads(o1)["events"]] == ["pull_request_review:601"]
+    saved1 = json.loads(state_file.read_text(encoding="utf-8"))
+    assert len([k for k in saved1["etags"] if k.startswith("reviews:")]) <= 2
+
+
+def test_tracked_pulls_and_state_bytes_bounds_exit_cleanly_with_their_own_codes_at_the_edge(
+    monkeypatch, tmp_path
+):
+    module = load_watcher()
+    assert module is not None
+    monkeypatch.setattr(module, "MAX_TRACKED_PULLS", 2)
+
+    gh = FakeGitHub()
+    gh.pulls = [
+        make_pr(102, 2, sha="2222222200000000", login="a", created_at="2026-11-17T01:00:02Z", updated_at="2026-11-17T01:00:02Z"),
+        make_pr(101, 1, sha="1111111100000000", login="a", created_at="2026-11-17T01:00:01Z", updated_at="2026-11-17T01:00:01Z"),
+    ]
+    state_file = tmp_path / "pulls-cap.json"
+    code0, _, err0, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
+    )
+    assert code0 == 0 and err0 == ""
+
+    # Third PR arrives past MAX_TRACKED_PULLS=2: rather than forgetting a PR and risking repeats,
+    # the watcher ends cleanly with exit code 8 and one line on stderr.
+    gh.pulls.insert(
+        0,
+        make_pr(103, 3, sha="3333333300000000", login="outsider", created_at="2026-11-18T09:00:00Z", updated_at="2026-11-18T09:00:00Z"),
+    )
+    code_cap, out_cap, err_cap, _ = run_watch(
+        monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module
+    )
+    assert code_cap == 8 and out_cap == ""
+    assert len(err_cap.strip().splitlines()) == 1 and "Traceback" not in err_cap
+
+    # MAX_STATE_BYTES edge: oversized state on load -> exit 4; state growing past byte cap before save -> exit 8.
+    monkeypatch.setattr(module, "MAX_TRACKED_PULLS", 100)
+    monkeypatch.setattr(module, "MAX_STATE_BYTES", 350)
+    too_big = tmp_path / "too-big.json"
+    too_big.write_text(state_file.read_text(encoding="utf-8"), encoding="utf-8")
+    assert too_big.stat().st_size > 350
+    code_big_load, out_big_load, err_big_load, _ = run_watch(
+        monkeypatch, ["--wait", "--state", str(too_big)], gh, module=module
+    )
+    assert code_big_load == 4 and out_big_load == ""
+    assert len(err_big_load.strip().splitlines()) == 1 and "Traceback" not in err_big_load
+
+    fresh_big = tmp_path / "grow-too-big.json"
+    code_big_save, out_big_save, err_big_save, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(fresh_big)], gh, module=module
+    )
+    assert code_big_save == 8 and out_big_save == ""
+    assert len(err_big_save.strip().splitlines()) == 1 and "Traceback" not in err_big_save
+
+
+def test_item_created_while_first_snapshot_is_running_is_still_reported(monkeypatch, tmp_path):
+    gh = FakeGitHub()
+    # Existing comment on pull_comments has timestamp 05:00:04Z (read AFTER issues during snapshot).
+    gh.pull_comments.append(make_review_comment(10, 1, login="old", created_at="2026-11-18T05:00:04Z"))
+    gh.issues.append(make_issue(100, 1, login="old", created_at="2026-11-18T05:00:00Z"))
+
+    injected_during_snapshot = False
+    orig = gh.__call__
+
+    def concurrent_arrival(args: list[str]) -> tuple[int, str, str]:
+        nonlocal injected_during_snapshot
+        res = orig(args)
+        # Right after the snapshot reads issues, an outsider opens issue #2 at 05:00:02Z
+        # (earlier than pull_comments' 05:00:04Z, which the snapshot has not read yet!).
+        if not injected_during_snapshot and args[-1].startswith(f"repos/{REPO}/issues?"):
+            injected_during_snapshot = True
+            gh.issues.insert(0, make_issue(101, 2, login="fast-outsider", created_at="2026-11-18T05:00:02Z"))
+        return res
+
+    state_file = tmp_path / "snapshot-race.json"
+    code, out, err, _ = run_watch(
+        monkeypatch, ["--wait", "--state", str(state_file)], concurrent_arrival
+    )
+    assert code == 0 and err == ""
+    assert [e["id"] for e in json.loads(out)["events"]] == ["issue_opened:101"]
 
 
 # --- Pre-start reviews never reported, multi-page reviews, and malformed single items ----------
@@ -1689,7 +1917,7 @@ def test_help_text_lists_switches_exit_codes_and_pull_request_commits_author_rul
     low = out.lower()
     for flag in ("--wait", "--state", "--include-own", "--settle", "--max-events", "--max-wait", "--repo", "--help"):
         assert flag in out, f"help text omits {flag}"
-    for exit_code in ("0", "1", "2", "3", "4", "5", "6", "7", "130"):
+    for exit_code in ("0", "1", "2", "3", "4", "5", "6", "7", "8", "130"):
         assert re.search(rf"(?m)^\s*{exit_code}\s+", out), f"help text omits exit code {exit_code}"
     assert "pull_request_commits" in out
     assert "author" in low and "pushed" in low, (
@@ -1731,28 +1959,33 @@ def test_desk_files_and_tests_carry_no_private_task_section_labels():
             assert not re.search(r"\b[ABCD]\.\d{1,2}\b", text), f"{path.name} carries private section labels"
 
 
-def test_brief_states_loop_watcher_switches_measured_round_and_every_exit_code():
+def test_brief_states_loop_watcher_switches_files_measured_round_and_every_exit_code():
     text = read_brief()
     low = text.lower()
     assert "tools/desk/watch.py --wait" in low
     assert "background" in low and "end the turn" in low
     assert "one watcher at a time" in low
     assert "keep nothing in mind between events" in low or "keeps nothing in mind between events" in low
-    assert "on github" in low and "work item" in low
+    assert "the desk creates no work items; the coordinator does" in low
 
     # Watcher switches explained, and desk passes none except --wait and --state.
     for switch in ("--wait", "--state", "--include-own", "--settle", "--max-events", "--max-wait", "--repo", "--help"):
         assert switch in text, f"brief.md omits switch {switch}"
     assert "none" in low and "--state" in text and "given" in low
 
+    # Every file the watcher writes (state file, lock file, trial file at start) + .dodam identity without opening.
+    assert "lock file" in low and "trial file" in low
+    assert "identity of the `.dodam` folder without opening anything in it" in low
+
     # Measured round stated as it is (seven requests, about 19 seconds).
     assert "seven" in low and "19 seconds" in low
 
-    # Every exit code listed, code 7 handles printed events without restarting, no non-zero code loops.
-    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`7`", "`130`"):
+    # Every exit code listed, code 7 handles printed events without restarting, code 130 checks before answering.
+    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`7`", "`8`", "`130`"):
         assert exit_code in text, f"brief.md omits exit code {exit_code}"
     assert "printed" in low and "real" in low and "do not start the watcher again" in low
     assert "until the coordinator says so" in low
+    assert "possibly seen before" in low and "checks on github before answering" in low
 
 
 def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rule():
@@ -1784,19 +2017,27 @@ def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_ge
         assert required in low, f"brief.md is missing: {required}"
 
 
-def test_brief_states_what_the_desk_does_including_paths_only_jq_no_claims_and_unlisted_arrivals():
+def test_brief_states_what_the_desk_does_with_one_protected_path_list_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
     # Question
     assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
     assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Outside PR: request returns changed paths ONLY (--jq '.[].filename'), and passes every bench/ or .github/ PR.
+    # Outside PR: request returns changed paths ONLY (--jq '.[].filename'), and uses ONE list of protected paths
+    # (including bench/tests/) in both places, never calling a PR that touches it ready for review.
     assert "pulls/<number>/files" in text and "--jq" in text and "filename" in text
     assert "without changed lines" in low
-    for path_prefix in ("bench/dodambench/", "bench/images/", "bench/tasks/", "bench/", ".github/"):
-        assert path_prefix in text, f"brief.md must name {path_prefix}"
-    assert "touches `bench/` or `.github/`" in text or "touches bench/ or .github/" in low
+    assert "one list of protected paths" in low
+    for path_prefix in ("bench/dodambench/", "bench/images/", "bench/harbor/", "bench/tests/", "bench/tasks/", ".github/"):
+        assert path_prefix in text, f"brief.md must name {path_prefix} in the one protected list"
+    assert "never** called ready for review" in low or "never called ready for review" in low
+    assert "does not judge" in low
+    assert (
+        "outside pull requests do not change the measuring tools, existing benchmark tasks, security tests or approval locks; new benchmark tasks are welcome"
+        in low
+    )
+    assert "naming the protected paths it touches" in low
     assert "isolated container" in low and "did not write" in low
     # Vulnerability in public
     assert "do not repeat" in low and "Security tab" in text
@@ -1804,9 +2045,10 @@ def test_brief_states_what_the_desk_does_including_paths_only_jq_no_claims_and_u
     assert "spam" in low and "abuse" in low and "orders" in low and "no answer to the content" in low
     # Claims taken out: desk does not mark, read, or judge claims.
     assert "does not mark, read, or judge" in low and "mark it as taken" not in low
-    # Unlisted arrivals (thanks, progress note, reply inside a review, reopened issue, review by outsider).
+    # Unlisted arrivals: write nothing in public and send a message to the coordinator at once (never create work items).
     for unlisted in ("thanks", "progress note", "reply inside a review", "reopened", "write nothing in public"):
         assert unlisted in low, f"brief.md is missing default rule item: {unlisted}"
+    assert "as a work item" not in low and "creates a work item" not in low
 
 
 def test_brief_states_everything_the_desk_never_does():
@@ -1818,6 +2060,7 @@ def test_brief_states_everything_the_desk_never_does():
         "close",
         "edit what others wrote",
         "delete anything",
+        "create, edit, or close work items",
         "setting",
         "run outside code",
         "claims",
@@ -1832,23 +2075,28 @@ def test_brief_states_everything_the_desk_never_does():
         assert forbidden_action.lower() in low, f"brief.md is missing forbidden item: {forbidden_action}"
 
 
-def test_brief_states_desk_identification_and_stops_writing_entirely_past_the_daily_limit():
+def test_brief_states_desk_identification_and_daily_limit_rules_for_labels_and_public_vulnerabilities():
     low = read_brief().lower()
     assert "project's ai desk" in low
     assert "3 answers on one item in an hour" in low
     assert "30 answers" in low and "in a day" in low
     assert "says so once on that item" in low
-    assert "writes nothing more that day" in low and "not even a limit notice" in low
+    assert "no comment" in low and "a label is not an answer and may still be added" in low
+    assert "no answer was written because of the daily limit" in low
+    assert "it is public and that no request to go private was posted" in low
     assert "first guesses" in low
 
 
-def test_brief_states_handover_work_item_shape_and_immediate_messages_to_the_coordinator():
+def test_brief_states_passing_on_always_means_an_immediate_message_to_the_coordinator_and_no_work_items():
     text = read_brief()
     low = text.lower()
+    assert "always** means sending a message to the coordinator at once" in low or (
+        "always means sending a message to the coordinator at once" in low
+    )
+    assert "the desk creates no work items; the coordinator does" in low
     assert "title in plain words" in low
     assert "address of the item on github" in low
     assert "marked as a summary of outside text" in low
-    assert "vulnerability" in low and "ready for review" in low and "message to the coordinator at once" in low
     assert "given to the desk when the desk session is started" in low
     assert '"the coordinator"' in text and "name no session" in low
     assert "term_" not in text and "ctx_" not in text
