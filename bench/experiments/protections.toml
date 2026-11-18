@@ -563,9 +563,61 @@ what = "A new high of the container's memory above the limit fails the case"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_still_fails_the_case"]
 [[protection.change]]
-find = '''    return high_now > high_before and high_now - all_before > allowed
+find = '''    return high_now > high_before and high_now - all_before - from_disk > allowed
 '''
 put = '''    return False
+'''
+
+[[protection]]
+what = "What the container read from disk is taken out of a new high before it fails a case"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_inside_its_limits_that_reads_uncached_files_never_fails_for_memory"]
+[[protection.change]]
+find = '''    return high_now > high_before and high_now - all_before - from_disk > allowed
+'''
+put = '''    return high_now > high_before and high_now - all_before > allowed
+'''
+
+[[protection]]
+what = "Where the count of what was read from disk cannot be relied on, a new high fails no case"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_where_the_kernel_keeps_no_count_of_what_was_read_the_check_fails_no_case_and_the_result_says_so"]
+[[protection.change]]
+find = '''    if from_disk is None:
+        return False
+'''
+put = '''    if from_disk is None:
+        from_disk = 0
+'''
+
+[[protection]]
+what = "What files in folders mounted from elsewhere can hold is taken out of a new high as well"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_what_the_cache_can_account_for_is_what_was_read_and_what_folders_from_elsewhere_hold"]
+[[protection.change]]
+find = '''    return read_now - read_before + elsewhere
+'''
+put = '''    return read_now - read_before
+'''
+
+[[protection]]
+what = "The judge measures what folders mounted from elsewhere hold, within a bound"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_check_of_a_new_high_knows_what_folders_from_elsewhere_hold"]
+[[protection.change]]
+find = '''            elsewhere = held_elsewhere(mounted_from_elsewhere())
+'''
+put = '''            elsewhere = 0
+'''
+
+[[protection]]
+what = "The judge tries the kernel's count of what the container read from disk before it relies on it"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_judge_tries_the_kernels_count_of_disk_reads_before_it_relies_on_it"]
+[[protection.change]]
+find = '''    if grown < size:
+'''
+put = '''    if False:
 '''
 
 [[protection]]
@@ -589,6 +641,15 @@ find = '''                stopped: set[int] = set()
 put = '''                stopped: set[int] = set()
                 for _ in range(0):
 '''
+
+[[protection]]
+what = "When no new process can be made, the processes are stopped before they are ended"
+file = "dodambench/judge.py"
+second_line = "the judge signals every process of the user in one pass and repeats the pass until none is left, and as soon as one process can be made it signals all of them at once as that user"
+tests = ["tests/test_cli_judge.py::test_processes_are_ended_even_when_no_new_process_can_be_made", "tests/test_cli_isolation.py::test_a_build_that_fills_the_containers_process_cap_is_ended_all_the_same", "tests/test_cli_isolation.py::test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same"]
+[[protection.change]]
+find = '''                            os.kill(other, signal.SIGSTOP)'''
+put = '''                            os.kill(other, signal.SIGKILL)'''
 
 [[protection]]
 what = "Each judging draws a user number of its own"
@@ -686,7 +747,7 @@ find = '''        if not side.end():
 put = ''''''
 
 [[protection]]
-what = "Between two runners and two files of tests the program's processes are ended"
+what = "When the judge takes back what cases left, it ends the program's processes"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
@@ -696,7 +757,25 @@ find = '''        if self.uid is not None and not Side(self.uid, self.uid).end()
 put = '''        if not self.work_root.is_dir():'''
 
 [[protection]]
-what = "Between two files of tests, and before the first, the cases' folder is emptied"
+what = "Between two runners the judge takes back what the ended runner left"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
+[[protection.change]]
+find = '''        cases = run_cases(path, self.test_env, timeout, self.sweep, ended)'''
+put = '''        cases = run_cases(path, self.test_env, timeout, None, ended)'''
+
+[[protection]]
+what = "After each file of tests the judge takes back what its cases left"
+file = "dodambench/judge.py"
+second_line = "after every run of the program the case runner ends what it left running, before every case anything left in the cases' folder is removed, and the judge takes back once more when the judging ends"
+tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running", "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge"]
+[[protection.change]]
+find = '''        self.sweep()
+        whole = '''
+put = '''        whole = '''
+
+[[protection]]
+what = "Before the first file of tests the cases' folder is emptied"
 file = "dodambench/judge.py"
 second_line = "before every case anything left in the cases' folder is removed"
 tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
@@ -706,6 +785,12 @@ find = '''            self.work_root = CASES_DIR
 '''
 put = '''            self.work_root = CASES_DIR
 '''
+
+[[protection]]
+what = "When the judge takes back what cases left, it empties the cases' folder"
+file = "dodambench/judge.py"
+second_line = "before every case anything left in the cases' folder is removed"
+tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
 find = '''        try:
             remove_tree(self.work_root, keep_top=True)

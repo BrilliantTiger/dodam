@@ -399,7 +399,7 @@ tests = [
 class = "memory"
 name = "memory taken and given back between two measurements"
 tries = "the program takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
-must = "the case fails for memory: the kernel kept the container's highest use, and the judge reads it after the run"
+must = "the case fails for memory: the kernel kept the container's highest use, and the judge reads it after the run and takes out of it what the container read from disk meanwhile"
 tests = [
     "tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_still_fails_the_case",
 ]
@@ -575,4 +575,32 @@ tries = "the folder above the results is one any user may write, and the build r
 must = "the rename is refused"
 tests = [
     "tests/test_cli_isolation.py::test_no_user_can_rename_or_replace_the_results_folder_from_the_folder_above",
+]
+
+[[attack]]
+class = "memory"
+name = "memory taken for a moment by a program that also reads from disk"
+tries = "the program reads 50 MB of a file that is not in the cache, then takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
+must = "the case fails for memory: what was read from disk accounts for 50 MB of the container's new high and no more"
+tests = [
+    "tests/test_cli_isolation.py::test_memory_taken_for_a_moment_fails_the_case_however_little_was_read_from_disk_meanwhile",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "folders and names a test cannot list"
+tries = "the program leaves a chain of folders as deep as it can make, or folders with names of 250 letters 32 deep, in a case whose test lists the files the program left"
+must = "that case fails by its own assertion, the cases before and after it are judged, and the judge ends normally with a result"
+tests = [
+    "tests/test_cli_isolation.py::test_listing_what_a_program_left_fails_that_case_by_its_assertion_and_never_the_judge[a chain of folders as deep as a program can make]",
+    "tests/test_cli_isolation.py::test_listing_what_a_program_left_fails_that_case_by_its_assertion_and_never_the_judge[names of 250 letters, 32 folders deep]",
+]
+
+[[attack]]
+class = "processes"
+name = "a build whose processes keep making new ones at the container's cap"
+tries = "a build fills every process the container may hold, and each of its processes keeps trying to make another, so that a place that comes free is taken again at once"
+must = "the judge ends them all, and the step's result says the build failed"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same",
 ]

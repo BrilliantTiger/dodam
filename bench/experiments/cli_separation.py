@@ -7,6 +7,9 @@ what the attack got (memory, files, processes), whether its case would fail, whe
 survived, and how long it took.
 
     python experiments/cli_separation.py > separation.json
+    python experiments/cli_separation.py --quick     # every table once with the smallest counts, Python only
+
+The script ends with an error when a table does not come out; the automatic check runs the quick mode.
 
 The parts: when the tests are closed; what a command line says; who the program runs as; what bounds
 files, memory, what outlives a process, and processes; how a case is ended; how what a case left is
@@ -180,7 +183,7 @@ elif what == "snoop":
 # inside a container
 # ------------------------------------------------------------------------------------------------
 
-def inside(part: str, candidate: str, attack: str) -> dict:
+def inside(part: str, candidate: str, attack: str, quick: bool = False) -> dict:
     sys.path.insert(0, "/probe/lib")
     import dodam_judge as judge
 
@@ -347,10 +350,11 @@ def inside(part: str, candidate: str, attack: str) -> dict:
     if part == "interval":
         every = float(candidate) / 1000
         watch = lambda whom, root, before: "memory" if taken() - before > LIMITS["memory_mb"] * MB else None
-        over = sorted(case([attack], kernel=base, refuse=True, watch=watch, every=every)["memory_mb"] for _ in range(20))
+        tries = 2 if quick else 20
+        over = sorted(case([attack], kernel=base, refuse=True, watch=watch, every=every)["memory_mb"] for _ in range(tries))
         (app / "sleeper.py").write_text("import time\ntime.sleep(2)\n")
         shares = []
-        for _ in range(5):
+        for _ in range(1 if quick else 5):
             # the judge's processor use: the processor time this process used while a program slept
             # for two seconds and was watched, as a share of those two seconds
             used, clock = time.process_time(), time.monotonic()
@@ -360,7 +364,7 @@ def inside(part: str, candidate: str, attack: str) -> dict:
                 watch(side, None, before)
                 time.sleep(every)
             shares.append(round((time.process_time() - used) / (time.monotonic() - clock) * 100, 1))
-        return {"memory_mb_reached_in_20_tries": {"smallest": over[0], "median": over[10], "largest": over[-1]},
+        return {"memory_mb_reached_in_20_tries": {"smallest": over[0], "median": over[len(over) // 2], "largest": over[-1]},
                 "judge_processor_percent_smallest_and_largest_of_5": [min(shares), max(shares)]}
 
     if part == "ending":
@@ -418,7 +422,7 @@ def inside(part: str, candidate: str, attack: str) -> dict:
         judge.give_app_to(app, "agent")
         if candidate == "before-anything-runs":
             judge.keep_private(tests)
-        ok, _ = judge.run_build("cp -R /tests /app/stolen", app, agent, dict(os.environ), 20)
+        judge.run_build("cp -R /tests /app/stolen", app, agent, dict(os.environ), 20)
         judge.keep_private(tests)
         return {"hidden_files_the_build_took": len(list((app / "stolen").rglob("*.py"))) if (app / "stolen").exists() else 0}
 
@@ -463,7 +467,7 @@ def inside(part: str, candidate: str, attack: str) -> dict:
         os.environ["DODAM_CLI_CONFIG"] = str(settings)
         import dodam_cli
         times = []
-        for _ in range(200):
+        for _ in range(5 if quick else 200):
             started = time.perf_counter()
             if candidate == "the-program-alone":
                 subprocess.run(["python3", "/app/plain.py"], capture_output=True)
@@ -506,6 +510,9 @@ def inside(part: str, candidate: str, attack: str) -> dict:
 # on the host
 # ------------------------------------------------------------------------------------------------
 
+QUICK = False   # go through every table once with the smallest counts: whether each still comes out
+
+
 def in_container(part: str, candidate: str, attack: str = "", image: str = "dodam-bench/python:dev",
                  memory_mb: int = CAPS["memory_mb"], extra: dict | None = None, env: dict | None = None) -> dict:
     name = f"dodam-probe-{uuid.uuid4().hex[:12]}"
@@ -523,7 +530,8 @@ def in_container(part: str, candidate: str, attack: str = "", image: str = "doda
                             "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
                             "--pids-limit", str(CAPS["processes"]),
                             "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
-                            *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack],
+                            *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack,
+                            *(["quick"] if QUICK else [])],
                            check=True, capture_output=True)
             subprocess.run(["docker", "cp", f"{probe}/.", f"{name}:/probe"], check=True, capture_output=True)
             done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=300)
@@ -574,6 +582,8 @@ def main() -> None:
     languages = {}
     for key in sample.languages:
         language = LANGUAGES[key]
+        if QUICK and key != "python":
+            continue   # the quick mode needs the Python image only
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "app"
             shutil.copytree(sample.root / "solutions/secure" / key / "build", source)
@@ -585,15 +595,50 @@ def main() -> None:
                                                "DEPS_DIR": settings.get("DEPS_DIR", ""),
                                                "DEPS_LINKS": settings.get("DEPS_LINKS", "")})
     report["each_language"] = languages
+    report["tables_that_did_not_come_out"] = missing(report)
     print(json.dumps(report, indent=1))
+    if report["tables_that_did_not_come_out"]:
+        raise SystemExit("a table did not come out: " + "; ".join(report["tables_that_did_not_come_out"]))
+
+
+# What every cell of a table must say for the table to have come out. A candidate that lets the
+# attack take the judging process down has that as its result; any other error is a table that no
+# longer comes out of this script.
+CELLS = {"when_the_tests_are_closed": "hidden_files_the_build_took", "what_a_command_line_says": "names the test",
+         "who_the_program_runs_as": "succeeded", "what_bounds_files": "case_fails_for",
+         "what_counts_as_memory": "case_fails_for", "what_outlives_a_process": "case_fails_for",
+         "what_bounds_processes": "case_fails_for", "how_a_case_is_ended": "survivors",
+         "how_what_a_case_left_is_removed": "removed", "how_often_the_judge_measures": "memory_mb_reached_in_20_tries",
+         "time_of_a_plain_case": "median_ms", "each_language": "threads_while_waiting_for_input"}
+JUDGE_TAKEN_DOWN = "the judging process ended with status"
+
+
+def missing(report: dict) -> list[str]:
+    """The cells of the report that do not hold what their table is about."""
+    found = []
+
+    def look(table: str, where: str, cell: dict) -> None:
+        if CELLS[table] in cell or str(cell.get("error", "")).startswith(JUDGE_TAKEN_DOWN):
+            return
+        if cell and all(isinstance(value, dict) for value in cell.values()) and "error" not in cell:
+            for name, below in cell.items():
+                look(table, f"{where} / {name}", below)
+        else:
+            found.append(f"{table} / {where}: {str(cell.get('error', cell))[:160]}")
+
+    for table in CELLS:
+        for name, cell in report.get(table, {"the whole table": {}}).items():
+            look(table, name, cell)
+    return found
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["inside"]:
         try:
-            print(json.dumps(inside(*sys.argv[2:5])))
+            print(json.dumps(inside(*sys.argv[2:5], quick=sys.argv[5:6] == ["quick"])))
         except BaseException as error:  # the candidate could not even run: that is its result
             print(json.dumps({"error": f"{type(error).__name__}: {str(error)[:200]}"}))
     else:
         sys.path.insert(0, str(BENCH))
+        QUICK = sys.argv[1:2] == ["--quick"]
         main()

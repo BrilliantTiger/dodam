@@ -6,6 +6,9 @@ two measurements. This runs programs that try, each several times, under the jud
 runs it: a container of the Python image without network, capped in memory and processes.
 
     python experiments/memory_overshoot.py > overshoot.json
+    python experiments/memory_overshoot.py --quick     # every row once: whether the table still comes out
+
+The script ends with an error when a row does not come out; the automatic check runs the quick mode.
 
 For every run it records, from inside the container:
 
@@ -175,14 +178,14 @@ def judged(program: str, memory_mb: int, limit_mb: int, stop: bool) -> dict:
         return {**seen, "exit_code": done.returncode, "outcomes": [c["outcome"] for c in cases]}
 
 
-def main() -> None:
+def main(runs_each: int = RUNS) -> None:
     table = []
     for memory_mb, limit_mb, stop in SETTINGS:
         for name, program in PROGRAMS.items():
-            runs = [judged(program, memory_mb, limit_mb, stop) for _ in range(RUNS)]
+            runs = [judged(program, memory_mb, limit_mb, stop) for _ in range(runs_each)]
             reached = sorted(r["high_after_mb"] - r["held_before_mb"] for r in runs if "high_after_mb" in r)
             row = {"container_mb": memory_mb, "limit_mb": limit_mb, "stop_128_mb_below_the_cap": stop,
-                   "program": name, "runs": len(runs),
+                   "program": name, "runs": len(runs), "measured_runs": sum("high_after_mb" in r for r in runs),
                    "judged_as_meant": sum(r["outcomes"] == ["passed", "failed", "passed"] and r["exit_code"] == 0
                                           for r in runs),
                    "ended_for_memory": sum(r.get("limit") == "memory" for r in runs),
@@ -195,8 +198,13 @@ def main() -> None:
             table.append(row)
             print(f"{memory_mb:5} MB  limit {limit_mb:6}  stop {stop!s:5}  {name:56}  {row['reached_mb']}  gap {row['longest_gap_ms']} ms  "
                   f"kernel {row['kernel_had_to_end_a_process']}  as meant {row['judged_as_meant']}", file=sys.stderr, flush=True)
-    print(json.dumps({"runs_each": RUNS, "rows": table}, indent=1))
+    # a row has come out when every run handed back what it measured and every case was judged
+    missing = [f"{row['container_mb']} MB, limit {row['limit_mb']}, {row['program']}" for row in table
+               if row["reached_mb"] is None or row["measured_runs"] != row["runs"] or row["judged_as_meant"] != row["runs"]]
+    print(json.dumps({"runs_each": runs_each, "rows": table, "rows_that_did_not_come_out": missing}, indent=1))
+    if missing:
+        raise SystemExit("a row did not come out: " + "; ".join(missing))
 
 
 if __name__ == "__main__":
-    main()
+    main(1 if sys.argv[1:2] == ["--quick"] else RUNS)

@@ -357,6 +357,108 @@ def highest_memory(group: Path = GROUP) -> int:
     return _group_number(group, "memory.peak") or 0
 
 
+def disk_read(group: Path = GROUP) -> int | None:
+    """How many bytes this container has read from disk so far, by the kernel's own count for the
+    container, over all disks; None where the kernel keeps no such count."""
+    try:
+        lines = (group / "io.stat").read_text().splitlines()
+    except OSError:
+        return None
+    try:
+        return sum(int(field[7:]) for line in lines for field in line.split()[1:] if field.startswith("rbytes="))
+    except ValueError:
+        return None
+
+
+READ_PROBE_MB = 4
+KERNELS_OWN = {"overlay", "tmpfs", "devtmpfs", "proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "ramfs",
+               "hugetlbfs", "bpf", "debugfs", "tracefs", "securityfs", "pstore", "configfs", "fusectl",
+               "binfmt_misc", "nsfs", "autofs"}
+ELSEWHERE_ENTRIES = 100_000        # how many entries the folders mounted from elsewhere may hold together
+
+
+def disk_reads_are_counted(where: Path) -> str:
+    """Whether the kernel's count of what this container reads from disk can be relied on here; the
+    reason when it cannot, "" when it can. The judge writes a file into its own folder, drops it
+    from the cache of files on disk, reads it back and looks whether the count grew by its size."""
+    before = disk_read()
+    if before is None:
+        return "the kernel keeps no count of what this container reads from disk"
+    size, path = READ_PROBE_MB * 2**20, where / "read-probe"
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_EXCL, 0o600)
+        try:
+            for _ in range(READ_PROBE_MB):
+                os.write(fd, b"x" * 2**20)
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.lseek(fd, 0, os.SEEK_SET)
+            while os.read(fd, 2**20):
+                pass
+        finally:
+            os.close(fd)
+            os.unlink(path)
+    except (OSError, AttributeError) as exc:
+        return f"the count of what this container reads from disk could not be tried: {exc}"
+    grown = (disk_read() or 0) - before
+    if grown < size:
+        return (f"the kernel's count of what this container reads from disk grew by {grown} bytes "
+                f"when {size} bytes were read from a file that was not in the cache")
+    return ""
+
+
+def mounted_from_elsewhere(mounts: str | None = None) -> list[str]:
+    """The places in this container that hold files of a file system which is neither one of the
+    Docker machine's disks nor made by the kernel itself: a folder shared from another machine. What
+    is read there is not in the kernel's count of what the container read from disk."""
+    if mounts is None:
+        mounts = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
+    found = []
+    for line in mounts.splitlines():
+        head, _, tail = line.partition(" - ")
+        fields, kind = head.split(), tail.split()[:1]
+        if len(fields) < 5 or not kind:
+            continue
+        if fields[2].split(":")[0] == "0" and kind[0] not in KERNELS_OWN:
+            found.append(fields[4].replace("\\040", " "))
+    return found
+
+
+def held_elsewhere(places: list[str]) -> int:
+    """The size of every file in these places together, each rounded up to whole pages: the most
+    the cache of files can ever hold of them. Raises TooMuchLeft past ELSEWHERE_ENTRIES entries."""
+    total = 0
+
+    def add(folder: int, name: str, info: os.stat_result) -> None:
+        nonlocal total
+        if stat.S_ISREG(info.st_mode):
+            total += (info.st_size + 4095) // 4096 * 4096
+
+    left = ELSEWHERE_ENTRIES
+    for place in places:
+        info = os.lstat(place)
+        if stat.S_ISDIR(info.st_mode):
+            left -= walk_tree(place, add, most=left)
+        else:
+            add(-1, place, info)
+    return total
+
+
+def new_high_check(where: Path) -> dict:
+    """What the case runner needs to judge a new high of the container's memory, found out once
+    when the judging begins. A new high counts the cache of files on disk; the runner takes out of
+    it what the container read from disk during the run and what the files in folders mounted from
+    elsewhere can hold. Where either cannot be known the check is not available and fails no case."""
+    why = disk_reads_are_counted(where)
+    elsewhere = 0
+    if not why:
+        try:
+            elsewhere = held_elsewhere(mounted_from_elsewhere())
+        except (OSError, TooMuchLeft) as exc:
+            why = f"the folders mounted from elsewhere could not be measured: {exc}"
+    return {"available": not why, "why_not": why, "elsewhere_bytes": elsewhere}
+
+
 def memory_events(group: Path = GROUP) -> dict[str, int]:
     """The kernel's counts for this container's memory; empty where it keeps none."""
     try:
@@ -705,10 +807,12 @@ class CliRun:
         else:
             self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
         self.fault_file = self.private / "faults.jsonl"
+        self.new_high = new_high_check(self.private) if run_as else {"available": False, "why_not": "", "elsewhere_bytes": 0}
         env = {k: v for k, v in {**os.environ, **extra_env}.items()
                if not k.startswith(("DODAM_", "PYTEST_")) and k not in ("PYTHONPATH", "HOME", "TMPDIR", "PWD", "OLDPWD")}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
-                    "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env}
+                    "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env,
+                    "new_high": self.new_high}
         self.settings_file = self.private / "settings.json"
         self.settings_file.write_text(json.dumps(settings), encoding="utf-8")
         # the tests get nothing that differs from one language to the next but the settings file itself
@@ -1115,6 +1219,9 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         # and how many processes the kernel ended there
         report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
                             "ended_by_the_kernel": killed_for_memory()}
+        if cli is not None:
+            # whether a new high of the container's memory could fail a case, and if not, why
+            report["memory"]["new_high_check"] = cli.new_high
 
     judged = [c for c in report["tests"] if c["outcome"] != "skipped"]
     failed = [c for c in judged if c["outcome"] == "failed"]

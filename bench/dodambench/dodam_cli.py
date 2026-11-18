@@ -28,8 +28,10 @@ Every case has limits. In the verifier each is a bound that holds whatever the p
   second, everything the kernel counts for the container beyond what was there when the run began,
   memory moved out to swap included, and ends the program above the limit. Between two
   measurements the program can be above it. After the run the judge also reads the highest value
-  the kernel itself kept for the container: a new high that lies above the limit fails the case
-  even when no measurement saw it. The program can never be above the container's memory cap,
+  the kernel itself kept for the container. That value counts the cache of files on disk, so the
+  judge takes out of a new high everything the container read from disk during the run; what is
+  left above the limit fails the case even when no measurement saw it. A program that only reads
+  files, cached or not, never fails this way. The program can never be above the container's memory cap,
   where the kernel ends it first, and that fails the case as well. Memory that would outlive the
   program's processes cannot be taken: the calls for it are refused.
 
@@ -75,12 +77,32 @@ def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
     return killed_now > killed_before
 
 
-def _passed_unseen(high_before: int, high_now: int, all_before: int, allowed: int) -> bool:
-    """The container's memory made a new high during the run, and that high lies further above what
-    the container held when the run began than the case may take in memory and files together. The
-    kernel keeps the high whatever happens between two measurements; it never goes down, so a run
-    that stays below an earlier high is not seen this way."""
-    return high_now > high_before and high_now - all_before > allowed
+def _passed_unseen(high_before: int, high_now: int, all_before: int, allowed: int, from_disk: int | None) -> bool:
+    """The container's memory made a new high during the run, and what is left of it when everything
+    the cache of files on disk can account for is taken out lies further above what the container
+    held when the run began than the case may take in memory and files together.
+
+    The kernel keeps the high whatever happens between two measurements, but it counts the cache of
+    files on disk, which is no memory of the program's: the kernel gives it back whenever memory is
+    needed. During the run that cache can have grown by no more than `from_disk`: what the container
+    read from disk meanwhile, by the kernel's own count, and what files in folders mounted from
+    elsewhere can hold. So a program that only reads never fails here, however much it reads and
+    whether or not it was in the cache before. None means the count cannot be relied on in this
+    container: then no case fails by this check. The high never goes down, so a run that stays
+    below an earlier high is not seen this way; nor is one that reads as much from disk as it
+    goes above its limit."""
+    if from_disk is None:
+        return False
+    return high_now > high_before and high_now - all_before - from_disk > allowed
+
+
+def _cache_can_account_for(read_before: int | None, read_now: int | None, elsewhere: int) -> int | None:
+    """The most the cache of files on disk can have grown by during a run: what the container read
+    from disk meanwhile, and what the files in folders mounted from elsewhere can hold, since the
+    kernel does not count reads there. None when the count of reads cannot be relied on."""
+    if read_before is None or read_now is None:
+        return None
+    return read_now - read_before + elsewhere
 
 
 TICK = 0.002
@@ -345,6 +367,7 @@ class Case:
         killed_before = _judge.killed_for_memory() if self._side is not None else 0
         high_before = _judge.highest_memory() if self._side is not None else 0
         all_before = _judge.container_memory()["all"] if self._side is not None else 0
+        read_before = self._read_from_disk()
         try:
             result = self._watch(proc, stdin, started, left)
             if result.limit is None and self._left_processes(proc):
@@ -353,12 +376,22 @@ class Case:
             self._end(proc)
         if self._side is not None and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
+        from_disk = _cache_can_account_for(read_before, self._read_from_disk(),
+                                           self._cfg.get("new_high", {}).get("elsewhere_bytes", 0))
+        high_now = _judge.highest_memory() if self._side is not None else 0
+        self.measured.update(high_before=high_before, high_now=high_now, held_before=all_before, from_disk=from_disk)
         if self._side is not None and result.limit is None and _passed_unseen(
-                high_before, _judge.highest_memory(), all_before, (limits["memory_mb"] + limits["disk_mb"]) * 2**20):
+                high_before, high_now, all_before, (limits["memory_mb"] + limits["disk_mb"]) * 2**20, from_disk):
             result.limit, result.exit_code = "memory", None
         result.seconds = time.monotonic() - started
         _spent[self._key] = _spent.get(self._key, 0.0) + result.seconds
         return self._note(result)
+
+    def _read_from_disk(self) -> int | None:
+        """What the container has read from disk so far; None where that count cannot be relied on."""
+        if self._side is None or not self._cfg.get("new_high", {}).get("available"):
+            return None
+        return _judge.disk_read()
 
     def _note(self, result: Result) -> Result:
         if result.limit:
