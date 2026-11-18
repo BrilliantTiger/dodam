@@ -1314,7 +1314,7 @@ def test_agreeing_again_resumes_measurement_and_a_second_run_of_the_script_does_
     assert measure.index('window["ga-disable-" + id] = false') < measure.index("if (loaded) return"), \
         "agreeing again after declining leaves the measurement switched off until a reload"
     start = script.split("function start()", 1)[1]
-    assert re.search(r"if \([^)]*data-measure[^)]*\) return;", start) and 'setAttribute("data-measure"' in start, \
+    assert re.search(r"if \(.*data-measure.*\) return;", start) and 'setAttribute("data-measure"' in start, \
         "the script would attach its handlers twice if it were evaluated twice"
 
 

@@ -31,9 +31,10 @@
   }
 
   function measure() {
+    // Switched on first, so that agreeing again after declining resumes in the same tab.
+    window["ga-disable-" + id] = false;
     if (loaded) return;
     loaded = true;
-    window["ga-disable-" + id] = false;
     window.dataLayer = window.dataLayer || [];
     function gtag() {
       window.dataLayer.push(arguments);
@@ -70,6 +71,9 @@
     var bar = document.getElementById("consent");
     var again = document.querySelector("[data-consent-open]");
     if (!bar || refused()) return;
+    // Evaluated a second time on the same page, this script does nothing: the first run has the handlers.
+    if (bar.getAttribute("data-measure")) return;
+    bar.setAttribute("data-measure", "on");
 
     Array.prototype.slice.call(bar.querySelectorAll("[data-consent]")).forEach(function (button) {
       button.addEventListener("click", function () {
