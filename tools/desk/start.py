@@ -39,6 +39,7 @@ import re  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -48,12 +49,15 @@ sys.path.insert(0, str(HERE))
 import facts as facts_file  # noqa: E402
 import guard  # noqa: E402
 import relay  # noqa: E402
+import state as state_files  # noqa: E402
 import tools  # noqa: E402
 
 DEFAULT_STATE = Path.home() / ".dodam-desk"
 LIVE_SERVER_FILE = "live-server.json"
 CLAUDE_TOKEN_FILE = "claude-token"
-CLAUDE_CONFIG_FOLDER = "claude-config"
+CLAUDE_CONFIG_PREFIX = "claude-config-"
+# What a sign-in may show about the account. Whatever of it is there is kept out of what the desk sends.
+SHOWN_ABOUT_THE_ACCOUNT = ("email", "orgName", "organizationName", "displayName", "fullName", "name")
 ADDRESS = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9_:@.-]{0,119}$")
 VERSION = re.compile(r"\d+(?:\.\d+)+")
 
@@ -69,20 +73,38 @@ NEVER = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agen
 NAME = {"type": str}
 NAMES = {"type": list, "of": str}
 COUNT = {"type": int}
+SENTENCES = {"en": NAME, "ko": NAME, "ja": NAME, "es": NAME}
+WEIGHT = {"type": (int, float)}
 LOCK_SHAPE = {
     "claude_version": NAME, "model": NAME, "repository": NAME, "live_server": NAME, "path": NAME,
     "builtin_tools": NAMES, "desk_tools": NAMES, "live_tools": NAMES, "live_tools_never": NAMES, "labels": NAMES, "environment": NAMES,
     "labels_per_day": COUNT,
-    "answer": {"first_line": NAME, "max_chars": COUNT, "per_author_per_day": COUNT},
-    "read": {"max_field_chars": COUNT, "max_comments": COUNT, "max_paths": COUNT, "max_path_chars": COUNT, "max_labels": COUNT, "max_label_chars": COUNT},
-    "coordinator": {"first_line": NAME, "max_chars": COUNT, "limit_notices_per_day": COUNT, "budgets": {"type": dict, "of": int}},
-    "spending": {"turns_per_session": COUNT, "seconds_per_session": COUNT, "reads_per_session": COUNT, "tokens_per_session": COUNT,
-                 "sessions_per_item_per_day": COUNT, "sessions_per_day": COUNT, "tokens_per_day": COUNT, "events_kept": COUNT},
+    "answer": {"first_line": NAME, "max_chars": COUNT, "per_account_per_day": COUNT, "told": SENTENCES, "could_not_tell": SENTENCES},
+    "read": {"max_bytes": COUNT, "body_bytes": COUNT, "title_bytes": COUNT, "comment_bytes": COUNT, "max_comments": COUNT, "max_paths": COUNT,
+             "path_bytes": COUNT, "max_labels": COUNT, "label_bytes": COUNT, "name_bytes": COUNT},
+    "coordinator": {"first_line": NAME, "max_chars": COUNT, "kinds": NAMES,
+                    "at_once": {"vulnerability_per_account": COUNT, "vulnerability_per_day": COUNT, "desk_down_per_day": COUNT, "limit_notices_per_day": COUNT},
+                    "kept_per_day": COUNT, "kept_per_account_per_day": COUNT, "digest_seconds": COUNT, "digest_lines": COUNT, "digest_line_chars": COUNT},
+    "spending": {"turns_per_session": COUNT, "seconds_per_session": COUNT, "grace_seconds": COUNT, "reads_per_session": COUNT, "read_lines": COUNT,
+                 "search_lines": COUNT, "calls_per_session": COUNT, "result_bytes": COUNT, "message_bytes": COUNT,
+                 "content_bytes_per_session": COUNT, "output_tokens_per_turn": COUNT, "brief_bytes": COUNT, "base_tokens": COUNT,
+                 "weights": {"input": WEIGHT, "cache_written": WEIGHT, "cache_read": WEIGHT, "output": WEIGHT},
+                 "units_per_session": COUNT, "units_per_turn": COUNT, "units_per_day": COUNT,
+                 "sessions_per_item_per_day": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
+                 "sign_in_failures": COUNT},
 }  # fmt: skip
 
 
-class Problem(Exception):
-    """A reason not to start the desk."""
+def turn_bound(spending: dict) -> float:
+    """The most one turn can cost in weighted units: everything a session can hold, written to the cache anew, and one full output."""
+    weights = spending["weights"]
+    held = (spending["base_tokens"] + spending["brief_bytes"] + spending["message_bytes"] + spending["content_bytes_per_session"]
+            + spending["calls_per_session"] * spending["result_bytes"] + spending["turns_per_session"] * spending["output_tokens_per_turn"])  # fmt: skip
+    return held * max(weights["input"], weights["cache_written"], weights["cache_read"]) + spending["output_tokens_per_turn"] * weights["output"]
+
+
+# A reason not to start the desk. What is wrong in the state folder is the same kind of reason.
+Problem = state_files.StateProblem
 
 
 CHECK_SECONDS = 20
@@ -97,10 +119,10 @@ CHECK_WRAPPER = (
 )
 
 
-def check_command(interpreter: str, desk_folder: Path, known: Path, seconds: float = CHECK_SECONDS, shell: str = "/bin/sh") -> str:
+def check_command(interpreter: str, desk_folder: Path, known: Path, state: Path, seconds: float = CHECK_SECONDS, shell: str = "/bin/sh") -> str:
     """The command Claude Code runs before every tool call of the session."""
     check = [interpreter, "-I", "-B", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
-             "--facts", str(desk_folder / "desk.toml"), "--known", str(known)]  # fmt: skip
+             "--facts", str(desk_folder / "desk.toml"), "--known", str(known), "--copy", str(desk_folder.parents[1]), "--state", str(state)]  # fmt: skip
     return shlex.join([shell, "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
 
 
@@ -135,12 +157,6 @@ def version_tuple(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in word.split("."))
 
 
-def private(path: Path, what: str) -> None:
-    info = path.lstat()
-    if path.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise Problem(f"{what} must belong to this account and be closed to every other account.")
-
-
 def state_folder(raw: Path, copy: Path) -> Path:
     given = Path(os.path.abspath(raw.expanduser()))
     # Looked at before the path is followed: a link here would send the desk's secrets and counts somewhere else.
@@ -152,9 +168,9 @@ def state_folder(raw: Path, copy: Path) -> Path:
         raise Problem("The state folder must not be inside .dodam.")
     if state == copy or state.is_relative_to(copy) or copy.is_relative_to(state):
         raise Problem("The state folder must be outside the desk's copy of the repository, where the session cannot read it.")
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    private(state, "The state folder")
-    return state
+    if not state.exists():
+        state.mkdir(mode=0o700, parents=True)
+    return state_files.folder(state, "The state folder")
 
 
 def fits(value, shape) -> bool:
@@ -163,6 +179,8 @@ def fits(value, shape) -> bool:
     kind = shape["type"]
     if kind is int:
         return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+    if kind == (int, float):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
     if kind is str:
         return isinstance(value, str) and bool(value.strip())
     if kind is list:
@@ -194,12 +212,12 @@ def load_lock(copy: Path) -> dict:
 def live_server(state: Path, lock: dict, facts: facts_file.Facts) -> dict:
     """The command that serves the tools of a live session, kept where the session cannot read it."""
     path = state / LIVE_SERVER_FILE
-    if not path.is_file():
+    text = state_files.read(path, f"The file {LIVE_SERVER_FILE}")
+    if text is None:
         raise Problem(f"The way in through a live session is open, but {LIVE_SERVER_FILE} is missing from the state folder.")
-    private(path, f"The file {LIVE_SERVER_FILE}")
     try:
-        server = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        server = json.loads(text)
+    except ValueError:
         server = None
     good = (
         isinstance(server, dict)
@@ -223,50 +241,60 @@ def live_server(state: Path, lock: dict, facts: facts_file.Facts) -> dict:
     return {"command": command, "args": arguments, "env": env}
 
 
-def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str, str], str | None, str | None]:
-    """The desk's own sign-in to Claude when the owner made one, and the address each sign-in shows.
+def own_configuration(state: Path) -> Path:
+    """A configuration folder for Claude Code that this run of the command made itself.
+
+    It is made new at every start, under a name that did not exist, so nothing in it was put there by
+    anyone else. The ones earlier starts made are removed; anything else under such a name is refused.
+    """
+    for earlier in sorted(state.glob(CLAUDE_CONFIG_PREFIX + "*")) + [state / "claude-config"]:
+        if earlier.is_symlink() or earlier.exists():
+            state_files.folder(earlier, "A configuration folder for Claude in the state folder")
+            shutil.rmtree(earlier)
+    return state_files.folder(Path(tempfile.mkdtemp(prefix=CLAUDE_CONFIG_PREFIX, dir=state)), "The desk's own configuration folder for Claude")
+
+
+def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str, str], str | None, list[str]]:
+    """The desk's own sign-in to Claude when the owner made one, and what each sign-in shows.
 
     Returns what to add to a session's environment, the address the session's sign-in shows (None when
-    it shows none), and the address of the owner's own sign-in (to be refused in outgoing text).
+    it shows none), and everything either sign-in shows about the account (to be refused in outgoing text).
+    Claude Code answers this question without asking the service, so the answer says nothing about
+    whether a token is good, and nothing about what a session is told once it talks to the service.
     """
 
-    def shown_by(env: dict[str, str]) -> tuple[bool, str | None]:
+    def shown_by(env: dict[str, str]) -> tuple[bool, dict[str, str]]:
         code, output = run([claude, "auth", "status"], env=env)
         try:
             status = json.loads(output)
         except ValueError:
             status = None
         if code != 0 or not isinstance(status, dict) or status.get("loggedIn") is not True:
-            return (False, None)
-        email = status.get("email")
-        return (True, email if isinstance(email, str) and email.strip() else None)
+            return (False, {})
+        return (True, {key: status[key].strip() for key in SHOWN_ABOUT_THE_ACCOUNT if isinstance(status.get(key), str) and status[key].strip()})
 
     base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
     owner_signed_in, owner = shown_by(base)
-    token_path = state / CLAUDE_TOKEN_FILE
-    if not token_path.exists() and not token_path.is_symlink():
+    token = state_files.read(state / CLAUDE_TOKEN_FILE, "The desk's sign-in to Claude (claude-token)")
+    if token is None:
         if not owner_signed_in:
             raise Problem("Claude Code is not signed in.")
-        return ({}, owner, owner)
-    private(token_path, "The desk's sign-in to Claude (claude-token)")
-    token = token_path.read_text(encoding="utf-8").strip()
+        return ({}, owner.get("email"), sorted(set(owner.values())))
+    token = token.strip()
     if not token or any(character.isspace() for character in token):
         raise Problem("The desk's sign-in to Claude (claude-token) is empty or damaged.")
-    config = state / CLAUDE_CONFIG_FOLDER
-    config.mkdir(mode=0o700, exist_ok=True)
-    private(config, "The desk's own configuration folder for Claude")
     # The token reaches a session through its environment only, with a configuration folder of the desk's own,
     # so that nothing of the owner's sign-in or settings is read.
-    extra = {"CLAUDE_CODE_OAUTH_TOKEN": token, "CLAUDE_CONFIG_DIR": str(config)}
-    signed_in, email = shown_by(base | extra)
+    extra = {"CLAUDE_CODE_OAUTH_TOKEN": token, "CLAUDE_CONFIG_DIR": str(own_configuration(state))}
+    signed_in, own = shown_by(base | extra)
     if not signed_in:
         raise Problem("The desk's sign-in to Claude (claude-token) was not accepted.")
-    return (extra, email, owner)
+    return (extra, own.get("email"), sorted(set(owner.values()) | set(own.values())))
 
 
-def known_values(owner_email: str | None, session_email: str | None, environ: dict[str, str]) -> list[list[str]]:
+def known_values(shown: list[str], environ: dict[str, str]) -> list[list[str]]:
     """Values of the owner that the tools refuse to send, beyond what the computer itself tells them."""
-    known = [["the address of a sign-in", email] for email in sorted({owner_email, session_email} - {None})]
+    known = [["what a sign-in shows about the account", value] for value in shown if len(value) >= 3]
     base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
     for key in ("user.name", "user.email"):
         code, output = run(["git", "config", "--global", key], env=base)
@@ -300,6 +328,15 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         brief = ""
     if not brief:
         raise Problem("The desk's standing instructions (brief.md) are missing.")
+    spending = lock["spending"]
+    if len(brief.encode("utf-8")) > spending["brief_bytes"]:
+        raise Problem(f"The desk's standing instructions (brief.md) are longer than {spending['brief_bytes']} bytes, which the bound on what a session may cost counts on.")
+    if spending["units_per_turn"] < turn_bound(spending):
+        raise Problem("The closed list (lock.json) states less for one turn than its own numbers add up to.")
+    if spending["units_per_session"] + spending["units_per_turn"] > spending["units_per_day"]:
+        raise Problem("The closed list (lock.json) sets aside more for one session than a day may cost.")
+    if max(guard.paths_of(copy), default=0) > guard.BYTES_PER_LISTED_PATH:
+        raise Problem(f"A path in the desk's copy is longer than {guard.BYTES_PER_LISTED_PATH} bytes, which the bound on what a search may hand over counts on.")
     if facts.live_open and stand_in is None:
         # The limits on connection codes and on live sessions at once are in the facts, but no tool keeps them yet.
         raise Problem("The way in through a live session is open, but its limits are not enforced yet. The desk does not start with that way open.")
@@ -319,7 +356,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
             f"The lock was checked against Claude Code {lock['claude_version']}; another version is installed. "
             "Run the lock check on the new version and change the pinned version with it."
         )
-    own_sign_in, session_email, owner_email = sign_in(claude, state, environ)
+    own_sign_in, session_email, shown_about_the_account = sign_in(claude, state, environ)
     if stand_in is None and (facts.github_open or facts.live_open) and session_email:
         # A session cannot give away what it does not hold. With the owner's sign-in it holds the owner's address.
         raise Problem(
@@ -360,8 +397,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         if environ.get("ORCA_TERMINAL_HANDLE") and ADDRESS.fullmatch(environ["ORCA_TERMINAL_HANDLE"]):
             desk_env["DESK_SENDER"] = environ["ORCA_TERMINAL_HANDLE"]
 
-    session = state / "session"
-    session.mkdir(mode=0o700, exist_ok=True)
+    session = state_files.folder(state / "session", "The folder session in the state folder", make=True)
     known_path = session / "known.json"
     desk_env["DESK_KNOWN"] = str(known_path)
 
@@ -370,7 +406,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     if facts.live_open:
         servers[lock["live_server"]] = live_server(state, lock, facts)
 
-    hook = check_command(python, desk_folder, known_path)
+    hook = check_command(python, desk_folder, known_path, state)
     live = lock["live_server"]
     settings = {
         # Claude Code otherwise describes the repository to the session, the owner's git name included.
@@ -385,11 +421,9 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
 
     # The files hold paths, values of the owner and, for a live session, a key. They go to the state folder, not to the command line.
     files = {}
-    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(owner_email, session_email, environ))):
+    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(shown_about_the_account, environ))):
         files[name] = session / name
-        descriptor = os.open(files[name], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(content, handle, indent=1)
+        state_files.write(files[name], f"The file {name} in the state folder", json.dumps(content, indent=1))
 
     argv = [
         claude,
@@ -404,15 +438,20 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "--permission-mode", "dontAsk",
         "--disable-slash-commands",
         "--model", lock["model"],
+        # Claude Code's own bound on turns: one turn is one response of the model, with or without tool calls.
+        "--max-turns", str(spending["turns_per_session"]),
         "--append-system-prompt", brief,
     ]  # fmt: skip
     # The check is run once here, as Claude Code will run it. A check that does not answer is a reason not to start.
-    if check_answers(hook, {"tool_name": "Read", "tool_input": {}}) != 0 or check_answers(hook, {"tool_name": "Bash", "tool_input": {}}) != 2:
+    probe = {"session_id": "start-check", "tool_name": "Read", "tool_input": {"file_path": str(desk_folder / "lock.json"), "limit": 1}}
+    if check_answers(hook, probe) != 0 or check_answers(hook, probe | {"tool_name": "Bash", "tool_input": {}}) != 2:
         raise Problem("The check that runs before every tool call does not answer as it must.")
 
     env = {key: environ[key] for key in lock["environment"] if key in environ}
     env["PATH"] = lock["path"]
     env["DISABLE_AUTOUPDATER"] = "1"
+    # Claude Code's own bound on what one response may hold, thinking included.
+    env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(spending["output_tokens_per_turn"])
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # The owner's git name and address stay out of what Claude Code tells the session about the folder.
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
