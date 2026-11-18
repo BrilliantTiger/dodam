@@ -32,6 +32,7 @@ Exit codes:
   5    State file location cannot be written (checked before calling GitHub).
   6    Another watcher is already holding the lock on this --state file.
   7    Events JSON was printed on standard output, then saving state failed.
+  8    A non-evictable state capacity bound (tracked pull requests or state bytes) was reached.
   130  Interrupted by signal (SIGINT).
 """
 
@@ -66,12 +67,15 @@ PER_PAGE = 100
 
 STATE_FOLDER_NAME = ".dodam-desk"
 STATE_FILE_NAME = "watch-state.json"
-STATE_VERSION = 2
+STATE_VERSION = 3
 
-# Explicit upper bounds so the state file cannot grow without limit.
+# Explicit upper bounds on state. Evictable caches/windows drop only entries that monotonic
+# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_STATE_BYTES) end with
+# exit code 8 instead of forgetting per-pull-request history, and MAX_PENDING_EVENTS pauses
+# polling without advancing watermarks past unqueued events.
 MAX_OPEN_PR_REVIEWS_POLLED = 25
 MAX_SEEN_IDS = 5_000
-MAX_TRACKED_PULLS = 500
+MAX_TRACKED_PULLS = 10_000
 MAX_REVIEW_ETAGS = 100
 MAX_PENDING_EVENTS = 1_000
 MAX_STATE_BYTES = 16 * 1024 * 1024
@@ -84,6 +88,7 @@ EXIT_STATE_READ = 4
 EXIT_STATE_WRITE = 5
 EXIT_STATE_LOCKED = 6
 EXIT_SAVE_AFTER_PRINT = 7
+EXIT_STATE_FULL = 8
 EXIT_INTERRUPTED = 130
 
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -134,8 +139,9 @@ Notes:
     plus one review tail page per open pull request — seven requests with two open
     pull requests, taking about 19 seconds including the 15-second pause) and uses
     zero counted primary rate-limit requests when nothing changed.
-  - State size is bounded (at most 5,000 recent event ids, 500 tracked pull requests,
-    100 cached review-page ETags, and 1,000 queued overflow events).
+  - When the waiting queue reaches MAX_PENDING_EVENTS (1,000), the watcher reports
+    what is queued and asks GitHub for nothing more until there is room, without
+    moving any watermark past unqueued events.
 
 Exit codes:
   0    Normal exit: printed one JSON object (or --help text) and saved state.
@@ -146,6 +152,7 @@ Exit codes:
   5    State location cannot be written (checked before calling GitHub).
   6    Another watcher is already holding the lock on this --state file.
   7    Events JSON was printed on standard output, then saving state failed.
+  8    A non-evictable state capacity bound (tracked pull requests or state bytes) was reached.
   130  Interrupted by signal (SIGINT).
 """
 
@@ -176,6 +183,10 @@ class StateLockedError(Exception):
 
 class SaveAfterPrintError(Exception):
     """Raised when saving state fails after events JSON was printed to stdout (exit 7)."""
+
+
+class StateFullError(Exception):
+    """Raised when a non-evictable state capacity bound is exceeded (exit 8)."""
 
 
 class SignedOutError(Exception):
@@ -239,14 +250,14 @@ def validate_state_path(raw_path: Path, repo_root: Path | None = None) -> Path:
     except OSError:
         real_path = abs_path
 
-    # 1. Lexical case-insensitive check for .dodam anywhere in expanded or resolved path.
+    # 1. Lexical case-insensitive check for .dodam anywhere in expanded or resolved path
+    #    (stops paths inside ~/.dodam even when ~/.dodam does not exist yet on disk).
     for candidate in (abs_path, real_path):
         for part in candidate.parts:
             if part.casefold() == ".dodam":
                 raise BadArgsError("The state file must never be inside .dodam.")
 
-    # 2. Filesystem identity check (st_dev, st_ino) on existing ancestors so case-insensitive
-    #    disks and symlinks cannot alias either the repository folder or ~/.dodam.
+    # 2. Filesystem identity check (st_dev, st_ino) on existing ancestors without opening .dodam.
     guarded_dirs: list[Path] = [effective_repo]
     try:
         guarded_dirs.append(Path.home() / ".dodam")
@@ -270,7 +281,6 @@ def validate_state_path(raw_path: Path, repo_root: Path | None = None) -> Path:
                 if any(os.path.samestat(st, gst) for gst in guarded_stats):
                     raise BadArgsError("The state file must not be inside the repository or .dodam.")
 
-    # Fallback lexical check when effective_repo does not exist on disk in a synthetic test.
     repo_abs = Path(os.path.abspath(effective_repo))
     for candidate in (abs_path, real_path):
         if candidate == repo_abs or repo_abs in candidate.parents:
@@ -329,7 +339,6 @@ def _empty_state() -> dict[str, object]:
         "pending": [],
         "etags": {},
         "watermarks": {
-            "baseline_cutoff": "",
             "max_issue_id": 0,
             "max_issue_event_id": 0,
             "max_issue_comment_id": 0,
@@ -344,60 +353,45 @@ def _empty_state() -> dict[str, object]:
         "pull_seq": {},
         "pull_draft": {},
         "pull_ready_seq": {},
+        "pull_max_review_id": {},
         "pull_baseline_updated_at": {},
         "pull_reviews_checked": {},
         "pull_review_page": {},
     }
 
 
-def _bound_state(state: dict[str, object]) -> None:
-    """Enforce upper bounds on every dynamic collection in state."""
+def _check_and_bound_state(state: dict[str, object]) -> None:
+    """Trim harmless caches/windows and fail with StateFullError rather than forgetting needed state."""
     seen: list[str] = state["seen_ids"]  # type: ignore[assignment]
     if len(seen) > MAX_SEEN_IDS:
         state["seen_ids"] = seen[-MAX_SEEN_IDS:]
 
     pending: list[dict[str, object]] = state["pending"]  # type: ignore[assignment]
     if len(pending) > MAX_PENDING_EVENTS:
-        state["pending"] = pending[:MAX_PENDING_EVENTS]
+        raise StateFullError("Waiting event queue exceeds MAX_PENDING_EVENTS.")
 
     open_prs_raw: list[int] = list(state["open_pr_numbers"])  # type: ignore[arg-type]
-    seen_open: list[int] = []
+    dedup_open: list[int] = []
     for n in open_prs_raw:
-        if n not in seen_open:
-            seen_open.append(n)
-    open_prs = seen_open[:MAX_TRACKED_PULLS]
-    state["open_pr_numbers"] = open_prs
+        if n not in dedup_open:
+            dedup_open.append(n)
 
     known_prs: list[int] = state["known_pr_numbers"]  # type: ignore[assignment]
     pull_heads: dict[str, str] = state["pull_heads"]  # type: ignore[assignment]
-    all_pr_nums = set(known_prs) | {int(k) for k in pull_heads if k.isdigit()} | set(open_prs)
+    pull_max_rev: dict[str, int] = state["pull_max_review_id"]  # type: ignore[assignment]
+    all_pr_nums = (
+        set(known_prs)
+        | {int(k) for k in pull_heads if k.isdigit()}
+        | {int(k) for k in pull_max_rev if k.isdigit()}
+        | set(dedup_open)
+    )
     if len(all_pr_nums) > MAX_TRACKED_PULLS:
-        keep_nums: set[int] = set(open_prs)
-        for num in sorted(all_pr_nums - keep_nums, reverse=True):
-            if len(keep_nums) >= MAX_TRACKED_PULLS:
-                break
-            keep_nums.add(num)
-    else:
-        keep_nums = all_pr_nums
+        raise StateFullError("Tracked pull request count reached MAX_TRACKED_PULLS.")
 
-    state["known_pr_numbers"] = sorted(keep_nums)
-    keep_keys = {str(n) for n in keep_nums}
-    for map_name in (
-        "pull_heads",
-        "pull_seq",
-        "pull_draft",
-        "pull_ready_seq",
-        "pull_baseline_updated_at",
-        "pull_reviews_checked",
-        "pull_review_page",
-    ):
-        mapping = state[map_name]
-        assert isinstance(mapping, dict)
-        for k in [k for k in mapping if k not in keep_keys]:
-            del mapping[k]
-
+    state["open_pr_numbers"] = dedup_open
+    state["known_pr_numbers"] = sorted(all_pr_nums)
     baselined: list[int] = state["reviews_baselined"]  # type: ignore[assignment]
-    state["reviews_baselined"] = [n for n in baselined if n in keep_nums][-MAX_TRACKED_PULLS:]
+    state["reviews_baselined"] = sorted({n for n in baselined if n in all_pr_nums})
 
     etags: dict[str, str] = state["etags"]  # type: ignore[assignment]
     core_keys = {"pulls", "issues", "issue_events", "issue_comments", "pull_comments"}
@@ -405,6 +399,14 @@ def _bound_state(state: dict[str, object]) -> None:
     if len(review_keys) > MAX_REVIEW_ETAGS:
         for old_k in review_keys[:-MAX_REVIEW_ETAGS]:
             del etags[old_k]
+
+
+def _serialize_state(state: dict[str, object]) -> str:
+    _check_and_bound_state(state)
+    payload = json.dumps(state, ensure_ascii=True, separators=(",", ":")) + "\n"
+    if len(payload.encode("utf-8")) > MAX_STATE_BYTES:
+        raise StateFullError("Serialized state exceeds MAX_STATE_BYTES.")
+    return payload
 
 
 def _load_state(path: Path) -> dict[str, object]:
@@ -422,8 +424,12 @@ def _load_state(path: Path) -> dict[str, object]:
 
     try:
         raw_bytes = path.read_bytes()
+        if len(raw_bytes) > MAX_STATE_BYTES:
+            raise StateReadError("State file exceeds maximum allowed size.")
         text = raw_bytes.decode("utf-8")
         raw = json.loads(text)
+    except StateReadError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise StateReadError("State file is unreadable or damaged.") from exc
 
@@ -442,19 +448,18 @@ def _load_state(path: Path) -> dict[str, object]:
     seen = raw.get("seen_ids", [])
     if not isinstance(seen, list) or not all(isinstance(x, str) for x in seen):
         raise StateReadError("State file has invalid seen_ids.")
-    # Preserve order while deduplicating.
     dedup_seen: list[str] = []
     seen_lookup: set[str] = set()
     for item_id in seen:
         if item_id not in seen_lookup:
             seen_lookup.add(item_id)
             dedup_seen.append(item_id)
-    base["seen_ids"] = dedup_seen
+    base["seen_ids"] = dedup_seen[-MAX_SEEN_IDS:]
 
     pending = raw.get("pending", [])
     allowed_ev_keys = {"id", "kind", "number", "actor", "time", "url"}
-    if not isinstance(pending, list):
-        raise StateReadError("State file has invalid pending events.")
+    if not isinstance(pending, list) or len(pending) > MAX_PENDING_EVENTS:
+        raise StateReadError("State file has invalid or oversized pending events.")
     for ev in pending:
         if (
             not isinstance(ev, dict)
@@ -476,7 +481,7 @@ def _load_state(path: Path) -> dict[str, object]:
             raise StateReadError(f"State file has invalid {str_map}.")
         base[str_map] = dict(val)
 
-    for int_map in ("pull_seq", "pull_ready_seq", "pull_review_page"):
+    for int_map in ("pull_seq", "pull_ready_seq", "pull_max_review_id", "pull_review_page"):
         val = raw.get(int_map, {})
         if not isinstance(val, dict) or not all(
             isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0
@@ -510,7 +515,7 @@ def _load_state(path: Path) -> dict[str, object]:
             raise StateReadError(f"State file has invalid {list_key}.")
         base[list_key] = list(vals)
 
-    _bound_state(base)
+    _check_and_bound_state(base)
     return base
 
 
@@ -539,7 +544,6 @@ def _acquire_state_lock_and_verify_writable(state_path: Path) -> int:
             raise StateLockedError("Another watcher is already using this state file.") from exc
         raise StateWriteError("Cannot lock state file.") from exc
 
-    # Verify we can create, write, fsync, and unlink a temporary file in the state folder before asking GitHub.
     probe_fd = -1
     probe_name = ""
     try:
@@ -569,10 +573,8 @@ def _acquire_state_lock_and_verify_writable(state_path: Path) -> int:
     return lock_fd
 
 
-def _save_state(path: Path, state: dict[str, object]) -> None:
-    _bound_state(state)
+def _write_serialized_state(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(state, ensure_ascii=True, separators=(",", ":")) + "\n"
     fd, tmp_name = tempfile.mkstemp(prefix=".watch-state-", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -812,7 +814,7 @@ def _extract_number_from_urls(primary: object, primary_re: re.Pattern[str], fall
 
 
 class _SeenTracker:
-    """Order-preserving seen-id set so oldest ids are evicted first when bounded."""
+    """Order-preserving recent-id window for reported outside events only."""
 
     def __init__(self, initial: list[str]):
         self.order: list[str] = list(initial)
@@ -858,9 +860,6 @@ def _fetch_reviews_from_tail(
     ep = _review_endpoint(repo, number, start_page)
     status, headers, data, max_poll = _gh_get(ep, etag=etag)
     if status == 304 and force_recheck_on_304:
-        # If /pulls reported a newer updated_at on this PR while the cached tail page answered 304
-        # (for example when a page filled up at a smaller server page size and grew a Link rel=next),
-        # re-fetch without If-None-Match once so a newly linked page is never missed.
         status, headers, data, p2 = _gh_get(ep, etag=None)
         max_poll = max(max_poll, p2)
 
@@ -889,9 +888,6 @@ def _fetch_reviews_from_tail(
             break
         next_ep = _next_endpoint(p_headers.get("link"))
 
-    # When the final page reached is full (PER_PAGE items), advance to curr_page + 1 right away so
-    # the next review (#101, #201, ...) lands on the conditionally polled tail page rather than an
-    # already-full page whose ETag will never change.
     while curr_page_len >= PER_PAGE:
         probe_page = curr_page + 1
         p_status, p_headers, p_data, p_poll = _gh_get(_review_endpoint(repo, number, probe_page), etag=None)
@@ -912,7 +908,7 @@ def _fetch_paginated_list(
     first_endpoint: str,
     etag: str | None,
     stop_item,
-) -> tuple[bool, str | None, list[object], float, int]:
+) -> tuple[bool, str | None, list[dict[str, object]], float, int]:
     """Fetch a list endpoint across Link rel=next pages until stop_item(item) is True."""
     status, headers, data, max_poll = _gh_get(first_endpoint, etag=etag)
     if status == 304:
@@ -921,7 +917,7 @@ def _fetch_paginated_list(
         raise TransientGitHubError("unexpected")
 
     new_etag = headers.get("etag") or etag
-    items: list[object] = []
+    items: list[dict[str, object]] = []
     skipped = 0
     stop = False
     for raw_item in data:
@@ -982,26 +978,20 @@ def _initialize_baseline(
     state: dict[str, object],
     repo: str,
 ) -> tuple[dict[str, object], float, int]:
-    """Snapshot existing repository state on first run so nothing older than first start is reported."""
+    """Snapshot existing repository watermarks on first run without dropping concurrent arrivals."""
     working = copy.deepcopy(state)
     etags: dict[str, str] = working["etags"]  # type: ignore[assignment]
     wm: dict[str, object] = working["watermarks"]  # type: ignore[assignment]
-    seen = _SeenTracker(list(working["seen_ids"]))  # type: ignore[arg-type]
     known_prs: set[int] = set(working["known_pr_numbers"])  # type: ignore[arg-type]
     pull_heads: dict[str, str] = working["pull_heads"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
+    pull_max_rev: dict[str, int] = working["pull_max_review_id"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
 
     server_poll = 0.0
     skipped = 0
-    baseline_cutoff = ""
-
-    def note_time(ts: str) -> None:
-        nonlocal baseline_cutoff
-        if ts > baseline_cutoff:
-            baseline_cutoff = ts
 
     # 1. Pull requests (all pages at initial setup so every existing PR head, draft state, and id is known)
     _, p_etag, pull_items, hint, p_skip = _fetch_paginated_list(
@@ -1022,7 +1012,7 @@ def _initialize_baseline(
             pr = _item_dict(raw_pr)
             pr_id = _pos_int(pr.get("id"))
             number = _pos_int(pr.get("number"))
-            created_at = _iso_utc(pr.get("created_at"))
+            _iso_utc(pr.get("created_at"))
             updated_at = _iso_utc(pr.get("updated_at"))
             head = _item_dict(pr.get("head"))
             raw_sha = head.get("sha")
@@ -1034,15 +1024,14 @@ def _initialize_baseline(
             skipped += 1
             continue
 
-        note_time(created_at)
-        note_time(updated_at)
         known_prs.add(number)
+        if len(known_prs) > MAX_TRACKED_PULLS:
+            raise StateFullError("Tracked pull request count reached MAX_TRACKED_PULLS.")
         num_key = str(number)
         pull_heads[num_key] = head_sha
         pull_draft[num_key] = is_draft
         pull_base_upd[num_key] = updated_at
         pull_rev_checked[num_key] = updated_at
-        seen.add(f"pull_request_opened:{pr_id}")
         if pr_id > max_pull_id:
             max_pull_id = pr_id
         if updated_at > max_pull_upd:
@@ -1052,7 +1041,7 @@ def _initialize_baseline(
 
     wm["max_pull_id"] = max_pull_id
     wm["max_pull_updated_at"] = max_pull_upd
-    working["open_pr_numbers"] = open_prs[:MAX_TRACKED_PULLS]
+    working["open_pr_numbers"] = open_prs
     polled_open_prs = open_prs[:MAX_OPEN_PR_REVIEWS_POLLED]
 
     # 2. Issues (page 1 sorted by created desc gives max_issue_id)
@@ -1068,20 +1057,16 @@ def _initialize_baseline(
             item = _item_dict(raw_item)
             iid = _pos_int(item.get("id"))
             num = _pos_int(item.get("number"))
-            created = _iso_utc(item.get("created_at"))
-            updated = item.get("updated_at")
-            if isinstance(updated, str) and ISO_UTC_RE.fullmatch(updated):
-                note_time(updated)
+            _iso_utc(item.get("created_at"))
         except MalformedItemError:
             skipped += 1
             continue
-        note_time(created)
         if iid > max_issue_id:
             max_issue_id = iid
         if "pull_request" in item and item["pull_request"] is not None:
             known_prs.add(num)
-        else:
-            seen.add(f"issue_opened:{iid}")
+            if len(known_prs) > MAX_TRACKED_PULLS:
+                raise StateFullError("Tracked pull request count reached MAX_TRACKED_PULLS.")
     wm["max_issue_id"] = max_issue_id
 
     # 3. Issue events (page 1 gives max_issue_event_id)
@@ -1094,17 +1079,10 @@ def _initialize_baseline(
         try:
             item = _item_dict(raw_item)
             eid = _pos_int(item.get("id"))
-            created = _iso_utc(item.get("created_at"))
-            if item.get("event") == "reopened":
-                issue_obj = _item_dict(item.get("issue"))
-                num = _pos_int(issue_obj.get("number"))
-                is_pr = ("pull_request" in issue_obj and issue_obj["pull_request"] is not None) or (num in known_prs)
-                kind = "pull_request_reopened" if is_pr else "issue_reopened"
-                seen.add(f"{kind}:{eid}")
+            _iso_utc(item.get("created_at"))
         except MalformedItemError:
             skipped += 1
             continue
-        note_time(created)
         if eid > max_ev_id:
             max_ev_id = eid
     wm["max_issue_event_id"] = max_ev_id
@@ -1121,19 +1099,12 @@ def _initialize_baseline(
         try:
             item = _item_dict(raw_item)
             cid = _pos_int(item.get("id"))
-            created = _iso_utc(item.get("created_at"))
-            html_url = item.get("html_url")
-            num = _extract_number_from_urls(item.get("issue_url"), ISSUE_URL_NUM_RE, html_url)
+            _iso_utc(item.get("created_at"))
         except MalformedItemError:
             skipped += 1
             continue
-        note_time(created)
         if cid > max_ic_id:
             max_ic_id = cid
-        html_pr = isinstance(html_url, str) and bool(re.search(r"/pull/\d+(?:$|[#/?])", html_url))
-        is_pr = (num in known_prs) or html_pr or ("pull_request_url" in item)
-        kind = "pull_request_comment" if is_pr else "issue_comment"
-        seen.add(f"{kind}:{cid}")
     wm["max_issue_comment_id"] = max_ic_id
 
     # 5. Review comments (page 1 sorted by created desc gives max_review_comment_id)
@@ -1148,26 +1119,26 @@ def _initialize_baseline(
         try:
             item = _item_dict(raw_item)
             cid = _pos_int(item.get("id"))
-            created = _iso_utc(item.get("created_at"))
+            _iso_utc(item.get("created_at"))
         except MalformedItemError:
             skipped += 1
             continue
-        note_time(created)
         if cid > max_rc_id:
             max_rc_id = cid
-        seen.add(f"pull_request_review_comment:{cid}")
     wm["max_review_comment_id"] = max_rc_id
 
-    # 6. Existing reviews on the polled open pull requests (walking to the non-full tail page)
+    # 6. Existing reviews on the polled open pull requests (recording highest review id per PR)
     reviews_baselined: list[int] = []
     for num in polled_open_prs:
         _, tail_page, r_etag, r_items, hint = _fetch_reviews_from_tail(
             repo, num, start_page=1, etag=None, force_recheck_on_304=False
         )
         server_poll = max(server_poll, hint)
-        pull_rev_page[str(num)] = tail_page
+        num_key = str(num)
+        pull_rev_page[num_key] = tail_page
         _set_review_etag(etags, num, tail_page, r_etag)
         reviews_baselined.append(num)
+        highest_rid = pull_max_rev.get(num_key, 0)
         for raw_rev in r_items:
             try:
                 rev = _item_dict(raw_rev)
@@ -1175,19 +1146,18 @@ def _initialize_baseline(
                 if isinstance(rev_state, str) and rev_state.upper() == "PENDING":
                     continue
                 rid = _pos_int(rev.get("id"))
-                sub = _iso_utc(rev.get("submitted_at") or rev.get("created_at"))
+                _iso_utc(rev.get("submitted_at") or rev.get("created_at"))
             except MalformedItemError:
                 skipped += 1
                 continue
-            note_time(sub)
-            seen.add(f"pull_request_review:{rid}")
+            if rid > highest_rid:
+                highest_rid = rid
+        pull_max_rev[num_key] = highest_rid
 
-    wm["baseline_cutoff"] = baseline_cutoff
     working["initialized"] = True
-    working["seen_ids"] = seen.to_list()
     working["known_pr_numbers"] = sorted(known_prs)
     working["reviews_baselined"] = reviews_baselined
-    _bound_state(working)
+    _check_and_bound_state(working)
     return (working, server_poll, skipped)
 
 
@@ -1197,7 +1167,7 @@ def _poll_once(
     own_login: str,
     include_own: bool,
 ) -> tuple[dict[str, object], float, int]:
-    """Poll GitHub on a copy of an initialized state; return (updated_state, max_poll_hint, skipped_count)."""
+    """Poll GitHub on a copy of state, stopping immediately without advancing past unqueued events if full."""
     working = copy.deepcopy(state)
     etags: dict[str, str] = working["etags"]  # type: ignore[assignment]
     wm: dict[str, object] = working["watermarks"]  # type: ignore[assignment]
@@ -1211,376 +1181,479 @@ def _poll_once(
     pull_seq: dict[str, int] = working["pull_seq"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_ready_seq: dict[str, int] = working["pull_ready_seq"]  # type: ignore[assignment]
+    pull_max_rev: dict[str, int] = working["pull_max_review_id"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
 
-    baseline_cutoff = str(wm.get("baseline_cutoff", ""))
     discovered: list[dict[str, object]] = []
     server_poll = 0.0
     skipped = 0
     ready_emitted_prs: set[int] = set()
+    queue_filled = len(pending_list) >= MAX_PENDING_EVENTS
 
-    def record_event(ev: dict[str, object]) -> None:
-        ev_id = str(ev["id"])
-        ev_time = str(ev["time"])
-        if baseline_cutoff and ev_time < baseline_cutoff:
-            seen.add(ev_id)
-            return
-        if ev_id in seen or ev_id in pending_ids:
-            return
-        pending_ids.add(ev_id)
-        discovered.append(ev)
+    def has_room() -> bool:
+        return (len(pending_list) + len(discovered)) < MAX_PENDING_EVENTS
 
-    # 1. Pull requests (opened, draft->ready, head commit moves, and which PRs need review checks)
+    def ensure_pr_tracked(number: int) -> None:
+        if number not in known_prs:
+            if len(known_prs) >= MAX_TRACKED_PULLS:
+                raise StateFullError("Tracked pull request count reached MAX_TRACKED_PULLS.")
+            known_prs.add(number)
+
+    # 1. Pull requests (processed oldest-updated first so stopping on full queue never skips earlier PR updates)
     prev_max_pull_id = int(wm["max_pull_id"])  # type: ignore[arg-type]
     prev_max_pull_upd = str(wm["max_pull_updated_at"])
-    pulls_ep = f"repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={PER_PAGE}"
-
-    def stop_pulls(item: dict[str, object]) -> bool:
-        if not prev_max_pull_upd:
-            return False
-        return _iso_utc(item.get("updated_at")) < prev_max_pull_upd
-
-    changed, new_etag, pull_items, poll_hint, p_skip = _fetch_paginated_list(
-        pulls_ep,
-        etags.get("pulls"),
-        stop_pulls,
-    )
-    server_poll = max(server_poll, poll_hint)
-    skipped += p_skip
-    if new_etag:
-        etags["pulls"] = new_etag
-
     prs_with_updated_timestamp: set[int] = set()
     prs_to_check_reviews: list[int] = []
-    new_max_pull_id = prev_max_pull_id
-    new_max_pull_upd = prev_max_pull_upd
     valid_pulls_seen: dict[int, str] = {}
 
-    if changed:
-        current_open_seen: list[int] = []
-        closed_this_poll: set[int] = set()
-        for raw_pr in pull_items:
-            try:
-                pr = _item_dict(raw_pr)
-                pr_id = _pos_int(pr.get("id"))
-                number = _pos_int(pr.get("number"))
-                created_at = _iso_utc(pr.get("created_at"))
-                updated_at = _iso_utc(pr.get("updated_at"))
-                head = _item_dict(pr.get("head"))
-                raw_sha = head.get("sha")
-                if not isinstance(raw_sha, str) or not HEX_SHA_RE.fullmatch(raw_sha.lower()):
-                    raise MalformedItemError()
-                head_sha = raw_sha.lower()
-                is_draft = bool(pr.get("draft", False))
-                keep, actor = _classify_actor(pr.get("user"), own_login, include_own)
-            except MalformedItemError:
-                skipped += 1
-                continue
+    if not queue_filled:
+        pulls_ep = f"repos/{repo}/pulls?state=all&sort=updated&direction=desc&per_page={PER_PAGE}"
 
-            valid_pulls_seen[number] = updated_at
-            known_prs.add(number)
-            if pr.get("state") == "open":
-                if number not in current_open_seen:
-                    current_open_seen.append(number)
+        def stop_pulls(item: dict[str, object]) -> bool:
+            if not prev_max_pull_upd:
+                return False
+            return _iso_utc(item.get("updated_at")) < prev_max_pull_upd
+
+        changed, new_etag, pull_items, poll_hint, p_skip = _fetch_paginated_list(
+            pulls_ep,
+            etags.get("pulls"),
+            stop_pulls,
+        )
+        server_poll = max(server_poll, poll_hint)
+        skipped += p_skip
+
+        new_max_pull_id = prev_max_pull_id
+        new_max_pull_upd = prev_max_pull_upd
+
+        if changed:
+            parsed_pulls: list[tuple[str, int, dict[str, object], str, str, str, bool, bool, str | None]] = []
+            for raw_pr in pull_items:
+                try:
+                    pr = _item_dict(raw_pr)
+                    pr_id = _pos_int(pr.get("id"))
+                    number = _pos_int(pr.get("number"))
+                    created_at = _iso_utc(pr.get("created_at"))
+                    updated_at = _iso_utc(pr.get("updated_at"))
+                    head = _item_dict(pr.get("head"))
+                    raw_sha = head.get("sha")
+                    if not isinstance(raw_sha, str) or not HEX_SHA_RE.fullmatch(raw_sha.lower()):
+                        raise MalformedItemError()
+                    head_sha = raw_sha.lower()
+                    is_draft = bool(pr.get("draft", False))
+                    keep, actor = _classify_actor(pr.get("user"), own_login, include_own)
+                except MalformedItemError:
+                    skipped += 1
+                    continue
+                parsed_pulls.append((updated_at, pr_id, pr, created_at, head_sha, str(number), is_draft, keep, actor))
+
+            # Oldest (updated_at, pr_id) first.
+            parsed_pulls.sort(key=lambda t: (t[0], t[1]))
+            current_open_seen: list[int] = []
+            closed_this_poll: set[int] = set()
+
+            for updated_at, pr_id, pr, created_at, head_sha, num_key, is_draft, keep, actor in parsed_pulls:
+                number = int(num_key)
+                prev_sha = pull_heads.get(num_key)
+                prev_draft = pull_draft.get(num_key)
+
+                # Build candidate outside events for this PR before mutating per-PR state.
+                is_brand_new = prev_sha is None and pr_id > prev_max_pull_id
+                if is_brand_new:
+                    ev_id = f"pull_request_opened:{pr_id}"
+                    if keep and ev_id not in seen and ev_id not in pending_ids:
+                        if not has_room():
+                            queue_filled = True
+                            break
+                        ensure_pr_tracked(number)
+                        pending_ids.add(ev_id)
+                        discovered.append(
+                            _build_event(
+                                ev_id,
+                                "pull_request_opened",
+                                number,
+                                actor,
+                                created_at,
+                                f"https://github.com/{repo}/pull/{number}",
+                            )
+                        )
+                    else:
+                        ensure_pr_tracked(number)
+                    pull_heads[num_key] = head_sha
+                    pull_draft[num_key] = is_draft
+                    reviews_baselined.add(number)
+                else:
+                    ensure_pr_tracked(number)
+                    if prev_sha is not None and prev_sha != head_sha:
+                        next_seq = pull_seq.get(num_key, 0) + 1
+                        move_id = f"pull_request_commits:{pr_id}:{next_seq}:{prev_sha}:{head_sha}"
+                        if keep and move_id not in seen and move_id not in pending_ids:
+                            if not has_room():
+                                queue_filled = True
+                                break
+                            pending_ids.add(move_id)
+                            discovered.append(
+                                _build_event(
+                                    move_id,
+                                    "pull_request_commits",
+                                    number,
+                                    actor,
+                                    updated_at,
+                                    f"https://github.com/{repo}/pull/{number}",
+                                )
+                            )
+                        pull_seq[num_key] = next_seq
+                        pull_heads[num_key] = head_sha
+                    else:
+                        pull_heads[num_key] = head_sha
+
+                    if prev_draft is True and not is_draft:
+                        next_rseq = pull_ready_seq.get(num_key, 0) + 1
+                        ready_id = f"pull_request_ready:{pr_id}:{next_rseq}"
+                        if keep and ready_id not in seen and ready_id not in pending_ids:
+                            if not has_room():
+                                queue_filled = True
+                                break
+                            pending_ids.add(ready_id)
+                            discovered.append(
+                                _build_event(
+                                    ready_id,
+                                    "pull_request_ready",
+                                    number,
+                                    actor,
+                                    updated_at,
+                                    f"https://github.com/{repo}/pull/{number}",
+                                )
+                            )
+                        pull_ready_seq[num_key] = next_rseq
+                        pull_draft[num_key] = is_draft
+                        ready_emitted_prs.add(number)
+                    else:
+                        pull_draft[num_key] = is_draft
+
+                valid_pulls_seen[number] = updated_at
+                if pr.get("state") == "open":
+                    if number in current_open_seen:
+                        current_open_seen.remove(number)
+                    current_open_seen.insert(0, number)
+                else:
+                    closed_this_poll.add(number)
+
+                if pr_id > new_max_pull_id:
+                    new_max_pull_id = pr_id
+                if updated_at > new_max_pull_upd:
+                    new_max_pull_upd = updated_at
+
+                if pull_rev_checked.get(num_key) != updated_at:
+                    prs_with_updated_timestamp.add(number)
+                    if number not in prs_to_check_reviews:
+                        prs_to_check_reviews.append(number)
+
+            merged_open = list(current_open_seen)
+            for existing_open in open_prs:
+                if existing_open not in merged_open and existing_open not in closed_this_poll:
+                    merged_open.append(existing_open)
+            open_prs = merged_open
+            working["open_pr_numbers"] = open_prs
+
+            # Only commit pulls ETag and max_pull_id if every PR item in the response was consumed.
+            if not queue_filled:
+                if new_etag:
+                    etags["pulls"] = new_etag
+                wm["max_pull_id"] = new_max_pull_id
+                wm["max_pull_updated_at"] = new_max_pull_upd
             else:
-                closed_this_poll.add(number)
+                etags.pop("pulls", None)
+                wm["max_pull_updated_at"] = new_max_pull_upd
+        else:
+            if new_etag:
+                etags["pulls"] = new_etag
 
-            if pr_id > new_max_pull_id:
-                new_max_pull_id = pr_id
-            if updated_at > new_max_pull_upd:
-                new_max_pull_upd = updated_at
+        if not queue_filled:
+            for open_num in open_prs[:MAX_OPEN_PR_REVIEWS_POLLED]:
+                if open_num not in prs_to_check_reviews:
+                    prs_to_check_reviews.append(open_num)
 
-            num_key = str(number)
-            prev_sha = pull_heads.get(num_key)
-            prev_draft = pull_draft.get(num_key)
+    # 2. Issues (processed in ascending id order; stop before unqueued item if queue fills)
+    if not queue_filled and has_room():
+        prev_max_issue_id = int(wm["max_issue_id"])  # type: ignore[arg-type]
+        issues_ep = f"repos/{repo}/issues?state=all&sort=created&direction=desc&per_page={PER_PAGE}"
 
-            if prev_sha is None and pr_id > prev_max_pull_id:
-                ev_id = f"pull_request_opened:{pr_id}"
-                if keep:
-                    record_event(
+        def stop_issues(item: dict[str, object]) -> bool:
+            return prev_max_issue_id > 0 and _pos_int(item.get("id")) <= prev_max_issue_id
+
+        i_changed, i_etag, issue_items, poll_hint, i_skip = _fetch_paginated_list(
+            issues_ep,
+            etags.get("issues"),
+            stop_issues,
+        )
+        server_poll = max(server_poll, poll_hint)
+        skipped += i_skip
+        if i_changed:
+            parsed_issues: list[tuple[int, int, str, bool, bool, str | None]] = []
+            for raw_item in issue_items:
+                try:
+                    item = _item_dict(raw_item)
+                    item_id = _pos_int(item.get("id"))
+                    number = _pos_int(item.get("number"))
+                    created_at = _iso_utc(item.get("created_at"))
+                    is_pr_item = "pull_request" in item and item["pull_request"] is not None
+                    keep, actor = (False, None) if is_pr_item else _classify_actor(item.get("user"), own_login, include_own)
+                except MalformedItemError:
+                    skipped += 1
+                    continue
+                parsed_issues.append((item_id, number, created_at, is_pr_item, keep, actor))
+
+            parsed_issues.sort(key=lambda t: t[0])
+            new_max_issue_id = prev_max_issue_id
+            for item_id, number, created_at, is_pr_item, keep, actor in parsed_issues:
+                if is_pr_item:
+                    ensure_pr_tracked(number)
+                    if item_id > new_max_issue_id:
+                        new_max_issue_id = item_id
+                    continue
+                ev_id = f"issue_opened:{item_id}"
+                if keep and ev_id not in seen and ev_id not in pending_ids:
+                    if not has_room():
+                        queue_filled = True
+                        break
+                    pending_ids.add(ev_id)
+                    discovered.append(
                         _build_event(
                             ev_id,
-                            "pull_request_opened",
+                            "issue_opened",
                             number,
                             actor,
                             created_at,
-                            f"https://github.com/{repo}/pull/{number}",
+                            f"https://github.com/{repo}/issues/{number}",
                         )
                     )
-                else:
-                    seen.add(ev_id)
-                # Brand-new PR created after baseline has no pre-baseline reviews.
-                reviews_baselined.add(number)
-            else:
-                if prev_sha is not None and prev_sha != head_sha:
-                    seq = pull_seq.get(num_key, 0) + 1
-                    pull_seq[num_key] = seq
-                    move_id = f"pull_request_commits:{pr_id}:{seq}:{prev_sha}:{head_sha}"
-                    if keep:
-                        record_event(
-                            _build_event(
-                                move_id,
-                                "pull_request_commits",
-                                number,
-                                actor,
-                                updated_at,
-                                f"https://github.com/{repo}/pull/{number}",
-                            )
-                        )
-                    else:
-                        seen.add(move_id)
-                if prev_draft is True and not is_draft:
-                    rseq = pull_ready_seq.get(num_key, 0) + 1
-                    pull_ready_seq[num_key] = rseq
-                    ready_id = f"pull_request_ready:{pr_id}:{rseq}"
-                    ready_emitted_prs.add(number)
-                    if keep:
-                        record_event(
-                            _build_event(
-                                ready_id,
-                                "pull_request_ready",
-                                number,
-                                actor,
-                                updated_at,
-                                f"https://github.com/{repo}/pull/{number}",
-                            )
-                        )
-                    else:
-                        seen.add(ready_id)
+                if item_id > new_max_issue_id:
+                    new_max_issue_id = item_id
 
-            pull_heads[num_key] = head_sha
-            pull_draft[num_key] = is_draft
+            wm["max_issue_id"] = new_max_issue_id
+            if not queue_filled and i_etag:
+                etags["issues"] = i_etag
+            elif queue_filled:
+                etags.pop("issues", None)
+        elif i_etag:
+            etags["issues"] = i_etag
 
-            if pull_rev_checked.get(num_key) != updated_at:
-                prs_with_updated_timestamp.add(number)
-                if number not in prs_to_check_reviews:
-                    prs_to_check_reviews.append(number)
+    # 3. Issue and pull request reopened events (processed in ascending id order)
+    if not queue_filled and has_room():
+        prev_max_ev_id = int(wm["max_issue_event_id"])  # type: ignore[arg-type]
+        ie_ep = f"repos/{repo}/issues/events?per_page={PER_PAGE}"
 
-        merged_open = list(current_open_seen)
-        for existing_open in open_prs:
-            if existing_open not in merged_open and existing_open not in closed_this_poll:
-                merged_open.append(existing_open)
-        open_prs = merged_open[:MAX_TRACKED_PULLS]
+        def stop_ie(item: dict[str, object]) -> bool:
+            return prev_max_ev_id > 0 and _pos_int(item.get("id")) <= prev_max_ev_id
 
-    for open_num in open_prs[:MAX_OPEN_PR_REVIEWS_POLLED]:
-        if open_num not in prs_to_check_reviews:
-            prs_to_check_reviews.append(open_num)
+        ie_changed, ie_etag, ie_items, poll_hint, ie_skip = _fetch_paginated_list(
+            ie_ep,
+            etags.get("issue_events"),
+            stop_ie,
+        )
+        server_poll = max(server_poll, poll_hint)
+        skipped += ie_skip
+        if ie_changed:
+            parsed_ie: list[tuple[int, str, str | None, int | None, bool, bool, str | None]] = []
+            for raw_item in ie_items:
+                try:
+                    item = _item_dict(raw_item)
+                    ev_num_id = _pos_int(item.get("id"))
+                    created_at = _iso_utc(item.get("created_at"))
+                    ev_name_obj = item.get("event")
+                    ev_name = ev_name_obj if isinstance(ev_name_obj, str) else None
+                    if ev_name not in ("reopened", "ready_for_review"):
+                        parsed_ie.append((ev_num_id, created_at, None, None, False, False, None))
+                        continue
+                    issue_obj = _item_dict(item.get("issue"))
+                    number = _pos_int(issue_obj.get("number"))
+                    is_pr = ("pull_request" in issue_obj and issue_obj["pull_request"] is not None) or (number in known_prs)
+                    actor_obj = item.get("actor") if "actor" in item else item.get("user")
+                    keep, actor = _classify_actor(actor_obj, own_login, include_own)
+                except MalformedItemError:
+                    skipped += 1
+                    continue
+                parsed_ie.append((ev_num_id, created_at, ev_name, number, is_pr, keep, actor))
 
-    wm["max_pull_id"] = new_max_pull_id
-    wm["max_pull_updated_at"] = new_max_pull_upd
-    working["open_pr_numbers"] = open_prs
-
-    # 2. Issues (issue_opened and PR number discovery)
-    prev_max_issue_id = int(wm["max_issue_id"])  # type: ignore[arg-type]
-    issues_ep = f"repos/{repo}/issues?state=all&sort=created&direction=desc&per_page={PER_PAGE}"
-
-    def stop_issues(item: dict[str, object]) -> bool:
-        return prev_max_issue_id > 0 and _pos_int(item.get("id")) <= prev_max_issue_id
-
-    i_changed, i_etag, issue_items, poll_hint, i_skip = _fetch_paginated_list(
-        issues_ep,
-        etags.get("issues"),
-        stop_issues,
-    )
-    server_poll = max(server_poll, poll_hint)
-    skipped += i_skip
-    if i_etag:
-        etags["issues"] = i_etag
-    if i_changed:
-        new_max_issue_id = prev_max_issue_id
-        for raw_item in issue_items:
-            try:
-                item = _item_dict(raw_item)
-                item_id = _pos_int(item.get("id"))
-                number = _pos_int(item.get("number"))
-                created_at = _iso_utc(item.get("created_at"))
-                is_pr_item = "pull_request" in item and item["pull_request"] is not None
-                keep, actor = (False, None) if is_pr_item else _classify_actor(item.get("user"), own_login, include_own)
-            except MalformedItemError:
-                skipped += 1
-                continue
-            if item_id > new_max_issue_id:
-                new_max_issue_id = item_id
-            if is_pr_item:
-                known_prs.add(number)
-                continue
-            ev_id = f"issue_opened:{item_id}"
-            if keep:
-                record_event(
-                    _build_event(
-                        ev_id,
-                        "issue_opened",
-                        number,
-                        actor,
-                        created_at,
-                        f"https://github.com/{repo}/issues/{number}",
-                    )
-                )
-            else:
-                seen.add(ev_id)
-        wm["max_issue_id"] = new_max_issue_id
-
-    # 3. Issue and pull request reopened (and fallback ready_for_review) events
-    prev_max_ev_id = int(wm["max_issue_event_id"])  # type: ignore[arg-type]
-    ie_ep = f"repos/{repo}/issues/events?per_page={PER_PAGE}"
-
-    def stop_ie(item: dict[str, object]) -> bool:
-        return prev_max_ev_id > 0 and _pos_int(item.get("id")) <= prev_max_ev_id
-
-    ie_changed, ie_etag, ie_items, poll_hint, ie_skip = _fetch_paginated_list(
-        ie_ep,
-        etags.get("issue_events"),
-        stop_ie,
-    )
-    server_poll = max(server_poll, poll_hint)
-    skipped += ie_skip
-    if ie_etag:
-        etags["issue_events"] = ie_etag
-    if ie_changed:
-        new_max_ev_id = prev_max_ev_id
-        for raw_item in ie_items:
-            try:
-                item = _item_dict(raw_item)
-                ev_num_id = _pos_int(item.get("id"))
-                created_at = _iso_utc(item.get("created_at"))
-                ev_name = item.get("event")
-                if ev_name not in ("reopened", "ready_for_review"):
+            parsed_ie.sort(key=lambda t: t[0])
+            new_max_ev_id = prev_max_ev_id
+            for ev_num_id, created_at, ev_name, number, is_pr, keep, actor in parsed_ie:
+                if ev_name is None or number is None:
                     if ev_num_id > new_max_ev_id:
                         new_max_ev_id = ev_num_id
                     continue
-                issue_obj = _item_dict(item.get("issue"))
-                number = _pos_int(issue_obj.get("number"))
-                actor_obj = item.get("actor") if "actor" in item else item.get("user")
-                keep, actor = _classify_actor(actor_obj, own_login, include_own)
-            except MalformedItemError:
-                skipped += 1
-                continue
-
-            if ev_num_id > new_max_ev_id:
-                new_max_ev_id = ev_num_id
-
-            if ev_name == "ready_for_review":
-                known_prs.add(number)
-                num_key = str(number)
-                if number in ready_emitted_prs or pull_draft.get(num_key) is False:
-                    continue
-                rseq = pull_ready_seq.get(num_key, 0) + 1
-                pull_ready_seq[num_key] = rseq
-                pull_draft[num_key] = False
-                ready_emitted_prs.add(number)
-                ev_id = f"pull_request_ready:ev{ev_num_id}:{rseq}"
-                url = f"https://github.com/{repo}/pull/{number}"
-                if keep:
-                    record_event(_build_event(ev_id, "pull_request_ready", number, actor, created_at, url))
+                if ev_name == "ready_for_review":
+                    ensure_pr_tracked(number)
+                    num_key = str(number)
+                    if number not in ready_emitted_prs and pull_draft.get(num_key) is not False:
+                        next_rseq = pull_ready_seq.get(num_key, 0) + 1
+                        ev_id = f"pull_request_ready:ev{ev_num_id}:{next_rseq}"
+                        if keep and ev_id not in seen and ev_id not in pending_ids:
+                            if not has_room():
+                                queue_filled = True
+                                break
+                            pending_ids.add(ev_id)
+                            discovered.append(
+                                _build_event(
+                                    ev_id,
+                                    "pull_request_ready",
+                                    number,
+                                    actor,
+                                    created_at,
+                                    f"https://github.com/{repo}/pull/{number}",
+                                )
+                            )
+                        pull_ready_seq[num_key] = next_rseq
+                        pull_draft[num_key] = False
+                        ready_emitted_prs.add(number)
                 else:
-                    seen.add(ev_id)
-                continue
+                    if is_pr:
+                        ensure_pr_tracked(number)
+                        kind = "pull_request_reopened"
+                        url = f"https://github.com/{repo}/pull/{number}"
+                    else:
+                        kind = "issue_reopened"
+                        url = f"https://github.com/{repo}/issues/{number}"
+                    ev_id = f"{kind}:{ev_num_id}"
+                    if keep and ev_id not in seen and ev_id not in pending_ids:
+                        if not has_room():
+                            queue_filled = True
+                            break
+                        pending_ids.add(ev_id)
+                        discovered.append(_build_event(ev_id, kind, number, actor, created_at, url))
 
-            is_pr = ("pull_request" in issue_obj and issue_obj["pull_request"] is not None) or (number in known_prs)
-            if is_pr:
-                known_prs.add(number)
-                kind = "pull_request_reopened"
-                url = f"https://github.com/{repo}/pull/{number}"
-            else:
-                kind = "issue_reopened"
-                url = f"https://github.com/{repo}/issues/{number}"
-            ev_id = f"{kind}:{ev_num_id}"
-            if keep:
-                record_event(_build_event(ev_id, kind, number, actor, created_at, url))
-            else:
-                seen.add(ev_id)
-        wm["max_issue_event_id"] = new_max_ev_id
+                if ev_num_id > new_max_ev_id:
+                    new_max_ev_id = ev_num_id
 
-    # 4. Comments on issues and pull requests
-    prev_max_ic_id = int(wm["max_issue_comment_id"])  # type: ignore[arg-type]
-    ic_ep = f"repos/{repo}/issues/comments?sort=created&direction=desc&per_page={PER_PAGE}"
+            wm["max_issue_event_id"] = new_max_ev_id
+            if not queue_filled and ie_etag:
+                etags["issue_events"] = ie_etag
+            elif queue_filled:
+                etags.pop("issue_events", None)
+        elif ie_etag:
+            etags["issue_events"] = ie_etag
 
-    def stop_ic(item: dict[str, object]) -> bool:
-        return prev_max_ic_id > 0 and _pos_int(item.get("id")) <= prev_max_ic_id
+    # 4. Comments on issues and pull requests (processed in ascending id order)
+    if not queue_filled and has_room():
+        prev_max_ic_id = int(wm["max_issue_comment_id"])  # type: ignore[arg-type]
+        ic_ep = f"repos/{repo}/issues/comments?sort=created&direction=desc&per_page={PER_PAGE}"
 
-    ic_changed, ic_etag, ic_items, poll_hint, ic_skip = _fetch_paginated_list(
-        ic_ep,
-        etags.get("issue_comments"),
-        stop_ic,
-    )
-    server_poll = max(server_poll, poll_hint)
-    skipped += ic_skip
-    if ic_etag:
-        etags["issue_comments"] = ic_etag
-    if ic_changed:
-        new_max_ic_id = prev_max_ic_id
-        for raw_item in ic_items:
-            try:
-                item = _item_dict(raw_item)
-                cid = _pos_int(item.get("id"))
-                created_at = _iso_utc(item.get("created_at"))
-                html_url = item.get("html_url")
-                number = _extract_number_from_urls(item.get("issue_url"), ISSUE_URL_NUM_RE, html_url)
-                keep, actor = _classify_actor(item.get("user"), own_login, include_own)
-            except MalformedItemError:
-                skipped += 1
-                continue
-            if cid > new_max_ic_id:
-                new_max_ic_id = cid
-            html_indicates_pr = isinstance(html_url, str) and bool(re.search(r"/pull/\d+(?:$|[#/?])", html_url))
-            is_pr = (number in known_prs) or html_indicates_pr or ("pull_request_url" in item)
-            if is_pr:
-                known_prs.add(number)
-                kind = "pull_request_comment"
-                url = f"https://github.com/{repo}/pull/{number}#issuecomment-{cid}"
-            else:
-                kind = "issue_comment"
-                url = f"https://github.com/{repo}/issues/{number}#issuecomment-{cid}"
-            ev_id = f"{kind}:{cid}"
-            if keep:
-                record_event(_build_event(ev_id, kind, number, actor, created_at, url))
-            else:
-                seen.add(ev_id)
-        wm["max_issue_comment_id"] = new_max_ic_id
+        def stop_ic(item: dict[str, object]) -> bool:
+            return prev_max_ic_id > 0 and _pos_int(item.get("id")) <= prev_max_ic_id
 
-    # 5. Pull request review comments (inline comments in a review)
-    prev_max_rc_id = int(wm["max_review_comment_id"])  # type: ignore[arg-type]
-    rc_ep = f"repos/{repo}/pulls/comments?sort=created&direction=desc&per_page={PER_PAGE}"
+        ic_changed, ic_etag, ic_items, poll_hint, ic_skip = _fetch_paginated_list(
+            ic_ep,
+            etags.get("issue_comments"),
+            stop_ic,
+        )
+        server_poll = max(server_poll, poll_hint)
+        skipped += ic_skip
+        if ic_changed:
+            parsed_ic: list[tuple[int, int, str, bool, bool, str | None]] = []
+            for raw_item in ic_items:
+                try:
+                    item = _item_dict(raw_item)
+                    cid = _pos_int(item.get("id"))
+                    created_at = _iso_utc(item.get("created_at"))
+                    html_url = item.get("html_url")
+                    number = _extract_number_from_urls(item.get("issue_url"), ISSUE_URL_NUM_RE, html_url)
+                    keep, actor = _classify_actor(item.get("user"), own_login, include_own)
+                except MalformedItemError:
+                    skipped += 1
+                    continue
+                html_indicates_pr = isinstance(html_url, str) and bool(re.search(r"/pull/\d+(?:$|[#/?])", html_url))
+                is_pr = (number in known_prs) or html_indicates_pr or ("pull_request_url" in item)
+                parsed_ic.append((cid, number, created_at, is_pr, keep, actor))
 
-    def stop_rc(item: dict[str, object]) -> bool:
-        return prev_max_rc_id > 0 and _pos_int(item.get("id")) <= prev_max_rc_id
+            parsed_ic.sort(key=lambda t: t[0])
+            new_max_ic_id = prev_max_ic_id
+            for cid, number, created_at, is_pr, keep, actor in parsed_ic:
+                if is_pr:
+                    ensure_pr_tracked(number)
+                    kind = "pull_request_comment"
+                    url = f"https://github.com/{repo}/pull/{number}#issuecomment-{cid}"
+                else:
+                    kind = "issue_comment"
+                    url = f"https://github.com/{repo}/issues/{number}#issuecomment-{cid}"
+                ev_id = f"{kind}:{cid}"
+                if keep and ev_id not in seen and ev_id not in pending_ids:
+                    if not has_room():
+                        queue_filled = True
+                        break
+                    pending_ids.add(ev_id)
+                    discovered.append(_build_event(ev_id, kind, number, actor, created_at, url))
+                if cid > new_max_ic_id:
+                    new_max_ic_id = cid
 
-    rc_changed, rc_etag, rc_items, poll_hint, rc_skip = _fetch_paginated_list(
-        rc_ep,
-        etags.get("pull_comments"),
-        stop_rc,
-    )
-    server_poll = max(server_poll, poll_hint)
-    skipped += rc_skip
-    if rc_etag:
-        etags["pull_comments"] = rc_etag
-    if rc_changed:
-        new_max_rc_id = prev_max_rc_id
-        for raw_item in rc_items:
-            try:
-                item = _item_dict(raw_item)
-                cid = _pos_int(item.get("id"))
-                created_at = _iso_utc(item.get("created_at"))
-                number = _extract_number_from_urls(item.get("pull_request_url"), PULL_URL_NUM_RE, item.get("html_url"))
-                keep, actor = _classify_actor(item.get("user"), own_login, include_own)
-            except MalformedItemError:
-                skipped += 1
-                continue
-            if cid > new_max_rc_id:
-                new_max_rc_id = cid
-            known_prs.add(number)
-            ev_id = f"pull_request_review_comment:{cid}"
-            url = f"https://github.com/{repo}/pull/{number}#discussion_r{cid}"
-            if keep:
-                record_event(_build_event(ev_id, "pull_request_review_comment", number, actor, created_at, url))
-            else:
-                seen.add(ev_id)
-        wm["max_review_comment_id"] = new_max_rc_id
+            wm["max_issue_comment_id"] = new_max_ic_id
+            if not queue_filled and ic_etag:
+                etags["issue_comments"] = ic_etag
+            elif queue_filled:
+                etags.pop("issue_comments", None)
+        elif ic_etag:
+            etags["issue_comments"] = ic_etag
 
-    # 6. Reviews on open or updated pull requests (tail-page conditional polling + pre-baseline guard)
+    # 5. Pull request review comments (processed in ascending id order)
+    if not queue_filled and has_room():
+        prev_max_rc_id = int(wm["max_review_comment_id"])  # type: ignore[arg-type]
+        rc_ep = f"repos/{repo}/pulls/comments?sort=created&direction=desc&per_page={PER_PAGE}"
+
+        def stop_rc(item: dict[str, object]) -> bool:
+            return prev_max_rc_id > 0 and _pos_int(item.get("id")) <= prev_max_rc_id
+
+        rc_changed, rc_etag, rc_items, poll_hint, rc_skip = _fetch_paginated_list(
+            rc_ep,
+            etags.get("pull_comments"),
+            stop_rc,
+        )
+        server_poll = max(server_poll, poll_hint)
+        skipped += rc_skip
+        if rc_changed:
+            parsed_rc: list[tuple[int, int, str, bool, str | None]] = []
+            for raw_item in rc_items:
+                try:
+                    item = _item_dict(raw_item)
+                    cid = _pos_int(item.get("id"))
+                    created_at = _iso_utc(item.get("created_at"))
+                    number = _extract_number_from_urls(item.get("pull_request_url"), PULL_URL_NUM_RE, item.get("html_url"))
+                    keep, actor = _classify_actor(item.get("user"), own_login, include_own)
+                except MalformedItemError:
+                    skipped += 1
+                    continue
+                parsed_rc.append((cid, number, created_at, keep, actor))
+
+            parsed_rc.sort(key=lambda t: t[0])
+            new_max_rc_id = prev_max_rc_id
+            for cid, number, created_at, keep, actor in parsed_rc:
+                ensure_pr_tracked(number)
+                ev_id = f"pull_request_review_comment:{cid}"
+                url = f"https://github.com/{repo}/pull/{number}#discussion_r{cid}"
+                if keep and ev_id not in seen and ev_id not in pending_ids:
+                    if not has_room():
+                        queue_filled = True
+                        break
+                    pending_ids.add(ev_id)
+                    discovered.append(_build_event(ev_id, "pull_request_review_comment", number, actor, created_at, url))
+                if cid > new_max_rc_id:
+                    new_max_rc_id = cid
+
+            wm["max_review_comment_id"] = new_max_rc_id
+            if not queue_filled and rc_etag:
+                etags["pull_comments"] = rc_etag
+            elif queue_filled:
+                etags.pop("pull_comments", None)
+        elif rc_etag:
+            etags["pull_comments"] = rc_etag
+
+    # 6. Reviews on open or updated pull requests (guarded per PR by pull_max_review_id)
+    checked_review_prs: set[int] = set()
     for number in prs_to_check_reviews:
+        if queue_filled or not has_room():
+            queue_filled = True
+            break
+        ensure_pr_tracked(number)
         num_key = str(number)
         start_page = max(1, pull_rev_page.get(num_key, 1))
         cached_etag = etags.get(f"reviews:{number}:p{start_page}") or (
@@ -1594,16 +1667,13 @@ def _poll_once(
             force_recheck_on_304=(number in prs_with_updated_timestamp),
         )
         server_poll = max(server_poll, poll_hint)
-        pull_rev_page[num_key] = tail_page
-        _set_review_etag(etags, number, tail_page, r_etag)
 
-        # Reviews on any PR whose reviews were NOT fetched at baseline (e.g. a PR that was closed at
-        # baseline and later reopened, or open PR #26+ entering the top 25) must be strictly newer
-        # than the pre-baseline cutoff so pre-start reviews are never reported as new.
-        pr_cutoff = max(pull_base_upd.get(num_key, ""), baseline_cutoff)
+        pr_cutoff = pull_base_upd.get(num_key, "")
         was_baselined = number in reviews_baselined
+        prev_max_rid = pull_max_rev.get(num_key, 0)
 
         if r_changed:
+            parsed_revs: list[tuple[int, str, bool, str | None]] = []
             for raw_rev in r_items:
                 try:
                     rev = _item_dict(raw_rev)
@@ -1616,13 +1686,23 @@ def _poll_once(
                 except MalformedItemError:
                     skipped += 1
                     continue
+                parsed_revs.append((rid, submitted_at, keep, actor))
 
-                ev_id = f"pull_request_review:{rid}"
-                if not was_baselined and pr_cutoff and submitted_at <= pr_cutoff:
-                    seen.add(ev_id)
+            parsed_revs.sort(key=lambda t: t[0])
+            new_max_rid = prev_max_rid
+            for rid, submitted_at, keep, actor in parsed_revs:
+                if rid <= new_max_rid:
                     continue
-                if keep:
-                    record_event(
+                if not was_baselined and pr_cutoff and submitted_at <= pr_cutoff:
+                    new_max_rid = rid
+                    continue
+                ev_id = f"pull_request_review:{rid}"
+                if keep and ev_id not in seen and ev_id not in pending_ids:
+                    if not has_room():
+                        queue_filled = True
+                        break
+                    pending_ids.add(ev_id)
+                    discovered.append(
                         _build_event(
                             ev_id,
                             "pull_request_review",
@@ -1632,12 +1712,29 @@ def _poll_once(
                             f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}",
                         )
                     )
-                else:
-                    seen.add(ev_id)
-            reviews_baselined.add(number)
+                new_max_rid = rid
 
-        if number in valid_pulls_seen:
-            pull_rev_checked[num_key] = valid_pulls_seen[number]
+            pull_max_rev[num_key] = new_max_rid
+            if not queue_filled:
+                reviews_baselined.add(number)
+                pull_rev_page[num_key] = tail_page
+                _set_review_etag(etags, number, tail_page, r_etag)
+                if number in valid_pulls_seen:
+                    pull_rev_checked[num_key] = valid_pulls_seen[number]
+                checked_review_prs.add(number)
+            else:
+                pull_rev_page[num_key] = start_page
+                _set_review_etag(etags, number, start_page, None)
+        else:
+            pull_rev_page[num_key] = tail_page
+            _set_review_etag(etags, number, tail_page, r_etag)
+            if number in valid_pulls_seen:
+                pull_rev_checked[num_key] = valid_pulls_seen[number]
+            checked_review_prs.add(number)
+
+    if prs_with_updated_timestamp - checked_review_prs:
+        etags.pop("pulls", None)
+        wm["max_pull_updated_at"] = prev_max_pull_upd
 
     if discovered:
         discovered.sort(key=lambda e: (str(e["time"]), str(e["id"])))
@@ -1647,7 +1744,7 @@ def _poll_once(
     working["seen_ids"] = seen.to_list()
     working["known_pr_numbers"] = sorted(known_prs)
     working["reviews_baselined"] = sorted(reviews_baselined)
-    _bound_state(working)
+    _check_and_bound_state(working)
     return (working, server_poll, skipped)
 
 
@@ -1663,8 +1760,9 @@ def _failure_message(kind: str, pause: float) -> str:
 
 
 def _save_state_before_print(state_path: Path, state: dict[str, object]) -> None:
+    payload = _serialize_state(state)
     try:
-        _save_state(state_path, state)
+        _write_serialized_state(state_path, payload)
     except OSError as exc:
         raise StateWriteError("Failed to write state file.") from exc
 
@@ -1680,13 +1778,14 @@ def _emit_and_save(state_path: Path, state: dict[str, object], max_events: int) 
         seen.add(str(ev["id"]))
     next_state["seen_ids"] = seen.to_list()
     next_state["pending"] = rest
-    _bound_state(next_state)
+    # Validate capacity bounds BEFORE printing anything so StateFullError exits 8 cleanly.
+    payload = _serialize_state(next_state)
 
     # Print and flush BEFORE replacing the state file so a crash can repeat an event, never drop it.
     sys.stdout.write(json.dumps({"events": batch}, ensure_ascii=True) + "\n")
     sys.stdout.flush()
     try:
-        _save_state(state_path, next_state)
+        _write_serialized_state(state_path, payload)
     except Exception as exc:
         raise SaveAfterPrintError() from exc
     return EXIT_OK
@@ -1705,6 +1804,10 @@ def main(argv: list[str] | None = None) -> int:
         _load_state(ns.state_path)
         lock_fd = _acquire_state_lock_and_verify_writable(ns.state_path)
         state = _load_state(ns.state_path)
+
+        # When the waiting queue is already full, report from it at once and ask GitHub for nothing.
+        if len(state["pending"]) >= MAX_PENDING_EVENTS:  # type: ignore[arg-type]
+            return _emit_and_save(ns.state_path, state, ns.max_events)
 
         started = clock()
         deadline = (started + ns.max_wait) if ns.max_wait is not None else None
@@ -1787,6 +1890,9 @@ def main(argv: list[str] | None = None) -> int:
             if current_pending_count > 0:
                 if had_preexisting_pending and current_pending_count == prev_pending_count:
                     return _emit_and_save(ns.state_path, state, ns.max_events)
+                if current_pending_count >= MAX_PENDING_EVENTS:
+                    # Queue is full: report what we have right away and ask GitHub for nothing more.
+                    return _emit_and_save(ns.state_path, state, ns.max_events)
 
                 settle_wait = max(ns.settle, server_poll) if ns.settle > 0 or server_poll > 0 else 0.0
                 if settle_wait > 0:
@@ -1839,6 +1945,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("Events were printed, but saving the state file failed.\n")
         sys.stderr.flush()
         return EXIT_SAVE_AFTER_PRINT
+    except StateFullError as exc:
+        sys.stderr.write(f"{exc}\n")
+        sys.stderr.flush()
+        return EXIT_STATE_FULL
     except SignedOutError:
         sys.stderr.write("gh is not signed in; run 'gh auth login' first.\n")
         sys.stderr.flush()
