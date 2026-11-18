@@ -1105,6 +1105,116 @@ code {
   display: none;
 }
 
+/* The section about now, and the questions */
+
+.live {
+  max-width: 46rem;
+  margin-top: clamp(2rem, 5vh, 3rem);
+  padding: clamp(1.25rem, 4vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--surface);
+}
+
+.live[hidden],
+.live [hidden] {
+  display: none;
+}
+
+.live h3 {
+  font-size: 1.1875rem;
+  font-weight: 680;
+  letter-spacing: -0.015em;
+}
+
+.live h3::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.6rem;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 0.12em;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live > p {
+  margin-top: 0.4rem;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.live .plain {
+  margin-top: 1.25rem;
+  gap: 0.6rem;
+}
+
+.live .plain span,
+.live .plain time {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.live h4 {
+  margin-top: 1.5rem;
+  font-size: 0.9375rem;
+  font-weight: 680;
+}
+
+.changes {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+  font-size: 0.9375rem;
+}
+
+.changes li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.changes time {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.changes .link {
+  display: block;
+  min-height: 2.75rem;
+  padding-block: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.faq {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: clamp(1.5rem, 4vw, 2.5rem);
+  margin-top: clamp(2rem, 5vh, 3rem);
+}
+
+.faq > div {
+  min-width: 0;
+}
+
+.faq h3 {
+  font-size: 1.125rem;
+  font-weight: 680;
+  letter-spacing: -0.015em;
+}
+
+.faq p {
+  margin-top: 0.5rem;
+  color: var(--muted);
+}
+
 /* Timeline */
 
 .timeline {

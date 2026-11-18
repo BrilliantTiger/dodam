@@ -1,0 +1,62 @@
+# Dodam
+
+> {{description}}
+
+This file is the guide for AI agents. It is built together with the introduction page, from the same sources, each time the page is built. Last built: {{built}}.
+
+The introduction page, for people: {{pages}}.
+
+## Where Dodam stands
+
+- Charter: version {{charter_version}}, dated {{charter_date}}.
+- Step: "{{step_name}}" (step {{step_index}} of {{step_of}}). {{status}}.
+- The gate that ends this step: {{cap_plan}} {{gate_plan}}.{{gate_today}}
+- Benchmark tasks ready: {{tasks_ready}} of the first {{tasks_first}}.
+- Issues open for outside contributors: {{open_issues}}.
+
+Latest changes merged to main:
+
+{{changes}}
+
+Dates in this file are estimates from a schedule simulation, not promises. The plan's capacity is one subscription from each AI company in the plan. Today's conditions are one Claude subscription, shared with the owner's other work.
+
+## How an agent takes part
+
+1. Clone {{repo}} and read the file AGENTS.md in its root. It holds the working rules, written for agents.
+2. Pick an open issue labeled {{welcome}}: {{repo}}/issues?q=is%3Aopen+label%3A{{welcome}}. For a large change, open an issue that describes the problem or proposal first.
+3. Write a test that fails before your change, then the change that makes it pass.
+4. Send a pull request. An agent that did not write it reviews it in a fresh session, and it is judged by tests and benchmark numbers, exactly like the project's own work.
+
+## Rules an agent must keep
+
+{{rules}}
+- Do not include secrets, personal data or code you have no right to share.
+
+## Questions and short answers
+
+{{questions}}
+
+## The status file
+
+{{site}}status.json holds the values of the section above as JSON, for agents and for the open page, which reads it again from time to time. Fields, in version {{status_version}} of the file:
+
+- version: the version of this list of fields. A field is never renamed or removed without raising it.
+- built: when the page was last built, in UTC.
+- charter.version, charter.date: the charter's version and its date.
+- step.index, step.of: which step of the charter's schedule the project is in, counted from the first.
+- step.gate_plan: the date of the gate that ends the step, at the plan's capacity.
+- step.gate_today, step.gate_today_chance: the charter's median date for that gate under today's conditions and the chance, in percent, of reaching it by the plan's date; null where the charter gives none.
+- tasks.ready, tasks.first: benchmark tasks ready, and how many the first set has.
+- open_issues: issues open for outside contributors.
+- changes: the latest changes merged to main, newest first, each with date, title and url.
+- digest: changes when anything the page shows changes.
+
+## Addresses
+
+- [Charter, in Korean (the source of truth)]({{repo}}/blob/main/docs/charter.ko.md)
+- [Charter, in English]({{repo}}/blob/main/docs/charter.en.md)
+- [Working rules (AGENTS.md)]({{repo}}/blob/main/AGENTS.md)
+- [Issues open to outside contributors]({{repo}}/issues?q=is%3Aopen+label%3A{{welcome}})
+- [Security policy]({{repo}}/security/policy)
+- [Repository]({{repo}})
+- [Status file]({{site}}status.json)
