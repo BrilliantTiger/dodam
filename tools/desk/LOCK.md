@@ -22,7 +22,7 @@ This is the whole list.
 python3 tools/desk/start.py --coordinator ADDRESS
 ```
 
-The command is run in the terminal where the desk is to be watched. It checks everything it relies on, then runs the relay in that terminal, which starts Claude Code with the closed list once for every item, one session at a time. A fresh session takes in about 10,100 tokens before it does anything, the standing instructions included (measured once on the desk's model, with the real instructions).
+The command is run in the terminal where the desk is to be watched. It checks everything it relies on, then runs the relay in that terminal, which starts Claude Code with the closed list once for every item, one session at a time. A fresh session takes in about 10,200 tokens before it does anything, the standing instructions included (measured once on the desk's model, with the real instructions).
 
 Without `--state` the state folder is named `dodam-desk-` followed by the account's number and lies in the computer's folder for all accounts (the folder `Shared` beside the home folders), or in `/var/tmp` where there is no such folder. It is never in the home folder, because a session is shown paths of the state folder and the home folder's path names the account.
 
@@ -137,7 +137,7 @@ Every text that leaves passes it in one place: an answer, the label, the report 
 | Tab, line break, space | Layout |
 | The printable characters of ASCII: `A` to `Z`, `a` to `z`, `0` to `9` and its punctuation | English, and code |
 | `¡` `¿` `ª` `º` `«` `»` and `Á É Í Ñ Ó Ú Ü á é í ñ ó ú ü` | Spanish |
-| `×` `≤` `≥` `•` `※` | What ordinary answers use: the times sign, at most and at least, the bullet, the reference mark |
+| `×` `−` `≤` `≥` `•` `※` | What ordinary answers use: the times sign, the minus sign, at most and at least, the bullet, the reference mark |
 | `·` | It is in the desk's own name |
 | `–` `—` `‘` `’` `“` `”` `…` `→` | The usual marks of printed text |
 | `、` `。` `々` `「` `」` `『` `』` `【` `】` `〜` | Japanese punctuation, with the lenticular brackets and the wave dash |
@@ -170,13 +170,13 @@ Cost is counted in weighted units. The service reports four counts for every res
 | One session: cost | 60,000 units | The relay ends the session at the first response past it. |
 | One turn: cost | 196,250 units | Follows from the numbers above; see below. |
 | One item in a day: sessions | 6 | Checked when a session starts. |
-| One account in a day: sessions | 8 | Checked when a session starts. A session is charged to the account whose arrival set it off: the newest arrival it handles. |
+| One account in a day: sessions | 8 | Checked when a session starts. A session is charged to the account whose arrival set it off: the newest arrival it handles. A session that the service did not let in, because it refused the desk's sign-in, counts against no account's share and no item's sessions of a day, and holds neither the account nor the item back: the account did nothing. It still counts among the sessions of the day, and after three refusals in a row nothing is started. |
 | After a session that the relay had to end | no session for that item, and none for the account that set it off, for 24 hours | Checked when a session starts. Nobody else is held back. |
 | All items in a day: sessions | 40 | Checked when a session starts. |
 | All items in a day: cost | 800,000 units | Checked when a session starts, with the whole of what the session may cost set aside. |
 | Arrivals kept for later | 100, one for an item, 5 for an account | The relay's kept list. |
 
-**One turn.** The most a session can hold is the sum of what can enter it: 8,000 tokens for Claude Code's own instructions and the tools, and the standing instructions at 12,000 bytes (together 10,141 tokens measured, with the real instructions of 10,886 bytes), the one message that starts it (at most 4,000 bytes), what the reading calls hand over (48,000 bytes), the short replies of the other tool calls (30 of at most 500 bytes), and its own earlier responses (10 of at most 5,000 tokens): 137,000, counting a byte as a token, which is never too few. The dearest thing a turn can do with it is to write all of it to the cache anew, at 1.25, and to write one full response, at 5: 137,000 × 1.25 + 5,000 × 5 = 196,250 units. The largest files of the repository are read like any other, a part at a time: 400 lines of them are charged what those lines hold, and a part that does not fit in what is left is refused.
+**One turn.** The most a session can hold is the sum of what can enter it: 8,000 tokens for Claude Code's own instructions and the tools, and the standing instructions at 12,000 bytes (together 10,195 tokens measured, with the real instructions of 11,067 bytes), the one message that starts it (at most 4,000 bytes), what the reading calls hand over (48,000 bytes), the short replies of the other tool calls (30 of at most 500 bytes), and its own earlier responses (10 of at most 5,000 tokens): 137,000, counting a byte as a token, which is never too few. The dearest thing a turn can do with it is to write all of it to the cache anew, at 1.25, and to write one full response, at 5: 137,000 × 1.25 + 5,000 × 5 = 196,250 units. The largest files of the repository are read like any other, a part at a time: 400 lines of them are charged what those lines hold, and a part that does not fit in what is left is refused.
 
 The arithmetic checks itself while the desk runs. The first response of a session can take in only Claude Code's own instructions and tools, the standing instructions and the first message: at most 8,000 + 12,000 + 4,000 = 24,000. When a first response reports more input than that, the relay ends the session, tells the coordinator that the desk itself is not working, keeps the arrival, and starts nothing more until the desk is started again.
 

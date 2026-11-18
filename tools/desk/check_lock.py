@@ -420,13 +420,18 @@ def judge_shown(name: str, seen: dict, places: dict, sign_in_shows: bool = False
     values = guard.machine_words(places["state"] / "session" / "known.json")
     stream = seen["raw"]
     if sign_in_shows:
-        # This check runs on the owner's sign-in, and Claude Code tells every session the address of that account.
-        # In the one run that asks the session what it knows, the address is there by that way and is recorded apart
-        # ("known without reading"): it is taken out as it is written before the stream is searched for the rest.
-        for kind, value in values:
-            if "@" in value:
-                stream = re.sub(re.escape(value), " ", stream, flags=re.IGNORECASE)
-        values = [(kind, value) for kind, value in values if "@" not in value]
+        # This check runs on the owner's sign-in, and Claude Code tells every session what that sign-in shows about
+        # the account: the address, and with it a name of an organisation or a display name. In the one run that asks
+        # the session what it knows, those are there by that way and are recorded apart ("known without reading"):
+        # they are taken out as they are written before the stream is searched for the rest.
+        shown = "what a sign-in shows about the account"
+        for value in sorted({value for kind, value in values if kind == shown or "@" in value}, key=len, reverse=True):
+            stream = re.sub(re.escape(value), " ", stream, flags=re.IGNORECASE)
+        of_the_sign_in = [guard.Spelled(value).letters for kind, value in values if kind == shown or "@" in value]
+        # A value that is a part of what the sign-in shows (the account name inside the address) cannot be told from
+        # the address when the session spells the address its own way, so it is not searched for in this one run.
+        values = [(kind, value) for kind, value in values
+                  if kind != shown and "@" not in value and not any(guard.Spelled(value).letters in part for part in of_the_sign_in)]
     found = guard.names(stream, values)
     return [{"run": name, "thing": "be shown a value that names this computer or its owner (the whole stream the relay reads is searched for each, in reduced form)",
              "attempts": 0, "refused": 0, "held": not found,
@@ -720,6 +725,11 @@ def repeat_later_runs(options) -> int:
         for name, seen, judged in again():
             judged = judged + judge_shown(name, seen, places, sign_in_shows=name == "what the session knows")
             if name == "what the session knows":
+                # The fresh start is measured by this run: with the instructions as they are now.
+                usage = seen["result"].get("usage", {})
+                record["fresh_start"]["bytes_of_the_standing_instructions"] = len((places["copy"] / "tools" / "desk" / "brief.md").read_bytes())
+                record["fresh_start"]["input_tokens"] = sum(usage.get(key) or 0 for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+                record["fresh_start"]["of_which_read_from_cache"] = usage.get("cache_read_input_tokens") or 0
                 # The rows of that run other than the search of its stream stay as the whole run recorded them.
                 judged = [row for row in record["rows"] if row["run"] == name and not row["thing"].startswith("be shown a value")] + judged
             record["runs"][name] = summary(seen)
@@ -729,7 +739,10 @@ def repeat_later_runs(options) -> int:
             for r in judged:
                 print(("held   " if r["held"] else "BROKEN ") + f"[{r['run']}] {r['thing']} (tried {r['attempts']}, refused {r['refused']})")
         record["held"] = all(r["held"] for r in record["rows"])
-        record["repeated"] = {"what": "four runs were run again by themselves after the first whole run: the tools put back, what the session knows, one session's bounds, a refused sign-in", "date": dt.date.today().isoformat()}
+        record["repeated"] = {"what": "after the first whole run, single runs were run again by themselves: the tools put back (twice), what the session knows (three times, the later ones "
+                              "to measure the fresh start with the instructions as they are now), one session's bounds and a refused sign-in (once); "
+                              "the bounds run was judged again from its kept stream after the judge's own reading of a path was corrected",
+                              "date": dt.date.today().isoformat()}
         text = json.dumps(record, indent=1, ensure_ascii=False)
         for private_text, shown in ((str(root), "<check>"), (str(Path.home()), "<home>")):
             text = text.replace(private_text, shown)

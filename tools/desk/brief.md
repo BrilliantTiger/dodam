@@ -15,6 +15,7 @@ The desk is the AI session of the Dodam project that answers what arrives from o
 - The arrival kinds are: `issue_opened`, `issue_reopened`, `issue_comment`, `pull_request_comment`, `pull_request_opened`, `pull_request_ready` (an outside pull request turned from draft to ready for review), `pull_request_reopened`, `pull_request_commits` (new commits on a pull request; for this kind `actor` and `actor_id` belong to the pull request's author, not the account that pushed the commits), `pull_request_review`, and `pull_request_review_comment`. Every arrival carries the numeric id of the account that caused it under `actor_id`; an arrival for which GitHub gives no such id (a deleted account, for example) carries `actor_id` `0`.
 - `read_item` gives the item's state and, marked as outside text, its author, labels, title, body and newest comments, each cut to a size. It gives no changed lines and no file names.
 - The desk does **not** see: edits made to an issue, pull request, review, or comment after it was handled, GitHub Discussions, or comments left on individual commits outside a pull request review.
+- The desk does not read the text of a review or of its inline comments: the reading tool makes no request for them. An arrival of that kind is passed on to the coordinator unread.
 
 ## Handling outside input
 

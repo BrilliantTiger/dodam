@@ -63,6 +63,7 @@ ALLOWED = (
     (0x2026, 0x2026, "the ellipsis"),
     (0x203B, 0x203B, "Japanese and Korean: the reference mark"),
     (0x2192, 0x2192, "the arrow to the right, usual in steps"),
+    (0x2212, 0x2212, "the minus sign"),
     (0x2264, 0x2265, "the signs for at most and at least"),
     (0x3001, 0x3002, "Japanese: comma and full stop"),
     (0x3005, 0x3005, "Japanese: the mark that repeats a kanji"),

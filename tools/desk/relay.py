@@ -317,13 +317,14 @@ class Relay:
         if sum(s["reserved"] if s["charged"] is None else s["charged"] for s in sessions) + reservation(spending) > spending["units_per_day"]:
             return "what a day may cost"
         if number is not None:
-            on_item = [s for s in sessions if s["number"] == number]
+            # A session that the service did not let in was nobody's doing: it counts against no item and no account.
+            on_item = [s for s in sessions if s["number"] == number and s.get("let_in", True)]
             if len(on_item) >= spending["sessions_per_item_per_day"]:
                 return "sessions for one item in a day"
             if any(s.get("ended") for s in on_item):
                 return "an item whose session had to be ended"
         if account is not None:
-            for_account = [s for s in sessions if s.get("account") == account]
+            for_account = [s for s in sessions if s.get("account") == account and s.get("let_in", True)]
             if any(s.get("ended") for s in for_account):
                 return "an account whose session had to be ended"
             if len(for_account) >= spending["sessions_per_account_per_day"]:
@@ -385,6 +386,7 @@ class Relay:
                         # The four counts as the service gave them, so that real days can replace the estimate of a day's cost.
                         session["counts"] = counts
                         session["ended"] = bool(ended)
+                        session["let_in"] = bool(entry.get("let_in", True))
         except tools.Refused:
             pass
 
@@ -582,6 +584,7 @@ class Relay:
         spending = self.spending
         if seen["refused_sign_in"]:
             # Nothing was spent: the service did not let the session in.
+            entry["let_in"] = False
             self.settle(entry, seen["counts"], 1)
             self.failures += 1
             self.show("relay: the service refused the desk's sign-in")
