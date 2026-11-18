@@ -4,6 +4,11 @@
     python3 tools/site/sweep.py                 the full check (what the branch check runs)
     python3 tools/site/sweep.py --quick         every fourth width, for a fast local look
     python3 tools/site/sweep.py --shots DIR     also save screenshots of the named sizes
+    python3 tools/site/sweep.py --desk WAYS     the site was built with these ways to the desk open
+                                                (github or github,live): the section about talking in
+                                                real time must show exactly those ways as open and
+                                                offer a link to reach the desk for those only; without
+                                                this option both ways must show as closed
 
 For each of the four languages it checks, at every width from 320 to 1100 CSS px in steps of
 8 px, once very tall (9:21) and once nearly square:
@@ -196,6 +201,18 @@ LIVE = """async () => {
 }"""
 
 
+# The section about talking with the project's AI in real time: which ways it offers a link to reach the
+# desk for, and that the steps of each way are numbered.
+DESK = """() => {
+  const section = document.querySelector('#desk');
+  const marks = [...document.querySelectorAll('#desk .steps')].map(list =>
+    [...list.children].map(item => getComputedStyle(item, '::before').content.replace(/"/g, '')).join(','));
+  return {there: !!section, ways: document.querySelectorAll('#desk .card').length, marks,
+          links: [...document.querySelectorAll('#desk .card a[href]')].map(a => a.href),
+          question: [...document.querySelectorAll('#faq h3')].length};
+}"""
+
+
 # Measurement asks first. Every request to another host is answered here with an empty script, so the
 # check itself never reaches Google; it only records what the page tried to reach, and when.
 BAR = """() => {
@@ -354,6 +371,7 @@ def main() -> int:
     parser.add_argument("--shots")
     parser.add_argument("--site", help="the built site to check (default: the committed site/)")
     parser.add_argument("--consent", action="store_true", help="the site was built with a measurement ID: check that it asks first")
+    parser.add_argument("--desk", default="", help="the ways to the desk the site was built with: github or github,live")
     args = parser.parse_args()
     global SITE
     SITE = Path(args.site).resolve() if args.site else SITE
@@ -381,6 +399,17 @@ def main() -> int:
                 report(f"{lang} section about now", page.evaluate(LIVE))
                 if not any(url.endswith("/status.json") for url in asked):
                     report(f"{lang} section about now", ["the script did not read the status file"])
+            ways, desk = [way for way in args.desk.split(",") if way], page.evaluate(DESK)
+            if not desk["there"] or desk["ways"] != 2:
+                report(f"{lang} talking in real time", [f"the page shows {desk['ways']} ways to the desk instead of both"])
+            offered = [way for way, mark in (("github", "/issues/new"), ("live", "/issues/new?template=")) if any(link.endswith(mark) or (way == "live" and mark in link) for link in desk["links"])]
+            if offered != ways:
+                report(f"{lang} talking in real time", [f"the page offers a link to reach the desk for {offered or 'no way'}, and it was built with {ways or 'no way'} open"])
+            if desk["question"] != 7:
+                report(f"{lang} talking in real time", [f"the page asks {desk['question']} questions"])
+            for marks in desk["marks"]:   # each step shows the list's counter, not the dash of an unordered list
+                if set(marks.split(",")) != {"counter(step)"}:
+                    report(f"{lang} talking in real time", [f"the steps of a way are not numbered ({marks})"])
             elsewhere = sorted({url for url in asked if not url.startswith(base)})
             if elsewhere:
                 report(f"{lang}", [f"the page asked another host for {url}" for url in elsewhere])
