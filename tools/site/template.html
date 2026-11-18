@@ -283,7 +283,6 @@
       </div>
     </section>
 
-<!--desk-->
     <section id="desk">
       <div class="wrap">
         <header class="reveal">
@@ -291,7 +290,13 @@
           <h2>{{desk_h}}</h2>
           <p class="lead">{{desk_p1}}</p>
           <p class="lead">{{desk_p2}}</p>
+<!--none-->
+          <p class="lead">{{desk_p3}}</p>
+<!--/none-->
         </header>
+<!--none-->
+        <p class="note reveal">{{desk_today}} <a class="link" href="{{repo}}/issues/new">{{desk_gh_link}} <span class="arr" aria-hidden="true">→</span></a></p>
+<!--/none-->
         <ul class="grid" data-stagger>
 <!--github-->
           <li><div class="card big">
@@ -308,6 +313,18 @@
             </p>
           </div></li>
 <!--/github-->
+<!--github_closed-->
+          <li><div class="card big">
+            <span class="n">{{desk_gh_n}}</span>
+            <h3>{{desk_gh_h_closed}}</h3>
+            <p><strong>{{desk_closed}}</strong> {{desk_soon}}</p>
+            <ol class="steps">
+              <li>{{desk_gh_c1}}</li>
+              <li>{{desk_gh_c2}}</li>
+              <li>{{desk_gh_c3}}</li>
+            </ol>
+          </div></li>
+<!--/github_closed-->
 <!--live-->
           <li><div class="card big">
             <span class="n">{{desk_live_n}}</span>
@@ -327,15 +344,40 @@
             </p>
           </div></li>
 <!--/live-->
+<!--live_closed-->
+          <li><div class="card big">
+            <span class="n">{{desk_live_n}}</span>
+            <h3>{{desk_live_h_closed}}</h3>
+<!--unreleased-->
+            <p><strong>{{desk_closed}}</strong> {{desk_live_need_wait}} {{desk_soon}}</p>
+<!--/unreleased-->
+<!--released-->
+            <p><strong>{{desk_closed}}</strong> {{desk_live_need}} {{desk_soon}}</p>
+<!--/released-->
+            <ol class="steps">
+              <li>{{desk_live_c1}}</li>
+              <li>{{desk_live_c2}}</li>
+              <li>{{desk_live_c3}}</li>
+              <li>{{desk_live_c4}}</li>
+              <li>{{desk_live_c5}}</li>
+              <li>{{desk_live_c6}}</li>
+            </ol>
+            <p class="more">
+              <a class="link" href="{{coworker_repo}}">{{desk_live_cw}} <span class="arr" aria-hidden="true">→</span></a>
+            </p>
+          </div></li>
+<!--/live_closed-->
         </ul>
         <h3 class="sub reveal">{{desk_limits_h}}</h3>
+<!--waiting-->
+        <p class="note reveal">{{desk_limits_p}}</p>
+<!--/waiting-->
         <ul class="plain" data-stagger>
           <li>{{desk_limit1}}</li>
-<!--live-->
           <li>{{desk_limit2}}</li>
           <li>{{desk_limit3}}</li>
-<!--/live-->
         </ul>
+<!--any-->
         <h3 class="sub reveal">{{desk_know_h}}</h3>
         <ul class="plain" data-stagger>
           <li>{{desk_know1}}</li>
@@ -350,10 +392,10 @@
           <li>{{desk_know9}}</li>
 <!--/live-->
         </ul>
+<!--/any-->
       </div>
     </section>
 
-<!--/desk-->
     <section id="rules">
       <div class="wrap">
         <header class="reveal">
@@ -385,9 +427,7 @@
           <div><h3>{{q4}}</h3><p>{{a4}}</p></div>
           <div><h3>{{q5}}</h3><p>{{a5}}</p></div>
           <div><h3>{{q6}}</h3><p>{{a6}}</p></div>
-<!--desk-->
           <div><h3>{{q7}}</h3><p>{{a7}}</p></div>
-<!--/desk-->
         </div>
       </div>
     </section>

@@ -1,8 +1,8 @@
 # Checks the introduction page in a real browser: the four languages are built from the template,
 # and the layout holds at every width from 320 to 1100 px, at phone and foldable sizes, with large
-# text, and when the page is folded and unfolded. The page has a section about talking with the project's
-# AI in real time only while a way to do that is open, so the layout is checked in all three states: with
-# no way open, with the one on GitHub open, and with both open. Needs no secrets and only reads the repository.
+# text, and when the page is folded and unfolded. The page's section about talking with the
+# project's AI in real time reads differently for a way that is open and one that is not yet, so the layout
+# is checked in all three states: with no way open, with the one on GitHub open, and with both open. Needs no secrets and only reads the repository.
 name: site
 
 # It runs on every push and pull request, with no path filter, so that it can be a required check.

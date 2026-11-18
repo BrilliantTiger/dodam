@@ -28,11 +28,12 @@ llms.txt, the guide for AI agents. Whatever comes from outside the template is e
         --open WAYS    build as if these ways to the desk were open, github or github,live, with made-up
                        dates and times (the layout check does; what is published is never built this way)
 
-Talking with the project's AI in real time is on the page only while a way to do it is open. The facts
-of the desk (which way is open and since when, its limits, the measured time to its first answer) live
-in tools/desk/desk.toml and nowhere else. The page's section, the question about it, the part of the
-guide and the part of the status file are built from that file; with no way open the pages and the
-guide say nothing about it, and the status file says that both ways are closed.
+Talking with the project's AI in real time is on the page in every state. The facts of the desk (which
+way is open and since when, its limits, the measured time to its first answer, whether the version of
+AI coworker it needs is released) live in tools/desk/desk.toml and nowhere else. The page's section,
+the question about it, the part of the guide and the part of the status file are built from that file.
+A closed way says first that it is not open yet and then how it will work, in sentences that are true
+while it is closed; it shows no opening date, no measured time and no link to reach the desk.
 """
 
 import datetime as dt
@@ -65,8 +66,10 @@ REPO_URL = "https://github.com/BrilliantTiger/dodam"
 # name no other host.
 ANALYTICS_ID = "G-DHJKG68707"
 MEASURED = re.compile(r"<!--measured-->\n(.*?)<!--/measured-->\n", re.S)   # parts of the template that exist only with an ID
-# Parts of the template that exist only while a way to the desk is open: any way, the one on GitHub, the live one.
-OPEN_ONLY = {name: re.compile(rf"<!--{name}-->\n(.*?)<!--/{name}-->\n", re.S) for name in ("desk", "github", "live")}
+# Parts of the template that exist only in some states of the desk: a way open or closed, the version of
+# AI coworker released or not while the live way is closed, any way open or none, some way still closed.
+STATE_PARTS = ["github", "github_closed", "live", "live_closed", "released", "unreleased", "any", "none", "waiting"]
+OPEN_ONLY = {name: re.compile(rf"<!--{name}-->\n(.*?)<!--/{name}-->\n", re.S) for name in STATE_PARTS}
 # What Google's measurement needs, from Google's guide to content security policies for the Google tag.
 GOOGLE_NEEDS = {
     "script-src": ["https://www.googletagmanager.com"],
@@ -92,25 +95,35 @@ PLACE = re.compile(r"\{(?:(d|m|n):([0-9-]+)|(repo))\}")
 FACT = re.compile(r"\{desk:([a-z_.]+)\}")   # a fact of the desk, as {desk:code_minutes}
 LIMITS = ["answers_per_item_per_hour", "answers_per_day", "code_uses", "code_minutes", "codes_per_author_per_day", "live_sessions"]
 MEASURES = ["median_seconds", "longest_seconds", "trials", "date"]
-FACT_NAMES = set(LIMITS) - {"code_uses"} | {"name", "min_version", "label"} | {
+FACT_NAMES = set(LIMITS) - {"code_uses"} | {"name", "min_version", "label", "as_of"} | {
     f"{way}.{part}" for way in WAYS for part in ("since", "median", "longest", "trials", "measured")}
 LIVE = re.compile(r"\[([a-z_]+(?:\.[a-z_]+)?)\]")   # a value of the status, as [tasks.ready]
 LIVE_DATES = {"charter.date", "step.gate_plan", "step.gate_today"}
 LIVE_NUMBERS = {"charter.version", "step.gate_today_chance", "tasks.ready", "tasks.first", "open_issues"}
 COMPUTED = {"changes", "gate_today_hidden", "live_hidden", "structured", "csp", "analytics_id",
             "a7", "desk_form", "coworker_repo"}   # filled in by render()
-# The sentences about the desk: those that hold in every open state, and those of each way. The page's
-# section holds exactly these, the guide repeats them, and the answer to the question is put together
-# from its three parts.
+# The sentences about the desk, by the state in which they are shown: always; a way open, or closed and
+# described as what is coming; the note on AI coworker's version while the live way is closed; with no
+# way open, what holds today; with a way open, what to know before writing; with a way closed, that the
+# limits are what will hold. The page's section holds exactly these, and the guide repeats them.
 DESK_TEXT = {
-    "desk": ["desk_k", "desk_h", "desk_p1", "desk_p2", "desk_limits_h", "desk_limit1", "desk_know_h",
-             "desk_know1", "desk_know2", "desk_know3", "desk_know4", "desk_know5", "q7"],
-    "github": ["desk_gh_n", "desk_gh_h", "desk_gh_state", "desk_gh_s1", "desk_gh_s2", "desk_gh_s3", "desk_gh_link"],
-    "live": ["desk_live_n", "desk_live_h", "desk_live_state", "desk_live_s1", "desk_live_s2", "desk_live_s3", "desk_live_s4",
-             "desk_live_s5", "desk_live_s6", "desk_live_form", "desk_live_cw", "desk_limit2", "desk_limit3",
-             "desk_know6", "desk_know7", "desk_know8", "desk_know9"],
+    "always": ["desk_k", "desk_h", "desk_p1", "desk_p2", "desk_gh_n", "desk_live_n", "desk_limits_h", "desk_limit1", "desk_limit2",
+               "desk_limit3", "desk_live_cw", "q7"],
+    "github": ["desk_gh_h", "desk_gh_state", "desk_gh_s1", "desk_gh_s2", "desk_gh_s3", "desk_gh_link"],
+    "github_closed": ["desk_closed", "desk_soon", "desk_gh_h_closed", "desk_gh_c1", "desk_gh_c2", "desk_gh_c3"],
+    "live": ["desk_live_h", "desk_live_state", "desk_live_s1", "desk_live_s2", "desk_live_s3", "desk_live_s4", "desk_live_s5",
+             "desk_live_s6", "desk_live_form", "desk_know6", "desk_know7", "desk_know8", "desk_know9"],
+    "live_closed": ["desk_closed", "desk_soon", "desk_live_h_closed", "desk_live_c1", "desk_live_c2", "desk_live_c3", "desk_live_c4",
+                    "desk_live_c5", "desk_live_c6"],
+    "released": ["desk_live_need"],
+    "unreleased": ["desk_live_need_wait"],
+    "none": ["desk_p3", "desk_today", "desk_gh_link"],
+    "any": ["desk_know_h", "desk_know1", "desk_know2", "desk_know3", "desk_know4", "desk_know5"],
+    "waiting": ["desk_limits_p"],
 }
-ANSWER_PARTS = {"desk": "a7_desk", "github": "a7_github", "live": "a7_live"}
+# The answer to the question about talking in real time, by which ways are open.
+ANSWERS = {(): ["a7_closed"], ("github",): ["a7_desk", "a7_github", "a7_live_closed"], ("github", "live"): ["a7_desk", "a7_github", "a7_live"]}
+ANSWER_KEYS = {key for keys in ANSWERS.values() for key in keys}
 LIVE_NAMES = LIVE_DATES | LIVE_NUMBERS | {"step.name", "built"}
 ALLOWED_TAGS = {"strong", "code", "span"}
 # Counts are written in digits so that a differing count shows up as a differing number.
@@ -207,20 +220,23 @@ def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: 
     desk = desk if desk is not None else load_desk()
     forms = forms if forms is not None else FORMS
     found = []
-    if set(desk) != {"name", "ways", "limits", "coworker", "form"}:
-        return ["the facts of the desk are: name, ways, limits, coworker, form"]
+    if set(desk) != {"name", "as_of", "ways", "limits", "coworker", "form"}:
+        return ["the facts of the desk are: name, as_of, ways, limits, coworker, form"]
     ways, limits, coworker, form = desk["ways"], desk["limits"], desk["coworker"], desk["form"]
     if not all(isinstance(part, dict) for part in (ways, limits, coworker, form)) or set(ways) != set(WAYS):
         return ["the desk has two ways, github and live, and its limits, coworker and form are tables"]
     if not isinstance(desk["name"], str) or not desk["name"].strip():
         found.append("the desk has no name")
+    if not is_day(desk["as_of"]):
+        found.append("as_of is the day the facts were last checked, as 2026-11-18")
     if set(limits) != set(LIMITS) or not all(is_count(limits[name]) for name in limits):
         found.append("the limits are whole numbers above zero: " + ", ".join(LIMITS))
     elif limits["code_uses"] != 1:
         found.append("a connection code of AI coworker works once, and the page says once")
-    if set(coworker) != {"min_version", "repository"} or not re.fullmatch(r"\d+\.\d+\.\d+", str(coworker.get("min_version"))) \
+    if set(coworker) != {"min_version", "released", "repository"} or not isinstance(coworker.get("released"), bool) \
+            or not re.fullmatch(r"\d+\.\d+\.\d+", str(coworker.get("min_version"))) \
             or not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+", str(coworker.get("repository"))):
-        found.append("coworker names the lowest version, as 0.13.0, and the address of its repository on GitHub")
+        found.append("coworker names the lowest version, as 0.13.0, whether it is released, and the address of its repository on GitHub")
     if set(form) != {"file", "label"} or not re.fullmatch(r"[a-z0-9-]+\.yml", str(form.get("file"))) \
             or not re.fullmatch(r"[a-z0-9-]+", str(form.get("label"))):
         found.append("form names the file of the request form, as live-session.yml, and its label")
@@ -242,6 +258,8 @@ def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: 
                 found.append(f"the {way} way is open without a measured time to the first answer")
             elif is_day(facts["since"]) and measured["date"] > facts["since"]:
                 found.append(f"the {way} way opened before its time to the first answer was measured")
+            if is_day(facts["since"]) and is_day(desk["as_of"]) and facts["since"] > desk["as_of"]:
+                found.append(f"the {way} way opened after the day the facts were last checked: set as_of")
         elif facts["since"]:
             found.append(f"the {way} way is closed and yet carries an opening date")
     if found:
@@ -251,6 +269,8 @@ def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: 
             found.append("the live way is open while the github way is closed: a connection code is asked for on GitHub")
         elif ways["live"]["since"] < ways["github"]["since"]:
             found.append("the live way opened before the github way")
+        if not coworker["released"]:
+            found.append(f"the live way is open while AI coworker {coworker['min_version']} is not released")
         path = forms / form["file"]
         if made_up:
             pass
@@ -275,7 +295,8 @@ def as_if_open(desk: dict, ways: list[str]) -> dict:
     for way in ways:
         if not made[way]["open"]:
             made[way] = {"open": True, "since": MADE_UP[way][0], "first_answer": dict(MADE_UP[way][1])}
-    return desk | {"ways": made}
+    last = max([desk["as_of"]] + [made[way]["since"] for way in ways])
+    return desk | {"ways": made, "as_of": last, "coworker": desk["coworker"] | ({"released": True} if "live" in ways else {})}
 
 
 def open_ways(desk: dict) -> list[str]:
@@ -283,15 +304,25 @@ def open_ways(desk: dict) -> list[str]:
 
 
 def shown_parts(desk: dict) -> list[str]:
-    """Which parts about the desk exist: none while no way is open, else "desk" and each open way."""
+    """Which parts about the desk are shown in this state. The section itself is there in every state."""
     ways = open_ways(desk)
-    return ["desk"] + ways if ways else []
+    parts = ["always"] + [way if way in ways else f"{way}_closed" for way in WAYS]
+    if "live" not in ways:
+        parts.append("released" if desk["coworker"]["released"] else "unreleased")
+    parts.append("any" if ways else "none")
+    return parts + (["waiting"] if len(ways) < len(WAYS) else [])
+
+
+def shown_keys(desk: dict) -> list[str]:
+    """The sentences about the desk that are shown in this state, each once."""
+    return list(dict.fromkeys(key for part in shown_parts(desk) for key in DESK_TEXT[part]))
 
 
 def desk_facts(lang: str, desk: dict) -> dict:
     """Every fact of the desk a sentence can name, as text in this language."""
     facts = {name: str(desk["limits"][name]) for name in LIMITS if name != "code_uses"}
-    facts |= {"name": desk["name"], "min_version": desk["coworker"]["min_version"], "label": desk["form"]["label"]}
+    facts |= {"name": desk["name"], "min_version": desk["coworker"]["min_version"], "label": desk["form"]["label"],
+              "as_of": spell(lang, "d", desk["as_of"])}
     for way in WAYS:
         since, measured = desk["ways"][way]["since"], desk["ways"][way]["first_answer"]
         facts[f"{way}.since"] = spell(lang, "d", since) if since else ""
@@ -304,10 +335,11 @@ def desk_facts(lang: str, desk: dict) -> dict:
 
 def desk_status(desk: dict | None = None) -> dict:
     """The desk's part of the status file, the same in every state: per way whether it is open and
-    since when, the limits, and the lowest version of AI coworker."""
+    since when, the limits, the lowest version of AI coworker and whether that version is released."""
     desk = desk if desk is not None else load_desk()
     ways = {way: {"open": desk["ways"][way]["open"], "since": desk["ways"][way]["since"] or None} for way in WAYS}
-    return ways | {"limits": {name: desk["limits"][name] for name in LIMITS}, "coworker_min_version": desk["coworker"]["min_version"]}
+    return ways | {"limits": {name: desk["limits"][name] for name in LIMITS}, "coworker_min_version": desk["coworker"]["min_version"],
+                   "coworker_min_version_released": desk["coworker"]["released"]}
 
 
 def desk_links(desk: dict) -> dict:
@@ -317,9 +349,9 @@ def desk_links(desk: dict) -> dict:
 
 
 def desk_answer(lang: str, strings: dict, desk: dict) -> str:
-    """The answer to the question about talking in real time: one sentence on the desk, one per open way."""
+    """The answer to the question about talking in real time. With no way open it begins with "Not yet"."""
     glue = "" if lang == "ja" else " "   # Japanese puts no space between sentences
-    return glue.join(expand(lang, strings[ANSWER_PARTS[part]], desk) for part in shown_parts(desk))
+    return glue.join(expand(lang, strings[key], desk) for key in ANSWERS[tuple(open_ways(desk))])
 
 
 def desk_rule_state(desk: dict, way: str) -> str:
@@ -329,30 +361,37 @@ def desk_rule_state(desk: dict, way: str) -> str:
 
 
 def desk_guide(desk: dict) -> str:
-    """The guide's part about talking in real time, in the page's own sentences: empty while no way is
-    open, else what the desk is, each open way with its steps and addresses, the limits, and what an
-    outside agent should know before it writes."""
-    parts = shown_parts(desk)
-    if not parts:
-        return ""
+    """The guide's part about talking in real time, in the page's own sentences: what the desk is, with no
+    way open what holds today, each way (open with its steps and addresses, or closed and described as what
+    is coming), the limits, and with a way open what an outside agent should know before it writes."""
+    parts, keys = shown_parts(desk), shown_keys(desk)
     strings, links = load_strings("en"), desk_links(desk)
     say = lambda key: plain("en", strings[key], desk)
     rows = ["", "## Talking with the project in real time", "", f"{say('desk_p1')} {say('desk_p2')}"]
-    for way, addresses in (("github", [("desk_gh_link", links["github"])]),
-                           ("live", [("desk_live_form", links["form"]), ("desk_live_cw", links["coworker"])])):
-        if way not in parts:
-            continue
-        short = {"github": "gh", "live": "live"}[way]
-        rows += ["", f"### {say(f'desk_{short}_n')}: {say(f'desk_{short}_h')}", "", say(f"desk_{short}_state"), ""]
-        rows += [f"{number}. {say(key)}" for number, key in
-                 enumerate((key for key in DESK_TEXT[way] if re.fullmatch(rf"desk_{short}_s\d", key)), 1)]
-        rows += [""] + [f"- {say(label)}: {address}" for label, address in addresses]
+    if "none" in parts:
+        rows += ["", say("desk_p3"), "", say("desk_today"), "", f"- {say('desk_gh_link')}: {links['github']}"]
+    for way, short in (("github", "gh"), ("live", "live")):
+        if way in parts:
+            rows += ["", f"### {say(f'desk_{short}_n')}: {say(f'desk_{short}_h')}", "", say(f"desk_{short}_state"), ""]
+            steps = [key for key in keys if re.fullmatch(rf"desk_{short}_s\d", key)]
+        else:
+            need = [say(key) for key in ("desk_live_need", "desk_live_need_wait") if way == "live" and key in keys]
+            rows += ["", f"### {say(f'desk_{short}_n')}: {say(f'desk_{short}_h_closed')}", "",
+                     " ".join([say("desk_closed")] + need + [say("desk_soon")]), ""]
+            steps = [key for key in keys if re.fullmatch(rf"desk_{short}_c\d", key)]
+        rows += [f"{number}. {say(key)}" for number, key in enumerate(steps, 1)] + [""]
+        if way == "github" and way in parts:
+            rows.append(f"- {say('desk_gh_link')}: {links['github']}")
         if way == "live":
-            rows += [f"- Label of the request form: {desk['form']['label']}",
-                     f"- Lowest version of AI coworker: {desk['coworker']['min_version']}"]
-    for head, start in (("desk_limits_h", "desk_limit"), ("desk_know_h", "desk_know")):
-        keys = [key for part in parts for key in DESK_TEXT[part] if re.fullmatch(rf"{start}\d", key)]
-        rows += ["", f"### {say(head)}", ""] + [f"- {say(key)}" for key in sorted(keys)]
+            if way in parts:
+                rows += [f"- {say('desk_live_form')}: {links['form']}", f"- Label of the request form: {desk['form']['label']}"]
+            rows += [f"- {say('desk_live_cw')}: {links['coworker']}", f"- Lowest version of AI coworker: {desk['coworker']['min_version']}"]
+        if rows[-1] == "":
+            rows.pop()
+    rows += ["", f"### {say('desk_limits_h')}", ""] + ([say("desk_limits_p"), ""] if "waiting" in parts else [])
+    rows += [f"- {say(key)}" for key in keys if re.fullmatch(r"desk_limit\d", key)]
+    if "any" in parts:
+        rows += ["", f"### {say('desk_know_h')}", ""] + [f"- {say(key)}" for key in keys if re.fullmatch(r"desk_know\d", key)]
     return "\n".join(rows) + "\n"
 
 
@@ -541,11 +580,9 @@ def plain(lang: str, text: str, desk: dict | None = None) -> str:
 
 
 def questions(lang: str, strings: dict, desk: dict) -> list[tuple[str, str]]:
-    """The questions and answers as text. The one about talking in real time exists only while a way is open."""
+    """The questions and answers as text. The last one, about talking in real time, is answered from the facts of the desk."""
     asked = [(plain(lang, strings[f"q{i}"]), plain(lang, strings[f"a{i}"])) for i in range(1, QUESTIONS + 1)]
-    if shown_parts(desk):
-        asked.append((plain(lang, strings["q7"], desk), plain(lang, desk_answer(lang, strings, desk))))
-    return asked
+    return asked + [(plain(lang, strings["q7"], desk), plain(lang, desk_answer(lang, strings, desk)))]
 
 
 def structured(lang: str, strings: dict, desk: dict | None = None) -> dict:
@@ -602,7 +639,7 @@ def working_rule(words: str) -> str:
 
 def guide(status: dict, desk: dict | None = None) -> str:
     """The guide for AI agents (llms.txt), in English: the page's own strings, the status, two rules
-    in the working rules' own words, and while a way to the desk is open the page's sentences about it."""
+    in the working rules' own words, and the page's sentences about the desk in whatever state it is."""
     desk = desk if desk is not None else load_desk()
     strings = load_strings("en")
     step = status["step"]
@@ -688,7 +725,7 @@ def render(lang: str, strings: dict | None = None, status: dict | None = None, a
     parts = shown_parts(desk)
     for key, text in strings.items():
         values[key] = headline(lang, text) if isinstance(text, list) else live(lang, expand(lang, text, desk), status, strings)
-    values["a7"] = desk_answer(lang, strings, desk) if parts else ""
+    values["a7"] = desk_answer(lang, strings, desk)
     values["desk_form"] = html.escape(desk_links(desk)["form"], quote=True)
     values["coworker_repo"] = html.escape(desk_links(desk)["coworker"], quote=True)
     values["live_hidden"] = "" if status else " hidden"
@@ -761,8 +798,8 @@ def shape(value) -> dict:
 def problems(strings: dict[str, dict] | None = None) -> list[str]:
     strings = strings if strings is not None else {lang: load_strings(lang) for lang in LANGS}
     found = []
-    used = set(KEY.findall(template())) - set(specials("en")) - COMPUTED | set(ANSWER_PARTS.values())
-    about_desk = {key for keys in DESK_TEXT.values() for key in keys} | set(ANSWER_PARTS.values())
+    used = set(KEY.findall(template())) - set(specials("en")) - COMPUTED | ANSWER_KEYS
+    about_desk = {key for keys in DESK_TEXT.values() for key in keys} | ANSWER_KEYS
     found += [f"the template lacks the sentence about the desk {key}" for key in sorted(about_desk - used)]
     found += [f"the template has a sentence about the desk that no state shows: {key}"
               for key in sorted(key for key in used - about_desk if key.startswith(("desk_", "a7", "q7")))]

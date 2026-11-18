@@ -3,13 +3,17 @@
 # status file and the working rules take every value below from this file, and a test fails when one
 # of them says something else.
 #
+# The page shows both ways in every state. A closed way says first that it is not open yet, and then
+# how it will work; it carries no opening date, no measured time and no link to reach the desk.
+#
 # A way is opened by a small pull request of its own, after it has been tried and measured: set
-# open = true, set since to the date, and fill in first_answer. A way that is open without those
-# fails a test. The live way cannot be open while the GitHub way is closed, because a connection code
-# is asked for on GitHub; it also needs the request form named below in .github/ISSUE_TEMPLATE,
-# carrying the label named below.
+# open = true, set since to the date, fill in first_answer, and set as_of to that day. A way that is
+# open without those fails a test. The live way cannot be open while the GitHub way is closed, because
+# a connection code is asked for on GitHub; it also needs the lowest version of AI coworker to be
+# released, and the request form named below in .github/ISSUE_TEMPLATE, carrying the label named below.
 
 name = "Dodam · desk"    # how the desk is named in AI coworker
+as_of = "2026-11-18"     # the day these facts were last checked; the page dates its answer with it
 
 # Way one: someone writes an issue or a comment in the public repository, and the desk answers there.
 [ways.github]
@@ -34,6 +38,7 @@ live_sessions = 5                # live sessions at once
 
 [coworker]
 min_version = "0.13.0"           # the lowest version of AI coworker an outside session needs
+released = false                 # whether that version is released; while it is not, the page says so
 repository = "https://github.com/BrilliantTiger/ai-coworker-without-me"
 
 [form]
