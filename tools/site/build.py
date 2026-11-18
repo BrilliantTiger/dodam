@@ -7,7 +7,7 @@
                                              now filled in, status.json and llms.txt (see below)
 
 The structure, every link and every element live once, in template.html. Each language has one
-strings file. Dates and large numbers are written in the strings as {d:2027-02-24}, {m:2038-11}
+strings file. Dates and large numbers are written in the strings as {d:2027-02-24}, {m:2041-01}
 and {n:2000} and are spelled here in each language's usual form, so a date cannot differ between
 languages. problems() reports any string that a language lacks or adds, and any string whose
 numbers, dates or markup differ from the English one, and any count written as a word instead of
