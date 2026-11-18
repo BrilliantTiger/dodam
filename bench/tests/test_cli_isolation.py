@@ -1147,10 +1147,15 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
                               room={"memory_mb": 640, "changed": NO_STOPS}, CASE_MEMORY_MB="100000")
         assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
         assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
-        seen = found_by(where / "out", "attack.json")
-        assert seen["after"]["kernel_kills"] > seen["before"]["kernel_kills"], "the kernel was to end the program here"
-        assert seen["limit"] == "memory" and seen["exit_code"] is None, seen
-        assert "memory" in message(result, "test_the_attack")
+        if (where / "out/attack.json").is_file():
+            seen = found_by(where / "out", "attack.json")
+            assert seen["after"]["kernel_kills"] > seen["before"]["kernel_kills"], "the kernel was to end the program here"
+            assert seen["limit"] == "memory" and seen["exit_code"] is None, seen
+        else:
+            # what the kernel ends is its choice: here it was the case runner, before the test could hand anything back
+            ends = result["report"]["runner_ended"]
+            assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], lost(result, where / "out")
+        assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
 
 
 def test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running(tmp_path):

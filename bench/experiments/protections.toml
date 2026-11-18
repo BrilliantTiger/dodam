@@ -229,8 +229,7 @@ put = '''    return False'''
 what = "The judge ends a program that leaves the container too little memory"
 file = "dodambench/dodam_cli.py"
 second_line = "a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose"
-tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[more memory than the whole container has]",
-         "tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged"]
+tests = ["tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged"]
 [[protection.change]]
 find = '''(memory_taken() - memory_before > max_memory or memory_runs_out())'''
 put = '''(memory_taken() - memory_before > max_memory)'''

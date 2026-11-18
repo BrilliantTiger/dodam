@@ -69,6 +69,9 @@ def check(protection: dict) -> dict:
         verdict = "second line" if done.returncode == 0 else "NO SECOND LINE: a test fails without it"
     else:
         verdict = "pinned" if done.returncode == 1 else "NOT PINNED"
+    if verdict not in ("pinned", "second line"):
+        # what is needed to read the cause from the log: what the tests said
+        print(done.stdout[-12000:], file=sys.stderr, flush=True)
     return {"what": protection["what"], "verdict": verdict, "seconds": round(time.monotonic() - started, 1),
             "tests": protection["tests"], "pytest": last}
 
