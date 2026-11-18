@@ -6,12 +6,13 @@
   <title>Dodam — AIが正確に書けることを目指す、安全で速い言語（設計段階）</title>
   <meta name="description" content="Dodamは、AIが正確かつ堅牢に書けることを目指して設計している、安全で速い汎用言語です。現在は設計段階で、コンパイラはまだありません。設計では、セキュリティのルールをコンパイラが強制し、人はコードの代わりにセキュリティレポートを確認し、言語そのものもAIエージェントが作ります。人もAIエージェントも参加できます。">
   <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Dodam — AIが正確に書けることを目指す、安全で速い言語（設計段階）">
   <meta property="og:description" content="現在は設計段階で、コンパイラはまだありません。目指しているのは、コンパイラがセキュリティのルールを強制し、人はコードの代わりにセキュリティレポートを確認し、AIエージェントも一緒に作る言語です。人もAIエージェントも参加できます。">
   <meta property="og:url" content="https://brillianttigercorp.com/dodam/ja/">
   <meta property="og:site_name" content="Dodam">
-  <meta property="og:locale" content="ja">
+  <meta property="og:locale" content="ja_JP">
   <meta property="og:image" content="https://brillianttigercorp.com/dodam/card-ja.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -28,6 +29,7 @@
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="../style.css">
   <script src="../motion.js"></script>
+  <script src="../analytics.js" data-id="G-DHJKG68707" defer></script>
   <script type="application/ld+json">
 {
  "@context": "https://schema.org",
@@ -93,7 +95,7 @@
      "name": "Dodamは誰のための言語ですか？",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "Dodamは、コードを書くAIコーディングエージェントと、そのエージェントが作ったものをコードを読まずに頼る人のための言語です。Dodamの最初の分野はウェブで、サーバーとブラウザをひとつのコードベースで書き、設計は最初から汎用です。"
+      "text": "Dodamは、コードを書くAIコーディングエージェントと、そのエージェントが作ったものに、コードを読まずに頼る人のための言語です。Dodamの最初の分野はウェブで、サーバーとブラウザをひとつのコードベースで書き、設計は最初から汎用です。"
      }
     },
     {
@@ -109,7 +111,7 @@
      "name": "人やAIエージェントは、Dodamにどう参加しますか？",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "Dodamは、人にもAIエージェントにも同じルールで開かれています。人でもエージェントでも、GitHubのDodamリポジトリでai-welcomeラベルの付いたオープンなIssueを選び、変更前は失敗し変更後は通るテストを添えてプルリクエストを送ります。エージェントはリポジトリのAGENTS.mdを読めばよく、作業のルールはそこにあります。"
+      "text": "Dodamは、人にもAIエージェントにも同じルールで開かれています。人でもエージェントでも、GitHubのDodamリポジトリでai-welcomeラベルの付いたオープンなイシューを選び、変更前は失敗し変更後は通るテストを添えてプルリクエストを送ります。エージェントはリポジトリのAGENTS.mdを読めばよく、作業のルールはそこにあります。"
      }
     },
     {
@@ -125,7 +127,7 @@
      "name": "AIに既存の言語をもっと慎重に書かせるのと、Dodamは何が違いますか？",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "慎重なプロンプトとレビューではセキュリティは運まかせになり、Veracodeの2026年7月のレポートでは、AIが書いたコードがセキュリティの検査に合格した割合は平均56%でした。Dodamはルールを言語の中に移し、どのモデルが書いたコードでも、セキュリティのルールに反すればコンパイルされません。Dodamのルールは時間とともに厳しくなる一方で、緩めるにはオーナーの承認が必要です。"
+      "text": "慎重なプロンプトとレビューではセキュリティは運まかせになり、Veracodeの2026年7月のレポートでは、AIが書いたコードがセキュリティの検査に合格した割合は平均56%でした。Dodamはルールを言語の中に移し、どのモデルが書いたコードでも、セキュリティのルールに反すればコンパイルされません。Dodamのルールは時間とともに厳しくなるだけで、緩めるにはオーナーの承認が必要です。"
      }
     }
    ]
@@ -136,6 +138,12 @@
 </head>
 <body>
   <a class="skip" href="#what">本文へ移動</a>
+  <div class="consent" id="consent" role="region" aria-label="アクセス計測" hidden>
+    <div class="wrap">
+      <p>このページでGoogle Analyticsを使って訪問を数えてもよいですか？同意しないかぎり、何も読み込まず、Cookieも設定しません。</p>
+      <p class="choices"><button type="button" class="choice" data-consent="yes">同意する</button><button type="button" class="choice" data-consent="no">拒否する</button></p>
+    </div>
+  </div>
   <div class="progress" aria-hidden="true"></div>
 
   <header class="top">
@@ -315,14 +323,14 @@
         </header>
         <div class="live reveal" id="live" data-status="../status.json" data-repo="https://github.com/BrilliantTiger/dodam" hidden>
           <h3>いま</h3>
-          <p>以下の値は、このページをビルドするたびにDodamのリポジトリから計算され、開いたままのページは自分で読み直します。</p>
+          <p>以下の値は、このページをビルドするたびにDodamのリポジトリから計算され、開いたままのページでも自動で読み直します。</p>
           <ul class="plain">
             <li>Dodamの設計憲章は<span data-live="charter.version"></span>版で、日付は<time data-live-date="charter.date" datetime=""></time>です。</li>
             <li>Dodamはいま「<span data-live-pick="step.index" data-options="方向を固める|最小限の言語|最初の公開版 0.1|実際に使う|1.0"></span>」の段階にあります。</li>
             <li>この段階を終える関門は、計画の容量で<time data-live-date="step.gate_plan" datetime=""></time>の予定です。</li>
-            <li data-live-show="step.gate_today" hidden>いまの条件では、試行で測った値を入れると、その関門の中央値の見積もりは<time data-live-date="step.gate_today" datetime=""></time>で、計画の日付までに届く確率は<span data-live="step.gate_today_chance"></span>%です。</li>
+            <li data-live-show="step.gate_today" hidden>いまの条件では、試験実行で測った値を入れると、その関門の中央値の見積もりは<time data-live-date="step.gate_today" datetime=""></time>で、計画の日付までに届く確率は<span data-live="step.gate_today_chance"></span>%です。</li>
             <li>準備できたベンチマーク課題：最初の<span data-live="tasks.first"></span>件のうち<span data-live="tasks.ready"></span>件。</li>
-            <li>外部の参加者に開かれたIssue：<span data-live="open_issues"></span>件。</li>
+            <li>外部の参加者向けに開いているイシュー：<span data-live="open_issues"></span>件。</li>
             <li>このページの最終ビルド：<time data-live-time="built" datetime=""></time>。</li>
           </ul>
           <h4>Dodamに最近マージされた変更</h4>
@@ -406,11 +414,11 @@
         </header>
         <div class="faq" data-stagger>
           <div><h3>Dodamとは何ですか？</h3><p>Dodamは、AIコーディングエージェントが正確かつ堅牢に書けるように設計している、安全で高速な汎用プログラミング言語です。Dodamではコンパイラがセキュリティのルールを強制し、人はコードの代わりに成果物とセキュリティレポートを見ます。Dodamは設計段階にあり、コンパイラはまだありません。</p></div>
-          <div><h3>Dodamは誰のための言語ですか？</h3><p>Dodamは、コードを書くAIコーディングエージェントと、そのエージェントが作ったものをコードを読まずに頼る人のための言語です。Dodamの最初の分野はウェブで、サーバーとブラウザをひとつのコードベースで書き、設計は最初から汎用です。</p></div>
+          <div><h3>Dodamは誰のための言語ですか？</h3><p>Dodamは、コードを書くAIコーディングエージェントと、そのエージェントが作ったものに、コードを読まずに頼る人のための言語です。Dodamの最初の分野はウェブで、サーバーとブラウザをひとつのコードベースで書き、設計は最初から汎用です。</p></div>
           <div><h3>Dodamはいま使えますか？</h3><p>いいえ。Dodamは設計段階にあり、コンパイラはまだありません。いまの作業は設計憲章と、よくあるプログラミング課題からなるベンチマークで、まず既存の7言語で測り、Dodamが超えるべき数値を決めます。</p></div>
-          <div><h3>人やAIエージェントは、Dodamにどう参加しますか？</h3><p>Dodamは、人にもAIエージェントにも同じルールで開かれています。人でもエージェントでも、GitHubのDodamリポジトリでai-welcomeラベルの付いたオープンなIssueを選び、変更前は失敗し変更後は通るテストを添えてプルリクエストを送ります。エージェントはリポジトリのAGENTS.mdを読めばよく、作業のルールはそこにあります。</p></div>
+          <div><h3>人やAIエージェントは、Dodamにどう参加しますか？</h3><p>Dodamは、人にもAIエージェントにも同じルールで開かれています。人でもエージェントでも、GitHubのDodamリポジトリでai-welcomeラベルの付いたオープンなイシューを選び、変更前は失敗し変更後は通るテストを添えてプルリクエストを送ります。エージェントはリポジトリのAGENTS.mdを読めばよく、作業のルールはそこにあります。</p></div>
           <div><h3>Dodamはいつ完成しますか？</h3><p>Dodam 1.0は、計画の容量、つまりAI企業3社のサブスクリプションをひとつずつ使う場合で2032年2月25日ごろと見積もっており、この日付はスケジュールのシミュレーションの中央値で、約束ではありません。いまの条件、つまりClaudeのサブスクリプションひとつをオーナーのほかの作業と分け合う場合、同じシミュレーションではDodam 1.0の中央値は2040年5月から2041年1月のあいだになります。最初の公開版である0.1は、計画の容量で2029年4月4日ごろの予定です。</p></div>
-          <div><h3>AIに既存の言語をもっと慎重に書かせるのと、Dodamは何が違いますか？</h3><p>慎重なプロンプトとレビューではセキュリティは運まかせになり、Veracodeの2026年7月のレポートでは、AIが書いたコードがセキュリティの検査に合格した割合は平均56%でした。Dodamはルールを言語の中に移し、どのモデルが書いたコードでも、セキュリティのルールに反すればコンパイルされません。Dodamのルールは時間とともに厳しくなる一方で、緩めるにはオーナーの承認が必要です。</p></div>
+          <div><h3>AIに既存の言語をもっと慎重に書かせるのと、Dodamは何が違いますか？</h3><p>慎重なプロンプトとレビューではセキュリティは運まかせになり、Veracodeの2026年7月のレポートでは、AIが書いたコードがセキュリティの検査に合格した割合は平均56%でした。Dodamはルールを言語の中に移し、どのモデルが書いたコードでも、セキュリティのルールに反すればコンパイルされません。Dodamのルールは時間とともに厳しくなるだけで、緩めるにはオーナーの承認が必要です。</p></div>
         </div>
       </div>
     </section>
@@ -429,6 +437,8 @@
         <a class="link" href="https://github.com/BrilliantTiger/dodam/discussions">ディスカッション</a>
         <a class="link" href="https://github.com/BrilliantTiger/dodam/security/policy">セキュリティポリシー</a>
       </p>
+      <p class="note">このページは、同意した訪問者についてのみ、Google Analyticsで訪問を数えます。記録するのは、開かれたページとそのページが前面で表示されていた時間、ページを最後までスクロールしたか、サイトの外へ出るリンクのクリック、ブラウザ、OS、言語、端末の種類、国と地域までのおおよその位置（GoogleがIPアドレスから割り出し、アドレス自体は保存しません）、どこから来たかです。同意すると、Google Analyticsはランダムな識別子とセッションの状態を持つファーストパーティCookieを設定し、これで再訪したブラウザと新しいブラウザを見分けます。選択は下のボタンからいつでも変更でき、変更すると計測が止まり、そのCookieは削除されます。広告機能はオフです。拒否した場合や、ブラウザが追跡を拒否する信号を送っている場合は、Googleから何も読み込まず、Cookieも設定しません。選択そのものは、お使いの端末のブラウザのストレージに記憶されます。</p>
+      <p class="foot"><button type="button" class="link" data-consent-open hidden>計測の選択を変更</button></p>
       <p class="foot" aria-label="言語">
         <a class="link" href="../" lang="en" hreflang="en">English</a>
         <a class="link" href="../ko/" lang="ko" hreflang="ko">한국어</a>

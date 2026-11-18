@@ -37,6 +37,7 @@ Needs the playwright package and Chrome or Chromium. Nothing here runs on the pu
 """
 
 import argparse
+import re
 import functools
 import http.server
 import sys
@@ -144,7 +145,12 @@ CHECK = """
     const headH = head.getBoundingClientRect().height;
     if (stuck && headH > Math.max(vh * 0.16, 1)) out.push(`the fixed header takes ${Math.round(headH)} of ${vh} px`);
     const h1 = document.querySelector('h1').getBoundingClientRect();
-    if (h1.bottom > vh + 0.5) out.push(`the headline does not fit the first screen (${Math.round(h1.bottom)} > ${vh})`);
+    // While the question about measurement is open it stands above the page, in the flow, and covers
+    // nothing. The headline must then fit one screen counted from below the question.
+    const asking = document.querySelector('#consent');
+    const pushed = asking && !asking.hidden ? asking.getBoundingClientRect().height : 0;
+    if (pushed > vh * 0.45) out.push(`the question about measurement takes ${Math.round(pushed)} of ${vh} px`);
+    if (h1.bottom - pushed > vh + 0.5) out.push(`the headline does not fit the first screen (${Math.round(h1.bottom - pushed)} > ${vh})`);
     const svg = document.querySelector('.dam svg').getBoundingClientRect();
     const room = vh - (stuck ? headH : 0);
     if (svg.height > room + 0.5) out.push(`the diagram is taller than the screen (${Math.round(svg.height)} > ${Math.round(room)})`);
@@ -190,6 +196,123 @@ LIVE = """async () => {
 }"""
 
 
+# Measurement asks first. Every request to another host is answered here with an empty script, so the
+# check itself never reaches Google; it only records what the page tried to reach, and when.
+BAR = """() => {
+  const bar = document.querySelector('#consent');
+  if (!bar) return {missing: true};
+  const buttons = [...bar.querySelectorAll('button')].map(b => {
+    const r = b.getBoundingClientRect(), s = getComputedStyle(b);
+    return [Math.round(r.width), Math.round(r.height), s.backgroundColor, s.color, s.fontWeight, s.fontSize, s.borderTopWidth];
+  });
+  const open = document.querySelector('[data-consent-open]');
+  return {shown: !bar.hidden && bar.getBoundingClientRect().height > 0, buttons, open: !!open && !open.hidden,
+          cookie: document.cookie, lang: (bar.closest('[lang]') || document.documentElement).lang};
+}"""
+
+
+def consent(browser, base: str, path: str, lang: str, ident: str, report) -> None:
+    def visit(setup: str | None = None):
+        context = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
+        outside, blocked = [], []
+        context.route(lambda url: not url.startswith(base),
+                      lambda route: (outside.append(route.request.url), route.fulfill(status=200, content_type="text/javascript", body=""))[1])
+        if setup:
+            context.add_init_script(setup)
+        page = context.new_page()
+        page.on("console", lambda message: blocked.append(message.text) if "Content Security Policy" in message.text else None)
+        page.goto(base + path)
+        page.wait_for_timeout(400)
+        return context, page, outside, blocked
+
+    where = f"{lang} measurement"
+    context, page, outside, blocked = visit()
+    state = page.evaluate(BAR)
+    if state.get("missing"):
+        report(where, ["a measurement ID is set but the page has no bar that asks"])
+        context.close()
+        return
+    found = []
+    if not state["shown"]:
+        found.append("the bar that asks is not shown to a visitor who has not chosen")
+    if outside:
+        found.append(f"the page reached another host before the visitor agreed: {outside[0]}")
+    if state["cookie"]:
+        found.append("a cookie is set before the visitor agreed")
+    if len(state["buttons"]) != 2 or state["buttons"][0][1:] != state["buttons"][1][1:] or abs(state["buttons"][0][0] - state["buttons"][1][0]) > 1:
+        found.append(f"agree and decline do not have equal weight: {state['buttons']}")
+
+    page.click('#consent [data-consent="no"]')
+    page.wait_for_timeout(300)
+    page.reload()
+    page.wait_for_timeout(400)
+    state = page.evaluate(BAR)
+    if state["shown"]:
+        found.append("the bar asks again after the visitor declined")
+    if outside or state["cookie"]:
+        found.append("declining loaded something or set a cookie")
+    if not state["open"]:
+        found.append("the footer has no way to change the choice")
+    else:
+        page.click("[data-consent-open]")
+        if not page.evaluate(BAR)["shown"]:
+            found.append("the link in the footer does not bring the question back")
+        else:
+            page.click('#consent [data-consent="yes"]')
+            page.wait_for_timeout(500)
+            if not any(url.startswith("https://www.googletagmanager.com/gtag/js?id=" + ident) for url in outside):
+                found.append("agreeing did not load the measurement")
+            allowed = ("https://www.googletagmanager.com/", ".google-analytics.com/", ".google.com/")
+            found += [f"after agreeing the page reached a host outside its policy: {url}" for url in outside
+                      if not any(part in url.split("?")[0] for part in allowed)]
+            page.reload()
+            page.wait_for_timeout(500)
+            if page.evaluate(BAR)["shown"] or not outside:
+                found.append("the choice to agree is not remembered")
+            # A change of mind in the same tab, both ways, without a reload.
+            switch = f"window['ga-disable-{ident}']"
+            tags = "document.querySelectorAll('script[src*=\"gtag/js\"]').length"
+            page.click("[data-consent-open]")
+            page.click('#consent [data-consent="no"]')
+            if page.evaluate(switch) is not True:
+                found.append("declining after having agreed does not switch the measurement off")
+            page.click("[data-consent-open]")
+            page.click('#consent [data-consent="yes"]')
+            page.wait_for_timeout(300)
+            if page.evaluate(switch) is not False:
+                found.append("agreeing again after declining leaves the measurement switched off until a reload")
+            if page.evaluate(tags) != 1:
+                found.append(f"Google's tag is on the page {page.evaluate(tags)} times after agreeing again")
+    found += [f"the page's own policy blocked something: {text[:160]}" for text in blocked]
+    report(where, found)
+    context.close()
+
+    # The script evaluated a second time on the same page must not act twice.
+    context, page, outside, blocked = visit()
+    page.evaluate("""() => new Promise(done => {
+      const first = document.querySelector('script[src$="analytics.js"]'), again = document.createElement('script');
+      again.src = first.src + '?again'; again.setAttribute('data-id', first.getAttribute('data-id'));
+      again.onload = done; again.onerror = done; document.head.appendChild(again);
+    })""")
+    page.click('#consent [data-consent="yes"]')
+    page.wait_for_timeout(400)
+    loads = page.evaluate("document.querySelectorAll('script[src*=\"gtag/js\"]').length")   # the cache hides a second request
+    report(where, [] if loads == 1 else [f"with the script evaluated twice, agreeing puts Google's tag on the page {loads} times"])
+    context.close()
+
+    for name, setup in (("a global privacy control signal", "Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', {get: () => true})"),
+                        ("a do-not-track signal", "Object.defineProperty(Navigator.prototype, 'doNotTrack', {get: () => '1'})")):
+        context, page, outside, blocked = visit(setup)
+        state = page.evaluate(BAR)
+        found = []
+        if state["shown"]:
+            found.append(f"the bar asks although the browser sends {name}")
+        if outside or state["cookie"]:
+            found.append(f"something was loaded or a cookie set although the browser sends {name}")
+        report(where, found)
+        context.close()
+
+
 def serve() -> str:
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *args):
@@ -230,6 +353,7 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--shots")
     parser.add_argument("--site", help="the built site to check (default: the committed site/)")
+    parser.add_argument("--consent", action="store_true", help="the site was built with a measurement ID: check that it asks first")
     args = parser.parse_args()
     global SITE
     SITE = Path(args.site).resolve() if args.site else SITE
@@ -242,6 +366,12 @@ def main() -> int:
         browser = launch(p)
         for lang, path in LANGS.items():
             still = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
+            if args.consent:
+                ident = re.search(r'analytics\.js" data-id="(G-[A-Z0-9]+)"', (SITE / path / "index.html").read_text(encoding="utf-8"))
+                if ident:
+                    consent(browser, base, path, lang, ident.group(1), report)
+                else:
+                    report(f"{lang} measurement", ["the built page names no measurement ID"])
             asked: list[str] = []
             still.on("request", lambda request: asked.append(request.url))
             page = still.new_page()

@@ -5,11 +5,12 @@
 
 It draws the page's own design (its colors from site/style.css, its name mark, its headline and its
 status line from the strings) at 1200 by 630 px in the Chrome on this machine. The images are
-committed. Run it again when the headline, the status line or the colors change; a test fails when a
-card is missing or has another size. Needs the pinned browser driver in requirements.txt.
+committed, and what each was drawn from is recorded in cards.json. Run it again when the headline, the
+status line or the colors change; a test fails until then, and when a card is missing or has another size. Needs the pinned browser driver in requirements.txt.
 """
 
 import html
+import json
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,8 @@ def main() -> int:
                 raise SystemExit(f"{lang}: the headline does not fit the card")
             page.screenshot(path=str(build.OUT / f"card-{lang}.png"))
         browser.close()
+    drawn = {lang: build.card_source(lang) for lang in build.LANGS}
+    (build.HERE / "cards.json").write_text(json.dumps(drawn, indent=1) + "\n", encoding="utf-8")
     return 0
 
 
