@@ -4,6 +4,20 @@ from pathlib import Path
 import pytest
 
 CANARY = "dodam-bench-canary-00000000-0000-4000-8000-000000000001"
+FIGURES: list[str] = []
+
+
+def note_figures(what: str, **figures: float) -> None:
+    """Keep the figures a test measured. They are printed when the run ends, also when every test
+    passed, so that a run that is green still shows how close it came."""
+    FIGURES.append(f"{what}: " + ", ".join(f"{name} {value:.2f}" for name, value in figures.items()))
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    if FIGURES:
+        terminalreporter.section("what the tests measured, in MB")
+        for line in FIGURES:
+            terminalreporter.write_line(line)
 
 
 @pytest.fixture(autouse=True)

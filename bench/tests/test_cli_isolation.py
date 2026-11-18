@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from conftest import CANARY
+from conftest import CANARY, note_figures
 from dodambench.convert import TEST_SH
+from dodambench.judge import RECORDS_LEFT_OUT_MB
 from dodambench.task import load_task
 from dodambench.vet import VetError, vet
 
@@ -66,9 +67,173 @@ def judge_attack(tmp_path: Path, program: str, tests: dict[str, str], room: dict
     return in_the_image(tests_dir, solution, tmp_path / "out", env.get("CASE_DISK_MB", "32"), **(room or {}))
 
 
+# What a container really holds is read from outside it, by a helper that has what the judged
+# container must never get: the kernel's own files for the container's memory, open for writing.
+# Asked by a hidden test, the helper has the kernel give back everything of the container's that
+# it can give back, and reads what is then still charged to it, memory and swap together. Whatever
+# keeps a page shows in that figure, known to the judge or not. Two such readings, one when a case
+# begins and one while the program holds what it holds, differ by what the case really holds.
+READER = r"""
+import json, os, time
+asked, held = "/reading", "/group"
+os.chmod(asked, 0o700)
+
+
+def number(name):
+    try:
+        with open(f"{held}/{name}") as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return 0
+
+
+def charged():
+    return number("memory.current") + number("memory.swap.current")
+
+
+def give_back(first):
+    try:
+        with open(f"{held}/memory.reclaim", "wb", buffering=0) as f:
+            f.write(str(first).encode())
+    except OSError:
+        pass                          # the kernel says so when it could not give back all that was asked
+
+
+def reading():
+    started, first, passes, dropped = time.monotonic(), charged(), 0, True
+    last = first
+    while passes < 12:
+        give_back(first)
+        passes += 1
+        now = charged()
+        if passes > 1 and now > last - 65536:
+            break
+        last = now
+    # asked for the container alone, the kernel keeps some records nothing holds on to; asked for
+    # the whole machine, it lets go of every one of them
+    try:
+        with open("/drop", "wb", buffering=0) as f:
+            f.write(b"2")
+    except OSError:
+        dropped = False
+    give_back(first)
+    # what the kernel lets go of it frees a moment later: the figure is read once it has stood still
+    last, still = charged(), 0
+    while still < 6 and time.monotonic() - started < 3:
+        time.sleep(0.005)
+        now = charged()
+        still = still + 1 if now > last - 65536 else 0
+        last = min(last, now)
+    with open(f"{held}/memory.stat") as f:
+        stat = dict(line.split()[:2] for line in f.read().splitlines())
+    return {"charged": charged(), "charged_before": first, "passes": passes, "dropped": dropped,
+            "seconds": time.monotonic() - started,
+            "stat": {name: int(stat.get(name, 0)) for name in (
+                "anon", "file", "shmem", "kernel", "slab_reclaimable", "slab_unreclaimable", "sock", "pagetables",
+                "unevictable", "file_mapped")}}
+
+
+while True:
+    for name in os.listdir(asked):
+        if name.startswith("ask-") and not os.path.exists(f"{asked}/answer-{name[4:]}"):
+            with open(f"{asked}/answer.tmp", "w") as f:
+                json.dump(reading(), f)
+            os.rename(f"{asked}/answer.tmp", f"{asked}/answer-{name[4:]}")
+    time.sleep(0.002)
+"""
+
+# For the hidden tests of an attack: ask for a reading, and take one while the program holds what
+# it holds. The program is given two files; it removes the first when it holds everything, and
+# ends when the second is gone.
+READING = r"""
+import threading
+
+
+def reading(label):
+    with open("/logs/reading/ask.tmp", "w") as f:
+        f.write(label)
+    os.rename("/logs/reading/ask.tmp", "/logs/reading/ask-" + label)
+    for _ in range(6000):
+        try:
+            with open("/logs/reading/answer-" + label) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            time.sleep(0.005)
+    raise AssertionError("no reading came from outside the container")
+
+
+def read_while_held(c, label, into):
+    c.write("holding-not-yet", "")
+    c.write("not-read-yet", "")
+
+    over = threading.Event()
+
+    def wait():
+        while not over.is_set():
+            if not os.path.exists(c.work / "holding-not-yet"):
+                room = os.statvfs(c.work)
+                into.update(reading(label), files=(room.f_blocks - room.f_bfree) * room.f_frsize)
+                break
+            time.sleep(0.005)
+        try:
+            os.unlink(c.work / "not-read-yet")
+        except OSError:
+            pass
+    waiting = threading.Thread(target=wait, daemon=True)
+    waiting.start()
+
+    def after_the_run():
+        over.set()
+        waiting.join(60)
+    return after_the_run
+
+
+def attempt(name, args, files=None):
+    # one case: a reading when it begins, the program run once, a reading while it holds
+    with case(files=files) as c:
+        start, while_held = reading(name + "-start"), {}
+        after_the_run = read_while_held(c, name + "-held", while_held)
+        r = c.run(args)
+        after_the_run()
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[name] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
+                      "start": start, "held": while_held, "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        return r
+"""
+# the program's part of it
+HELD = r"""
+def held_until_read():
+    os.unlink("holding-not-yet")
+    for _ in range(12000):
+        if not os.path.exists("not-read-yet"):
+            return
+        time.sleep(0.005)
+"""
+
+
+TOLERANCE_MB = 6      # how far the kernel's own figures, read at two moments, may lie apart
+
+
+def really_mb(seen: dict) -> float:
+    """What a case really held while its program held what it held, as read from outside: what
+    was charged to the container then, less what was charged when the case began and the case's
+    own files, which have a limit of their own."""
+    assert seen["held"], f"no reading was taken while the program held: {seen}"
+    assert seen["held"]["dropped"] and seen["start"]["dropped"], f"the kernel was not asked to let go of everything: {seen}"
+    return (seen["held"]["charged"] - seen["start"]["charged"] - seen["held"]["files"]) / 2**20
+
+
+def left_out_mb(limit_mb: int) -> float:
+    """The most of the kernel's records that is left out of a case's memory, by the judge's rule."""
+    return min(limit_mb / 4, RECORDS_LEFT_OUT_MB)
+
+
 def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32", memory_mb: int | None = None,
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
-                 changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300) -> dict:
+                 changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
+                 processes: int | None = None) -> dict:
     """What the verifier does: a fresh container without network, capped in memory, processors and
     processes, with the capped memory-backed folder for the cases; the judge as root with its own
     Python, started by the verifier's own script, the program's build user named agent. Returns the
@@ -79,7 +244,8 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     a command run as root before the judge starts: what was there when the judging began. `changed`
     names texts to replace in the judge's files (file, text, replacement): a judge with one of its
     own stops taken out, to see what the kernel then does. A judging that does not end in `seconds`
-    is ended and fails the test."""
+    is ended and fails the test. With `reading` a helper runs outside the container and the hidden
+    tests can ask it what the container really holds; the folder they ask through is root's alone."""
     name = f"dodam-attack-{uuid.uuid4().hex[:12]}"
     (tests_dir / "test.sh").write_text(TEST_SH, encoding="utf-8")
     for file, text, replacement in changed:
@@ -92,26 +258,47 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     memory = memory_mb or ROOM["memory_mb"]
     cases = f"{CASES}:rw,exec,nosuid,nodev,size={disk_mb}m,nr_inodes=20000,mode=0711"
     caps = {"memory": ["--memory", f"{memory}m", "--memory-swap", f"{memory}m"],
-            "processes": ["--pids-limit", str(ROOM["processes"])],
+            "processes": ["--pids-limit", str(processes or ROOM["processes"])],
             "cases": ["--tmpfs", cases.replace(",nr_inodes=20000", "") if "entries" in without else cases]}
     # where Docker gives every container a cap of its own, leaving the flag out would leave that one:
     # a cap far above anything that protects the machine stands in for none
     loose = {"processes": ["--pids-limit", "100000"]}
     flags = [flag for key, value in caps.items() for flag in (loose.get(key, []) if key in without else value)]
     hung = False
+    if reading:
+        flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
         subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0", *flags,
                         "--cpus", str(ROOM["cpus"]), "-e", f"DODAM_APP_USER={user}", IMAGE, "sh", "-c", script],
                        check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{solution}/.", f"{name}:/solution"], check=True, capture_output=True)
+        running = subprocess.Popen(["docker", "start", "--attach", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if reading:
+            # the helper gets the one folder of the kernel's that belongs to the judged container, the
+            # machine's file for letting go of unused records, and the folder it is asked through
+            ident = subprocess.run(["docker", "inspect", "--format", "{{.Id}}", name], check=True, capture_output=True,
+                                   text=True).stdout.strip()
+            driver = subprocess.run(["docker", "info", "--format", "{{.CgroupDriver}}"], check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            group = f"system.slice/docker-{ident}.scope" if driver == "systemd" else f"docker/{ident}"
+            subprocess.run(["docker", "run", "--detach", "--name", f"{name}-reader", "--network", "none", "--user", "0",
+                            "--memory", "256m", "--pids-limit", "64", "--volume", f"/sys/fs/cgroup/{group}:/group",
+                            "--volume", "/proc/sys/vm/drop_caches:/drop",
+                            "--volume", f"{name}-asked:/reading", IMAGE, "python3", "-c", READER],
+                           check=True, capture_output=True)
         try:
-            done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=seconds)
+            said, errors = running.communicate(timeout=seconds)
+            done = subprocess.CompletedProcess(running.args, running.returncode, said, errors)
         except subprocess.TimeoutExpired:
+            running.kill()
             hung = True
         subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out)], capture_output=True)
     finally:
         subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+        if reading:
+            subprocess.run(["docker", "rm", "--force", f"{name}-reader"], capture_output=True)
+            subprocess.run(["docker", "volume", "rm", "--force", f"{name}-asked"], capture_output=True)
     assert not hung, f"the judging did not end within {seconds} seconds"
     result = {"exit_code": done.returncode, "reward": None, "report": {"tests": []}, "fault": None,
               "stderr": done.stderr.decode("utf-8", errors="replace")[-2000:]}
@@ -1442,6 +1629,72 @@ time.sleep(0.2)
     assert failed.get("records_counted_bytes", 0) > 0 and failed["records_left_out_bytes"] == 16 * 2**20, failed
 
 
+READS = r"""
+if sys.argv[1] == "holds":
+    block = bytearray(b"x") * (100 * MB)
+elif sys.argv[1] == "only reads":
+    with open("/app/large.bin", "rb") as f:
+        while f.read(MB):
+            pass
+held_until_read()
+print("done")
+"""
+
+READ_TESTS = READING + """
+def test_nothing():
+    assert attempt("nothing", ["nothing"]).out == "done\\n"
+
+
+def test_holds():
+    assert attempt("holds", ["holds"]).out == "done\\n"
+
+
+def test_only_reads():
+    assert attempt("only reads", ["only reads"]).out == "done\\n"
+
+
+def test_the_judged_container_cannot_ask_the_kernel_itself():
+    refused = {}
+    for path in ("/sys/fs/cgroup/memory.reclaim", "/proc/sys/vm/drop_caches"):
+        try:
+            with open(path, "w") as f:
+                f.write("1")
+            refused[path] = "written"
+        except OSError as error:
+            refused[path] = "refused: " + error.strerror
+    seen = json.load(open("/logs/verifier/attack.json"))
+    seen["asked by the judge's own user"] = refused
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump(seen, f)
+"""
+
+
+def test_the_reading_from_outside_shows_what_a_program_holds_and_nothing_the_kernel_can_give_back(tmp_path):
+    """The figure the bound tests take for what a container really holds. A program that holds
+    100 MB of ordinary memory reads as 100 MB more than one that holds nothing. A program that has
+    read a file of 200 MB from disk and holds nothing reads as that one does, although the kernel
+    keeps the file in memory until it is asked: what can be given back is given back before the
+    figure is read. The judged container itself cannot ask the kernel for this: only the helper
+    outside it can."""
+    result = judge_attack(tmp_path, PLAIN + HELD + READS, {"functional/test_read.py": READ_TESTS},
+                          {"reading": True, "before": "dd if=/dev/zero of=/app/large.bin bs=1M count=200 status=none"},
+                          CASE_MEMORY_MB="256", CASE_TIMEOUT_SEC="60")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_nothing": "passed", "test_holds": "passed", "test_only_reads": "passed",
+                                "test_the_judged_container_cannot_ask_the_kernel_itself": "passed"}, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    # what the helper may write, the judged container may not, not even as root
+    assert all(said.startswith("refused") for said in seen["asked by the judge's own user"].values()), seen["asked by the judge's own user"]
+    nothing = really_mb(seen["nothing"])
+    holds, reads = really_mb(seen["holds"]) - nothing, really_mb(seen["only reads"]) - nothing
+    kept = (seen["only reads"]["held"]["charged_before"] - seen["only reads"]["start"]["charged"]) / 2**20
+    note_figures("the reading itself", nothing=nothing, holds_100=holds, only_reads_200=reads, kept_before_asking=kept,
+                 seconds_while_held=seen["holds"]["held"]["seconds"], seconds_at_start=seen["holds"]["start"]["seconds"])
+    assert abs(holds - 100) <= TOLERANCE_MB, f"100 MB of ordinary memory read as {holds:.1f} MB: {seen['holds']}"
+    assert kept >= 150, f"the file was to be in memory before the kernel was asked; {kept:.1f} MB were: {seen['only reads']}"
+    assert abs(reads) <= TOLERANCE_MB, f"a program that only read a file read as holding {reads:.1f} MB: {seen['only reads']}"
+
+
 # The kernel's records of names and files are left out of a case's memory only up to a bound: a
 # quarter of the case's memory limit, and never more than 16 MB. Everything beyond counts. Some of
 # these records the kernel cannot give back while a program holds on to what they describe. The
@@ -1562,27 +1815,13 @@ for at in range(0, min(max(goal - (now - held_first), 0), len(aside)), 4096):
     aside[at] = 1
 now, records = held()
 print(json.dumps({"held_mb": now / MB, "records_mb": records / MB, "steps": steps}), flush=True)
-time.sleep(0.3)
+held_until_read()
 """
 
-HOLD_TESTS = """
-def numbers():
-    stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat"))
-    return {"held_mb": (int(open("/sys/fs/cgroup/memory.current").read()) - int(stat["file"]) + int(stat["shmem"])) / 2**20,
-            "records_mb": int(stat["slab_reclaimable"]) / 2**20}
-
-
+HOLD_TESTS = READING + """
 def hold(aim):
-    with case() as c:
-        before = numbers()
-        r = c.run(["hold", WAY, aim, LIMIT_MB, LEFT_OUT_MB, FILES_MB])
-        said = json.loads(r.out) if r.out.startswith("{") else {}
-        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
-        seen[aim] = {"exit_code": r.exit_code, "limit": r.limit, "err": r.err[-300:], "before": before, "program": said,
-                     "measured": c.measured}
-        with open("/logs/verifier/attack.json", "w") as f:
-            json.dump(seen, f)
-        assert r.exit_code == 0, r
+    r = attempt(aim, ["hold", WAY, aim, LIMIT_MB, LEFT_OUT_MB, FILES_MB])
+    assert r.exit_code == 0, r
 
 
 def test_before():
@@ -1605,31 +1844,33 @@ def test_after():
 
 WAYS = ("open files", "memory files, mapped and closed", "shared mappings without a file", "the image's files, mapped",
         "far-apart pages in the case folder")
-LEFT_OUT_MB = 16      # the most of the kernel's records that is left out of a case's memory
-TOLERANCE_MB = 6      # how far the kernel's own figures, read at two moments, may lie apart
 
 
 @pytest.mark.parametrize("limit_mb", [64, 256, 512])
 @pytest.mark.parametrize("way", WAYS)
 def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out(tmp_path, way, limit_mb):
-    """However a program holds on to the kernel's records, the judge leaves at most 16 MB of them
-    out of the case's memory. A program that holds its limit and that amount passes, and what the
-    container then holds beyond the judge's count is no more than that amount. A program that
-    holds clearly more fails for memory."""
+    """However a program holds on to the kernel's records, the judge leaves at most a quarter of
+    the case's limit and never more than 16 MB of them out of the case's memory. A program that
+    holds its limit and that amount passes, and what the container then really holds beyond the
+    judge's count, read from outside, is no more than that amount. A program that holds clearly
+    more fails for memory."""
+    left_out = left_out_mb(limit_mb)
     tests = HOLD_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
-        .replace("LEFT_OUT_MB", repr(str(LEFT_OUT_MB))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
-    result = judge_attack(tmp_path, PLAIN + HOLDS, {"functional/test_hold.py": tests}, CASE_MEMORY_MB=str(limit_mb),
-                          CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+        .replace("LEFT_OUT_MB", repr(str(int(left_out)))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + HELD + HOLDS, {"functional/test_hold.py": tests}, {"reading": True},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
     within, beyond = seen["within"], seen["beyond"]
     assert within["limit"] is None and within["exit_code"] == 0, f"a program within its limit and the amount left out failed: {within}"
     counted = within["measured"].get("memory_highest")
     assert counted is not None, f"the case does not say the most the judge counted: {within['measured']}"
-    really = within["program"]["held_mb"] - within["before"]["held_mb"]
-    assert really - counted / 2**20 <= LEFT_OUT_MB + TOLERANCE_MB, (
-        f"the container held {really:.1f} MB more than before the run and the judge counted {counted / 2**20:.1f} MB: {within}")
-    assert within["measured"]["records_left_out"] <= LEFT_OUT_MB * 2**20, within["measured"]
+    really = really_mb(within)
+    note_figures(f"{way}, limit {limit_mb} MB", really=really, counted=counted / 2**20, beyond=really - counted / 2**20)
+    assert really - counted / 2**20 <= left_out + TOLERANCE_MB, (
+        f"the container really held {really:.1f} MB more than when the case began and the judge counted "
+        f"{counted / 2**20:.1f} MB: {within}")
+    assert within["measured"]["records_left_out"] <= left_out * 2**20, within["measured"]
     assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
     assert outcomes(result) == {"test_before": "passed", "test_within": "passed", "test_beyond": "failed",
                                 "test_after": "passed"}, lost(result, tmp_path / "out")
