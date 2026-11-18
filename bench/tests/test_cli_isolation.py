@@ -255,9 +255,11 @@ def held_until_read():
 # How far a reading may lie from what it should be. The rule: take the largest use of tolerance
 # over every turn of the reading's own test and of the bound tests on the machine of the
 # automatic check; the tolerance is twice that, rounded up to a whole MB, and not under 2. Above 6
-# it is not set: the reading is then not good enough. In the two runs on the commit that brought
-# the reading that stands still, the largest uses were 1.46 and 1.32 MB, so the tolerance is 3.
-TOLERANCE_MB = 3
+# it is not set: the reading is then not good enough. In the five runs since the helper stops the
+# container while it reads, the largest uses were 1.96, 1.46, 1.32, 1.59 and 1.71 MB, so the
+# tolerance is 4. Held to one processor, ten readings of one program lie 0.03 MB apart; on two
+# processors 0.63 MB, around the same mean: how far readings scatter grows with the processors.
+TOLERANCE_MB = 4
 
 
 def really_mb(seen: dict) -> float:
@@ -2085,14 +2087,15 @@ def test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_o
         "import ctypes, errno, json, os, sys\nlibc = ctypes.CDLL(None, use_errno=True)\n" + TRIES
         + "json.dump(tries(), open('/app/tried-by-the-build.json', 'w'))\n", encoding="utf-8")
     program = PLAIN + TRIES + ("print(json.dumps({'run': tries(), 'build': json.load(open('/app/tried-by-the-build.json')), 'caps': "
-                               "[int(open(name).read()) for name in ('/proc/sys/fs/aio-max-nr', '/proc/sys/kernel/pty/max')]}))\n")
+                               "[int(open(name).read()) for name in ('/proc/sys/fs/aio-max-nr', '/proc/sys/kernel/pty/max')] + [os.cpu_count()]}))\n")
     result = judge_attack(tmp_path, program, {"functional/test_tries.py": REPORT}, {"own_filter_only": True},
                           BUILD_CMD="python3 tries.py")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
     assert seen["exit_code"] == 0, seen
     tried = json.loads(seen["out"])
-    note_figures("the machine's caps (counts, not MB)", older_asynchronous_events=tried["caps"][0], terminals=tried["caps"][1])
+    note_figures("the machine's caps and processors (counts, not MB)", older_asynchronous_events=tried["caps"][0], terminals=tried["caps"][1],
+                 processors=tried["caps"][2])
     for who in ("build", "run"):
         wrong = {name: said for name, said in tried[who].items() if said != {**TRIED, THE_32_BIT_WAY: NOT_PERMITTED}.get(name)}
         assert not wrong and set(tried[who]) - {THE_32_BIT_WAY} == set(TRIED), f"in the {who}: {wrong}"
