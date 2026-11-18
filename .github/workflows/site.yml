@@ -33,9 +33,9 @@ jobs:
         run: python tools/site/build.py --check
       - name: Build what would be published, with a made-up status that carries markup in a title
         run: python tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json
-      - name: Lay the page out (uses the Chrome already on the runner)
-        run: python tools/site/sweep.py --quick --site "$RUNNER_TEMP/site"
-      - name: Build it again with a made-up measurement ID
-        run: python tools/site/build.py --live "$RUNNER_TEMP/measured" --status tools/site/sample_status.json --analytics G-SAMPLE0000
       - name: Lay the page out at every size with the question about measurement open, and check that it asks first
-        run: python tools/site/sweep.py --site "$RUNNER_TEMP/measured" --consent G-SAMPLE0000
+        run: python tools/site/sweep.py --site "$RUNNER_TEMP/site" --consent
+      - name: Build it again as it would be without a measurement ID
+        run: python tools/site/build.py --live "$RUNNER_TEMP/unmeasured" --status tools/site/sample_status.json --analytics ""
+      - name: Lay that out as well, and check that it asks no other host for anything
+        run: python tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"

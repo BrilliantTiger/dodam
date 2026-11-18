@@ -187,5 +187,5 @@
   "consent_yes": "Agree",
   "consent_no": "Decline",
   "consent_settings": "Change measurement choice",
-  "measure_p": "This page counts visits with Google Analytics, only for visitors who agree: which pages are opened, from what kind of device and from which country, and where the visit came from. Advertising features are off. If you decline, or your browser sends a signal that refuses tracking, nothing is loaded from Google and no cookie is set."
+  "measure_p": "This page counts visits with Google Analytics, only for visitors who agree: which pages are opened, whether a visitor scrolls to the end of a page, clicks on links that leave the site, from what kind of device and from which country, and where the visit came from. Advertising features are off. If you decline, or your browser sends a signal that refuses tracking, nothing is loaded from Google and no cookie is set."
 }

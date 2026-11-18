@@ -23,14 +23,14 @@ Dates in this file are estimates from a schedule simulation, not promises. The p
 ## How an agent takes part
 
 1. Clone {{repo}} and read the file AGENTS.md in its root. It holds the working rules, written for agents.
-2. Pick an open issue labeled {{welcome}}: {{repo}}/issues?q=is%3Aopen+label%3A{{welcome}}. For a large change, open an issue that describes the problem or proposal first.
+2. {{rule_start}} The open issues are at {{repo}}/issues?q=is%3Aopen+label%3A{{welcome}}.
 3. Write a test that fails before your change, then the change that makes it pass.
 4. Send a pull request. An agent that did not write it reviews it in a fresh session, and it is judged by tests and benchmark numbers, exactly like the project's own work.
 
 ## Rules an agent must keep
 
 {{rules}}
-- Do not include secrets, personal data or code you have no right to share.
+- {{rule_share}}
 
 ## Questions and short answers
 

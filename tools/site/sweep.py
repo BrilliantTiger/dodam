@@ -37,6 +37,7 @@ Needs the playwright package and Chrome or Chromium. Nothing here runs on the pu
 """
 
 import argparse
+import re
 import functools
 import http.server
 import sys
@@ -325,7 +326,7 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--shots")
     parser.add_argument("--site", help="the built site to check (default: the committed site/)")
-    parser.add_argument("--consent", metavar="ID", help="the site was built with this measurement ID: check that it asks first")
+    parser.add_argument("--consent", action="store_true", help="the site was built with a measurement ID: check that it asks first")
     args = parser.parse_args()
     global SITE
     SITE = Path(args.site).resolve() if args.site else SITE
@@ -339,7 +340,11 @@ def main() -> int:
         for lang, path in LANGS.items():
             still = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
             if args.consent:
-                consent(browser, base, path, lang, args.consent, report)
+                ident = re.search(r'analytics\.js" data-id="(G-[A-Z0-9]+)"', (SITE / path / "index.html").read_text(encoding="utf-8"))
+                if ident:
+                    consent(browser, base, path, lang, ident.group(1), report)
+                else:
+                    report(f"{lang} measurement", ["the built page names no measurement ID"])
             asked: list[str] = []
             still.on("request", lambda request: asked.append(request.url))
             page = still.new_page()

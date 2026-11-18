@@ -36,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -46,9 +47,11 @@ CHARTER = ROOT / "docs" / "charter.ko.md"
 TASKS = ROOT / "bench" / "tasks"
 SITE_URL = "https://brillianttigercorp.com/dodam/"
 REPO_URL = "https://github.com/BrilliantTiger/dodam"
-# The measurement ID of Google Analytics: this one setting, empty until the owner has created the
-# property. While it is empty the built pages hold no analytics code and name no other host.
-ANALYTICS_ID = ""
+# The measurement ID of Google Analytics: this one setting, the owner's property. Google's tag is loaded
+# by this ID, never through a container: a container can be given other tags later, and the page promises
+# measurement without advertising. With the setting empty the built pages hold no analytics code and
+# name no other host.
+ANALYTICS_ID = "G-DHJKG68707"
 MEASURED = re.compile(r"<!--measured-->\n(.*?)<!--/measured-->\n", re.S)   # parts of the template that exist only with an ID
 # What Google's measurement needs, from Google's guide to content security policies for the Google tag.
 GOOGLE_NEEDS = {
@@ -64,6 +67,7 @@ QUESTIONS = 6
 CARD = (1200, 630)       # the image shown when the page is shared
 LANGS = ["en", "ko", "ja", "es"]
 NAMES = {"en": "English", "ko": "한국어", "ja": "日本語", "es": "Español"}
+LOCALES = {"en": "en_US", "ko": "ko_KR", "ja": "ja_JP", "es": "es_ES"}   # as pages are shared: language_TERRITORY
 MONTHS = {
     "en": "January February March April May June July August September October November December".split(),
     "es": "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split(),
@@ -234,7 +238,7 @@ def inputs_digest(status: dict) -> str:
     file the pages are built from. The scheduled build deploys only when it differs from the published one."""
     shown = {key: value for key, value in status.items() if key not in {"built", "digest"}}
     sha = hashlib.sha256(json.dumps(shown, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    sources = [HERE / "template.html", HERE / "guide.txt", HERE / "analytics.js", Path(__file__)] + sorted((HERE / "strings").glob("*.json"))
+    sources = [HERE / "template.html", HERE / "guide.txt", Path(__file__)] + sorted((HERE / "strings").glob("*.json"))
     sources += sorted(p for p in OUT.rglob("*") if p.is_file() and p.name != "index.html")
     for path in sources:
         sha.update(path.name.encode("utf-8") + b"\0" + path.read_bytes())
@@ -355,13 +359,24 @@ def sitemap() -> str:
     return "\n".join(rows + ["</urlset>"]) + "\n"
 
 
+def working_rule(words: str) -> str:
+    """One rule of the working rules (AGENTS.md), in its own words, for the guide."""
+    found = [line[2:].replace("`", "") for line in (ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+             if line.startswith("- ") and words in line]
+    if len(found) != 1:
+        raise ValueError(f"the working rules do not have one rule that says: {words}")
+    return found[0]
+
+
 def guide(status: dict) -> str:
-    """The guide for AI agents (llms.txt), in English: the page's own strings and the status."""
+    """The guide for AI agents (llms.txt), in English: the page's own strings, the status, and two rules
+    in the working rules' own words."""
     strings = load_strings("en")
     step = status["step"]
     values = {key: plain("en", text) for key, text in strings.items() if isinstance(text, str)}
     values |= {
         "site": SITE_URL, "repo": REPO_URL, "welcome": WELCOME,
+        "rule_start": working_rule("before sending a large change"), "rule_share": working_rule("no right to share"),
         "pages": ", ".join(f"{NAMES[lang]} {page_url(lang)}" for lang in LANGS),
         "built": moment("en", status["built"]),
         "charter_version": status["charter"]["version"], "charter_date": spell("en", "d", status["charter"]["date"]),
@@ -403,6 +418,7 @@ def specials(lang: str) -> dict:
         "foot_languages": links("        ", "{}", ' class="link"'),
         "repo": REPO_URL,
         "site": SITE_URL,
+        "locale": LOCALES[lang],
         "card": f"{SITE_URL}card-{lang}.png",
         "card_width": str(CARD[0]),
         "card_height": str(CARD[1]),
@@ -458,18 +474,28 @@ def publish(out: Path, status: dict, analytics: str | None = None) -> None:
     shutil.copytree(OUT, out, ignore=shutil.ignore_patterns("__pycache__"))
     for name, text in pages(status, ident).items():
         (out / name).write_text(text, encoding="utf-8")
-    if ident:
-        shutil.copyfile(HERE / "analytics.js", out / "analytics.js")
+    if not ident:
+        (out / "analytics.js").unlink()
     (out / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (out / "llms.txt").write_text(guide(status), encoding="utf-8")
 
 
 def published_digest() -> str | None:
+    """The digest of what is published now. None only when no status file is published yet (not found).
+    Any other failure to read it is an error: the run fails and deploys nothing, so that a lasting fault
+    is seen instead of deploying again every hour."""
+    request = urllib.request.Request(SITE_URL + "status.json", headers={"User-Agent": "dodam-site-build"})
     try:
-        with urllib.request.urlopen(urllib.request.Request(SITE_URL + "status.json", headers={"User-Agent": "dodam-site-build"}), timeout=30) as response:
-            return json.load(response).get("digest")
-    except Exception:
-        return None   # nothing is published yet, or it cannot be read: deploy
+        with urllib.request.urlopen(request, timeout=30) as response:
+            found = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    digest = found.get("digest") if isinstance(found, dict) else None
+    if not isinstance(digest, str) or not digest:
+        raise ValueError("the published status file has no digest")
+    return digest
 
 
 def shape(value) -> dict:
