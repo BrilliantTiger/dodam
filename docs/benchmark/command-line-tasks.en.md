@@ -596,14 +596,14 @@ For every protection there is one variant of the code without it (`bench/experim
 
 | Check | Where | Numbers |
 |---|---|---|
-| All tests that need no image | automatically on every push | 493 tests pass, 5 min 35 s (time limit 15 minutes) |
-| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over | automatically on every push; the image is built on the spot | 83 tests pass, 7 min 53 s (time limit 30 minutes) |
-| Taking each of the 85 protections out in turn | automatically on every push | the tests catch 81, the 4 second lines hold, 9 min 57 s (time limit 40 minutes) |
+| All tests that need no image | automatically on every push | 654 tests pass, 5 min 10 s (time limit 15 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that read files that are not in the cache; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 96 tests pass, 10 min 42 s (time limit 30 minutes) |
+| Taking each of the 94 protections out in turn | automatically on every push | the tests catch 88, the 6 second lines hold, 10 min 59 s (time limit 40 minutes) |
 | The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written, once after the last change and five times over before it |
 | The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
 | Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
 
-The times are the longer of the two runs of the automatic check on the commit that made this change. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the last change the three jobs took 4 min 59 s, 5 min 26 s and 7 min 21 s; the repeated attacks and the 41 added protections lengthened the second and the third. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
+The times are the longer of the two runs of the automatic check on the commit that made this change. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the last change the three jobs took at most 5 min 35 s, 8 min 14 s and 11 min 16 s; the quick mode of the two experiment scripts adds about two and a half minutes to the second, and the count of the first includes the tests main gained meanwhile. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
 
 The commands that check these again on the measuring machine:
 
