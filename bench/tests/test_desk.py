@@ -1,7 +1,7 @@
 """Checks on the desk watcher (tools/desk/watch.py) and standing instructions (tools/desk/brief.md).
 
-All watcher tests run offline by replacing the single function in watch.py that runs gh,
-plus its clock and sleep hooks.
+All watcher tests run without the network by replacing the single function in watch.py that
+runs gh, along with its clock and sleep hooks.
 """
 
 from __future__ import annotations
@@ -11,9 +11,13 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import time
+import traceback
 from pathlib import Path
 
 import pytest
@@ -57,10 +61,16 @@ def read_brief() -> str:
 
 
 class FakeClock:
-    def __init__(self, start: float = 1_000.0, epoch_start: float = 1_763_450_000.0):
+    def __init__(
+        self,
+        start: float = 1_000.0,
+        epoch_start: float = 1_794_980_000.0,
+        max_sleeps: int = 200,
+    ):
         self.t = start
         self.epoch_offset = epoch_start - start
         self.sleeps: list[float] = []
+        self.max_sleeps = max_sleeps
 
     def now(self) -> float:
         return self.t
@@ -70,6 +80,9 @@ class FakeClock:
 
     def sleep(self, seconds: float) -> None:
         assert seconds >= 0, f"negative sleep: {seconds}"
+        assert len(self.sleeps) < self.max_sleeps, (
+            f"watcher slept {len(self.sleeps)} times without terminating (possible unbounded loop)"
+        )
         self.sleeps.append(seconds)
         self.t += seconds
 
@@ -133,27 +146,23 @@ def parse_gh_call(args: list[str]) -> tuple[str, dict[str, str]]:
 
 
 class FakeGitHub:
-    """In-memory GitHub REST API responder with ETag / 304 Not Modified and pagination support."""
+    """In-memory GitHub REST API responder with per-page ETags and pagination."""
 
     def __init__(self, own_login: str = "project-account"):
         self.own_login = own_login
-        self.pulls: list[dict[str, object]] = []
-        self.issues: list[dict[str, object]] = []
-        self.issue_events: list[dict[str, object]] = []
-        self.issue_comments: list[dict[str, object]] = []
-        self.pull_comments: list[dict[str, object]] = []
-        self.reviews: dict[int, list[dict[str, object]]] = {}
+        self.pulls: list[object] = []
+        self.issues: list[object] = []
+        self.issue_events: list[object] = []
+        self.issue_comments: list[object] = []
+        self.pull_comments: list[object] = []
+        self.reviews: dict[int, list[object]] = {}
         self.poll_interval: int | None = None
         self.page_size: int | None = None
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.scripted: list = []
-        self._version = 1
 
-    def bump(self) -> None:
-        self._version += 1
-
-    def _etag_for(self, key: str, data: object) -> str:
-        digest = hash((key, json.dumps(data, sort_keys=True))) & 0xFFFFFFFF
+    def _etag_for(self, key: str, slice_items: object) -> str:
+        digest = hash((key, json.dumps(slice_items, sort_keys=True, default=str))) & 0xFFFFFFFF
         return f'W/"{digest:08x}"'
 
     def __call__(self, args: list[str]) -> tuple[int, str, str]:
@@ -174,6 +183,7 @@ class FakeGitHub:
         path, _, query = endpoint.partition("?")
         params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
         page = int(params.get("page", "1"))
+        eff_per_page = self.page_size if self.page_size is not None else int(params.get("per_page", "100"))
 
         if path == f"repos/{REPO}/pulls":
             full = list(self.pulls)
@@ -191,20 +201,18 @@ class FakeGitHub:
         else:
             return http_response(404, {"message": "Not Found"})
 
-        etag = self._etag_for(path, full)
-        if page == 1 and req_headers.get("if-none-match") == etag:
+        start = (page - 1) * eff_per_page
+        end = start + eff_per_page
+        slice_items = full[start:end]
+        # Compute ETag strictly on this page's slice (not on later pages) so tests catch page-1 ETag freezing.
+        etag = self._etag_for(f"{path}:p{page}:{eff_per_page}", slice_items)
+        if req_headers.get("if-none-match") == etag:
             return http_response(304, None, {**base_hdrs, "ETag": etag})
 
         hdrs = {**base_hdrs, "ETag": etag}
-        if self.page_size is not None:
-            start = (page - 1) * self.page_size
-            end = start + self.page_size
-            slice_items = full[start:end]
-            if end < len(full):
-                next_url = f"https://api.github.com/{path}?per_page={self.page_size}&page={page + 1}"
-                hdrs["Link"] = f'<{next_url}>; rel="next"'
-        else:
-            slice_items = full
+        if end < len(full):
+            next_url = f"https://api.github.com/{path}?per_page={eff_per_page}&page={page + 1}"
+            hdrs["Link"] = f'<{next_url}>; rel="next"'
 
         return http_response(200, slice_items, hdrs)
 
@@ -214,9 +222,11 @@ def run_watch(
     argv: list[str],
     gh_fn,
     fake_clock: FakeClock | None = None,
+    module=None,
 ) -> tuple[int, str, str, FakeClock]:
     clk = fake_clock or FakeClock()
-    module = load_watcher()
+    if module is None:
+        module = load_watcher()
     if module is None:
         return (1, "", "", clk)
     assert hasattr(module, "run_gh"), "watch.py must expose a single run_gh function"
@@ -228,12 +238,25 @@ def run_watch(
     out_buf = io.StringIO()
     err_buf = io.StringIO()
     with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-        code = module.main(argv)
+        try:
+            code = module.main(argv)
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        except Exception:
+            # Mirror what Python prints on stderr if main() lets an exception escape uncaught.
+            traceback.print_exc(file=err_buf)
+            code = 1
     return (code, out_buf.getvalue(), err_buf.getvalue(), clk)
 
 
-def make_issue(issue_id: int, number: int, login: str = "alice", user_type: str = "User",
-               created_at: str = "2026-11-18T05:00:10Z", is_pr: bool = False) -> dict[str, object]:
+def make_issue(
+    issue_id: int,
+    number: int,
+    login: str = "alice",
+    user_type: str = "User",
+    created_at: str = "2026-11-18T05:00:10Z",
+    is_pr: bool = False,
+) -> dict[str, object]:
     item: dict[str, object] = {
         "id": issue_id,
         "number": number,
@@ -250,14 +273,22 @@ def make_issue(issue_id: int, number: int, login: str = "alice", user_type: str 
     return item
 
 
-def make_pr(pr_id: int, number: int, sha: str = "1111111abcdef0", login: str = "alice",
-            user_type: str = "User", state: str = "open",
-            created_at: str = "2026-11-18T05:00:10Z",
-            updated_at: str = "2026-11-18T05:00:10Z") -> dict[str, object]:
+def make_pr(
+    pr_id: int,
+    number: int,
+    sha: str = "1111111abcdef0",
+    login: str = "alice",
+    user_type: str = "User",
+    state: str = "open",
+    draft: bool = False,
+    created_at: str = "2026-11-18T05:00:10Z",
+    updated_at: str = "2026-11-18T05:00:10Z",
+) -> dict[str, object]:
     return {
         "id": pr_id,
         "number": number,
         "state": state,
+        "draft": draft,
         "title": POISON_TITLE,
         "body": POISON_BODY,
         "user": {"login": login, "type": user_type},
@@ -269,9 +300,15 @@ def make_pr(pr_id: int, number: int, sha: str = "1111111abcdef0", login: str = "
     }
 
 
-def make_issue_event(ev_id: int, number: int, event_name: str = "reopened",
-                     login: str = "alice", user_type: str = "User",
-                     created_at: str = "2026-11-18T05:00:20Z", is_pr: bool = False) -> dict[str, object]:
+def make_issue_event(
+    ev_id: int,
+    number: int,
+    event_name: str = "reopened",
+    login: str = "alice",
+    user_type: str = "User",
+    created_at: str = "2026-11-18T05:00:20Z",
+    is_pr: bool = False,
+) -> dict[str, object]:
     issue_obj: dict[str, object] = {"number": number, "title": POISON_TITLE, "body": POISON_BODY}
     if is_pr:
         issue_obj["pull_request"] = {"url": f"https://api.github.com/repos/{REPO}/pulls/{number}"}
@@ -284,8 +321,14 @@ def make_issue_event(ev_id: int, number: int, event_name: str = "reopened",
     }
 
 
-def make_issue_comment(cid: int, number: int, login: str = "alice", user_type: str = "User",
-                       created_at: str = "2026-11-18T05:00:30Z", is_pr: bool = False) -> dict[str, object]:
+def make_issue_comment(
+    cid: int,
+    number: int,
+    login: str = "alice",
+    user_type: str = "User",
+    created_at: str = "2026-11-18T05:00:30Z",
+    is_pr: bool = False,
+) -> dict[str, object]:
     kind_seg = "pull" if is_pr else "issues"
     return {
         "id": cid,
@@ -298,8 +341,14 @@ def make_issue_comment(cid: int, number: int, login: str = "alice", user_type: s
     }
 
 
-def make_review(rid: int, number: int, state: str = "COMMENTED", login: str = "alice",
-                user_type: str = "User", submitted_at: str = "2026-11-18T05:00:40Z") -> dict[str, object]:
+def make_review(
+    rid: int,
+    number: int,
+    state: str = "COMMENTED",
+    login: str = "alice",
+    user_type: str = "User",
+    submitted_at: str = "2026-11-18T05:00:40Z",
+) -> dict[str, object]:
     return {
         "id": rid,
         "state": state,
@@ -311,8 +360,13 @@ def make_review(rid: int, number: int, state: str = "COMMENTED", login: str = "a
     }
 
 
-def make_review_comment(cid: int, number: int, login: str = "alice", user_type: str = "User",
-                        created_at: str = "2026-11-18T05:00:50Z") -> dict[str, object]:
+def make_review_comment(
+    cid: int,
+    number: int,
+    login: str = "alice",
+    user_type: str = "User",
+    created_at: str = "2026-11-18T05:00:50Z",
+) -> dict[str, object]:
     return {
         "id": cid,
         "body": POISON_BODY,
@@ -326,7 +380,7 @@ def make_review_comment(cid: int, number: int, login: str = "alice", user_type: 
     }
 
 
-# --- A (intro): standard library only, gh only, no tokens, no headers printed ----------------
+# --- Standard library only, gh only via run_gh, no tokens, no headers printed -----------------
 
 
 def test_watcher_uses_only_standard_library_talks_only_via_run_gh_and_never_handles_tokens_or_prints_headers(
@@ -335,7 +389,6 @@ def test_watcher_uses_only_standard_library_talks_only_via_run_gh_and_never_hand
     gh = FakeGitHub()
     state_file = tmp_path / "state.json"
 
-    # Baseline + one rate-limit error + one outside event: headers must never appear on stdout or stderr.
     call_num = 0
 
     def hooked_gh(args: list[str]) -> tuple[int, str, str]:
@@ -393,7 +446,7 @@ def test_watcher_uses_only_standard_library_talks_only_via_run_gh_and_never_hand
         assert forbidden not in source, f"watch.py must never touch tokens or verbose headers ({forbidden})"
 
 
-# --- A.1: blocks until something new arrives, prints exactly one JSON object, exits 0 --------
+# --- Waiting for outside activity and printing a single JSON object on standard output ---------
 
 
 def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_object(monkeypatch, tmp_path):
@@ -408,7 +461,6 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
         nonlocal polls_seen
         if args[-1].startswith(f"repos/{REPO}/pulls?"):
             polls_seen += 1
-            # Poll 1: baseline; Poll 2: nothing new (304); Poll 3: new outside issue arrives!
             if polls_seen == 3:
                 gh.issues.insert(0, make_issue(200, 2, login="fresh-outsider", created_at="2026-11-18T06:00:00Z"))
         return orig_call(args)
@@ -419,7 +471,6 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
     assert polls_seen == 4, "expected baseline poll, one idle poll, detection poll, and post-settle poll"
     assert len(clk.sleeps) == 3
 
-    # Exactly one JSON object on stdout and nothing else.
     assert out.endswith("\n") and len(out.splitlines()) == 1
     parsed, end_idx = json.JSONDecoder().raw_decode(out.strip())
     assert end_idx == len(out.strip()) and isinstance(parsed, dict)
@@ -437,7 +488,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
     }
 
 
-# --- A.2: all nine counted event kinds, non-counted ignored, own & bots excluded -------------
+# --- Every counted outside event kind, non-counted activity ignored, own and bot filtering ----
 
 
 @pytest.mark.parametrize(
@@ -503,21 +554,39 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 gh.pulls.insert(
                     0,
                     make_pr(
-                        601, 12, sha="aaaa1111bbbb2222", login="erin",
+                        610, 12, sha="aaaa1111bbbb2222", login="erin",
                         created_at="2026-11-18T07:05:00Z", updated_at="2026-11-18T07:05:00Z",
                     ),
                 ),
                 gh.issues.insert(
-                    0, make_issue(602, 12, login="erin", created_at="2026-11-18T07:05:00Z", is_pr=True)
+                    0, make_issue(611, 12, login="erin", created_at="2026-11-18T07:05:00Z", is_pr=True)
                 ),
             ),
             {
-                "id": "pull_request_opened:601",
+                "id": "pull_request_opened:610",
                 "kind": "pull_request_opened",
                 "number": 12,
                 "actor": "erin",
                 "time": "2026-11-18T07:05:00Z",
                 "url": f"https://github.com/{REPO}/pull/12",
+            },
+        ),
+        (
+            "pull_request_ready",
+            lambda gh: gh.pulls.__setitem__(
+                1,
+                make_pr(
+                    605, 6, sha="5555666677778888", login="nia", draft=False,
+                    created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T07:05:30Z",
+                ),
+            ),
+            {
+                "id": "pull_request_ready:605:1",
+                "kind": "pull_request_ready",
+                "number": 6,
+                "actor": "nia",
+                "time": "2026-11-18T07:05:30Z",
+                "url": f"https://github.com/{REPO}/pull/6",
             },
         ),
         (
@@ -544,7 +613,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 ),
             ),
             {
-                "id": "pull_request_commits:600:deadbeef99990000",
+                "id": "pull_request_commits:600:1:1111222233334444:deadbeef99990000",
                 "kind": "pull_request_commits",
                 "number": 5,
                 "actor": "grace",
@@ -586,15 +655,21 @@ def test_each_counted_event_kind_is_reported_and_other_github_activity_is_ignore
     monkeypatch, tmp_path, kind, mutate, expected
 ):
     gh = FakeGitHub()
-    # Baseline includes an open issue #3 and an open PR #5.
     gh.issues.append(make_issue(10, 3, login="grace", created_at="2026-11-17T01:00:00Z"))
     gh.pulls.append(
         make_pr(
-            600, 5, sha="1111222233334444", login="grace",
+            600, 5, sha="1111222233334444", login="grace", draft=False,
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    gh.pulls.append(
+        make_pr(
+            605, 6, sha="5555666677778888", login="nia", draft=True,
             created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
         )
     )
     gh.reviews[5] = []
+    gh.reviews[6] = []
     state_file = tmp_path / f"state-{kind}.json"
 
     poll_round = 0
@@ -604,7 +679,6 @@ def test_each_counted_event_kind_is_reported_and_other_github_activity_is_ignore
         if args[-1].startswith(f"repos/{REPO}/pulls?"):
             poll_round += 1
             if poll_round == 2:
-                # Non-counting noise alongside the real event: closed, labeled, merged, pending review.
                 gh.issue_events.insert(0, make_issue_event(9001, 3, "labeled", login="zoe"))
                 gh.issue_events.insert(0, make_issue_event(9002, 3, "closed", login="zoe"))
                 gh.issue_events.insert(0, make_issue_event(9003, 5, "merged", login="zoe", is_pr=True))
@@ -619,13 +693,123 @@ def test_each_counted_event_kind_is_reported_and_other_github_activity_is_ignore
     assert json.loads(out) == {"events": [expected]}
 
 
+def test_draft_pull_request_turning_ready_is_reported_even_across_repeated_draft_cycles(
+    monkeypatch, tmp_path
+):
+    gh = FakeGitHub()
+    state_file = tmp_path / "state.json"
+
+    # Baseline with nothing yet.
+    code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0
+
+    # Outsider opens a draft PR -> pull_request_opened.
+    gh.pulls.insert(
+        0,
+        make_pr(
+            710, 20, sha="aaaa000011112222", login="outsider-pr", draft=True,
+            created_at="2026-11-18T07:10:00Z", updated_at="2026-11-18T07:10:00Z",
+        ),
+    )
+    code1, out1, err1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code1 == 0 and err1 == ""
+    assert [e["kind"] for e in json.loads(out1)["events"]] == ["pull_request_opened"]
+
+    # Turning from draft to ready -> pull_request_ready.
+    gh.pulls[0] = make_pr(
+        710, 20, sha="aaaa000011112222", login="outsider-pr", draft=False,
+        created_at="2026-11-18T07:10:00Z", updated_at="2026-11-18T07:12:00Z",
+    )
+    code2, out2, err2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code2 == 0 and err2 == ""
+    ev2 = json.loads(out2)["events"]
+    assert len(ev2) == 1 and ev2[0]["kind"] == "pull_request_ready" and ev2[0]["number"] == 20
+
+    # Converting back to draft is silent; marking ready a second time emits a new pull_request_ready id.
+    gh.pulls[0] = make_pr(
+        710, 20, sha="aaaa000011112222", login="outsider-pr", draft=True,
+        created_at="2026-11-18T07:10:00Z", updated_at="2026-11-18T07:14:00Z",
+    )
+    code3, out3, _, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "5", "--state", str(state_file)], gh
+    )
+    assert code3 == 0 and json.loads(out3)["events"] == []
+
+    gh.pulls[0] = make_pr(
+        710, 20, sha="aaaa000011112222", login="outsider-pr", draft=False,
+        created_at="2026-11-18T07:10:00Z", updated_at="2026-11-18T07:16:00Z",
+    )
+    code4, out4, err4, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code4 == 0 and err4 == ""
+    ev4 = json.loads(out4)["events"]
+    assert len(ev4) == 1 and ev4[0]["kind"] == "pull_request_ready" and ev4[0]["id"] != ev2[0]["id"]
+
+
+def test_pull_request_head_moving_back_to_an_earlier_commit_is_reported_again(monkeypatch, tmp_path):
+    gh = FakeGitHub()
+    sha_a = "aaaa111122223333"
+    sha_b = "bbbb444455556666"
+    gh.pulls.append(
+        make_pr(
+            600, 5, sha="0000999988887777", login="grace",
+            created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z",
+        )
+    )
+    state_file = tmp_path / "state.json"
+    code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0
+
+    # Move 1: to commit A.
+    gh.pulls[0] = make_pr(
+        600, 5, sha=sha_a, login="grace",
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T08:01:00Z",
+    )
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert c1 == 0 and e1 == ""
+    ev_a1 = json.loads(o1)["events"][0]
+    assert ev_a1["kind"] == "pull_request_commits" and sha_a in ev_a1["id"]
+
+    # Move 2: to commit B.
+    gh.pulls[0] = make_pr(
+        600, 5, sha=sha_b, login="grace",
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T08:02:00Z",
+    )
+    c2, o2, e2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert c2 == 0 and e2 == ""
+    ev_b = json.loads(o2)["events"][0]
+    assert ev_b["kind"] == "pull_request_commits" and ev_b["id"] != ev_a1["id"]
+
+    # Move 3: force-push back to commit A! Must be reported again with a distinct move id,
+    # and if saving state fails on that run, retrying produces the same move id for Move 3.
+    gh.pulls[0] = make_pr(
+        600, 5, sha=sha_a, login="grace",
+        created_at="2026-11-17T01:00:00Z", updated_at="2026-11-18T08:03:00Z",
+    )
+    module = load_watcher()
+    assert module is not None
+    real_replace = module.os.replace
+    monkeypatch.setattr(module.os, "replace", lambda _s, _d: (_ for _ in ()).throw(OSError("disk full")))
+    c3_fail, o3_fail, _, _ = run_watch(
+        monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module
+    )
+    assert c3_fail == 7
+    ev_a2_before_save = json.loads(o3_fail)["events"][0]
+    assert ev_a2_before_save["kind"] == "pull_request_commits"
+    assert ev_a2_before_save["id"] not in {ev_a1["id"], ev_b["id"]}
+
+    monkeypatch.setattr(module.os, "replace", real_replace)
+    c3_ok, o3_ok, e3_ok, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert c3_ok == 0 and e3_ok == ""
+    ev_a2 = json.loads(o3_ok)["events"][0]
+    assert ev_a2 == ev_a2_before_save
+
+
 def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_include_own_for_trials(
     monkeypatch, tmp_path
 ):
     gh = FakeGitHub(own_login="DodamDesk")
     state_file = tmp_path / "state.json"
 
-    # Run 1: initialize baseline, then inject own event + bot events + one outside event.
     poll_round = 0
 
     def run_api(args: list[str]) -> tuple[int, str, str]:
@@ -662,7 +846,6 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
         ]
     }
 
-    # Run 2 with --include-own: own human/agent events ARE reported, bots are STILL excluded.
     gh.issues.insert(0, make_issue(105, 5, login="DodamDesk", created_at="2026-11-18T08:05:00Z"))
     gh.issues.insert(
         0, make_issue(106, 6, login="github-actions[bot]", user_type="Bot", created_at="2026-11-18T08:05:05Z")
@@ -685,7 +868,7 @@ def test_own_account_is_asked_once_and_own_and_bot_events_are_filtered_with_incl
     }
 
 
-# --- A.3: never carries outsider text; login included only when valid GitHub login ------------
+# --- Excluding outsider-chosen prose and disallowed logins from all output and state ----------
 
 
 def test_outsider_titles_bodies_branches_filenames_markup_and_orders_never_appear_anywhere(
@@ -797,39 +980,228 @@ def test_disallowed_github_login_is_omitted_while_event_is_still_reported(monkey
         assert bad_user["login"] not in out and bad_user["login"] not in state_file.read_text(encoding="utf-8")
 
 
-# --- A.4: state file location, persistence across restarts, crash safety ----------------------
+# --- State path guards, damaged startup states, locking, bounds, and exit codes ---------------
 
 
-def test_default_state_path_lives_in_its_own_home_folder_outside_repo_and_never_dot_dodam(
+def test_state_path_guard_holds_across_letter_case_and_symlinks_and_fails_at_once(
     monkeypatch, tmp_path
 ):
-    fake_home = tmp_path / "fake-home"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
-
-    gh = FakeGitHub()
-    # Explicitly passing a path inside ~/.dodam or inside the repository must be rejected.
-    for forbidden in (fake_home / ".dodam" / "state.json", ROOT / "state.json"):
-        code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(forbidden)], gh)
-        assert code == 2 and out == ""
-        assert len(err.strip().splitlines()) == 1 and "Traceback" not in err
+    standin_home = tmp_path / "standin-home"
+    standin_dodam = standin_home / ".dodam"
+    standin_dodam.mkdir(parents=True)
+    standin_repo = tmp_path / "StandInRepo"
+    standin_repo.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(standin_home))
 
     module = load_watcher()
-    assert module is not None and hasattr(module, "default_state_path")
+    assert module is not None
+    monkeypatch.setattr(module, "ROOT", standin_repo)
+
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    link_to_dodam = tmp_path / "harmless-dodam-link"
+    link_to_dodam.symlink_to(standin_dodam)
+    link_to_repo = tmp_path / "harmless-repo-link"
+    link_to_repo.symlink_to(standin_repo)
+
+    forbidden_paths = [
+        standin_home / ".dodam" / "state.json",
+        standin_home / ".DODAM" / "state.json",
+        standin_home / ".DoDaM" / "nested" / "state.json",
+        link_to_dodam / "state.json",
+        standin_repo / "state.json",
+        link_to_repo / "sub" / "state.json",
+    ]
+    # On a case-insensitive disk (macOS APFS), standinREpo already points to standin_repo.
+    swapped_repo = tmp_path / "standinrepo"
+    if swapped_repo.exists() and os.path.samefile(swapped_repo, standin_repo):
+        forbidden_paths.append(swapped_repo / "state.json")
+
+    for forbidden in forbidden_paths:
+        clk = FakeClock(max_sleeps=3)
+        gh_called = False
+        code, out, err, _ = run_watch(
+            monkeypatch, ["--wait", "--state", str(forbidden)], never_call_gh, fake_clock=clk, module=module
+        )
+        assert not gh_called, f"watcher contacted gh instead of rejecting {forbidden} at start"
+        assert code == 3, f"expected exit code 3 for forbidden path {forbidden}, got {code}"
+        assert out == "" and clk.sleeps == []
+        assert len(err.strip().splitlines()) == 1 and "Traceback" not in err
+
+    # Also test case-insensitive disk identity explicitly even when running on case-sensitive Linux ext4:
+    # simulate os.stat returning standin_repo's (st_dev, st_ino) for differently-spelt STANDINREPO.
+    real_stat = module.os.stat
+    repo_stat = real_stat(standin_repo)
+    upper_repo = tmp_path / "STANDINREPO"
+
+    def case_folding_stat(p, *args, **kwargs):
+        if Path(p) == upper_repo:
+            return repo_stat
+        return real_stat(p, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "stat", case_folding_stat)
+    gh_called = False
+    code_ci, out_ci, err_ci, _ = run_watch(
+        monkeypatch,
+        ["--wait", "--state", str(upper_repo / "sub" / "state.json")],
+        never_call_gh,
+        fake_clock=FakeClock(max_sleeps=3),
+        module=module,
+    )
+    assert not gh_called and code_ci == 3 and out_ci == "" and "Traceback" not in err_ci
+    monkeypatch.setattr(module.os, "stat", real_stat)
+
     default_path = module.default_state_path().resolve()
-    assert default_path.is_relative_to(fake_home.resolve())
-    assert default_path.parent != fake_home.resolve(), "state file must be in a folder of its own under home"
-    assert not default_path.is_relative_to(ROOT), "state file must not be inside the repository"
-    assert ".dodam" not in default_path.parts, "state file must never use the folder .dodam"
+    assert default_path.is_relative_to(standin_home.resolve())
+    assert default_path.parent != standin_home.resolve()
+    assert not any(p.casefold() == ".dodam" for p in default_path.parts)
 
 
-def test_state_file_persists_across_restarts_and_crash_before_state_commit_never_drops_events(
+def test_damaged_or_unaccessible_startup_state_never_prints_a_traceback(monkeypatch, tmp_path):
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    # 1. State file is not valid UTF-8.
+    bad_utf8 = tmp_path / "bad-utf8.json"
+    bad_utf8.write_bytes(b"\xff\xfe\x80\x81" + POISON_BODY.encode("utf-8"))
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--state", str(bad_utf8)], never_call_gh)
+    assert not gh_called and c1 == 4 and o1 == ""
+    assert len(e1.strip().splitlines()) == 1 and "Traceback" not in e1 and POISON_BODY not in e1
+
+    # 2. State file in a folder that cannot be entered.
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        locked_dir = tmp_path / "no-enter"
+        locked_dir.mkdir()
+        (locked_dir / "state.json").write_text("{}", encoding="utf-8")
+        locked_dir.chmod(0o000)
+        try:
+            c2, o2, e2, _ = run_watch(
+                monkeypatch, ["--wait", "--state", str(locked_dir / "state.json")], never_call_gh
+            )
+        finally:
+            locked_dir.chmod(0o700)
+        assert c2 == 4 and o2 == ""
+        assert len(e2.strip().splitlines()) == 1 and "Traceback" not in e2
+
+    # 3. State path starting with a tilde and an unknown user name.
+    c3, o3, e3, _ = run_watch(
+        monkeypatch,
+        ["--wait", "--state", "~nonexistent_dodam_account_987654321/state.json"],
+        never_call_gh,
+    )
+    assert c3 == 3 and o3 == ""
+    assert len(e3.strip().splitlines()) == 1 and "Traceback" not in e3
+    assert "nonexistent_dodam_account_987654321" not in e3
+
+    # 4. State file nested very deeply (exceeding Python's recursion limit).
+    deep_file = tmp_path / "deep.json"
+    deep_file.write_text("[" * 5000 + "]" * 5000, encoding="utf-8")
+    c4, o4, e4, _ = run_watch(monkeypatch, ["--wait", "--state", str(deep_file)], never_call_gh)
+    assert c4 == 4 and o4 == ""
+    assert len(e4.strip().splitlines()) == 1 and "Traceback" not in e4
+
+
+def test_unwritable_state_location_fails_at_start_with_code_five_before_asking_github(
+    monkeypatch, tmp_path
+):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses directory write permissions")
+
+    ro_dir = tmp_path / "readonly-dir"
+    ro_dir.mkdir()
+    ro_dir.chmod(0o555)
+
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    try:
+        code, out, err, _ = run_watch(
+            monkeypatch, ["--wait", "--state", str(ro_dir / "state.json")], never_call_gh
+        )
+    finally:
+        ro_dir.chmod(0o755)
+
+    assert not gh_called and code == 5 and out == ""
+    assert len(err.strip().splitlines()) == 1 and "Traceback" not in err
+
+
+def test_two_watchers_cannot_share_a_state_file_and_a_dead_watcher_leaves_it_unlocked(
+    monkeypatch, tmp_path
+):
+    module = load_watcher()
+    assert module is not None
+    state_file = tmp_path / "shared" / "state.json"
+
+    r_fd, w_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r_fd)
+        notified = False
+
+        def holding_gh(_args: list[str]) -> tuple[int, str, str]:
+            nonlocal notified
+            if not notified:
+                notified = True
+                os.write(w_fd, b"running\n")
+                os.close(w_fd)
+            while True:
+                time.sleep(1.0)
+
+        try:
+            module.run_gh = holding_gh
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                module.main(["--wait", "--state", str(state_file)])
+        finally:
+            os._exit(0)
+
+    os.close(w_fd)
+    try:
+        ready = os.read(r_fd, 16)
+        os.close(r_fd)
+        assert ready == b"running\n"
+
+        second_gh = FakeGitHub()
+        code_locked, out_locked, err_locked, _ = run_watch(
+            monkeypatch,
+            ["--wait", "--max-wait", "0", "--state", str(state_file)],
+            second_gh,
+            fake_clock=FakeClock(max_sleeps=5),
+        )
+        assert code_locked == 6 and out_locked == ""
+        assert second_gh.calls == []
+        assert len(err_locked.strip().splitlines()) == 1 and "Traceback" not in err_locked
+    finally:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+
+    # After the first watcher died abruptly (SIGKILL), the OS kernel released the lock.
+    gh = FakeGitHub()
+    code_after, out_after, err_after, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh
+    )
+    assert code_after == 0 and err_after == ""
+    assert json.loads(out_after) == {"events": [], "reason": "timeout"}
+
+
+def test_state_file_persists_across_restarts_and_save_failure_after_printing_exits_seven(
     monkeypatch, tmp_path
 ):
     gh = FakeGitHub()
     state_file = tmp_path / "state.json"
 
-    # Run 1: establish baseline and exit cleanly via --max-wait 0.
     code0, out0, err0, _ = run_watch(
         monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh
     )
@@ -837,37 +1209,32 @@ def test_state_file_persists_across_restarts_and_crash_before_state_commit_never
     assert json.loads(out0) == {"events": [], "reason": "timeout"}
     assert state_file.is_file()
 
-    # While watcher is NOT running, two outside events arrive.
     gh.issues.insert(0, make_issue(401, 1, login="alice", created_at="2026-11-18T10:00:01Z"))
     gh.issue_comments.insert(0, make_issue_comment(402, 1, login="bob", created_at="2026-11-18T10:00:02Z"))
 
-    # Simulate a crash right when os.replace tries to commit the updated state file after stdout printed.
     module = load_watcher()
     assert module is not None
     real_replace = module.os.replace
 
-    def crashing_replace(src, dst):
+    def crashing_replace(_src, _dst):
         raise OSError("power lost before state replace")
 
     monkeypatch.setattr(module.os, "replace", crashing_replace)
     code_crash, out_crash, err_crash, _ = run_watch(
-        monkeypatch, ["--wait", "--state", str(state_file)], gh
+        monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module
     )
-    assert code_crash == 1
-    assert "Traceback" not in err_crash
+    assert code_crash == 7
+    assert len(err_crash.strip().splitlines()) == 1 and "Traceback" not in err_crash
     first_delivery = json.loads(out_crash)["events"]
     assert [e["id"] for e in first_delivery] == ["issue_opened:401", "issue_comment:402"]
 
-    # Restore os.replace and restart: neither event was dropped; the stable ids identify the repeat.
     monkeypatch.setattr(module.os, "replace", real_replace)
     code_ok, out_ok, err_ok, _ = run_watch(
         monkeypatch, ["--wait", "--state", str(state_file)], gh
     )
     assert code_ok == 0 and err_ok == ""
-    second_delivery = json.loads(out_ok)["events"]
-    assert second_delivery == first_delivery
+    assert json.loads(out_ok)["events"] == first_delivery
 
-    # Third run with one new event: the two earlier events are NOT reported again, only the new one is.
     gh.issue_comments.insert(0, make_issue_comment(403, 1, login="carol", created_at="2026-11-18T10:05:00Z"))
     code_next, out_next, err_next, _ = run_watch(
         monkeypatch, ["--wait", "--state", str(state_file)], gh
@@ -876,7 +1243,202 @@ def test_state_file_persists_across_restarts_and_crash_before_state_commit_never
     assert [e["id"] for e in json.loads(out_next)["events"]] == ["issue_comment:403"]
 
 
-# --- A.5: conditional requests (If-None-Match -> 304) and honoring X-Poll-Interval ------------
+def test_state_collections_stay_within_stated_bounds(monkeypatch, tmp_path):
+    module = load_watcher()
+    max_seen = getattr(module, "MAX_SEEN_IDS", 5_000) if module is not None else 5_000
+    max_pulls = getattr(module, "MAX_TRACKED_PULLS", 500) if module is not None else 500
+    max_etags = getattr(module, "MAX_REVIEW_ETAGS", 100) if module is not None else 100
+    max_pending = getattr(module, "MAX_PENDING_EVENTS", 1_000) if module is not None else 1_000
+
+    state_file = tmp_path / "bounded-state.json"
+    oversized = {
+        "version": 2,
+        "initialized": True,
+        "seen_ids": [f"issue_opened:{i}" for i in range(1, max_seen + 250)],
+        "pending": [
+            {
+                "id": f"issue_comment:{i}",
+                "kind": "issue_comment",
+                "number": 1,
+                "actor": "alice",
+                "time": "2026-11-18T10:00:00Z",
+                "url": f"https://github.com/{REPO}/issues/1#issuecomment-{i}",
+            }
+            for i in range(1, max_pending + 120)
+        ],
+        "etags": {
+            "pulls": 'W/"p"',
+            **{f"reviews:{i}:p1": f'W/"{i}"' for i in range(1, max_etags + 40)},
+        },
+        "watermarks": {
+            "baseline_cutoff": "2026-11-17T00:00:00Z",
+            "max_issue_id": max_seen + 250,
+            "max_issue_event_id": 0,
+            "max_issue_comment_id": max_pending + 120,
+            "max_pull_id": max_pulls + 50,
+            "max_pull_updated_at": "2026-11-18T00:00:00Z",
+            "max_review_comment_id": 0,
+        },
+        "known_pr_numbers": list(range(1, max_pulls + 60)),
+        "open_pr_numbers": [3, 7],
+        "reviews_baselined": list(range(1, max_pulls + 60)),
+        "pull_heads": {str(i): "aaaa1111bbbb2222" for i in range(1, max_pulls + 60)},
+        "pull_seq": {str(i): 1 for i in range(1, max_pulls + 60)},
+        "pull_draft": {str(i): False for i in range(1, max_pulls + 60)},
+        "pull_ready_seq": {str(i): 0 for i in range(1, max_pulls + 60)},
+        "pull_baseline_updated_at": {str(i): "2026-11-17T00:00:00Z" for i in range(1, max_pulls + 60)},
+        "pull_reviews_checked": {str(i): "2026-11-17T00:00:00Z" for i in range(1, max_pulls + 60)},
+        "pull_review_page": {str(i): 1 for i in range(1, max_pulls + 60)},
+    }
+    state_file.write_text(json.dumps(oversized), encoding="utf-8")
+
+    gh = FakeGitHub()
+    code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code == 0 and err == ""
+    assert len(json.loads(out)["events"]) == 20
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert len(saved["seen_ids"]) <= max_seen
+    # Newest seen ids and just-reported ids are preserved while oldest were trimmed.
+    assert "issue_comment:1" in saved["seen_ids"]
+    assert f"issue_opened:{max_seen + 249}" in saved["seen_ids"]
+    assert len(saved["pending"]) <= max_pending - 20
+    assert len(saved["known_pr_numbers"]) <= max_pulls
+    assert len(saved["pull_heads"]) <= max_pulls
+    # Open PRs (#3, #7) are retained even though their numbers are low.
+    assert "3" in saved["pull_heads"] and "7" in saved["pull_heads"]
+    review_etags = [k for k in saved["etags"] if k.startswith("reviews:")]
+    assert len(review_etags) <= max_etags
+
+
+# --- Pre-start reviews never reported, multi-page reviews, and malformed single items ----------
+
+
+def test_nothing_older_than_first_start_is_reported_when_closed_pr_reopens_or_open_pr_enters_poll_set(
+    monkeypatch, tmp_path
+):
+    gh = FakeGitHub()
+    # Closed PR #4 has an old review from before the watcher started.
+    gh.pulls.append(
+        make_pr(
+            40, 4, sha="4444444400000000", login="old-author", state="closed",
+            created_at="2026-11-16T01:00:00Z", updated_at="2026-11-17T02:00:00Z",
+        )
+    )
+    gh.reviews[4] = [make_review(4001, 4, login="old-reviewer", submitted_at="2026-11-17T01:30:00Z")]
+
+    # Also create 27 open PRs (#101..#127) so #127 lies past the 25 open PRs polled at baseline,
+    # with an old review from before the watcher started.
+    for idx in range(27):
+        pr_num = 101 + idx
+        ts = f"2026-11-17T01:{30 - idx:02d}:00Z"
+        gh.pulls.append(
+            make_pr(1000 + idx, pr_num, sha=f"{pr_num:016x}", login="old-author", state="open", created_at=ts, updated_at=ts)
+        )
+        gh.reviews[pr_num] = [make_review(5000 + idx, pr_num, login="old-reviewer", submitted_at=ts)]
+
+    state_file = tmp_path / "state.json"
+    code0, _, err0, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0 and err0 == ""
+
+    # Reopen closed PR #4 AND close three earlier open PRs so #127 enters the polled top 25!
+    gh.pulls[0] = make_pr(
+        40, 4, sha="4444444400000000", login="old-author", state="open",
+        created_at="2026-11-16T01:00:00Z", updated_at="2026-11-18T09:00:00Z",
+    )
+    gh.issue_events.insert(
+        0, make_issue_event(8801, 4, "reopened", login="reopener", created_at="2026-11-18T09:00:00Z", is_pr=True)
+    )
+    for idx in (1, 2, 3):
+        old_pr = gh.pulls[idx]
+        assert isinstance(old_pr, dict)
+        old_pr["state"] = "closed"
+        old_pr["updated_at"] = "2026-11-18T09:00:01Z"
+
+    code1, out1, err1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code1 == 0 and err1 == ""
+    # Only the reopen event itself may be reported — NEITHER pre-start review (4001 or 5026)!
+    events1 = json.loads(out1)["events"]
+    assert [e["id"] for e in events1] == ["pull_request_reopened:8801"]
+
+    # Now add genuinely new reviews to both #4 and #127: both must be reported!
+    gh.reviews[4].append(make_review(4002, 4, login="new-reviewer", submitted_at="2026-11-18T09:10:00Z"))
+    gh.reviews[127].append(make_review(5999, 127, login="new-reviewer", submitted_at="2026-11-18T09:10:05Z"))
+    code2, out2, err2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code2 == 0 and err2 == ""
+    assert [e["id"] for e in json.loads(out2)["events"]] == [
+        "pull_request_review:4002",
+        "pull_request_review:5999",
+    ]
+
+
+def test_reviews_on_later_pages_are_not_missed_even_when_page_one_etag_is_unchanged(
+    monkeypatch, tmp_path
+):
+    gh = FakeGitHub()
+    gh.pulls.append(
+        make_pr(
+            600, 5, sha="1111222233334444", login="grace", state="open",
+            created_at="2026-11-17T00:00:00Z", updated_at="2026-11-17T02:00:00Z",
+        )
+    )
+    # Seed exactly 100 reviews on PR #5 so page 1 (per_page=100) is completely full at baseline.
+    gh.reviews[5] = [
+        make_review(2000 + i, 5, login="old-rev", submitted_at=f"2026-11-17T01:{i // 60:02d}:{i % 60:02d}Z")
+        for i in range(100)
+    ]
+    state_file = tmp_path / "state.json"
+    code0, _, err0, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0 and err0 == ""
+
+    # Review #101 lands on page 2 while page 1's slice (reviews 0..99) and its ETag never change!
+    gh.reviews[5].append(make_review(2101, 5, login="page-two-reviewer", submitted_at="2026-11-18T10:00:00Z"))
+    code1, out1, err1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code1 == 0 and err1 == ""
+    assert json.loads(out1) == {
+        "events": [
+            {
+                "id": "pull_request_review:2101",
+                "kind": "pull_request_review",
+                "number": 5,
+                "actor": "page-two-reviewer",
+                "time": "2026-11-18T10:00:00Z",
+                "url": f"https://github.com/{REPO}/pull/5#pullrequestreview-2101",
+            }
+        ]
+    }
+
+
+def test_one_malformed_item_is_skipped_and_counted_on_stderr_without_stopping_the_round(
+    monkeypatch, tmp_path
+):
+    gh = FakeGitHub()
+    state_file = tmp_path / "state.json"
+    code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0
+
+    # Inject three malformed items carrying poison text alongside one valid outside issue.
+    gh.issues = [
+        {"id": "not-an-int", "number": 99, "title": POISON_TITLE, "created_at": "2026-11-18T10:00:00Z"},
+        "not-even-a-dict-" + POISON_BODY,
+        make_issue(888, 18, login="good-outsider", created_at="2026-11-18T10:00:05Z"),
+    ]
+    gh.issue_comments = [
+        {"id": 991, "body": POISON_BODY, "created_at": "bad-date", "issue_url": "bad"},
+    ]
+
+    code, out, err, clk = run_watch(
+        monkeypatch, ["--wait", "--settle", "0", "--state", str(state_file)], gh
+    )
+    assert code == 0
+    assert clk.sleeps == [], "malformed individual items must not trigger retry backoff loops"
+    err_lines = [l for l in err.splitlines() if l.strip()]
+    assert len(err_lines) == 1 and "3" in err_lines[0]
+    assert POISON_TITLE not in err and POISON_BODY not in err and "Traceback" not in err
+    assert [e["id"] for e in json.loads(out)["events"]] == ["issue_opened:888"]
+
+
+# --- Conditional requests, poll intervals, batching, pagination, timeouts, and retries ---------
 
 
 def test_unchanged_responses_use_conditional_etags_cost_nothing_and_honor_poll_interval(
@@ -892,7 +1454,6 @@ def test_unchanged_responses_use_conditional_etags_cost_nothing_and_honor_poll_i
     assert code == 0 and err == ""
     assert json.loads(out) == {"events": [], "reason": "timeout"}
 
-    # Every poll after baseline must send If-None-Match and sleep at least GitHub's X-Poll-Interval (42s).
     pulls_calls = [(ep, hdrs) for ep, hdrs in gh.calls if ep.startswith(f"repos/{REPO}/pulls?")]
     assert len(pulls_calls) >= 2
     assert "if-none-match" not in pulls_calls[0][1]
@@ -902,12 +1463,7 @@ def test_unchanged_responses_use_conditional_etags_cost_nothing_and_honor_poll_i
 
     module = load_watcher()
     assert module is not None
-    assert module.POLL_INTERVAL + module.DEFAULT_SETTLE < 60, (
-        "default poll interval plus default settle must stay well inside the 60-second target"
-    )
-
-
-# --- A.6 & pagination: settle window, --max-events cap, leftover events, multi-page responses -
+    assert module.POLL_INTERVAL + module.DEFAULT_SETTLE < 60
 
 
 def test_settle_waits_for_companion_events_and_max_events_caps_output_keeping_rest_for_next_call(
@@ -915,7 +1471,6 @@ def test_settle_waits_for_companion_events_and_max_events_caps_output_keeping_re
 ):
     gh = FakeGitHub()
     state_file = tmp_path / "state.json"
-    # Baseline first.
     code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
     assert code0 == 0
 
@@ -923,7 +1478,6 @@ def test_settle_waits_for_companion_events_and_max_events_caps_output_keeping_re
     assert module is not None
     assert module.DEFAULT_SETTLE == 15.0 and module.DEFAULT_MAX_EVENTS == 20
 
-    # First new event arrives before call 1; 24 more arrive during the 15s settle window (25 total).
     gh.issues.insert(0, make_issue(1001, 1, login="u1", created_at="2026-11-18T11:00:01Z"))
     settled = False
     orig = gh.__call__
@@ -948,13 +1502,11 @@ def test_settle_waits_for_companion_events_and_max_events_caps_output_keeping_re
     assert len(batch1) == 20
     assert [e["number"] for e in batch1] == list(range(1, 21))
 
-    # Next call reports the remaining 5 events even when GitHub returns 304 Not Modified everywhere.
     code2, out2, err2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
     assert code2 == 0 and err2 == ""
     batch2 = json.loads(out2)["events"]
     assert [e["number"] for e in batch2] == [21, 22, 23, 24, 25]
 
-    # Nothing left on a third call.
     code3, out3, err3, _ = run_watch(
         monkeypatch, ["--wait", "--max-wait", "5", "--state", str(state_file)], gh
     )
@@ -967,18 +1519,15 @@ def test_several_pages_are_followed_to_seen_watermarks_and_off_host_links_are_re
 ):
     gh = FakeGitHub()
     gh.page_size = 2
-    # Seed 3 old issues so baseline max_issue_id = 13.
     for num in (1, 2, 3):
         gh.issues.insert(0, make_issue(10 + num, num, login="old", created_at=f"2026-11-17T00:00:0{num}Z"))
     state_file = tmp_path / "state.json"
     code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
     assert code0 == 0
 
-    # Add 5 new outside issues across 3 pages (page_size=2).
     for num in (4, 5, 6, 7, 8):
         gh.issues.insert(0, make_issue(10 + num, num, login="pager", created_at=f"2026-11-18T12:00:0{num}Z"))
 
-    # Inject one poisoned Link header pointing off-host first; watcher must reject it as unexpected and retry.
     injected_bad_link = False
 
     def with_bad_link_once(args: list[str]) -> tuple[int, str, str]:
@@ -1000,9 +1549,6 @@ def test_several_pages_are_followed_to_seen_watermarks_and_off_host_links_are_re
     assert [e["number"] for e in events] == [4, 5, 6, 7, 8]
 
 
-# --- A.7: --max-wait timeout vs waiting without limit -----------------------------------------
-
-
 def test_max_wait_prints_empty_events_with_reason_when_time_runs_out_and_no_limit_waits_past_it(
     monkeypatch, tmp_path
 ):
@@ -1017,7 +1563,6 @@ def test_max_wait_prints_empty_events_with_reason_when_time_runs_out_and_no_limi
     parsed = json.loads(out)
     assert parsed["events"] == [] and isinstance(parsed.get("reason"), str) and parsed["reason"]
 
-    # Without --max-wait, the watcher waits indefinitely (e.g. 600s across 40 polls) until an event arrives.
     state_unlimited = tmp_path / "unlimited-state.json"
     polls = 0
 
@@ -1035,9 +1580,6 @@ def test_max_wait_prints_empty_events_with_reason_when_time_runs_out_and_no_limi
     assert [e["id"] for e in json.loads(out2)["events"]] == ["issue_opened:900"]
 
 
-# --- A.8: network/GitHub/unexpected/rate-limit growing pauses; signed-out gh exits 2 ----------
-
-
 def test_network_errors_github_faults_unexpected_answers_and_rate_limits_wait_with_growing_pauses(
     monkeypatch, tmp_path
 ):
@@ -1047,7 +1589,6 @@ def test_network_errors_github_faults_unexpected_answers_and_rate_limits_wait_wi
     assert code0 == 0
 
     clk = FakeClock()
-    # Queue 5 consecutive failures of every kind before normal service resumes with an outside event.
     gh.scripted = [
         (1, "", f"dial tcp: connection refused {POISON_BODY}"),
         http_response(502, raw_body=f"<html>502 Bad Gateway {POISON_TITLE}</html>"),
@@ -1068,8 +1609,6 @@ def test_network_errors_github_faults_unexpected_answers_and_rate_limits_wait_wi
     assert "Traceback" not in err
     assert POISON_TITLE not in err and POISON_BODY not in err and HEADER_PROBE not in err
 
-    # First 5 sleeps are the failure pauses (strictly growing, with the 5th honoring X-RateLimit-Reset >= 90s),
-    # followed by the 15s settle sleep.
     failure_pauses = clk.sleeps[:5]
     assert len(failure_pauses) == 5
     for earlier, later in zip(failure_pauses, failure_pauses[1:]):
@@ -1102,45 +1641,74 @@ def test_signed_out_gh_ends_at_once_with_exit_code_two_and_one_clear_line(
     assert "Traceback" not in err and HEADER_PROBE not in err and "Bad credentials" not in err
 
 
-def test_bad_arguments_and_internal_faults_never_print_a_traceback(monkeypatch, tmp_path):
+def test_bad_arguments_internal_faults_and_interruption_each_have_their_own_code_and_no_traceback(
+    monkeypatch, tmp_path
+):
     gh = FakeGitHub()
     for bad_argv in (
         [],
         ["--wait", "--max-events", "0"],
         ["--wait", "--settle", "-1"],
         ["--wait", "--max-wait", "-5"],
+        ["--wait", "--repo", "not-a-valid-repo-slug"],
         ["--wait", "--unknown-flag"],
     ):
         code, out, err, _ = run_watch(monkeypatch, bad_argv, gh)
-        assert code == 2 and out == ""
+        assert code == 3 and out == ""
         assert len(err.strip().splitlines()) == 1 and "Traceback" not in err
 
-    # Unexpected internal runtime exception inside run_gh is caught without a traceback or exception text leak.
     def exploding_gh(_args: list[str]) -> tuple[int, str, str]:
         raise RuntimeError(f"boom {POISON_BODY}")
 
     code_err, out_err, err_err, _ = run_watch(
-        monkeypatch, ["--wait", "--state", str(tmp_path / "s.json")], exploding_gh
+        monkeypatch, ["--wait", "--state", str(tmp_path / "s1.json")], exploding_gh
     )
     assert code_err == 1 and out_err == ""
     assert len(err_err.strip().splitlines()) == 1
     assert "Traceback" not in err_err and POISON_BODY not in err_err
 
+    def interrupted_gh(_args: list[str]) -> tuple[int, str, str]:
+        raise KeyboardInterrupt()
 
-# --- B.1 through B.7: standing instructions in tools/desk/brief.md ----------------------------
+    code_int, out_int, err_int, _ = run_watch(
+        monkeypatch, ["--wait", "--state", str(tmp_path / "s2.json")], interrupted_gh
+    )
+    assert code_int == 130 and out_int == "" and "Traceback" not in err_int
+
+
+def test_help_text_lists_switches_exit_codes_and_pull_request_commits_author_rule(monkeypatch):
+    gh_called = False
+
+    def never_call_gh(_args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_called
+        gh_called = True
+        return (4, "", "gh auth login")
+
+    code, out, err, _ = run_watch(monkeypatch, ["--help"], never_call_gh)
+    assert not gh_called and code == 0 and err == ""
+    low = out.lower()
+    for flag in ("--wait", "--state", "--include-own", "--settle", "--max-events", "--max-wait", "--repo", "--help"):
+        assert flag in out, f"help text omits {flag}"
+    for exit_code in ("0", "1", "2", "3", "4", "5", "6", "7", "130"):
+        assert re.search(rf"(?m)^\s*{exit_code}\s+", out), f"help text omits exit code {exit_code}"
+    assert "pull_request_commits" in out
+    assert "author" in low and "pushed" in low, (
+        "help text must state that for new commits the login is the pull request's author, not the pusher"
+    )
+
+
+# --- Standing instructions in tools/desk/brief.md ----------------------------------------------
 
 
 def test_brief_is_plain_self_contained_english_without_codes_section_numbers_or_document_referrals():
     text = read_brief()
     assert len(text) > 500, "tools/desk/brief.md is missing or empty"
-    # No internal tracker codes, no email addresses, no local machine paths, no numbered headings.
     assert re.findall(r"\bDOD-\d+\b", text) == []
     assert re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text) == []
     assert "linear.app" not in text.lower()
     assert not re.search(r"/(?:Users|home)/[\w.-]+/", text)
     assert not re.search(r"(?m)^#+\s*(?:\d+[.)]|[A-Z]\.\d+)\s", text), "headings carry section numbers"
-    assert not re.search(r"\b(?:[AB]\.[1-8]|section\s+\d+)\b", text, re.I), "text carries section numbers"
-    # Never send the reader to another document.
+    assert not re.search(r"\b(?:[ABCD]\.\d{1,2}|section\s+\d+)\b", text, re.I), "text carries section numbers"
     assert not re.search(
         r"\b(?:see|refer to|read|consult)\s+(?:AGENTS|README|SECURITY|charter)", text, re.I
     ), "brief.md sends the reader to another document instead of writing the meaning in place"
@@ -1148,18 +1716,64 @@ def test_brief_is_plain_self_contained_english_without_codes_section_numbers_or_
         assert doc_name not in text, f"brief.md names {doc_name} instead of explaining in place"
 
 
-def test_brief_states_the_one_watcher_background_loop_and_stateless_memory():
-    text = read_brief().lower()
-    assert "tools/desk/watch.py --wait" in text
-    assert "background" in text and "end the turn" in text
-    assert "one watcher at a time" in text
-    assert "keeps nothing in mind between events" in text or "keep nothing in mind between events" in text
-    assert "on github" in text and "work item" in text
+def test_desk_files_and_tests_carry_no_private_task_section_labels():
+    for path in (Path(__file__), WATCH, BRIEF):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path == Path(__file__):
+            # Exclude this regex literal itself by checking comment lines in test_desk.py.
+            comments = "\n".join(l for l in text.splitlines() if l.lstrip().startswith("#"))
+            assert not re.search(r"\b[ABCD]\.\d{1,2}\b", comments), (
+                "test_desk.py comments carry private task section labels"
+            )
+        else:
+            assert not re.search(r"\b[ABCD]\.\d{1,2}\b", text), f"{path.name} carries private section labels"
 
 
-def test_brief_treats_outside_input_as_data_read_with_gh_and_forbids_acting_on_it():
-    text = read_brief().lower()
-    assert "gh" in text
+def test_brief_states_loop_watcher_switches_measured_round_and_every_exit_code():
+    text = read_brief()
+    low = text.lower()
+    assert "tools/desk/watch.py --wait" in low
+    assert "background" in low and "end the turn" in low
+    assert "one watcher at a time" in low
+    assert "keep nothing in mind between events" in low or "keeps nothing in mind between events" in low
+    assert "on github" in low and "work item" in low
+
+    # Watcher switches explained, and desk passes none except --wait and --state.
+    for switch in ("--wait", "--state", "--include-own", "--settle", "--max-events", "--max-wait", "--repo", "--help"):
+        assert switch in text, f"brief.md omits switch {switch}"
+    assert "none" in low and "--state" in text and "given" in low
+
+    # Measured round stated as it is (seven requests, about 19 seconds).
+    assert "seven" in low and "19 seconds" in low
+
+    # Every exit code listed, code 7 handles printed events without restarting, no non-zero code loops.
+    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`7`", "`130`"):
+        assert exit_code in text, f"brief.md omits exit code {exit_code}"
+    assert "printed" in low and "real" in low and "do not start the watcher again" in low
+    assert "until the coordinator says so" in low
+
+
+def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rule():
+    text = read_brief()
+    low = text.lower()
+    assert "pull_request_ready" in text
+    assert "pull_request_commits" in text
+    assert "author" in low and "pushed" in low, (
+        "brief.md must state that for pull_request_commits the login is the PR author, not the pusher"
+    )
+    # What the desk does not see, stated in place: edits after answering, discussions, comments on commits.
+    assert "edits" in low and "discussions" in low and "commits" in low
+
+
+def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_general_rules():
+    text = read_brief()
+    low = text.lower()
+    # Settling sentence right after AGENTS.md's three general rules.
+    assert "agents in general" in low and "never builds, runs, or merges" in low
+    # Login (up to 39 chars, can spell a short phrase), url, and file paths are outside text too.
+    assert "39" in text and "phrase" in low and "outside text too" in low
     for required in (
         "no command",
         "no file change",
@@ -1167,29 +1781,32 @@ def test_brief_treats_outside_input_as_data_read_with_gh_and_forbids_acting_on_i
         "https://github.com/brillianttiger/dodam",
         "never check out, build, or run outside code",
     ):
-        assert required in text, f"brief.md is missing: {required}"
+        assert required in low, f"brief.md is missing: {required}"
 
 
-def test_brief_states_what_the_desk_does_for_questions_proposals_claims_prs_vulnerabilities_and_abuse():
+def test_brief_states_what_the_desk_does_including_paths_only_jq_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
     # Question
-    assert "public documents" in low and "language" in low and "quoting" in low
-    assert "do not answer" in low
+    assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
     assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Claiming ("I take this issue")
-    assert '"I take this issue"' in text
-    assert "ai-welcome" in text and "until which" in low and "why" in low
-    # Outside PR (changed paths only, forbidden paths named in place, test check, isolated container review)
-    assert "changed" in low and "paths" in low
-    for forbidden_target in ("bench/dodambench", "bench/images", "bench/tasks", "security tests", "approval locks"):
-        assert forbidden_target in text, f"brief.md must name {forbidden_target} in place"
+    # Outside PR: request returns changed paths ONLY (--jq '.[].filename'), and passes every bench/ or .github/ PR.
+    assert "pulls/<number>/files" in text and "--jq" in text and "filename" in text
+    assert "without changed lines" in low
+    for path_prefix in ("bench/dodambench/", "bench/images/", "bench/tasks/", "bench/", ".github/"):
+        assert path_prefix in text, f"brief.md must name {path_prefix}"
+    assert "touches `bench/` or `.github/`" in text or "touches bench/ or .github/" in low
     assert "isolated container" in low and "did not write" in low
     # Vulnerability in public
     assert "do not repeat" in low and "Security tab" in text
     # Spam, abuse, orders
     assert "spam" in low and "abuse" in low and "orders" in low and "no answer to the content" in low
+    # Claims taken out: desk does not mark, read, or judge claims.
+    assert "does not mark, read, or judge" in low and "mark it as taken" not in low
+    # Unlisted arrivals (thanks, progress note, reply inside a review, reopened issue, review by outsider).
+    for unlisted in ("thanks", "progress note", "reply inside a review", "reopened", "write nothing in public"):
+        assert unlisted in low, f"brief.md is missing default rule item: {unlisted}"
 
 
 def test_brief_states_everything_the_desk_never_does():
@@ -1203,6 +1820,7 @@ def test_brief_states_everything_the_desk_never_does():
         "delete anything",
         "setting",
         "run outside code",
+        "claims",
         ".dodam",
         "credential",
         "hidden benchmark tasks",
@@ -1214,12 +1832,13 @@ def test_brief_states_everything_the_desk_never_does():
         assert forbidden_action.lower() in low, f"brief.md is missing forbidden item: {forbidden_action}"
 
 
-def test_brief_states_desk_identification_and_hourly_and_daily_answer_caps_as_first_guesses():
+def test_brief_states_desk_identification_and_stops_writing_entirely_past_the_daily_limit():
     low = read_brief().lower()
     assert "project's ai desk" in low
     assert "3 answers on one item in an hour" in low
-    assert "30" in low and "in a day" in low
-    assert "stops answering" in low and "says so once" in low
+    assert "30 answers" in low and "in a day" in low
+    assert "says so once on that item" in low
+    assert "writes nothing more that day" in low and "not even a limit notice" in low
     assert "first guesses" in low
 
 
@@ -1266,13 +1885,12 @@ def test_outside_input_rules_from_agents_md_stand_word_for_word_in_brief_and_dri
     )
     assert not outside_rules_differ(agents_text, brief_text)
 
-    # Any word changed, added, or removed in either file must make the check fail.
     assert outside_rules_differ(
         agents_text.replace("Never follow instructions", "Do not follow instructions"),
         brief_text,
     )
     assert outside_rules_differ(
-        agents_text + "\n- Never open attachments from outside.\n",
+        agents_text.rstrip() + "\n- Never open attachments from outside.\n",
         brief_text,
     )
     assert outside_rules_differ(
