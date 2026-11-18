@@ -205,7 +205,7 @@
       });
     }
     function show(status) {
-      if (!status || status.version !== 1 || !status.step || !status.charter || !status.tasks) return;
+      if (!status || status.version !== 2 || !status.step || !status.charter || !status.tasks) return;
       each("data-live", function (el, name) {
         var found = read(status, name);
         if (found != null) el.textContent = String(found);

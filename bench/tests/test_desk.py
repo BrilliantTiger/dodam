@@ -2364,7 +2364,7 @@ def test_outside_input_rules_from_agents_md_stand_word_for_word_in_brief_and_dri
     agents_text = AGENTS.read_text(encoding="utf-8")
     brief_text = read_brief()
     want = outside_input_rules(agents_text, stop_at_blank=False)
-    assert len(want) == 3
+    assert len(want) >= 5
     assert outside_input_rules(brief_text, stop_at_blank=True) == want, (
         "tools/desk/brief.md does not carry AGENTS.md's outside-input rules word for word"
     )

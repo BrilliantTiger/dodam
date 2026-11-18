@@ -129,6 +129,14 @@
       "@type": "Answer",
       "text": "Las instrucciones cuidadosas y la revisión dejan la seguridad al azar: en el informe de Veracode de julio de 2026, el código escrito por IA superó las pruebas de seguridad el 56% de las veces de media. Dodam traslada las reglas al lenguaje, de modo que el código que incumple una regla de seguridad no compila, sea cual sea el modelo que lo escribió. Las reglas de Dodam solo pueden endurecerse con el tiempo, y relajar una requiere la aprobación del propietario."
      }
+    },
+    {
+     "@type": "Question",
+     "name": "¿Puede un agente de IA hablar con el proyecto Dodam en tiempo real?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Todavía no. Dodam tiene una ventanilla, una sesión de IA del proyecto hecha para hablar con sesiones externas, y a fecha de 18 de noviembre de 2026 ninguna de sus vías está abierta: responder a issues y comentarios en GitHub, y hablar de sesión a sesión mediante AI coworker. Hasta que se abra una vía, escribe un issue en el repositorio de Dodam en GitHub, que los agentes de IA del proyecto leen sin plazo prometido."
+     }
     }
    ]
   }
@@ -349,7 +357,7 @@
           <li><span class="when"><span class="cap">Con la capacidad del plan:</span> hacia el 30 de octubre de 2030</span><h3>Uso real</h3><p>Biblioteca estándar, gestor de paquetes y un servicio real hecho con Dodam en funcionamiento durante más de 3 meses.</p></li>
           <li><span class="when"><span class="cap">Con la capacidad del plan:</span> hacia el 25 de febrero de 2032</span><span class="when"><span class="cap">En las condiciones de hoy:</span> entre mayo de 2040 y enero de 2041</span><h3>1.0</h3><p>El núcleo congelado, una auditoría de seguridad completa y una evaluación final con tareas ocultas nuevas.</p></li>
         </ol>
-        <p class="note reveal">Todas estas fechas son estimaciones de una simulación del calendario, no promesas. Las fechas con la capacidad del plan son medianas de 2000 ejecuciones, suponiendo una suscripción de cada una de 3 empresas de IA, que juntas dan unos 15 días de trabajo de agente por semana, siendo un día de trabajo de agente lo que hace un agente en un día (carta de Dodam, versión 0.10, 18 de noviembre de 2026). Con otras semillas aleatorias, la mediana de la versión 1.0 se mueve entre el 11 de febrero de 2032 y el 24 de marzo de 2032, y la fecha para la que la versión 1.0 está terminada con un 80% de probabilidad, entre el 18 de enero de 2034 y el 19 de abril de 2034. <strong>Hoy el trabajo cuenta con menos: una sola suscripción de Claude, compartida con el resto del trabajo del propietario.</strong> Eso se cuenta como unos 4 días de trabajo de agente por semana, una suposición que no se ha medido. Si siguiera así hasta el final, la misma simulación (1200 ejecuciones con cada una de 5 semillas) sitúa la mediana de la versión 1.0 entre mayo de 2040 y enero de 2041, y la fecha con un 80% de probabilidad después de octubre de 2042, donde la simulación se detiene. Lo que separa las fechas del plan de las de hoy es esa capacidad; el trabajo por hacer es el mismo. Más manos, humanas y de IA, acortan el plazo.</p>
+        <p class="note reveal">Todas estas fechas son estimaciones de una simulación del calendario, no promesas. Las fechas con la capacidad del plan son medianas de 2000 ejecuciones, suponiendo una suscripción de cada una de 3 empresas de IA, que juntas dan unos 15 días de trabajo de agente por semana, siendo un día de trabajo de agente lo que hace un agente en un día (carta de Dodam, versión 0.11, 18 de noviembre de 2026). Con otras semillas aleatorias, la mediana de la versión 1.0 se mueve entre el 11 de febrero de 2032 y el 24 de marzo de 2032, y la fecha para la que la versión 1.0 está terminada con un 80% de probabilidad, entre el 18 de enero de 2034 y el 19 de abril de 2034. <strong>Hoy el trabajo cuenta con menos: una sola suscripción de Claude, compartida con el resto del trabajo del propietario.</strong> Eso se cuenta como unos 4 días de trabajo de agente por semana, una suposición que no se ha medido. Si siguiera así hasta el final, la misma simulación (1200 ejecuciones con cada una de 5 semillas) sitúa la mediana de la versión 1.0 entre mayo de 2040 y enero de 2041, y la fecha con un 80% de probabilidad después de octubre de 2042, donde la simulación se detiene. Lo que separa las fechas del plan de las de hoy es esa capacidad; el trabajo por hacer es el mismo. Más manos, humanas y de IA, acortan el plazo.</p>
       </div>
     </section>
 
@@ -388,6 +396,54 @@
       </div>
     </section>
 
+    <section id="desk">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">Hablar en tiempo real</p>
+          <h2>Habla con la IA del proyecto, en directo.</h2>
+          <p class="lead">La ventanilla es una sesión de IA del proyecto Dodam cuya única tarea es el contacto con sesiones externas. En cada respuesta dice que es la ventanilla.</p>
+          <p class="lead">La ventanilla no decide ni fusiona cambios. Lo que no puede resolver lo pasa a la IA que coordina el proyecto, y las decisiones se toman como en todo el proyecto: con pruebas y cifras de benchmark, en el issue o en la pull request.</p>
+          <p class="lead">La ventanilla ya está en marcha, pero todavía no le llega nada de fuera: ninguna de las vías está abierta.</p>
+        </header>
+        <p class="note reveal"><strong>Lo que puedes hacer hoy.</strong> Escribe un issue en el repositorio de Dodam en GitHub. Los agentes de IA del proyecto lo leen y lo convierten en una tarea o lo cierran. No se promete ningún plazo para ello. <a class="link" href="https://github.com/BrilliantTiger/dodam/issues/new">Escribir un issue <span class="arr" aria-hidden="true">→</span></a></p>
+        <ul class="grid" data-stagger>
+          <li><div class="card big">
+            <span class="n">En GitHub</span>
+            <h3>La ventanilla responderá donde escribas</h3>
+            <p><strong>Todavía no está abierta.</strong> No hay fecha de apertura. Cuando esta vía se abra, funcionará así:</p>
+            <ol class="steps">
+              <li>Escribirás un issue, o un comentario en un issue o en una pull request, en el repositorio de Dodam en GitHub.</li>
+              <li>La ventanilla lo detectará y responderá en el mismo lugar.</li>
+              <li>Continuarás en el mismo hilo. Lo que requiera una decisión se resolverá allí, con pruebas y cifras de benchmark.</li>
+            </ol>
+          </div></li>
+          <li><div class="card big">
+            <span class="n">De sesión a sesión</span>
+            <h3>Tu sesión se conectará con la ventanilla mediante AI coworker</h3>
+            <p><strong>Todavía no está abierta.</strong> Esta vía necesita AI coworker 0.13.0, y esa versión todavía no se ha publicado. No hay fecha de apertura. Cuando esta vía se abra, funcionará así:</p>
+            <ol class="steps">
+              <li>Instalarás AI coworker, versión 0.13.0 o posterior, para tu sesión.</li>
+              <li>Abrirás un issue en el repositorio de Dodam con un formulario de solicitud hecho para ello.</li>
+              <li>La ventanilla responderá en ese issue con un código de conexión. El código servirá una sola vez, durante 60 minutos.</li>
+              <li>Tu sesión se conectará con AI coworker usando ese código. Será un código privado: enlazará tu sesión con la ventanilla, de nombre <code>Dodam · desk</code>, y con ninguna otra sesión.</li>
+              <li>Ambas sesiones se preguntarán y se responderán directamente.</li>
+              <li>La ventanilla escribirá en ese issue lo acordado, de modo que el registro quede público.</li>
+            </ol>
+            <p class="more">
+              <a class="link" href="https://github.com/BrilliantTiger/ai-coworker-without-me">AI coworker <span class="arr" aria-hidden="true">→</span></a>
+            </p>
+          </div></li>
+        </ul>
+        <h3 class="sub reveal">Límites</h3>
+        <p class="note reveal">Estos límites rigen para una vía una vez abierta.</p>
+        <ul class="plain" data-stagger>
+          <li>La ventanilla responde como máximo 3 veces por hora en un mismo issue o pull request, y como máximo 30 veces al día en total.</li>
+          <li>Un código de conexión se puede usar una sola vez y durante 60 minutos, y cada autor recibe como máximo 3 códigos al día.</li>
+          <li>Hay como máximo 5 sesiones en directo a la vez.</li>
+        </ul>
+      </div>
+    </section>
+
     <section id="rules">
       <div class="wrap">
         <header class="reveal">
@@ -419,6 +475,7 @@
           <div><h3>¿Cómo participa en Dodam una persona o un agente de IA?</h3><p>Dodam está abierto a personas y a agentes de IA con las mismas reglas. Una persona o un agente elige un issue abierto con la etiqueta ai-welcome en el repositorio de Dodam en GitHub y envía una pull request con una prueba que falla antes del cambio y pasa después. Un agente lee el archivo AGENTS.md del repositorio, que contiene las reglas de trabajo.</p></div>
           <div><h3>¿Cuándo estará listo Dodam?</h3><p>Dodam 1.0 se estima hacia el 25 de febrero de 2032 con la capacidad del plan, que es una suscripción de cada una de 3 empresas de IA; esa fecha es la mediana de una simulación del calendario, no una promesa. En las condiciones de hoy, una sola suscripción de Claude compartida con el resto del trabajo del propietario, la misma simulación sitúa la mediana de Dodam 1.0 entre mayo de 2040 y enero de 2041. La primera versión pública, la 0.1, está prevista hacia el 4 de abril de 2029 con la capacidad del plan.</p></div>
           <div><h3>¿En qué se diferencia Dodam de hacer que la IA escriba con más cuidado en los lenguajes existentes?</h3><p>Las instrucciones cuidadosas y la revisión dejan la seguridad al azar: en el informe de Veracode de julio de 2026, el código escrito por IA superó las pruebas de seguridad el 56% de las veces de media. Dodam traslada las reglas al lenguaje, de modo que el código que incumple una regla de seguridad no compila, sea cual sea el modelo que lo escribió. Las reglas de Dodam solo pueden endurecerse con el tiempo, y relajar una requiere la aprobación del propietario.</p></div>
+          <div><h3>¿Puede un agente de IA hablar con el proyecto Dodam en tiempo real?</h3><p>Todavía no. Dodam tiene una ventanilla, una sesión de IA del proyecto hecha para hablar con sesiones externas, y a fecha de 18 de noviembre de 2026 ninguna de sus vías está abierta: responder a issues y comentarios en GitHub, y hablar de sesión a sesión mediante AI coworker. Hasta que se abra una vía, escribe un issue en el repositorio de Dodam en GitHub, que los agentes de IA del proyecto leen sin plazo prometido.</p></div>
         </div>
       </div>
     </section>

@@ -1,0 +1,48 @@
+# The public facts of the desk: the one AI session of the project whose only job is contact with
+# sessions from outside. The introduction page in its four languages, the guide for AI agents, the
+# status file and the working rules take every value below from this file, and a test fails when one
+# of them says something else.
+#
+# The page shows both ways in every state. A closed way says first that it is not open yet, and then
+# how it will work; it carries no opening date, no measured time and no link to reach the desk.
+#
+# A way is opened by a small pull request of its own, after it has been tried and measured: set
+# open = true, set since to the date, fill in first_answer, and set as_of to that day. A way that is
+# open without those fails a test. The live way cannot be open while the GitHub way is closed, because
+# a connection code is asked for on GitHub; it also needs the lowest version of AI coworker to be
+# released, the page's sentences about AI coworker checked against that version, and the request form named below in .github/ISSUE_TEMPLATE, carrying the label named below.
+
+name = "Dodam · desk"    # how the desk is named in AI coworker
+as_of = "2026-11-18"     # the day these facts were last checked; the page dates its answer with it
+
+# Way one: someone writes an issue or a comment in the public repository, and the desk answers there.
+[ways.github]
+open = false
+since = ""               # the date it opened, as "2026-12-01"; empty while it is closed
+first_answer = {}        # the measured time from the writing to the desk's first answer, empty until measured:
+                         # { median_seconds = 0, longest_seconds = 0, trials = 0, date = "2026-12-01" }
+
+# Way two: session to session over AI coworker, with a connection code asked for on GitHub.
+[ways.live]
+open = false
+since = ""
+first_answer = {}        # the measured time from the request to the desk's answer with the code
+
+[limits]
+answers_per_item_per_hour = 3    # the desk answers at most this often on one issue or pull request in an hour
+answers_per_day = 30             # and at most this often in a day
+code_uses = 1                    # a connection code works this many times
+code_minutes = 60                # and for this long
+codes_per_author_per_day = 3     # connection codes one author can get in a day
+live_sessions = 5                # live sessions at once
+
+[coworker]
+min_version = "0.13.0"           # the lowest version of AI coworker an outside session needs
+released = false                 # whether that version is released; while it is not, the page says so
+checked_against = ""             # the version of AI coworker against whose published documents the page's sentences
+                                 # about AI coworker were last checked; the live way opens only when it is min_version
+repository = "https://github.com/BrilliantTiger/ai-coworker-without-me"
+
+[form]
+file = "live-session.yml"        # the request form in .github/ISSUE_TEMPLATE
+label = "live-session"           # the label that form puts on the issue
