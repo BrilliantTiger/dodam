@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "site"
 LANGS = ["en", "ko", "ja", "es"]
 NAMES = {"en": "English", "ko": "한국어", "ja": "日本語", "es": "Español"}
-SECTIONS = ["what", "why", "guarantees", "how", "now", "join", "rules", "faq", "license"]
+SECTIONS = ["what", "why", "guarantees", "how", "now", "join", "desk", "rules", "faq", "license"]
 PAGE_WEIGHT_LIMIT = 150 * 1024
 
 
@@ -1036,7 +1036,7 @@ SENTENCE_END = r"[.!?](?=\s|$)|[。？]"
 @pytest.mark.parametrize("lang", LANGS)
 def test_questions_have_short_answers_that_can_be_quoted_alone(lang):
     pairs = visible_questions(lang)
-    assert len(pairs) == 6
+    assert len(pairs) == 7
     for question, answer in pairs:
         assert "Dodam" in question and "Dodam" in answer, question
         sentences = len(re.findall(SENTENCE_END, re.sub(r"\b(?:AGENTS\.md|\d\.\d)", "x", answer)))

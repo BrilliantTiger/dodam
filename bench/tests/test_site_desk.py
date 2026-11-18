@@ -3,9 +3,11 @@
 The desk is the one AI session of the project that talks with sessions from outside. Its public facts
 (which way is open and since when, its limits, the measured time to its first answer) are written once,
 in tools/desk/desk.toml. The introduction page in four languages, the guide for AI agents, the status
-file and the working rules must say what that file says: nothing about a way that is closed, and for an
-open way the steps, the limits and what an outside agent should know. These tests build the page with
-no way open, with the way on GitHub open and with both open, whatever the real state is.
+file and the working rules must say what that file says. The section is on the page in every state. A
+closed way says first that it is not open yet and then how it will work, in sentences that are true
+while it is closed, with no opening date, no measured time and no link to reach the desk. An open way
+has its steps, its link, the limits and what an outside agent should know. These tests build the page
+with no way open, with the way on GitHub open and with both open, whatever the real state is.
 """
 
 import copy
@@ -23,19 +25,24 @@ OPEN_STATES = ["github", "both"]
 SOURCE = ROOT / "tools" / "desk" / "desk.toml"
 LIMITS = ["answers_per_item_per_hour", "answers_per_day", "code_uses", "code_minutes", "codes_per_author_per_day", "live_sessions"]
 MEASURED = {"median_seconds": 20, "longest_seconds": 40, "trials": 8, "date": "2026-11-20"}
-# How each language names the desk and talking in real time. While no way is open none of these is on the page.
+# How each language names the desk and talking in real time.
 ABOUT = {"en": r"real time|\bdesk\b|coworker|live session", "ko": r"실시간|창구|coworker", "ja": r"リアルタイム|窓口|coworker|ライブセッション",
          "es": r"tiempo real|ventanilla|coworker|en directo"}
-ABOUT_COWORKER = r"(?i)coworker|0\.13\.0|live[- ]session|connection code|relay"
+NOT_OPEN = {"en": "Not open yet.", "ko": "아직 열리지 않았다.", "ja": "まだ開いていません。", "es": "Todavía no está abierta."}
+NOT_YET = {"en": "Not yet.", "ko": "아직은 아니다.", "ja": "まだできません。", "es": "Todavía no."}
 
 
 def api():
     build = builder()
-    for name in ("DESK", "WAYS", "DESK_TEXT", "load_desk", "desk_problems", "desk_status", "as_if_open", "shown_parts", "desk_links",
-                 "desk_rule_state", "questions"):
+    for name in ("DESK", "WAYS", "DESK_TEXT", "ANSWERS", "load_desk", "desk_problems", "desk_status", "as_if_open", "shown_parts",
+                 "shown_keys", "desk_links", "desk_rule_state", "questions"):
         assert hasattr(build, name), f"the build script has no {name}"
     assert SOURCE.is_file(), "tools/desk/desk.toml, the one file with the facts of the desk, is missing"
     assert build.DESK == SOURCE
+    real = build.load_desk()
+    assert "as_of" in real, "the source does not say on which day its facts were last checked"
+    assert "released" in real["coworker"], "the source does not say whether the version of AI coworker it needs is released"
+    assert "always" in build.DESK_TEXT, "the section is not shown in every state"
     for function in ("render", "guide", "publish", "status"):
         assert "desk" in inspect.signature(getattr(build, function)).parameters, f"{function} cannot be given the facts of the desk"
     return build
@@ -82,9 +89,22 @@ def said(lang: str, key: str, desk: dict) -> str:
     return words(Page("<main>" + build.expand(lang, build.load_strings(lang)[key], desk)).text)
 
 
-def keys_shown(state: str) -> list[str]:
+def keys_shown(state: str, change=None) -> list[str]:
+    return api().shown_keys(in_state(state, change))
+
+
+def keys_hidden(state: str, change=None) -> list[str]:
     build = api()
-    return [key for part in build.shown_parts(in_state(state)) for key in build.DESK_TEXT[part]]
+    shown = keys_shown(state, change)
+    return sorted({key for part in build.DESK_TEXT.values() for key in part} - set(shown))
+
+
+def cards(block: str) -> list[str]:
+    return re.findall(r'<div class="card big">(.*?)</div></li>', block, re.S)
+
+
+def released(desk: dict) -> None:
+    desk["coworker"]["released"] = True
 
 
 # --- one source ---------------------------------------------------------------------------------
@@ -94,7 +114,8 @@ def test_one_file_holds_the_public_facts_of_the_desk():
     build = api()
     desk = build.load_desk()
     assert build.desk_problems(desk) == []
-    assert set(desk) == {"name", "ways", "limits", "coworker", "form"} and desk["name"] == "Dodam · desk"
+    assert set(desk) == {"name", "as_of", "ways", "limits", "coworker", "form"} and desk["name"] == "Dodam · desk"
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d", desk["as_of"]) and isinstance(desk["coworker"]["released"], bool)
     assert set(desk["ways"]) == {"github", "live"}
     for way in desk["ways"].values():
         assert set(way) == {"open", "since", "first_answer"} and isinstance(way["open"], bool)
@@ -164,13 +185,23 @@ def open_without(what: str):
             del desk["limits"]["answers_per_day"]
         elif what == "no lowest version":
             desk["coworker"]["min_version"] = ""
+        elif what == "live while the version it needs is not released":
+            desk["coworker"]["released"] = False
+        elif what == "no word on whether the version is released":
+            del desk["coworker"]["released"]
+        elif what == "no day on which the facts were checked":
+            desk["as_of"] = ""
+        elif what == "opened after the day the facts were checked":
+            desk["as_of"] = "2026-11-18"
     return change
 
 
 @pytest.mark.parametrize("what", ["no date", "a date that is no date", "no measured time", "half a measured time", "measured after it opened",
                                   "live without a date", "live without a measured time", "live before github",
                                   "a closed way with an opening date", "a code that works twice", "a limit of zero", "a limit left out",
-                                  "no lowest version"])
+                                  "no lowest version", "live while the version it needs is not released",
+                                  "no word on whether the version is released", "no day on which the facts were checked",
+                                  "opened after the day the facts were checked"])
 def test_a_way_switched_to_open_without_what_it_needs_is_caught(what, tmp_path):
     build = api()
     real = build.load_desk()
@@ -210,34 +241,112 @@ def test_the_build_refuses_facts_that_cannot_be_stated(tmp_path, monkeypatch):
         assert build.main(["--check"]) == 1, "a way opened without its date and measured time still builds"
 
 
-# --- the page: nothing while no way is open ------------------------------------------------------
+# --- the page: there in every state, and a closed way says so first ------------------------------
 
 
 @pytest.mark.parametrize("lang", LANGS)
-def test_the_committed_page_says_what_the_source_says_and_nothing_about_a_closed_way(lang):
-    build, state = api(), real_state()
+def test_the_committed_page_is_built_from_the_source_and_has_the_section(lang):
+    build = api()
     text = page_path(lang).read_text(encoding="utf-8")
-    assert text == build.render(lang, desk=in_state(state) if state == "closed" else build.load_desk())
-    shown = Page(text)
-    if state == "closed":
-        assert 'id="desk"' not in text and "{{" not in text
-        assert not re.search(ABOUT[lang], shown.text, re.I), "the page speaks of talking in real time although no way is open"
-        assert not re.search(ABOUT[lang], shown.data_blocks[0], re.I), "the structured data speaks of it although no way is open"
-        assert not [h for h in shown.hrefs() if "coworker" in h or "issues/new" in h]
-    else:
-        assert 'id="desk"' in text
-    if state != "both":
-        assert not re.search(r"(?i)coworker", text), "AI coworker is on the page although the live way is closed"
+    assert text == build.render(lang, desk=build.load_desk())
+    assert text.count('<section id="desk"') == 1 and "{{" not in text and "<!--" not in text
+    real = build.load_desk()
+    block = section(text)
+    assert len(cards(block)) == 2
+    for way, card in zip(build.WAYS, cards(block)):
+        assert (NOT_OPEN[lang] in card) == (not real["ways"][way]["open"]), f"{lang}: the page and the source disagree on the {way} way"
+
+
+@pytest.mark.parametrize("state", ["closed", "github"])
+@pytest.mark.parametrize("lang", LANGS)
+def test_a_closed_way_says_first_that_it_is_not_open_and_then_how_it_will_work(lang, state):
+    build, desk = api(), in_state(state)
+    block = section(html_of(lang, state, status=sample()))
+    found = cards(block)
+    assert len(found) == 2
+    for way, card in zip(build.WAYS, found):
+        if way in STATES[state]:
+            assert NOT_OPEN[lang] not in card
+            continue
+        short = {"github": "gh", "live": "live"}[way]
+        said_first = re.search(r"</h3>\s*<p>(.*?)</p>", card, re.S).group(1)
+        assert said_first.startswith(f"<strong>{NOT_OPEN[lang]}</strong>"), f"{lang}: the closed {way} way does not say first that it is not open"
+        assert said_first.rstrip().endswith(build.expand(lang, build.load_strings(lang)["desk_soon"], desk)), "the steps have no lead that makes them what is coming"
+        text = words(Page("<main>" + card).text)
+        steps = [words(Page("<main>" + item).text) for item in re.findall(r"<li>(.*?)</li>", card.split('<ol class="steps">', 1)[1].split("</ol>", 1)[0], re.S)]
+        wanted = [key for key in build.DESK_TEXT[f"{way}_closed"] if re.fullmatch(rf"desk_{short}_c\d", key)]
+        assert steps == [said(lang, key, desk) for key in wanted] and len(steps) == len(
+            [key for key in build.DESK_TEXT[way] if re.fullmatch(rf"desk_{short}_s\d", key)]), "the closed way does not have the same steps"
+        for key in build.DESK_TEXT[way]:   # no sentence of the open way stands in the closed one
+            if re.fullmatch(rf"desk_{short}_(?:h|state|s\d)", key):
+                assert tight(said(lang, key, desk)) not in tight(text), f"{lang}: {key} stands as a present fact for the closed {way} way"
+        assert not re.search(r"(?<!\d)20[2-4]\d(?!\d)", text), "a closed way shows a date"
+        assert "issues/new" not in card, "a closed way offers a link to reach the desk"
+        if lang == "en":
+            assert all(re.search(r"\bwill\b", step) for step in steps), "a step of a closed way reads as something that happens today"
+            assert "No opening date is set." in text and "seconds" not in text and "Open since" not in text
+            for present in ("the desk answers", "The desk answers", "The desk notices", "answers there", "Install AI coworker", "Open an issue"):
+                assert present not in text, f"the closed {way} way says: {present}"
 
 
 @pytest.mark.parametrize("lang", LANGS)
-def test_a_page_built_with_no_way_open_has_no_section_no_question_and_no_promise(lang):
-    text = html_of(lang, "closed", status=sample())
-    shown = Page(text)
-    assert 'id="desk"' not in text and "<!--" not in text
-    assert not re.search(ABOUT[lang], shown.text, re.I)
-    assert not re.search(ABOUT[lang], shown.data_blocks[0], re.I)
-    assert len(re.findall(r"<div><h3>", text.split('id="faq"', 1)[1].split("</section>", 1)[0])) == 6
+def test_no_link_reaches_the_desk_through_a_closed_way_and_the_missing_form_is_never_linked(lang):
+    build = api()
+    for state, change in (("closed", None), ("closed", released), ("github", None)):
+        desk = in_state(state, change)
+        text = html_of(lang, state, status=sample(), change=change)
+        assert "issues/new?template=" not in text and desk["form"]["file"] not in text, "the request form is linked although the live way is closed"
+        assert desk["form"]["label"] not in text, "the label of a form that does not exist is on the page"
+        found = cards(section(text))
+        in_cards = [Page("<main>" + card).hrefs() for card in found]
+        assert in_cards[1] == [desk["coworker"]["repository"]], "the closed live way links to something other than AI coworker's repository"
+        assert in_cards[0] == ([f"{REPO_URL}/issues/new"] if state == "github" else [])
+        outside_cards = [h for h in Page(section(text)).hrefs() if h not in in_cards[0] + in_cards[1]]
+        assert outside_cards == ([f"{REPO_URL}/issues/new"] if state == "closed" else [])
+    both = Page(section(html_of(lang, "both")))
+    links = build.desk_links(in_state("both"))
+    assert both.hrefs() == [f"{REPO_URL}/issues/new", links["form"], links["coworker"]]
+    assert links["form"] == f"{REPO_URL}/issues/new?template={in_state('both')['form']['file']}"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_closed_live_way_says_whether_the_version_it_needs_is_released_from_the_source(lang):
+    build = api()
+    waiting, ready = in_state("closed"), in_state("closed", released)
+    assert waiting["coworker"]["released"] is False and ready["coworker"]["released"] is True
+    for desk, shown, hidden in ((waiting, "desk_live_need_wait", "desk_live_need"), (ready, "desk_live_need", "desk_live_need_wait")):
+        card = words(Page("<main>" + cards(section(build.render(lang, desk=desk)))[1]).text)
+        assert tight(said(lang, shown, desk)) in tight(card) and tight(said(lang, hidden, desk)) not in tight(card)
+        assert desk["coworker"]["min_version"] in said(lang, shown, desk)
+        guide = build.guide(sample(), desk)
+        assert (said("en", "desk_live_need_wait", desk) in guide) == (not desk["coworker"]["released"])
+        assert build.desk_status(desk)["coworker_min_version_released"] is desk["coworker"]["released"]
+    assert "not released yet" in said("en", "desk_live_need_wait", waiting) and "released" not in said("en", "desk_live_need", ready)
+    opened = words(Page(section(html_of(lang, "both"))).text)
+    for key in ("desk_live_need_wait", "desk_live_need"):
+        assert tight(said(lang, key, waiting)) not in tight(opened)
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_with_no_way_open_the_page_says_what_holds_today(lang):
+    build, desk = api(), in_state("closed")
+    text = words(Page(section(html_of(lang, "closed"))).text)
+    for key in build.DESK_TEXT["none"] + build.DESK_TEXT["waiting"]:
+        assert tight(said(lang, key, desk)) in tight(text), key
+    for key in build.DESK_TEXT["any"]:
+        assert tight(said(lang, key, desk)) not in tight(text), f"{lang}: {key} is about writing to the desk, and no way is open"
+    if lang == "en":
+        assert "The desk is already running, but nothing from outside reaches it yet: neither way is open." in text
+        assert "Write an issue in the Dodam repository on GitHub. The project’s AI agents read it" in text and "No time for that is promised." in text
+        assert "These limits hold for a way once it is open." in text
+    for state in OPEN_STATES:
+        later = words(Page(section(html_of(lang, state))).text)
+        for key in ("desk_p3", "desk_today"):
+            assert tight(said(lang, key, desk)) not in tight(later), f"{lang} {state}: {key} is no longer true"
+    assert (tight(said(lang, "desk_limits_p", desk)) in tight(words(Page(section(html_of(lang, "both"))).text))) is False
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")   # what the page offers today is what the rules already say
+    assert "open an issue describing the problem or proposal" in rules
+    assert "turning incoming proposals and reports into work items, or closing them" in rules
 
 
 # --- the page: an open way can be acted on from the page alone -----------------------------------
@@ -278,7 +387,7 @@ def test_the_section_says_what_the_desk_is_the_open_ways_the_limits_and_what_to_
         assert "A vulnerability is never reported in a live session" in text
 
 
-@pytest.mark.parametrize("state", OPEN_STATES)
+@pytest.mark.parametrize("state", list(STATES))
 @pytest.mark.parametrize("lang", LANGS)
 def test_the_section_holds_every_sentence_of_its_state_with_the_steps_in_order(lang, state):
     build, desk = api(), in_state(state)
@@ -287,66 +396,57 @@ def test_the_section_holds_every_sentence_of_its_state_with_the_steps_in_order(l
     for key in keys_shown(state):
         if key != "q7":
             assert tight(said(lang, key, desk)) in tight(text), f"{lang} {state}: the sentence {key} is not in the section"
-    cards = re.findall(r'<div class="card big">(.*?)</div></li>', block, re.S)
-    assert len(cards) == len(STATES[state])
-    for way, card in zip(STATES[state], cards):
-        short = {"github": "gh", "live": "live"}[way]
+    for key in keys_hidden(state):
+        assert tight(said(lang, key, desk)) not in tight(text), f"{lang} {state}: the sentence {key} is in the section"
+    found = cards(block)
+    assert len(found) == 2
+    for way, card in zip(build.WAYS, found):
+        short, kind = {"github": "gh", "live": "live"}[way], "s" if way in STATES[state] else "c"
         steps = [words(Page("<main>" + item).text) for item in re.findall(r"<li>(.*?)</li>", card.split('<ol class="steps">', 1)[1].split("</ol>", 1)[0], re.S)]
-        wanted = [said(lang, key, desk) for key in build.DESK_TEXT[way] if re.fullmatch(rf"desk_{short}_s\d", key)]
+        wanted = [said(lang, key, desk) for key in keys_shown(state) if re.fullmatch(rf"desk_{short}_{kind}\d", key)]
         assert steps == wanted and len(steps) >= 3, f"{lang}: the steps of the {way} way are not the source's, in order"
     template = (ROOT / "tools" / "site" / "template.html").read_text(encoding="utf-8")
-    inside = template.split("<!--desk-->", 1)[1].split("<!--/desk-->", 1)[0]
+    inside = template.split('<section id="desk">', 1)[1].split("</section>", 1)[0]
     assert sorted(set(re.findall(r"\{\{(desk_[a-z0-9_]+)\}\}", inside)) - {"desk_form"}) == sorted(
-        key for part in build.DESK_TEXT.values() for key in part if key != "q7")
-
-
-@pytest.mark.parametrize("lang", LANGS)
-def test_only_open_ways_are_shown_and_with_only_github_open_nothing_about_ai_coworker_appears(lang):
-    build = api()
-    text = html_of(lang, "github", status=sample())
-    assert not re.search(ABOUT_COWORKER if lang == "en" else r"(?i)coworker|0\.13\.0|live-session", text), "the closed live way is on the page"
-    desk = in_state("both")
-    block = words(Page(section(text)).text)
-    for key in build.DESK_TEXT["live"]:
-        assert tight(said(lang, key, desk)) not in tight(block), key
-    assert [h for h in Page(section(text)).hrefs()] == [f"{REPO_URL}/issues/new"]
-    both = Page(section(html_of(lang, "both")))
-    links = build.desk_links(desk)
-    assert both.hrefs() == [f"{REPO_URL}/issues/new", links["form"], links["coworker"]]
-    assert links["form"] == f"{REPO_URL}/issues/new?template={desk['form']['file']}" and links["coworker"] == desk["coworker"]["repository"]
+        {key for part in build.DESK_TEXT.values() for key in part if key != "q7"})
 
 
 # What the page says AI coworker does or sends, and where AI coworker's own published documents say it.
 # A sentence about AI coworker that is not listed here fails, so that none is added without its source.
 COWORKER_SAYS = {
     "desk_live_s3": "a connection code can be used once",
+    "desk_live_c3": "a connection code can be used once",
+    "desk_limit2": "a connection code can be used once",
     "desk_live_s4": "a private code links only the two sessions",
+    "desk_live_c4": "a private code links only the two sessions",
     "desk_know7": "what the sessions you connect to see of your session",
     "desk_know8": "end-to-end encryption and what a relay sees",
     "desk_know9": "values that look like secrets are blocked before anything is sent",
-    "desk_limit2": "a connection code can be used once",
+    "desk_live_need_wait": "whether the version is released: the source's own fact, checked against AI coworker's releases",
 }
-MENTIONS_ONLY = {"desk_live_h", "desk_live_s1", "desk_live_cw", "a7_live"}   # name AI coworker without saying what it does
+# These name AI coworker or a connection code without saying what AI coworker does.
+MENTIONS_ONLY = {"desk_live_h", "desk_live_h_closed", "desk_live_s1", "desk_live_c1", "desk_live_cw", "desk_live_need", "desk_live_state",
+                 "a7_live", "a7_live_closed", "a7_closed"}
 
 
 def test_every_sentence_about_what_ai_coworker_does_is_one_with_a_named_source():
     build = api()
     strings = build.load_strings("en")
     about = {key for key, text in strings.items() if isinstance(text, str) and re.search(r"(?i)coworker|relay|connection code|private one", text)}
-    assert about <= set(build.DESK_TEXT["live"]) | {"a7_live"}, "AI coworker is named outside the live way's sentences"
-    assert about - MENTIONS_ONLY - {"desk_live_state"} == set(COWORKER_SAYS), "a sentence about AI coworker has no source listed, or a listed one is gone"
+    assert about - MENTIONS_ONLY == set(COWORKER_SAYS), "a sentence about AI coworker has no source listed, or a listed one is gone"
+    assert MENTIONS_ONLY <= about
     for lang in LANGS:
-        for key in build.DESK_TEXT["desk"] + build.DESK_TEXT["github"] + ["a7_desk", "a7_github"]:
+        for key in build.DESK_TEXT["github"] + build.DESK_TEXT["github_closed"] + build.DESK_TEXT["any"] + build.DESK_TEXT["none"] + ["a7_desk", "a7_github"]:
             assert not re.search(r"(?i)coworker", build.load_strings(lang)[key]), f"{lang} {key}"
 
 
 # --- the page: design, weight, what it contacts --------------------------------------------------
 
 
-@pytest.mark.parametrize("state", OPEN_STATES)
+@pytest.mark.parametrize("state", list(STATES))
 def test_the_section_is_text_and_ordinary_links_in_the_page_s_own_design(state):
     build = api()
-    closed, opened = html_of("en", "closed"), html_of("en", state)
+    closed, opened = html_of("en", "closed", change=released), html_of("en", state)
     policy = lambda text: re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', text).group(1)
     assert policy(opened) == policy(closed), "the content security policy changes with the section"
     page = Page(opened)
@@ -364,9 +464,10 @@ def test_the_section_is_text_and_ordinary_links_in_the_page_s_own_design(state):
     assert re.search(r"\.card\.big \.steps li::before\s*\{[^}]*content:\s*counter\(step\)", css), "steps inside a card lose their numbers"
 
 
+@pytest.mark.parametrize("state", list(STATES))
 @pytest.mark.parametrize("lang", LANGS)
-def test_the_page_stays_light_with_both_ways_open(lang):
-    text = html_of(lang, "both")
+def test_the_page_stays_light_in_every_state(lang, state):
+    text = html_of(lang, state)
     loaded = [a.get("src") for t, a in Page(text).tags if a.get("src")]
     loaded += [a.get("href") for a in Page(text).all("link") if a.get("rel") not in {"canonical", "alternate", "sitemap"}]
     assert [u for u in loaded if u and not is_local(u)] == []
@@ -421,10 +522,10 @@ def facts_of(text: str, lang: str, desk: dict) -> dict:
     """What must be the same in every language. Dates are spelled differently in each, so the days of the
     desk are taken out of the section before its numbers are read; the years are compared on their own."""
     p = Page(text)
-    inside = words(Page(section(text)).text) if 'id="desk"' in text else ""
+    inside = words(Page(section(text)).text)
     days = [way[name] for way in desk["ways"].values() for name in ("since",) if way[name]]
     days += [way["first_answer"]["date"] for way in desk["ways"].values() if way["first_answer"]]
-    for day in days:
+    for day in sorted(set(days)):
         assert api().spell(lang, "d", day) in inside, f"{lang}: the date {day} is not in the section"
         inside = inside.replace(api().spell(lang, "d", day), " ")
     return {
@@ -453,6 +554,8 @@ def test_a_sentence_about_the_desk_missing_or_changed_in_one_language_is_caught(
     api()
     assert edited(lambda s: s["ja"].pop("desk_know4"))
     assert edited(lambda s: s["es"].pop("a7_live"))
+    assert edited(lambda s: s["ko"].pop("a7_closed")) and edited(lambda s: s["ja"].pop("desk_live_need_wait"))
+    assert edited(lambda s: s["es"].update(a7_closed=s["es"]["a7_closed"].replace("{desk:as_of}", "{d:2026-11-18}")))
     assert edited(lambda s: s["ko"].update(desk_limit1=s["ko"]["desk_limit1"].replace("{desk:answers_per_day}", "30")))
     assert edited(lambda s: s["ko"].update(desk_limit1=s["ko"]["desk_limit1"].replace("{desk:answers_per_day}", "{desk:live_sessions}")))
     assert edited(lambda s: [strings.update(desk_limit3=strings["desk_limit3"].replace("{desk:live_sessions}", "5")) for strings in s.values()]), \
@@ -466,7 +569,7 @@ def test_a_sentence_about_the_desk_missing_or_changed_in_one_language_is_caught(
 
 @pytest.mark.parametrize("state", list(STATES))
 @pytest.mark.parametrize("lang", LANGS)
-def test_the_question_about_talking_in_real_time_exists_only_while_a_way_is_open(lang, state):
+def test_the_question_about_talking_in_real_time_is_answered_from_the_source_in_every_state(lang, state):
     build, desk = api(), in_state(state)
     text = html_of(lang, state)
     faq = text.split('id="faq"', 1)[1].split("</section>", 1)[0]
@@ -474,15 +577,25 @@ def test_the_question_about_talking_in_real_time_exists_only_while_a_way_is_open
     data = {node["@type"]: node for node in json.loads(Page(text).data_blocks[0])["@graph"]}
     asked = [(words(q["name"]), words(q["acceptedAnswer"]["text"])) for q in data["FAQPage"]["mainEntity"]]
     assert asked == visible == [(words(q), words(a)) for q, a in build.questions(lang, build.load_strings(lang), desk)]
-    assert len(visible) == (6 if state == "closed" else 7)
-    if state == "closed":
-        assert not [q for q, a in visible if re.search(ABOUT[lang], q + a, re.I)]
-        return
+    assert len(visible) == 7
     question, answer = visible[-1]
     assert re.search(ABOUT[lang], question, re.I) and "Dodam" in question and "Dodam" in answer
-    assert str(desk["limits"]["answers_per_item_per_hour"]) in answer
-    assert (desk["coworker"]["min_version"] in answer) == (state == "both") and ("coworker" in answer) == (state == "both")
     assert 2 <= len(re.findall(SENTENCE_END, answer.replace(desk["coworker"]["min_version"], "x"))) <= 3
+    assert answer.startswith(NOT_YET[lang]) == (state == "closed"), "the answer does not begin by saying whether it can be done"
+    if state == "closed":
+        assert build.spell(lang, "d", desk["as_of"]) in answer, "the answer does not carry its date"
+        assert "GitHub" in answer and "AI coworker" in answer, "the answer does not name both ways"
+        later = html_of(lang, state, change=lambda d: d.update(as_of="2027-03-09"))
+        assert build.spell(lang, "d", "2027-03-09") in later.split('id="faq"', 1)[1]
+        if lang == "en":
+            assert "neither of its ways is open" in answer and "write an issue in the Dodam repository" in answer
+            assert "without a promised time" in answer
+        for number in (desk["limits"]["answers_per_item_per_hour"], desk["coworker"]["min_version"]):
+            assert str(number) not in answer.replace(build.spell(lang, "d", desk["as_of"]), ""), "the answer to a closed way carries a limit"
+        return
+    assert str(desk["limits"]["answers_per_item_per_hour"]) in answer
+    assert (desk["coworker"]["min_version"] in answer) == (state == "both")
+    assert (tight(said(lang, "a7_live_closed", desk)) in tight(answer)) == (state == "github")
     changed = html_of(lang, state, change=lambda d: d["limits"].update(answers_per_item_per_hour=7))
     assert "7" in re.findall(r"<div><h3>.*?</h3><p>(.*?)</p></div>", changed.split('id="faq"', 1)[1], re.S)[-1]
 
@@ -496,36 +609,35 @@ def guide_of(state: str, change=None) -> str:
     return build.guide(sample() | {"desk": build.desk_status(desk)}, desk)
 
 
-def test_the_guide_says_nothing_about_talking_in_real_time_while_no_way_is_open():
-    guide = guide_of("closed")
-    before_fields = guide.split("## The status file", 1)[0]
-    assert not re.search(ABOUT["en"], before_fields, re.I)
-    assert "## Talking with the project in real time" not in guide and "{{" not in guide
-    assert "\n\n\n" not in guide, "the missing part leaves a hole in the guide"
-
-
-@pytest.mark.parametrize("state", OPEN_STATES)
+@pytest.mark.parametrize("state", list(STATES))
 def test_guide_page_and_source_agree(state):
     build, desk = api(), in_state(state)
     guide, text = guide_of(state), words(Page(section(html_of("en", state))).text)
+    assert "{{" not in guide and "\n\n\n" not in guide
     part = guide.split("## Talking with the project in real time", 1)[1].split("\n## ", 1)[0]
     for key in keys_shown(state):
         if key in {"q7", "desk_k", "desk_h"}:
             continue
         sentence = tight(said("en", key, desk))
         assert sentence in tight(text) and sentence in tight(part), f"the guide and the page do not both say: {key}"
+    for key in keys_hidden(state):
+        assert tight(said("en", key, desk)) not in tight(part), f"the guide says {key}, which the page does not"
     numbered = re.findall(r"(?m)^(\d+)\. (.+)$", part)
-    wanted = [tight(said("en", key, desk)) for way in STATES[state] for key in build.DESK_TEXT[way] if re.search(r"_s\d$", key)]
+    wanted = [tight(said("en", key, desk)) for way, short in (("github", "gh"), ("live", "live"))
+              for key in keys_shown(state) if re.fullmatch(rf"desk_{short}_{'s' if way in STATES[state] else 'c'}\d", key)]
     assert [tight(line) for _, line in numbered] == wanted, "the guide's steps are not the page's, in order"
-    assert f"{REPO_URL}/issues/new" in part
-    live_only = [build.desk_links(desk)["form"], desk["coworker"]["repository"], f"Label of the request form: {desk['form']['label']}",
-                 f"Lowest version of AI coworker: {desk['coworker']['min_version']}"]
-    for fact in live_only:
-        assert (fact in part) == (state == "both"), fact
-    if state == "github":
-        assert not re.search(ABOUT_COWORKER, guide.split("## The status file", 1)[0])
+    assert (f"{REPO_URL}/issues/new\n" in part) == (state != "github" or True)
+    assert part.count(f"{REPO_URL}/issues/new\n") == 1, "the guide gives the place to write an issue once: today's, or the open way's"
+    for fact in (build.desk_links(desk)["form"], f"Label of the request form: {desk['form']['label']}", desk["form"]["label"]):
+        assert (fact in guide) == (state == "both"), fact
+    for fact in (desk["coworker"]["repository"], f"Lowest version of AI coworker: {desk['coworker']['min_version']}"):
+        assert fact in part, fact
+    assert part.count(NOT_OPEN["en"]) == 2 - len(STATES[state])
+    assert ("Open since" in part) == (state != "closed") and ("seconds" in part) == (state != "closed")
     question, answer = build.questions("en", build.load_strings("en"), desk)[-1]
     assert f"### {question}\n\n{answer}" in guide
+    if state == "closed":
+        return
 
     def other(d):   # every number of the source changed at once: the page, the guide and the status follow
         d["limits"].update(answers_per_item_per_hour=7, answers_per_day=71, code_minutes=73, codes_per_author_per_day=11, live_sessions=13)
@@ -546,20 +658,21 @@ def test_guide_page_and_source_agree(state):
 def test_the_status_file_has_a_small_stable_part_for_the_desk_in_every_state(state, tmp_path):
     build, desk = api(), in_state(state)
     part = build.desk_status(desk)
-    assert list(part) == ["github", "live", "limits", "coworker_min_version"]
+    assert list(part) == ["github", "live", "limits", "coworker_min_version", "coworker_min_version_released"]
     for way in ("github", "live"):
         open_now = way in STATES[state]
         assert part[way] == {"open": open_now, "since": desk["ways"][way]["since"] if open_now else None}
     assert part["limits"] == desk["limits"] and list(part["limits"]) == LIMITS
     assert part["coworker_min_version"] == desk["coworker"]["min_version"]
-    assert len(json.dumps(part)) < 400
+    assert part["coworker_min_version_released"] is desk["coworker"]["released"]
+    assert len(json.dumps(part)) < 450
     build.publish(tmp_path / "out", sample() | {"desk": {"github": {"open": True, "since": "2020-01-01"}}}, desk=desk)
     written = json.loads((tmp_path / "out" / "status.json").read_text(encoding="utf-8"))
     assert written["desk"] == part, "the status file says something else about the desk than the source"
     assert written == sample() | {"desk": part}
     for lang in LANGS:
         name = "index.html" if lang == "en" else f"{lang}/index.html"
-        assert ('id="desk"' in (tmp_path / "out" / name).read_text(encoding="utf-8")) == (state != "closed")
+        assert (tmp_path / "out" / name).read_text(encoding="utf-8") == build.render(lang, status=written, desk=desk)
 
 
 def test_an_agent_that_reads_only_the_status_file_can_tell_that_a_way_is_closed():
@@ -574,7 +687,8 @@ def test_an_agent_that_reads_only_the_status_file_can_tell_that_a_way_is_closed(
     assert "status.version !== 2" in (SITE / "motion.js").read_text(encoding="utf-8"), "an open page would misread the new list of fields"
     guide = build.guide(sample())
     assert "version 2 of the file" in guide
-    for name in ("desk.github.open", "desk.github.since", "desk.live.open", "desk.live.since", "desk.limits", "desk.coworker_min_version"):
+    for name in ("desk.github.open", "desk.github.since", "desk.live.open", "desk.live.since", "desk.limits", "desk.coworker_min_version",
+                 "desk.coworker_min_version_released"):
         assert re.search(rf"(?m)^- (?:[\w., ]*, )?{re.escape(name)}[,:]", guide), f"the guide does not describe {name}"
     fields = guide.split("## The status file", 1)[1].split("\n## ", 1)[0]
     for name in LIMITS:
@@ -668,12 +782,11 @@ def test_the_working_rules_bind_the_desk_under_handling_outside_input():
 
 
 @pytest.mark.parametrize("name", ["README.md", "README.ko.md"])
-def test_the_readmes_say_nothing_about_a_way_that_is_closed(name):
+def test_a_readme_that_speaks_of_talking_in_real_time_does_not_present_a_closed_way_as_usable(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     spoken = re.search(r"(?i)real time|\bdesk\b|coworker|live session|실시간|창구", text)
-    assert not spoken or real_state() != "closed", f"{name} speaks of talking in real time although no way is open"
-    if real_state() != "both":
-        assert not re.search(r"(?i)coworker", text)
+    if spoken and real_state() != "both":
+        assert re.search(r"not open yet|아직 열리지 않았다", text), f"{name} speaks of talking in real time and does not say that a way is not open yet"
 
 
 # --- nothing personal, nothing internal ------------------------------------------------------------
