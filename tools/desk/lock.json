@@ -34,6 +34,7 @@
     "question"
   ],
   "labels_per_day": 100,
+  "labels_per_account_per_day": 10,
   "answer": {
     "first_line": "This answer was written by the Dodam project's AI desk, an AI session that answers in the project's name.",
     "max_chars": 2500,
@@ -127,6 +128,8 @@
     "result_bytes": 500,
     "message_bytes": 4000,
     "search_lines": 30,
-    "sessions_per_account_per_day": 8
+    "sessions_per_account_per_day": 8,
+    "units_per_account_per_day": 287500,
+    "ended_in_a_row_per_item": 2
   }
 }

@@ -106,6 +106,9 @@ DIGIT_FOR_LETTER = str.maketrans({"0": "o", "1": "l", "i": "l", "2": "z", "3": "
 # word ends. A shorter value is refused as a whole word, also set apart like that.
 SHORTEST_REDUCED = 6
 MOST_BETWEEN = 3
+# The long-vowel mark of Japanese looks like a dash and is counted as one: it sets letters apart and is no letter itself.
+# Its half-width form becomes the same character when the text is folded.
+LONG_VOWEL = "\u30fc"
 
 
 def looks_like_a_secret(value: str) -> bool:
@@ -233,14 +236,14 @@ def _folded(text: str) -> str:
 
 def reduced(text: str) -> str:
     """Letters and digits only, in one case and one alphabet, a digit and the letters it stands for made one."""
-    return "".join(character for character in _folded(text) if character.isalnum()).translate(DIGIT_FOR_LETTER)
+    return "".join(character for character in _folded(text) if character.isalnum() and character != LONG_VOWEL).translate(DIGIT_FOR_LETTER)
 
 
 @functools.lru_cache(maxsize=65536)
 def _letters_of(character: str) -> str:
     """The letters and digits one written character stands for, in reduced form. None when it only marks a letter."""
     folded = _folded(character)
-    return "".join(c for c in folded if c.isalnum()).translate(DIGIT_FOR_LETTER) if folded else None
+    return "".join(c for c in folded if c.isalnum() and c != LONG_VOWEL).translate(DIGIT_FOR_LETTER) if folded else None
 
 
 class Spelled:

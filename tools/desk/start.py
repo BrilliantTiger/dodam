@@ -87,6 +87,7 @@ LOCK_SHAPE = {
     "claude_version": NAME, "model": NAME, "repository": NAME, "live_server": NAME, "path": NAME,
     "builtin_tools": NAMES, "desk_tools": NAMES, "live_tools": NAMES, "live_tools_never": NAMES, "labels": NAMES, "environment": NAMES,
     "labels_per_day": COUNT,
+    "labels_per_account_per_day": COUNT,
     "answer": {"first_line": NAME, "max_chars": COUNT, "per_account_per_day": COUNT, "told": SENTENCES, "could_not_tell": SENTENCES},
     "read": {"max_bytes": COUNT, "body_bytes": COUNT, "title_bytes": COUNT, "comment_bytes": COUNT, "max_comments": COUNT,
              "max_labels": COUNT, "label_bytes": COUNT, "name_bytes": COUNT, "file_pages": COUNT, "seconds": COUNT},
@@ -98,7 +99,7 @@ LOCK_SHAPE = {
                  "content_bytes_per_session": COUNT, "output_tokens_per_turn": COUNT, "brief_bytes": COUNT, "base_tokens": COUNT,
                  "weights": {"input": WEIGHT, "cache_written": WEIGHT, "cache_read": WEIGHT, "output": WEIGHT},
                  "units_per_session": COUNT, "units_per_turn": COUNT, "units_per_day": COUNT,
-                 "sessions_per_item_per_day": COUNT, "sessions_per_account_per_day": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
+                 "sessions_per_item_per_day": COUNT, "sessions_per_account_per_day": COUNT, "units_per_account_per_day": COUNT, "ended_in_a_row_per_item": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
                  "sign_in_failures": COUNT},
 }  # fmt: skip
 
@@ -363,6 +364,16 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         raise Problem("The closed list (lock.json) states less for one turn than its own numbers add up to.")
     if spending["units_per_session"] + spending["units_per_turn"] > spending["units_per_day"]:
         raise Problem("The closed list (lock.json) sets aside more for one session than a day may cost.")
+    # One outside account alone never closes a day for everyone, by the numbers alone. For the units: what one account
+    # can be charged is less than its share and one more session, and after that a session of another account must still start.
+    set_aside = spending["units_per_session"] + spending["units_per_turn"]
+    if (spending["units_per_account_per_day"] + 2 * set_aside > spending["units_per_day"]
+            or spending["sessions_per_account_per_day"] >= spending["sessions_per_day"]
+            or spending["arrivals_kept_per_account"] >= spending["arrivals_kept"]
+            or lock["labels_per_account_per_day"] >= lock["labels_per_day"]
+            or lock["answer"]["per_account_per_day"] >= facts.answers_per_day
+            or lock["coordinator"]["at_once"]["vulnerability_per_account"] >= lock["coordinator"]["at_once"]["vulnerability_per_day"]):  # fmt: skip
+        raise Problem("The closed list (lock.json) lets one account alone use up a day for everyone.")
     # What the sessions of a day can write must fit in what is kept, by the numbers alone. Twice the sessions of a
     # day, because the reports of 24 hours can come from sessions counted in the 24 hours before as well.
     reports = lock["coordinator"]
