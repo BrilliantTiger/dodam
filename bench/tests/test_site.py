@@ -1232,3 +1232,17 @@ def test_the_measurement_script_loads_nothing_by_itself_and_no_advertising_featu
         assert off in code, off
     assert "localStorage" in code, "the choice is not remembered on the visitor's device"
     assert not re.search(r"innerHTML|document\.write|\beval\(", code)
+
+
+def test_sharing_images_were_drawn_from_the_headline_status_line_and_colors_of_now():
+    """The images are drawn in a browser and committed. What each was drawn from is recorded beside them,
+    so a changed headline, status line or color without a new image fails here."""
+    source = need("card_source")
+    record = ROOT / "tools" / "site" / "cards.json"
+    assert record.is_file(), "what the sharing images were drawn from is not recorded"
+    drawn = json.loads(record.read_text(encoding="utf-8"))
+    for lang in LANGS:
+        assert drawn.get(lang) == source(lang), f"{lang}: the sharing image is older than its headline; run tools/site/card.py"
+    strings = builder().load_strings("en")
+    assert source("en", dict(strings, h1=strings["h1"][:-1] + ["*slow."])) != source("en")
+    assert source("en", dict(strings, status="Released")) != source("en")
