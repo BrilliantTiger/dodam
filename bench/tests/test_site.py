@@ -1264,14 +1264,31 @@ def test_sharing_images_were_drawn_from_the_headline_status_line_and_colors_of_n
     assert source("en", dict(strings, status="Released")) != source("en")
 
 
-# What the owner's property measures (set on 2026-11-18): page views, scrolling to the end of a page and
-# clicks on links that leave the site. The paragraph on the page lists these beside what it listed before.
+# What the owner's property collects for a visitor who agrees (as set on 2026-11-18, with the collection
+# of detailed location and device data switched off): the paragraph on the page names each item, the
+# cookies that agreeing sets, how to change the choice, and where the choice itself is kept.
 MEASURED_WORDS = {
-    "en": ["which pages are opened", "end of a page", "links that leave", "kind of device", "country", "where the visit came from", "Advertising features are off"],
-    "ko": ["어떤 페이지를 열었는지", "끝까지", "바깥으로 나가는 링크", "기기", "나라", "어디를 거쳐", "광고 기능은 꺼져"],
-    "ja": ["開かれたページ", "最後までスクロール", "サイトの外へ出るリンク", "端末の種類", "国", "どこから来たか", "広告機能はオフ"],
-    "es": ["qué páginas se abren", "hasta el final", "enlaces que salen", "tipo de dispositivo", "país", "de dónde llegó", "funciones publicitarias están desactivadas"],
+    "en": ["only for visitors who agree", "which pages are opened", "how long a page stays active in the foreground", "end of a page",
+           "links that leave the site", "browser", "operating system", "language", "kind of device", "country and region",
+           "derives from the IP address without storing the address", "where the visit came from",
+           "first-party cookies with a random identifier and the state of the session", "returning browser",
+           "change your choice below at any time", "stops the measurement and removes those cookies", "Advertising features are off",
+           "nothing is loaded from Google and no cookie is set", "remembered in the browser’s storage on your device"],
+    "ko": ["동의한 방문자에 한해", "어떤 페이지를 열었는지", "얼마나 오래", "끝까지", "바깥으로 나가는 링크", "브라우저", "운영체제", "언어", "기기 종류",
+           "나라와 지역", "IP 주소에서 알아내며 주소는 저장하지 않는다", "어디를 거쳐", "무작위 식별자와 세션 상태", "다시 온 브라우저",
+           "아래에서 언제든 바꿀 수 있고", "측정이 멈추고 그 쿠키가 지워진다", "광고 기능은 꺼져", "쿠키도 만들지 않는다", "브라우저 저장소에 기억된다"],
+    "ja": ["同意した訪問者についてのみ", "開かれたページ", "前面で表示されていた時間", "最後までスクロール", "サイトの外へ出るリンク", "ブラウザ", "OS", "言語",
+           "端末の種類", "国と地域", "IPアドレスから割り出し、アドレス自体は保存しません", "どこから来たか", "ランダムな識別子とセッションの状態", "再訪したブラウザ",
+           "いつでも変更でき", "計測が止まり、そのCookieは削除されます", "広告機能はオフ", "Cookieも設定しません", "ブラウザのストレージに記憶されます"],
+    "es": ["solo de quienes aceptan", "qué páginas se abren", "cuánto tiempo permanece una página activa en primer plano", "hasta el final de una página",
+           "enlaces que salen del sitio", "navegador", "sistema operativo", "idioma", "tipo de dispositivo", "país y región",
+           "deduce de la dirección IP sin guardarla", "de dónde llegó la visita", "identificador aleatorio y el estado de la sesión",
+           "navegador que vuelve", "cambiar su elección más abajo en cualquier momento", "detiene la medición y elimina esas cookies",
+           "funciones publicitarias están desactivadas", "ni se guarda ninguna cookie", "almacenamiento del navegador de su dispositivo"],
 }
+# Switched off in the property, so the page must not claim them: city, coordinates, screen size, device model.
+NOT_MEASURED = {"en": r"\bcity\b|screen|model|coordinates", "ko": r"도시|화면 크기|해상도|모델|좌표", "ja": r"都市|市区町村|画面|解像度|機種|座標",
+                "es": r"ciudad|pantalla|resolución|modelo|coordenadas"}
 
 
 @pytest.mark.parametrize("lang", LANGS)
@@ -1279,7 +1296,26 @@ def test_the_paragraph_says_what_the_property_measures(lang):
     paragraph = builder().load_strings(lang)["measure_p"]
     for words in MEASURED_WORDS[lang]:
         assert words in paragraph, f"{lang}: the paragraph does not say “{words}”"
+    assert not re.search(NOT_MEASURED[lang], paragraph, re.I), f"{lang}: the paragraph names something the property does not collect"
     assert " ".join(paragraph.split()) in " ".join(page(lang).text.split()), "the published page does not carry the paragraph"
+    footer = page_path(lang).read_text(encoding="utf-8").split("<footer", 1)[1]
+    assert footer.index("data-consent-open") > footer.index(paragraph[:20]), "the way to change the choice is not below the paragraph"
+
+
+def test_japanese_writes_browser_one_way():
+    text = json.dumps(builder().load_strings("ja"), ensure_ascii=False)
+    assert "ブラウザ" in text and "ブラウザー" not in text
+
+
+def test_agreeing_again_resumes_measurement_and_a_second_run_of_the_script_does_nothing():
+    """What the script does in a browser is checked by tools/site/sweep.py --consent; this pins its shape."""
+    script = (SITE / "analytics.js").read_text(encoding="utf-8")
+    measure = script.split("function measure()", 1)[1].split("\n  }\n", 1)[0]
+    assert measure.index('window["ga-disable-" + id] = false') < measure.index("if (loaded) return"), \
+        "agreeing again after declining leaves the measurement switched off until a reload"
+    start = script.split("function start()", 1)[1]
+    assert re.search(r"if \([^)]*data-measure[^)]*\) return;", start) and 'setAttribute("data-measure"' in start, \
+        "the script would attach its handlers twice if it were evaluated twice"
 
 
 def test_working_rules_say_what_the_public_page_may_contact():

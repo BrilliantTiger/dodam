@@ -269,8 +269,35 @@ def consent(browser, base: str, path: str, lang: str, ident: str, report) -> Non
             page.wait_for_timeout(500)
             if page.evaluate(BAR)["shown"] or not outside:
                 found.append("the choice to agree is not remembered")
+            # A change of mind in the same tab, both ways, without a reload.
+            switch = f"window['ga-disable-{ident}']"
+            tags = "document.querySelectorAll('script[src*=\"gtag/js\"]').length"
+            page.click("[data-consent-open]")
+            page.click('#consent [data-consent="no"]')
+            if page.evaluate(switch) is not True:
+                found.append("declining after having agreed does not switch the measurement off")
+            page.click("[data-consent-open]")
+            page.click('#consent [data-consent="yes"]')
+            page.wait_for_timeout(300)
+            if page.evaluate(switch) is not False:
+                found.append("agreeing again after declining leaves the measurement switched off until a reload")
+            if page.evaluate(tags) != 1:
+                found.append(f"Google's tag is on the page {page.evaluate(tags)} times after agreeing again")
     found += [f"the page's own policy blocked something: {text[:160]}" for text in blocked]
     report(where, found)
+    context.close()
+
+    # The script evaluated a second time on the same page must not act twice.
+    context, page, outside, blocked = visit()
+    page.evaluate("""() => new Promise(done => {
+      const first = document.querySelector('script[src$="analytics.js"]'), again = document.createElement('script');
+      again.src = first.src + '?again'; again.setAttribute('data-id', first.getAttribute('data-id'));
+      again.onload = done; again.onerror = done; document.head.appendChild(again);
+    })""")
+    page.click('#consent [data-consent="yes"]')
+    page.wait_for_timeout(400)
+    loads = page.evaluate("document.querySelectorAll('script[src*=\"gtag/js\"]').length")   # the cache hides a second request
+    report(where, [] if loads == 1 else [f"with the script evaluated twice, agreeing puts Google's tag on the page {loads} times"])
     context.close()
 
     for name, setup in (("a global privacy control signal", "Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', {get: () => true})"),
