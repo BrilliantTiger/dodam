@@ -59,6 +59,7 @@ DAMAGED = "the desk's record is damaged"
 TYPED_LINES = 200
 TYPED_CHARS = 1_000  # A typed message is at most this many characters, so at most four times as many bytes.
 EVENTS_PER_ARRIVAL = 10
+ACCOUNTS_PER_ARRIVAL = 20
 
 
 def whole_number(value, most: int = 2**53, least: int = 1) -> bool:
@@ -112,6 +113,12 @@ def news_message(events: list[dict]) -> str:
     )
 
 
+def accounts_of(known: list[int], events: list[dict]) -> list[int]:
+    """The accounts of one kept arrival, in the order they first wrote, up to a bound."""
+    accounts = list(dict.fromkeys([*known, *[event["actor_id"] for event in events]]))
+    return accounts[:ACCOUNTS_PER_ARRIVAL]
+
+
 def units(counts: list[int], weights: dict) -> float:
     """What a session cost in weighted units: each class of tokens times its weight."""
     return sum(count * weights[name] for count, name in zip(counts, WEIGHTS, strict=True))
@@ -146,7 +153,10 @@ class Kept:
         for entry in entries if isinstance(entries, list) else []:
             events = [e for e in map(address_only, entry.get("events", [])) if e] if isinstance(entry, dict) else []
             if events and whole_number(entry.get("account"), least=0) and len({e["number"] for e in events}) == 1:
-                good.append({"number": events[0]["number"], "account": entry["account"], "events": events[-EVENTS_PER_ARRIVAL:]})
+                listed = entry.get("accounts") if isinstance(entry.get("accounts"), list) else []
+                good.append({"number": events[0]["number"], "account": entry["account"],
+                             "accounts": accounts_of([entry["account"], *[a for a in listed if whole_number(a, least=0)]], events),
+                             "events": events[-EVENTS_PER_ARRIVAL:]})  # fmt: skip
         return good
 
     def _write(self, entries: list[dict]) -> None:
@@ -157,6 +167,9 @@ class Kept:
         number, account = events[0]["number"], events[0]["actor_id"]
         for entry in entries:
             if entry["number"] == number:
+                # Only the newest arrivals are told to the session, but every account that wrote stays known, the first ones first:
+                # writing again and again does not push another account out.
+                entry["accounts"] = accounts_of(entry["accounts"], events)
                 entry["events"] = (entry["events"] + events)[-EVENTS_PER_ARRIVAL:]
                 return None
         held: dict[int, int] = {}
@@ -172,7 +185,7 @@ class Kept:
                 return account
             entries.remove(next(e for e in entries if e["account"] == most))
             dropped = most
-        entries.append({"number": number, "account": account, "events": events[-EVENTS_PER_ARRIVAL:]})
+        entries.append({"number": number, "account": account, "accounts": accounts_of([account], events), "events": events[-EVENTS_PER_ARRIVAL:]})
         return dropped
 
     def put(self, events: list[dict]) -> int | None:
@@ -193,6 +206,8 @@ class Kept:
             for entry in entries:
                 if entry["number"] == number:
                     entry["events"] = [event for event in entry["events"] if event not in handled]
+                    entry["accounts"] = accounts_of([], entry["events"])
+                    entry["account"] = entry["accounts"][0] if entry["accounts"] else entry["account"]
             self._write([entry for entry in entries if entry["events"]])
 
 
@@ -358,7 +373,7 @@ class Relay:
                     return False
                 continue
             # The arrival stays in the kept list until a session has dealt with it.
-            if self.handle(f"item {arrival['number']}", news_message(arrival["events"]), arrival["number"], arrival["events"], entry):
+            if self.handle(f"item {arrival['number']}", news_message(arrival["events"]), arrival["number"], arrival["accounts"], entry):
                 self.kept.done(arrival["number"], arrival["events"])
             return True
         return False
@@ -473,13 +488,13 @@ class Relay:
             self.show(f"relay: session {self.handled} ended early ({seen['ended_by']})")
         return seen
 
-    def handle(self, about: str, text: str, number: int | None, events: list[dict], entry: dict) -> bool:
+    def handle(self, about: str, text: str, number: int | None, accounts: list[int], entry: dict) -> bool:
         """One fresh session for one message. Returns False when the arrival has to be kept for another try."""
         env = dict(self.plan["env"])
         if number is not None:
             # The tools of this session refuse every other item, and count answers against the accounts that wrote.
             env["DESK_ITEM"] = str(number)
-            env["DESK_ACCOUNTS"] = json.dumps(sorted({event["actor_id"] for event in events}))
+            env["DESK_ACCOUNTS"] = json.dumps(sorted(accounts))
         self.handled += 1
         if self.log is not None:
             self.log.write(json.dumps({"type": "relay", "session": self.handled, "about": about}) + "\n")
