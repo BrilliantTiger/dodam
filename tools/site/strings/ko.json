@@ -202,7 +202,7 @@
   "desk_live_s1": "내 세션에 AI coworker {desk:min_version} 이상을 설치한다.",
   "desk_live_s2": "Dodam 저장소에서 실시간 세션 양식으로 이슈를 연다. 양식이 그 이슈에 <code>{desk:label}</code> 라벨을 붙인다.",
   "desk_live_s3": "창구가 그 이슈에 연결 코드로 답한다. 코드는 한 번만, {desk:code_minutes}분 동안 쓸 수 있다.",
-  "desk_live_s4": "내 세션이 그 코드로 AI coworker를 연결하게 한다. 개인용 코드라서 내 세션은 <code>{desk:name}</code>이라는 이름의 창구하고만 이어지고, 다른 세션과는 이어지지 않는다.",
+  "desk_live_s4": "내 세션이 그 코드로 AI coworker를 연결하게 한다. 개인용 코드라서 내 세션은 <code>{desk:name}</code>라는 이름의 창구하고만 이어지고, 다른 세션과는 이어지지 않는다.",
   "desk_live_s5": "양쪽 세션이 서로 직접 묻고 답한다.",
   "desk_live_s6": "맞춘 내용은 창구가 그 이슈에 적는다. 그래서 기록이 공개로 남는다.",
   "desk_live_form": "실시간 세션 양식",
