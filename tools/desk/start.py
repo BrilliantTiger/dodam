@@ -19,7 +19,7 @@ The command refuses to start when anything it relies on is missing or different,
 in one sentence. It never starts half-checked: any error it did not expect is a refusal too.
 
 --coordinator is the one address the desk can send a message to. --state is the folder, outside
-the repository, where the tools keep what they must remember and where the owner puts what the
+the repository and outside the home folder, where the tools keep what they must remember and where the owner puts what the
 desk needs of the owner: github-token (the desk's own token for GitHub) and claude-token (the
 desk's own sign-in to Claude), each readable by this account only. --print shows what would be
 started and starts nothing.
@@ -52,7 +52,15 @@ import relay  # noqa: E402
 import state as state_files  # noqa: E402
 import tools  # noqa: E402
 
-DEFAULT_STATE = Path.home() / ".dodam-desk"
+
+
+def default_state() -> Path:
+    """Not in the home folder: a session is shown paths of the state folder, and the home folder's path names the account."""
+    shared = Path("/Users/Shared")
+    return (shared if shared.is_dir() and not shared.is_symlink() else Path("/var/tmp")) / f"dodam-desk-{os.getuid()}"
+
+
+CHECK_FILE = "check"
 LIVE_SERVER_FILE = "live-server.json"
 CLAUDE_TOKEN_FILE = "claude-token"
 CLAUDE_CONFIG_PREFIX = "claude-config-"
@@ -62,13 +70,13 @@ ADDRESS = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9_:@.-]{0,119}$")
 VERSION = re.compile(r"\d+(?:\.\d+)+")
 
 # The widest the closed list may ever be. lock.json may name less, never more.
-BUILTIN_TOOLS = {"Read", "Glob", "Grep"}
+BUILTIN_TOOLS = {"Read", "Grep"}
 LIVE_TOOLS = {"open_bridge", "wait_for_message", "inbox", "read_conversation", "reply", "list_connections", "write_agreement"}
 LIVE_TOOLS_NEVER = {"connect", "close_bridge"}
 ENVIRONMENT = {"HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR"}
 PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Named again here so that they stay refused even if a later change puts one back among the tools.
-NEVER = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Skill"]
+NEVER = ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Skill", "Glob"]
 
 NAME = {"type": str}
 NAMES = {"type": list, "of": str}
@@ -80,17 +88,17 @@ LOCK_SHAPE = {
     "builtin_tools": NAMES, "desk_tools": NAMES, "live_tools": NAMES, "live_tools_never": NAMES, "labels": NAMES, "environment": NAMES,
     "labels_per_day": COUNT,
     "answer": {"first_line": NAME, "max_chars": COUNT, "per_account_per_day": COUNT, "told": SENTENCES, "could_not_tell": SENTENCES},
-    "read": {"max_bytes": COUNT, "body_bytes": COUNT, "title_bytes": COUNT, "comment_bytes": COUNT, "max_comments": COUNT, "max_paths": COUNT,
-             "path_bytes": COUNT, "max_labels": COUNT, "label_bytes": COUNT, "name_bytes": COUNT},
+    "read": {"max_bytes": COUNT, "body_bytes": COUNT, "title_bytes": COUNT, "comment_bytes": COUNT, "max_comments": COUNT,
+             "max_labels": COUNT, "label_bytes": COUNT, "name_bytes": COUNT, "file_pages": COUNT, "seconds": COUNT},
     "coordinator": {"first_line": NAME, "max_chars": COUNT, "kinds": NAMES,
                     "at_once": {"vulnerability_per_account": COUNT, "vulnerability_per_day": COUNT, "desk_down_per_day": COUNT, "limit_notices_per_day": COUNT},
-                    "kept_per_day": COUNT, "kept_per_account_per_day": COUNT, "digest_seconds": COUNT, "digest_lines": COUNT, "digest_line_chars": COUNT},
+                    "kept_per_day": COUNT, "kept_per_account_per_day": COUNT, "vulnerability_kept_per_day": COUNT, "reports_per_session": COUNT, "digest_seconds": COUNT, "digest_lines": COUNT, "digest_line_chars": COUNT},
     "spending": {"turns_per_session": COUNT, "seconds_per_session": COUNT, "grace_seconds": COUNT, "reads_per_session": COUNT, "read_lines": COUNT,
                  "search_lines": COUNT, "calls_per_session": COUNT, "result_bytes": COUNT, "message_bytes": COUNT,
                  "content_bytes_per_session": COUNT, "output_tokens_per_turn": COUNT, "brief_bytes": COUNT, "base_tokens": COUNT,
                  "weights": {"input": WEIGHT, "cache_written": WEIGHT, "cache_read": WEIGHT, "output": WEIGHT},
                  "units_per_session": COUNT, "units_per_turn": COUNT, "units_per_day": COUNT,
-                 "sessions_per_item_per_day": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
+                 "sessions_per_item_per_day": COUNT, "sessions_per_account_per_day": COUNT, "sessions_per_day": COUNT, "arrivals_kept": COUNT, "arrivals_kept_per_account": COUNT,
                  "sign_in_failures": COUNT},
 }  # fmt: skip
 
@@ -110,20 +118,42 @@ Problem = state_files.StateProblem
 CHECK_SECONDS = 20
 # Runs the check before a tool call so that every ending but a clean "allowed" refuses the call: a crash, a
 # missing interpreter, a check that hangs. Claude Code blocks a call only on exit code 2, so everything becomes 2.
-CHECK_WRAPPER = (
-    # The call arrives on standard input. Some shells give a command in the background an empty input, so it is handed over by number.
-    'exec 3<&0; "$@" <&3 3<&- & check=$!; exec 3<&-; (sleep {seconds}; kill -9 $check 2>/dev/null) >/dev/null 2>&1 & dog=$!; '
-    "wait $check; code=$?; kill $dog 2>/dev/null; "
-    '[ "$code" -eq 0 ] && exit 0; '
-    "[ \"$code\" -eq 2 ] || echo \"The desk's lock could not be checked, so the call is refused.\" >&2; exit 2"
+# Claude Code shows a session the command of a check that refused, and what the check wrote as its error. So the
+# command is one path and nothing else, and of everything the check may print the session is shown one line:
+# the reason the check itself gave on its standard output, or a fixed sentence.
+CHECK_SCRIPT = """# The call arrives on standard input. Some shells give a command in the background an empty input, so it is handed over by number.
+exec 3<&0
+reason=$(
+  {check} <&3 3<&- 2>/dev/null & check=$!
+  exec 3<&-
+  (sleep {seconds}; kill -9 $check 2>/dev/null) >/dev/null 2>&1 & dog=$!
+  wait $check; code=$?
+  kill $dog 2>/dev/null
+  exit $code
 )
+code=$?
+exec 3<&-
+[ "$code" -eq 0 ] && exit 0
+if [ "$code" -eq 2 ] && [ -n "$reason" ]; then printf '%s\\n' "$reason" >&2
+else echo "The desk's lock could not be checked, so the call is refused." >&2; fi
+exit 2
+"""
 
 
-def check_command(interpreter: str, desk_folder: Path, known: Path, state: Path, seconds: float = CHECK_SECONDS, shell: str = "/bin/sh") -> str:
-    """The command Claude Code runs before every tool call of the session."""
+def check_script(interpreter: str, desk_folder: Path, known: Path, state: Path, seconds: float = CHECK_SECONDS) -> str:
+    """The text of the file that runs the check. It is kept in the state folder, where a session cannot read it."""
     check = [interpreter, "-I", "-B", str(desk_folder / "guard.py"), "hook", "--lock", str(desk_folder / "lock.json"),
              "--facts", str(desk_folder / "desk.toml"), "--known", str(known), "--copy", str(desk_folder.parents[1]), "--state", str(state)]  # fmt: skip
-    return shlex.join([shell, "-c", CHECK_WRAPPER.format(seconds=seconds), "desk-check", *check])
+    return CHECK_SCRIPT.format(check=shlex.join(check), seconds=seconds)
+
+
+def check_command(script: Path, shell: str = "/bin/sh") -> str:
+    """The command Claude Code runs before every tool call of the session: the shell, and the one file that holds the rest.
+
+    It carries these two paths because Claude Code has to be told what to run. A file that is gone, or a shell that
+    cannot read it, ends in a refusal like everything else.
+    """
+    return shlex.join([shell, str(script)]) + " || exit 2"
 
 
 def check_answers(command: str, call: dict) -> int:
@@ -159,18 +189,16 @@ def version_tuple(text: str) -> tuple[int, ...]:
 
 def state_folder(raw: Path, copy: Path) -> Path:
     given = Path(os.path.abspath(raw.expanduser()))
-    # Looked at before the path is followed: a link here would send the desk's secrets and counts somewhere else.
-    if given.is_symlink():
-        raise Problem("The state folder must be a real folder, not a link to one.")
-    state = given.resolve()
+    # Looked at before the path is followed: a link here, or in a folder above, would send the desk's secrets and counts somewhere else.
+    if any(part.is_symlink() for part in (given, *given.parents)):
+        raise Problem("The state folder must be a real folder, not a link to one, and no folder above it may be a link. Give its real path.")
     # The file system of this computer does not tell capital letters from small ones.
-    if ".dodam" in [part.casefold() for part in (*given.parts, *state.parts)]:
+    if ".dodam" in [part.casefold() for part in given.parts]:
         raise Problem("The state folder must not be inside .dodam.")
-    if state == copy or state.is_relative_to(copy) or copy.is_relative_to(state):
+    if given == copy or given.is_relative_to(copy) or copy.is_relative_to(given):
         raise Problem("The state folder must be outside the desk's copy of the repository, where the session cannot read it.")
-    if not state.exists():
-        state.mkdir(mode=0o700, parents=True)
-    return state_files.folder(state, "The state folder")
+    # What is missing on the way is made closed to every other account, each folder of it.
+    return state_files.real_folder(given, "The state folder")
 
 
 def fits(value, shape) -> bool:
@@ -335,6 +363,12 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         raise Problem("The closed list (lock.json) states less for one turn than its own numbers add up to.")
     if spending["units_per_session"] + spending["units_per_turn"] > spending["units_per_day"]:
         raise Problem("The closed list (lock.json) sets aside more for one session than a day may cost.")
+    # What the sessions of a day can write must fit in what is kept, by the numbers alone. Twice the sessions of a
+    # day, because the reports of 24 hours can come from sessions counted in the 24 hours before as well.
+    reports = lock["coordinator"]
+    if (2 * spending["sessions_per_day"] > reports["vulnerability_kept_per_day"]
+            or 2 * spending["sessions_per_day"] * (reports["reports_per_session"] + 2) > reports["kept_per_day"]):  # fmt: skip
+        raise Problem("The closed list (lock.json) lets the sessions of a day write more reports than it keeps.")
     if max(guard.paths_of(copy), default=0) > guard.BYTES_PER_LISTED_PATH:
         raise Problem(f"A path in the desk's copy is longer than {guard.BYTES_PER_LISTED_PATH} bytes, which the bound on what a search may hand over counts on.")
     if facts.live_open and stand_in is None:
@@ -348,6 +382,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         tools.read_token(state)
     except tools.Refused as refusal:
         raise Problem(str(refusal)) from None
+    state_files.file(state / relay.WATCH_STATE_FILE, "The watcher's state file")
 
     claude = which("claude")
     code, output = run([claude, "--version"])
@@ -406,7 +441,16 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     if facts.live_open:
         servers[lock["live_server"]] = live_server(state, lock, facts)
 
-    hook = check_command(python, desk_folder, known_path, state)
+    script = session / CHECK_FILE
+    hook = check_command(script)
+    known = known_values(shown_about_the_account, environ)
+    # Every path a session can be shown is looked at for every known value, in reduced form: the copy (its working
+    # folder), the state folder with the configuration folder in it, and the command of the check.
+    values = (guard.machine_words() if machine is None else list(machine)) + [(kind, value) for kind, value in known]
+    for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook)):
+        found = guard.names(path, values)
+        if found:
+            raise Problem(f"The path of {what} holds " + ", ".join(found) + ". A session is shown this path. Use a folder whose path names none of them.")
     live = lock["live_server"]
     settings = {
         # Claude Code otherwise describes the repository to the session, the owner's git name included.
@@ -421,9 +465,10 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
 
     # The files hold paths, values of the owner and, for a live session, a key. They go to the state folder, not to the command line.
     files = {}
-    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known_values(shown_about_the_account, environ))):
+    for name, content in (("mcp.json", {"mcpServers": servers}), ("settings.json", settings), ("known.json", known)):
         files[name] = session / name
         state_files.write(files[name], f"The file {name} in the state folder", json.dumps(content, indent=1))
+    state_files.write(script, f"The file {CHECK_FILE} in the state folder", check_script(python, desk_folder, known_path, state))
 
     argv = [
         claude,
@@ -480,14 +525,14 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="start.py", description="Start the Dodam desk, locked.")
     parser.add_argument("--coordinator", required=True, help="the one address the desk can send a message to")
-    parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="folder outside the repository for the tools' state")
+    parser.add_argument("--state", type=Path, default=None, help="folder outside the repository and outside the home folder for the tools' state")
     parser.add_argument("--stand-in", type=Path, default=None, help="a folder of made-up items in place of GitHub (for the lock check)")
     parser.add_argument("--print", action="store_true", dest="show", help="show what would be started and start nothing")
     parser.add_argument("--say", default=None, help="a first message for a session (for the lock check)")
     parser.add_argument("--exit-when-idle", action="store_true", help="end once there is nothing left to do (for the lock check)")
     options = parser.parse_args(argv)
     try:
-        planned = plan(options.coordinator, options.state, options.stand_in)
+        planned = plan(options.coordinator, options.state or default_state(), options.stand_in)
     except Problem as problem:
         sys.stderr.write(f"The desk was not started. {problem}\n")
         return 1

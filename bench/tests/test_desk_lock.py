@@ -3189,10 +3189,10 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     # Something was really tried: refusals were seen, not only expected.
     assert sum(row["refused"] for row in record["rows"]) >= 5
     # The row about tools put back rests on calls that were made and refused, not on tools that were absent.
-    (put_back,) = [row for row in record["rows"] if row["run"] == "removed tools put back"]
+    (put_back,) = [row for row in record["rows"] if row["run"] == "removed tools put back" and not row["thing"].startswith("be shown a value")]
     assert put_back["attempts"] >= 3 and put_back["refused"] == put_back["attempts"]
     # The bounds inside one session were seen to refuse on the real program: the reading call past the last, and the turn past the last.
-    bounds = [row for row in record["rows"] if row["run"] == "the bounds of one session"]
+    bounds = [row for row in record["rows"] if row["run"] == "the bounds of one session" and not row["thing"].startswith("be shown a value")]
     assert len(bounds) == 3 and bounds[0]["refused"] >= 1
     # After every run, everything the session was shown was searched for every known value, and none was found.
     shown = [row for row in record["rows"] if row["thing"].startswith("be shown a value that names this computer or its owner")]
@@ -3206,7 +3206,7 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     assert fresh["bytes_of_the_standing_instructions"] == len((DESK / "brief.md").read_bytes())
     assert fresh["input_tokens"] <= lock["spending"]["base_tokens"] + lock["spending"]["brief_bytes"]
     assert "brief.md" not in record["stand_ins"]
-    (refused_sign_in,) = [row for row in record["rows"] if row["run"] == "the service refuses the sign-in"]
+    (refused_sign_in,) = [row for row in record["rows"] if row["run"] == "the service refuses the sign-in" and not row["thing"].startswith("be shown a value")]
     assert refused_sign_in["attempts"] == spending_of(lock)["sign_in_failures"]
     # What one item cost was measured with the bounds as the closed list has them, and stayed within them.
     spending = lock["spending"]
