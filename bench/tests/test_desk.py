@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -1675,51 +1676,91 @@ def test_multi_page_reviews_restart_from_page_one_when_pull_request_is_updated(m
     assert [e["id"] for e in json.loads(o1)["events"]] == ["pull_request_review:1950"]
 
 
-def test_review_window_id_limit_while_asking_exits_with_code_8_immediately(monkeypatch, tmp_path):
+def test_review_window_bound_narrows_window_logs_once_per_pr_and_continues_on_first_start_and_while_asking(
+    monkeypatch, tmp_path
+):
     module = load_watcher()
     assert module is not None
     assert hasattr(module, "MAX_WINDOW_REVIEW_IDS"), "watch.py must expose MAX_WINDOW_REVIEW_IDS"
-    monkeypatch.setattr(module, "MAX_WINDOW_REVIEW_IDS", 2)
+    monkeypatch.setattr(module, "MAX_WINDOW_REVIEW_IDS", 3)
+    monkeypatch.setattr(module, "MAX_SEEN_IDS", 2)
 
     gh = FakeGitHub()
     gh.pulls = [
         make_pr(102, 2, sha="2222222200000000", login="a", state="open", created_at="2026-11-17T01:00:02Z", updated_at="2026-11-17T01:00:02Z"),
-        make_pr(101, 1, sha="1111111100000000", login="a", state="open", created_at="2026-11-17T01:00:01Z", updated_at="2026-11-17T01:00:01Z"),
+        make_pr(101, 1, sha="1111111100000000", login="a", state="open", created_at="2026-11-17T01:00:01Z", updated_at="2026-11-17T01:00:05Z"),
+    ]
+    # 1. Bound reached on the first start (PR #1 already has 5 reviews inside 5 minutes > limit 3):
+    #    watcher logs one line for PR #1, does NOT end with code 8, and does not log again on idle rounds.
+    gh.reviews[1] = [
+        make_review(500 + i, 1, login="old-r", submitted_at=f"2026-11-17T01:00:0{i}Z")
+        for i in (1, 2, 3, 4, 5)
     ]
     gh.reviews[2] = []
-    gh.reviews[1] = []
 
-    state_file = tmp_path / "win-cap.json"
-    code0, _, err0, _ = run_watch(
+    state_file = tmp_path / "win-narrow.json"
+    code0, out0, err0, _ = run_watch(
         monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh, module=module
     )
-    assert code0 == 0 and err0 == ""
+    assert code0 == 0 and json.loads(out0) == {"events": [], "reason": "timeout"}
+    err0_lines = err0.strip().splitlines()
+    assert len(err0_lines) == 1 and "#1" in err0_lines[0] and "Traceback" not in err0
 
-    # Three reviews in the same second on PR #2 (polled before PR #1) exceed MAX_WINDOW_REVIEW_IDS=2
-    # while asking: watcher exits 8 at once before asking GitHub for PR #1's reviews.
-    gh.reviews[2] = [
-        make_review(801, 2, login="r1", submitted_at="2026-11-18T11:00:00Z"),
-        make_review(802, 2, login="r2", submitted_at="2026-11-18T11:00:00Z"),
-        make_review(803, 2, login="r3", submitted_at="2026-11-18T11:00:00Z"),
-    ]
-    calls_before = len(gh.calls)
-    c_cap, o_cap, e_cap, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
-    assert c_cap == 8 and o_cap == ""
-    assert len(e_cap.strip().splitlines()) == 1 and "Traceback" not in e_cap
-    recent_endpoints = [ep for ep, _ in gh.calls[calls_before:]]
-    assert not any("/pulls/1/reviews" in ep for ep in recent_endpoints), (
-        "watcher kept polling later PRs instead of enforcing MAX_WINDOW_REVIEW_IDS while asking"
+    # Idle round right after: zero stderr lines (not once a round!) and zero repeated reviews.
+    ci, oi, ei, _ = run_watch(
+        monkeypatch, ["--wait", "--max-wait", "5", "--state", str(state_file)], gh, module=module
     )
+    assert ci == 0 and ei == "" and json.loads(oi) == {"events": [], "reason": "timeout"}
 
-    # Once the limit is raised, all three reviews are reported once and nothing is lost.
-    monkeypatch.setattr(module, "MAX_WINDOW_REVIEW_IDS", 10)
-    c_ok, o_ok, e_ok, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
-    assert c_ok == 0 and e_ok == ""
-    assert [e["id"] for e in json.loads(o_ok)["events"]] == [
+    # 2. Bound reached while asking on PR #2 (5 reviews within 5 minutes, including same-second reviews),
+    #    while PR #1 also gets review 506 and issue #9 opens in the SAME round:
+    #    watcher logs once for PR #2, reports all 5 on PR #2 + PR #1's review + issue #9, and exits 0.
+    gh.reviews[2] = [
+        make_review(801, 2, login="r1", submitted_at="2026-11-18T11:00:01Z"),
+        make_review(802, 2, login="r2", submitted_at="2026-11-18T11:00:02Z"),
+        make_review(803, 2, login="r3", submitted_at="2026-11-18T11:00:02Z"),
+        make_review(804, 2, login="r4", submitted_at="2026-11-18T11:00:03Z"),
+        make_review(805, 2, login="r5", submitted_at="2026-11-18T11:00:04Z"),
+    ]
+    gh.reviews[1].append(make_review(506, 1, login="r-pr1", submitted_at="2026-11-18T11:00:05Z"))
+    gh.issues.insert(0, make_issue(909, 9, login="issue-author", created_at="2026-11-18T11:00:06Z"))
+
+    c1, o1, e1, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c1 == 0
+    e1_lines = e1.strip().splitlines()
+    assert len(e1_lines) == 1 and "#2" in e1_lines[0] and "#1" not in e1_lines[0]
+    assert [e["id"] for e in json.loads(o1)["events"]] == [
         "pull_request_review:801",
         "pull_request_review:802",
         "pull_request_review:803",
+        "pull_request_review:804",
+        "pull_request_review:805",
+        "pull_request_review:506",
+        "issue_opened:909",
     ]
+
+    # 3. Afterwards: evict seen_ids, clear all ETags, add a late review among the forgotten ones on PR #2
+    #    (800 @ 11:00:01Z <= forgotten floor (11:00:02Z, 802), must NOT be reported) and a late review inside
+    #    the remembered narrowed window (899 @ 11:00:03Z > floor, MUST be reported once), with zero repeats
+    #    and zero extra stderr lines!
+    for idx in (1, 2, 3):
+        gh.issues.insert(
+            0, make_issue(950 + idx, 30 + idx, login="filler", created_at=f"2026-11-18T11:01:0{idx}Z")
+        )
+    c2, o2, e2, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh, module=module)
+    assert c2 == 0 and e2 == "" and len(json.loads(o2)["events"]) == 3
+
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert not any(sid.startswith("pull_request_review:") for sid in saved["seen_ids"])
+    saved["etags"] = {}
+    state_file.write_text(json.dumps(saved), encoding="utf-8")
+
+    gh.reviews[2].insert(0, make_review(800, 2, login="forgotten-late", submitted_at="2026-11-18T11:00:01Z"))
+    gh.reviews[2].append(make_review(899, 2, login="kept-window-late", submitted_at="2026-11-18T11:00:03Z"))
+
+    c3, o3, e3, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "40", "--state", str(state_file)], gh, module=module)
+    assert c3 == 0 and e3 == ""
+    assert [e["id"] for e in json.loads(o3)["events"]] == ["pull_request_review:899"]
 
 
 def test_older_version_state_file_is_refused_with_actionable_message_and_first_start_guarantee(
@@ -2332,8 +2373,10 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
     # Comments of a review sent late reach the desk through the review's event when the desk reads the item.
     assert "comments of a review reach the desk through the review's" in low
     assert "reads the review and its inline comments when it reads the item" in low
-    # Multi-page review restart relies on GitHub marking a pull request as updated when a review is sent.
+    # Multi-page review restart relies on GitHub marking a pull request as updated when a review is sent,
+    # and the review window bound states that a review first appearing late among forgotten ones is not reported.
     assert "marking a pull request as updated when a review is sent" in low
+    assert "a review that first appears late among the forgotten ones is not reported" in low
     # What the desk does not see, stated in place: edits after answering, discussions, comments on commits.
     assert "edits" in low and "discussions" in low and "commits" in low
 
@@ -2357,6 +2400,28 @@ def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_ge
         assert required in low, f"brief.md is missing: {required}"
 
 
+def _stream_pr_check_stdin(
+    pages: list[list[dict[str, object]]],
+    *,
+    changed_files: object = ...,
+    draft: object = ...,
+    task_folders: object = ...,
+) -> str:
+    chunks: list[str] = []
+    meta: dict[str, object] = {}
+    if changed_files is not ...:
+        meta["changed_files"] = changed_files
+    if draft is not ...:
+        meta["draft"] = draft
+    if meta:
+        chunks.append(json.dumps(meta))
+    if task_folders is not ...:
+        chunks.append(json.dumps({"task_folders": task_folders}))
+    for page in pages:
+        chunks.append(json.dumps(page))
+    return "\n".join(chunks)
+
+
 def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(monkeypatch):
     mod = load_pr_files()
     assert mod is not None, "tools/desk/pr_files.py does not exist yet"
@@ -2376,13 +2441,15 @@ def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(mo
             assert top in sys.stdlib_module_names, f"non-stdlib import in pr_files.py: {top}"
             assert top not in forbidden_imports, f"forbidden network/subprocess import in pr_files.py: {top}"
 
-    # Multi-page concatenated JSON arrays (as emitted by `gh api --paginate`) and `--draft` flag:
-    paginated_stdin = (
-        json.dumps([{"status": "modified", "filename": "docs/guide.md", "patch": POISON_DIFF}])
-        + "\n"
-        + json.dumps([{"status": "added", "filename": "bench/tests/test_guide.py", "patch": POISON_DIFF}])
+    # Multi-page concatenated stream (as emitted by the piped gh api request in brief.md):
+    pages = [
+        [{"status": "modified", "filename": "docs/guide.md", "patch": POISON_DIFF}],
+        [{"status": "added", "filename": "bench/tests/test_guide.py", "patch": POISON_DIFF}],
+    ]
+    c1, o1, e1 = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(pages, changed_files=2, draft=False, task_folders=["web-signup"]),
     )
-    c1, o1, e1 = run_pr_files(monkeypatch, paginated_stdin)
     assert c1 == 0 and e1 == ""
     assert json.loads(o1) == {
         "protected_folders": [],
@@ -2391,7 +2458,10 @@ def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(mo
     }
     assert "guide" not in o1 and POISON_DIFF not in o1
 
-    c_draft, o_draft, e_draft = run_pr_files(monkeypatch, paginated_stdin, ["--draft"])
+    c_draft, o_draft, e_draft = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(pages, changed_files=2, draft=True, task_folders=["web-signup"]),
+    )
     assert c_draft == 0 and e_draft == ""
     assert json.loads(o_draft) == {
         "protected_folders": [],
@@ -2400,28 +2470,57 @@ def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(mo
     }
 
 
+def _assert_pr_files_accepts_counts_and_base_tasks(mod) -> None:
+    assert hasattr(mod, "classify_pr_files"), "pr_files.py must expose classify_pr_files()"
+    params = inspect.signature(mod.classify_pr_files).parameters
+    assert "changed_files" in params, "classify_pr_files() must accept changed_files"
+    assert "draft" in params, "classify_pr_files() must accept draft"
+    assert "task_folders" in params, "classify_pr_files() must accept task_folders"
+
+
+def _call_classify_compat(
+    mod,
+    files: list[dict[str, object]],
+    *,
+    draft: bool = False,
+    tasks: list[str] | None = None,
+) -> dict[str, object]:
+    params = inspect.signature(mod.classify_pr_files).parameters
+    effective_tasks = ["web-signup"] if tasks is None else tasks
+    if "changed_files" in params and "task_folders" in params:
+        return mod.classify_pr_files(
+            files,
+            changed_files=len(files),
+            draft=draft,
+            task_folders=effective_tasks,
+        )
+    return mod.classify_pr_files(files, draft=draft, existing_tasks=set(effective_tasks))
+
+
 def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tasks_lookalikes_and_weird_names(
     monkeypatch,
 ):
     mod = load_pr_files()
     assert mod is not None, "tools/desk/pr_files.py does not exist yet"
-    classify = mod.classify_pr_files
+
+    def check(files: list[dict[str, object]], *, draft: bool = False, tasks: list[str] | None = None):
+        return _call_classify_compat(mod, files, draft=draft, tasks=tasks)
 
     # Local checkout at main has bench/tasks/web-signup as an existing benchmark task folder.
     assert "web-signup" in mod.existing_task_folders()
 
     # 1. Three core cases: new test only (ready); changed existing test (protected); new file in bench/images/ (protected).
-    assert classify([{"status": "added", "filename": "bench/tests/test_new_case.py"}]) == {
+    assert check([{"status": "added", "filename": "bench/tests/test_new_case.py"}]) == {
         "protected_folders": [],
         "adds_new_test": True,
         "ready_for_review": True,
     }
-    assert classify([{"status": "modified", "filename": "bench/tests/test_desk.py"}]) == {
+    assert check([{"status": "modified", "filename": "bench/tests/test_desk.py"}]) == {
         "protected_folders": ["bench/tests/"],
         "adds_new_test": False,
         "ready_for_review": False,
     }
-    assert classify(
+    assert check(
         [
             {"status": "added", "filename": "bench/images/@owner-mention.Dockerfile"},
             {"status": "added", "filename": "bench/tests/test_img.py"},
@@ -2440,7 +2539,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         ("bench/tests/test_desk.py", "bench/tests/"),
         ("bench/tasks/web-signup/task.yaml", "bench/tasks/"),
     ):
-        res_out = classify(
+        res_out = check(
             [
                 {"status": "renamed", "previous_filename": old_path, "filename": "docs/harmless.txt"},
                 {"status": "added", "filename": "bench/tests/test_accompanying.py"},
@@ -2459,7 +2558,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         ("bench/tests/test_moved_in.py", "bench/tests/"),
         ("bench/tasks/brand-new-task/task.yaml", "bench/tasks/"),
     ):
-        res_in = classify(
+        res_in = check(
             [
                 {"status": "renamed", "previous_filename": "docs/source.txt", "filename": new_path},
             ]
@@ -2471,14 +2570,14 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         }
 
     # 3. Copied file (both into bench/tests/ and out of bench/tests/ or bench/images/).
-    assert classify(
+    assert check(
         [{"status": "copied", "previous_filename": "docs/src.py", "filename": "bench/tests/test_copied.py"}]
     ) == {
         "protected_folders": ["bench/tests/"],
         "adds_new_test": False,
         "ready_for_review": False,
     }
-    assert classify(
+    assert check(
         [
             {"status": "copied", "previous_filename": "bench/tests/test_desk.py", "filename": "docs/copy.py"},
             {"status": "added", "filename": "bench/tests/test_real_add.py"},
@@ -2491,7 +2590,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
 
     # 4. Unknown status word counts as a change of something that exists.
     for unknown_status in ("changed", "chmod", "typechange", "future_github_status"):
-        assert classify(
+        assert check(
             [
                 {"status": unknown_status, "filename": "bench/tests/test_desk.py"},
                 {"status": "added", "filename": "bench/tests/test_extra.py"},
@@ -2501,7 +2600,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
             "adds_new_test": True,
             "ready_for_review": False,
         }
-        assert classify(
+        assert check(
             [
                 {"status": unknown_status, "filename": "bench/tasks/brand-new/task.yaml"},
                 {"status": "added", "filename": "bench/tests/test_extra.py"},
@@ -2520,14 +2619,14 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "bench/tests/test_.py",
         "bench/tests/subdir/test_nested.py",
     ):
-        assert classify([{"status": "added", "filename": helper_path}]) == {
+        assert check([{"status": "added", "filename": helper_path}]) == {
             "protected_folders": ["bench/tests/"],
             "adds_new_test": False,
             "ready_for_review": False,
         }
 
     # 6. File added inside an existing task folder on main (bench/tasks/web-signup/) or directly in bench/tasks/ is protected.
-    assert classify(
+    assert check(
         [
             {"status": "added", "filename": "bench/tasks/web-signup/extra_check.py"},
             {"status": "added", "filename": "bench/tests/test_ws_extra.py"},
@@ -2537,7 +2636,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "adds_new_test": True,
         "ready_for_review": False,
     }
-    assert classify(
+    assert check(
         [
             {"status": "added", "filename": "bench/tasks/loose_file.txt"},
             {"status": "added", "filename": "bench/tests/test_loose.py"},
@@ -2549,7 +2648,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
     }
 
     # 7. Whole new task folder not on main (+ a new test file) is NOT protected and IS ready for review.
-    assert classify(
+    assert check(
         [
             {"status": "added", "filename": "bench/tasks/brand-new-task/task.yaml"},
             {"status": "added", "filename": "bench/tasks/brand-new-task/tests/check.py"},
@@ -2562,7 +2661,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
     }
 
     # 8. Look-alike folder names are not mistaken for protected folders.
-    assert classify(
+    assert check(
         [
             {"status": "added", "filename": "bench/dodambenchmark/note.md"},
             {"status": "added", "filename": "bench/images_extra/pic.png"},
@@ -2578,17 +2677,14 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
     }
 
     # 9. File names with a line break, with a tab, and with quotes:
-    #    - cannot fake a second line / new test,
-    #    - cannot pass as a clean test_<something>.py when containing newline/tab,
-    #    - never appear anywhere in pr_files.py's JSON output.
     faked_second_line = [{"status": "modified", "filename": "docs/a.md\nadded\tbench/tests/test_fake.py"}]
-    assert classify(faked_second_line) == {
+    assert check(faked_second_line) == {
         "protected_folders": [],
         "adds_new_test": False,
         "ready_for_review": False,
     }
     for bad_test_name in ("bench/tests/test_line\nbreak.py", "bench/tests/test_with\ttab.py"):
-        assert classify([{"status": "added", "filename": bad_test_name}]) == {
+        assert check([{"status": "added", "filename": bad_test_name}]) == {
             "protected_folders": ["bench/tests/"],
             "adds_new_test": False,
             "ready_for_review": False,
@@ -2598,7 +2694,10 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         {"status": "added", "filename": 'bench/images/evil\nline\ttab"quotes"@owner'},
         {"status": "added", "filename": 'docs/with\nnewline\tand"quotes".md'},
     ]
-    code_w, out_w, err_w = run_pr_files(monkeypatch, json.dumps(weird_protected))
+    code_w, out_w, err_w = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin([weird_protected], changed_files=2, draft=False, task_folders=["web-signup"]),
+    )
     assert code_w == 0 and err_w == ""
     assert json.loads(out_w) == {
         "protected_folders": ["bench/images/"],
@@ -2609,6 +2708,191 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         assert leaked_piece not in out_w
 
 
+def test_pr_files_normalises_nfc_and_compares_protected_and_task_folders_without_regard_to_case():
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+
+    def check(files: list[dict[str, object]], tasks: list[str] | None = None):
+        return _call_classify_compat(mod, files, draft=False, tasks=tasks)
+
+    # 1. Each of the five protected folders in other capitals.
+    for cap_path, expected_folder in (
+        ("Bench/DodamBench/tool.py", "bench/dodambench/"),
+        ("BENCH/IMAGES/Containerfile", "bench/images/"),
+        (".GitHub/Workflows/extra.yml", ".github/"),
+        ("Bench/Tests/helper_cap.py", "bench/tests/"),
+        ("Bench/Tests/test_sneaky_cap.py", "bench/tests/"),
+        ("BENCH/TASKS/brand-new/task.yaml", "bench/tasks/"),
+    ):
+        res = check(
+            [
+                {"status": "added", "filename": cap_path},
+                {"status": "added", "filename": "bench/tests/test_valid_companion.py"},
+            ]
+        )
+        assert res == {
+            "protected_folders": [expected_folder],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }, f"capitalised path {cap_path} was not recognised as {expected_folder}"
+
+    # 2. Existing task folder in other capitals (and case-colliding existing test filename).
+    assert check(
+        [
+            {"status": "added", "filename": "bench/tasks/Web-Signup/extra.yaml"},
+            {"status": "added", "filename": "bench/tests/test_ws_cap.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert check([{"status": "added", "filename": "bench/tests/TEST_DESK.py"}]) == {
+        "protected_folders": ["bench/tests/"],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+
+    # 3. Decomposed Unicode (NFD) vs composed (NFC) task-folder names in both directions.
+    nfc_task = "caf\u00e9-task"
+    nfd_task_upper = "CAFE\u0301-TASK"
+    assert nfc_task != nfd_task_upper
+    assert check(
+        [
+            {"status": "added", "filename": f"bench/tasks/{nfd_task_upper}/solve.py"},
+            {"status": "added", "filename": "bench/tests/test_unicode_nfd.py"},
+        ],
+        tasks=["web-signup", nfc_task],
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert check(
+        [
+            {"status": "added", "filename": f"bench/tasks/{nfc_task}/solve.py"},
+            {"status": "added", "filename": "bench/tests/test_unicode_nfc.py"},
+        ],
+        tasks=["web-signup", "cafe\u0301-task"],
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+
+
+def test_pr_files_refuses_incomplete_capped_or_missing_counts_draft_or_base_task_list(monkeypatch):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    _assert_pr_files_accepts_counts_and_base_tasks(mod)
+    classify = mod.classify_pr_files
+    sample_new_test = [{"status": "added", "filename": "bench/tests/test_ok_one.py"}]
+
+    def assert_refused(verdict: dict[str, object]) -> None:
+        assert verdict.get("refused") is True, f"expected refusal, got {verdict}"
+        assert verdict.get("ready_for_review") is False
+        reason = verdict.get("reason")
+        assert isinstance(reason, str) and len(reason) > 0
+        assert "test_ok_one" not in reason
+
+    # 1. Missing or invalid changed_files or draft.
+    assert_refused(classify(sample_new_test, draft=False, task_folders=["web-signup"]))
+    assert_refused(classify(sample_new_test, changed_files=1, task_folders=["web-signup"]))
+    assert_refused(classify(sample_new_test, changed_files=True, draft=False, task_folders=["web-signup"]))
+    assert_refused(classify(sample_new_test, changed_files=1, draft="false", task_folders=["web-signup"]))
+
+    # 2. Entry count differs from changed_files (e.g. sender failed after page 1 while pipe exited 0).
+    assert_refused(classify(sample_new_test, changed_files=2, draft=False, task_folders=["web-signup"]))
+    c_inc, o_inc, e_inc = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin([sample_new_test], changed_files=35, draft=False, task_folders=["web-signup"]),
+    )
+    assert c_inc != 0
+    assert_refused(json.loads(o_inc))
+    assert len(e_inc.strip().splitlines()) == 1
+
+    # 3. changed_files is 3,000 or more (GitHub cuts pull request file lists at 3,000),
+    #    even when all 3,000 listed entries look harmless with one new test.
+    three_thousand = [{"status": "modified", "filename": f"docs/p{i}.md"} for i in range(2999)] + sample_new_test
+    assert len(three_thousand) == 3000
+    assert_refused(classify(three_thousand, changed_files=3000, draft=False, task_folders=["web-signup"]))
+    c_cap, o_cap, _ = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin([three_thousand], changed_files=3000, draft=False, task_folders=["web-signup"]),
+    )
+    assert c_cap != 0
+    assert_refused(json.loads(o_cap))
+
+    # 4. Base-commit task_folders: a folder on the base commit that the local copy lacks counts as existing;
+    #    local copy folders also still count when omitted from task_folders; missing or non-list is refused.
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/tasks/added-after-desk-started/task.yaml"},
+            {"status": "added", "filename": "bench/tests/test_after_start.py"},
+        ],
+        changed_files=2,
+        draft=False,
+        task_folders=["web-signup", "added-after-desk-started"],
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert classify(
+        [
+            {"status": "added", "filename": "bench/tasks/web-signup/sneak.py"},
+            {"status": "added", "filename": "bench/tests/test_local_copy.py"},
+        ],
+        changed_files=2,
+        draft=False,
+        task_folders=[],
+    ) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False))
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders=None))
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders={"name": "web-signup"}))
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders="web-signup"))
+
+    # CLI also refuses when file list or metadata is missing from piped stream.
+    c_bare, o_bare, _ = run_pr_files(monkeypatch, json.dumps(sample_new_test))
+    assert c_bare != 0
+    assert_refused(json.loads(o_bare))
+    c_nofiles, o_nofiles, _ = run_pr_files(
+        monkeypatch,
+        json.dumps({"changed_files": 0, "draft": False}) + "\n" + json.dumps({"task_folders": ["web-signup"]}),
+    )
+    assert c_nofiles != 0
+    assert_refused(json.loads(o_nofiles))
+
+
+def test_pr_files_treats_other_spellings_of_added_as_changes_to_existing_files():
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    for spelling in ("Added", "ADDED", "aDdEd"):
+        assert _call_classify_compat(
+            mod,
+            [{"status": spelling, "filename": "bench/tests/test_spelling_case.py"}],
+        ) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": False,
+            "ready_for_review": False,
+        }
+        assert _call_classify_compat(
+            mod,
+            [
+                {"status": spelling, "filename": "bench/tasks/brand-new-task/task.yaml"},
+                {"status": "added", "filename": "bench/tests/test_valid_spelling.py"},
+            ],
+        ) == {
+            "protected_folders": ["bench/tasks/"],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
+
+
 def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
@@ -2616,13 +2900,17 @@ def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlist
     assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
     assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Outside PR: pipes GitHub JSON straight into tools/desk/pr_files.py, tells desk never to work it out from file names itself,
-    # states how existing task folders on main are learned, and names only folders from protected_folders.
-    assert "gh api --paginate repos/BrilliantTiger/dodam/pulls/<number>/files | python3 tools/desk/pr_files.py" in text
+    # Outside PR: passes changed_files, draft, base-commit task_folders, and paginated files JSON into pr_files.py;
+    # states refusal / no-object handling (not ready, not worked out by hand, tells coordinator once kind trouble).
+    assert "pulls/<number>" in text and "changed_files" in text and "draft" in text
+    assert "contents/bench/tasks?ref=$base" in text and "task_folders" in text
+    assert "gh api --paginate repos/BrilliantTiger/dodam/pulls/<number>/files; } | python3 tools/desk/pr_files.py" in text
     assert "never work out protected folders, new tests, or readiness from file names yourself" in low
+    assert "prints no object or prints a refusal" in low
+    assert "does not work it out by hand" in low and "tells the coordinator once (kind `trouble`)" in low
+    assert "3,000" in text and "unicode normalisation (`nfc`)" in low and "without regard to case" in low
     assert "protected_folders" in text and "adds_new_test" in text and "ready_for_review" in text
     assert "previous_filename" in text and "test_<something>.py" in text
-    assert "directory names under `bench/tasks/` in the desk's own checkout" in low
     for path_prefix in ("bench/dodambench/", "bench/images/", "bench/tests/", "bench/tasks/", ".github/"):
         assert path_prefix in text, f"brief.md must name {path_prefix} in the fixed folder list"
     assert "only the folder from the fixed list" in low
