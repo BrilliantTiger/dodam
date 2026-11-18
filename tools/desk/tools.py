@@ -46,6 +46,10 @@ MAX_NUMBER = 10_000_000
 TOKEN_FILE = "github-token"
 COUNTS_FILE = "desk-counts.json"
 SHOWN_FILE = "shown.json"
+# Arrivals that were not kept or did not stay kept, counted one by one for the account that wrote them.
+DROPPED = "arrivals dropped"
+# For how many items of one account the record remembers that an arrival on them was dropped, until the next digest.
+WENT_ITEMS = 10
 # Every limit whose reaching the coordinator is told of, once a day each, and whether one outside account alone can
 # bring it about: by its own item's sessions, by its own arrivals past its places, by its own answers and its own kept
 # reports. The others take several accounts, by the numbers of the closed list.
@@ -106,8 +110,25 @@ def account_of(person) -> int:
 
 
 def charge_of(session: dict) -> float:
-    """What a session counts for: what it was charged, or everything set aside for it while it runs."""
+    """What a session counts for toward the day's units: what it was charged, or everything set aside for it until then."""
     return session["reserved"] if session["charged"] is None else session["charged"]
+
+
+def cut(text: str, limit: int) -> str:
+    """The text within its bound. A number is never cut: one that does not fit whole is left out."""
+    if len(text) <= limit:
+        return text
+    kept = text[:limit]
+    return kept.rstrip("0123456789") if text[limit].isdigit() else kept
+
+
+def named(numbers: list[int], room: int, most: int | None = None) -> str:
+    """As many of these numbers as the room holds, each of them whole, and how many more there are."""
+    for count in range(min(len(numbers), most or len(numbers)), 0, -1):
+        text = ", ".join(str(number) for number in numbers[:count]) + (f" and {len(numbers) - count} more" if len(numbers) > count else "")
+        if len(text) <= room:
+            return text
+    return f"{len(numbers)} that this line has no room to name"
 
 
 def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
@@ -121,14 +142,16 @@ def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
 
 def empty_record() -> dict:
     return {"answers": [], "labels": [], "reports": [], "sent": [], "sessions": [], "uncounted": {}, "last_digest": 0.0, "clock": 0.0,
-            "ended_in_a_row": {}, "closed": {}, "closed_items": {}}  # fmt: skip
+            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}}  # fmt: skip
 
 
 def checked_record(data) -> dict:
     """The record as it was written, or an error when it is not what the tools write."""
     # The desk's time was added later; a record written before it starts at nothing.
-    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed", "closed_items") else data[key] for key, default in empty_record().items()}
+    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed", "closed_items", "went") else data[key] for key, default in empty_record().items()}
     if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict) or not isinstance(record["closed_items"], dict):
+        raise ValueError("items")
+    if not isinstance(record["went"], dict) or not all(isinstance(items, list) for items in record["went"].values()):
         raise ValueError("items")
     if not all(isinstance(at, (int, float)) for at in record["closed_items"].values()):
         raise ValueError("items")
@@ -372,22 +395,27 @@ class Desk:
                 raise Refused("The desk's tools were not started by the desk's start command.")
             self.backend = GitHub(self.repository, env["DESK_GH"], self.state, self.lock["path"], self.lock["read"])
         self.machine = guard.machine_words(env.get("DESK_KNOWN") or None)
+        # The relay marks every session it starts: one for an item, or one for what was typed to the desk.
+        kind = env.get("DESK_SESSION")
         # A session started for one item works on that item only, so no other outsider's text enters it.
-        self.only_item = int(env["DESK_ITEM"]) if env.get("DESK_ITEM") else None
+        self.only_item = int(env["DESK_ITEM"]) if kind == "item" and env.get("DESK_ITEM") else None
         # The accounts whose arrivals this session was started for, by GitHub's numeric id, never by a login.
         # The newest writer first: what the session does is charged to the first of them that has room for it.
         self.accounts = accounts_of(env.get("DESK_ACCOUNTS"))
         # The accounts that get no session now. What they wrote is not shown to this session.
         self.held_back = set(accounts_of(env.get("DESK_HELD_BACK")))
-        # A session for an item is told whose arrivals it handles and who is held back. A list that is missing is not an
-        # empty list: without either, the tools of such a session do nothing.
-        self.not_told = self.only_item is not None and (env.get("DESK_ACCOUNTS") is None or env.get("DESK_HELD_BACK") is None)
+        # A session for an item is told its item, whose arrivals it handles and who is held back. A list that is missing
+        # is not an empty list. A session without the mark, or without all that a session of its kind is told, could be
+        # either kind: its tools do nothing.
+        told = [env.get(key) is not None for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")]
+        self.not_told = not (kind == "item" and self.only_item is not None and all(told) or kind == "typed" and not told[0])
         # The items for which a report was accepted in this session, and those for which one was refused.
         self.passed_on: set[int] = set()
         self.not_passed_on: set[int] = set()
         # The kinds of report this session already passed on: one of each kind is the most one session may.
         self.reported: list[str] = []
         self.said_down_without_record = False
+        self.no_room_for_its_writers = False
         self.shown: set[int] = set()
         self.shows: list[int] = []
 
@@ -408,7 +436,7 @@ class Desk:
 
     def number(self, value) -> int:
         if self.not_told:
-            raise Refused("This session was not told whose arrivals it handles and who is held back. Stop and tell the coordinator.")
+            raise Refused("This session was not told what kind of session it is, or not all of what a session of its kind is told. Stop and tell the coordinator.")
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_NUMBER:
             raise Refused("Give the number of one issue or pull request of the repository, as a whole number.")
         if self.only_item is not None and value != self.only_item:
@@ -512,7 +540,7 @@ class Desk:
         settings = self.lock["coordinator"]["at_once"]
         try:
             with self.counts() as record:
-                line = guard.shown(" ".join(line.split()))[: self.lock["coordinator"]["max_chars"]]
+                line = cut(guard.shown(" ".join(line.split())), self.lock["coordinator"]["max_chars"])
                 entry = {"t": record["clock"], "kind": "desk_down", "number": None, "accounts": [], "line": line, "sent": False, "digested": False}
                 record["reports"].append(entry)
                 if len([sent for sent in record["sent"] if sent["what"] == "desk_down"]) < settings["desk_down_per_day"]:
@@ -524,7 +552,7 @@ class Desk:
                 return False
             self.said_down_without_record = True
             try:
-                self.deliver("Desk: the desk itself is not working", "\n".join([self.lock["coordinator"]["first_line"], "Kind: desk_down", "Written by the desk's relay, not by a session: " + guard.shown(" ".join(line.split()))[:300]]))
+                self.deliver("Desk: the desk itself is not working", "\n".join([self.lock["coordinator"]["first_line"], "Kind: desk_down", "Written by the desk's relay, not by a session: " + cut(guard.shown(" ".join(line.split())), 300)]))
             except Refused:
                 return False
             return True
@@ -547,8 +575,8 @@ class Desk:
         except Refused:
             pass
 
-    def count(self, what: str, account: int | None = None, by: int = 1) -> None:
-        """Count something that was not kept, to be named in the next digest."""
+    def count(self, what: str, account: int | None = None, by: int = 1, item: int | None = None) -> None:
+        """Count something that was not kept, to be named in the next digest: for an account, and with the item it was on."""
         try:
             with self.counts() as record:
                 if account is None:
@@ -556,6 +584,9 @@ class Desk:
                 else:
                     per_account = record["uncounted"].setdefault(what, {})
                     per_account[str(account)] = per_account.get(str(account), 0) + by
+                    items = record["went"].setdefault(str(account), [])
+                    if item is not None and item not in items and len(items) < WENT_ITEMS:
+                        items.append(item)
         except Refused:
             pass
 
@@ -573,6 +604,7 @@ class Desk:
             # Charged to one account: the newest writer the session handles that has room for it.
             under = [a for a in accounts if sum(1 for entry in others if a in entry["accounts"]) < settings["kept_per_account_per_day"]][:1]
             full = len(others) >= settings["kept_per_day"] or bool(accounts and not under)
+            self.no_room_for_its_writers = len(others) < settings["kept_per_day"] and full
         if full:
             record["uncounted"]["reports_not_kept"] = record["uncounted"].get("reports_not_kept", 0) + 1
             self.limit_reached(record, "reports kept in a day")
@@ -607,6 +639,8 @@ class Desk:
                 raise Refused("Nothing was kept: this session already passed on what one session may. Do not say that the project's agents were told.")
             entry = self._keep(record, kind, number, self.accounts, line)
             if entry is None:
+                if kind != "vulnerability" and self.no_room_for_its_writers:
+                    raise Refused("Nothing was kept: no further report is kept today for the writers this session handles. Do not say that the project's agents were told.")
                 raise Refused("Nothing was kept: the desk's list of reports is full for today. Do not say that the project's agents were told.")
             self.reported.append(kind)
             if kind != "vulnerability":
@@ -648,7 +682,7 @@ class Desk:
                 lines = ["Kind: digest", f"Reports since the last digest: {len(waiting)}. Each line is a kind, an item and one line by the desk, which may quote outside text."]
                 for entry in carried:
                     where = f"item {entry['number']}" if entry["number"] is not None else "no item"
-                    lines.append(f"- {entry['kind']}, {where}: {entry['line'][: settings['digest_line_chars']]}")
+                    lines.append(f"- {entry['kind']}, {where}: {cut(entry['line'], settings['digest_line_chars'])}")
                 # After the vulnerabilities: a bound of the day that closed the desk for everyone, and the accounts that used the most of it.
                 for name, accounts in sorted(closed.items()):
                     lines.insert(2 + len(first), f"- a day closed for everyone ({name}); the accounts that used the most of it, by number: "
@@ -657,7 +691,17 @@ class Desk:
                     lines.append(f"- {len(waiting) - len(carried)} more wait for the next digest.")
                 for key, value in sorted(uncounted.items()):
                     if isinstance(value, dict):
-                        lines.append(f"- not handled ({key}): " + ", ".join(f"account {account}: {count}" for account, count in sorted(value.items())))
+                        parts = [f"account {account}: {count}" for account, count in sorted(value.items())]
+                        if key == DROPPED:
+                            # Every account is named with its count, whole. The items its arrivals were on are named
+                            # too, a few for each account, for as long as the line stays within the bound of a digest's line.
+                            room = settings["digest_line_chars"] - len(", ".join(parts))
+                            for n, account in enumerate(sorted(value)):
+                                items = [item for item in record["went"].get(account, []) if isinstance(item, int)]
+                                more = f" (on item {named(items, 40, 3)})" if items else ""
+                                if more and len(more) <= room:
+                                    parts[n], room = parts[n] + more, room - len(more)
+                        lines.append(f"- not handled ({key}): " + ", ".join(parts))
                     else:
                         lines.append(f"- not handled ({key}): {value}")
                 if not self._send(record, "digest", "Desk: digest", lines):
@@ -666,6 +710,7 @@ class Desk:
                     entry["digested"] = True
                 record["uncounted"] = {}
                 record["closed"] = {}
+                record["went"] = {}
                 record["last_digest"] = moment
                 return True
         except Refused:

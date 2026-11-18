@@ -379,11 +379,12 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         raise Problem("The closed list (lock.json) lets one account alone use up a day's notices that a limit was reached.")
     if spending["ended_in_a_row_per_item"] < 2:
         raise Problem("The closed list (lock.json) closes an item after fewer than two sessions in a row that had to be ended.")
-    # What the sessions of a day can write must fit in what is kept, by the numbers alone. Twice the sessions of a
-    # day, because the reports of 24 hours can come from sessions counted in the 24 hours before as well.
+    # What the sessions of a day can write must fit in what is kept, by the numbers alone. The reports of 24 hours
+    # come from one session more than a day has: one that started just before and was still running, because
+    # sessions run one at a time.
     reports = lock["coordinator"]
-    if (2 * spending["sessions_per_day"] > reports["vulnerability_kept_per_day"]
-            or 2 * spending["sessions_per_day"] * (reports["reports_per_session"] + 2) > reports["kept_per_day"]):  # fmt: skip
+    writing = spending["sessions_per_day"] + 1
+    if writing > reports["vulnerability_kept_per_day"] or writing * (reports["reports_per_session"] + 2) > reports["kept_per_day"]:
         raise Problem("The closed list (lock.json) lets the sessions of a day write more reports than it keeps.")
     if max(guard.paths_of(copy), default=0) > guard.BYTES_PER_LISTED_PATH:
         raise Problem(f"A path in the desk's copy is longer than {guard.BYTES_PER_LISTED_PATH} bytes, which the bound on what a search may hand over counts on.")
