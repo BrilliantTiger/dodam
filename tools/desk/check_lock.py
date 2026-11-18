@@ -875,7 +875,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--repeat-later-runs", action="store_true", help="run only the two later runs again and put them into the existing record")
     parser.add_argument("--streams", type=Path, default=None, help="where the stream of every run is kept (default: a folder of the check's own, outside the repository)")
-    parser.add_argument("--claude-token", type=Path, default=None, help="a sign-in of the desk's own, to run the check on it and not on the owner's")
+    parser.add_argument("--claude-token", type=Path, default=None, help="a sign-in of the desk's own, to run the check on it and not on the owner's. The check copies it into its temporary folder "
+                             "and takes the copy away when it ends, however it ends. A kill that cannot be caught (the kill signal, loss of power) "
+                             "leaves the copy in that folder: then remove the folder by hand")
     parser.add_argument("--only", default=None, help="with --repeat-later-runs: the one run to repeat, by its name")
     options = parser.parse_args(argv)
     options.streams = options.streams or streams_folder()
