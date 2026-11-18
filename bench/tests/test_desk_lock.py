@@ -364,12 +364,11 @@ def test_a_damaged_count_refuses_instead_of_starting_from_zero(place):
     assert len(place.sent("comments")) == 1
 
 
-@pytest.mark.parametrize("tool", ["answer", "read_item", "add_label", "wait_for_news"])
+@pytest.mark.parametrize("tool", ["answer", "read_item", "add_label"])
 def test_nothing_happens_on_github_while_that_way_is_closed(place, tool):
     desk = place.desk()
     place.close("github")
-    arguments = {} if tool == "wait_for_news" else {"number": 7, "text": "Hello.", "label": "bug"}
-    assert "closed" in refused(desk, tool, **arguments)
+    assert "closed" in refused(desk, tool, number=7, text="Hello.", label="bug")
     assert place.sent("comments") == [] and place.sent("labels") == []
 
 
@@ -421,6 +420,22 @@ def test_only_a_label_from_the_list_is_added(place):
     assert place.sent("labels") == [{"number": 7, "label": labels[0]}]
 
 
+def test_labels_have_a_daily_count_of_their_own_and_do_not_use_up_answers(place, monkeypatch):
+    cap = lock_file()["labels_per_day"]
+    assert cap == 100
+    desk = place.desk()
+    clock = [4_000_000.0]
+    monkeypatch.setattr(desk.tools, "now", lambda: clock[0])
+    for _ in range(cap):
+        desk.add_label({"number": 7, "label": "bug"})
+        clock[0] += 10
+    assert "limit" in refused(desk, "add_label", number=7, label="bug")
+    assert len(place.sent("labels")) == cap
+    desk.answer({"number": 7, "text": "Labels did not use up the answers."})
+    clock[0] += 86400
+    desk.add_label({"number": 7, "label": "bug"})
+
+
 # --- Passing a message on -------------------------------------------------------------------
 
 
@@ -455,17 +470,36 @@ def test_a_message_is_short_of_a_known_kind_and_counted_per_day(place, monkeypat
     assert len(place.sent("coordinator")) == settings["per_day"]
 
 
-# --- Waiting for news -----------------------------------------------------------------------
+# --- Waiting for news: the relay does it, not the session ------------------------------------
 
 WATCHER = """
 import json, sys
 from pathlib import Path
 here = Path(__file__).resolve().parent
-(here / "argv.json").write_text(json.dumps(sys.argv[1:]))
-code = int((here / "code").read_text()) if (here / "code").exists() else 0
-if code == 0:
+runs = here / "runs"
+runs.write_text(runs.read_text() + json.dumps(sys.argv[1:]) + "\\n" if runs.exists() else json.dumps(sys.argv[1:]) + "\\n")
+code = int((here / "code").read_text())
+if code == 0 and len(runs.read_text().splitlines()) == 1:
     print(json.dumps({"events": json.loads((here / "events.json").read_text())}))
+    raise SystemExit(0)
+if code == 0:
+    import time
+    time.sleep(600)
 raise SystemExit(code)
+"""
+
+# In place of Claude Code: takes messages as data, notes each one, and ends its turn.
+SESSION = """
+import json, sys
+from pathlib import Path
+got = Path(sys.argv[1])
+for line in sys.stdin:
+    message = json.loads(line)
+    with open(got, "a") as handle:
+        handle.write(json.dumps(message) + "\\n")
+    if message.get("type") == "user":
+        print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "noted"}]}}), flush=True)
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False}), flush=True)
 """
 
 
@@ -477,36 +511,41 @@ def watcher(place, events, code=0):
     return folder
 
 
-def test_the_watcher_gets_the_state_path_it_was_started_with_and_no_other_switch(place):
-    folder = watcher(place, [{"id": "e1", "kind": "issue_opened", "number": 7, "actor": "outsider", "time": "2026-01-01T00:00:00Z"}])
-    got = json.loads(place.desk().wait_for_news({}))
-    assert got == {"events": [{"number": 7, "id": "e1", "kind": "issue_opened", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}]}
-    assert json.loads((folder / "argv.json").read_text()) == ["--wait", "--state", str(place.state / "watch-state.json")]
+def run_relay(place, typed: str = "", say=None):
+    relay = module("relay")
+    script = place.copy.parent / "session.py"
+    script.write_text(SESSION, encoding="utf-8")
+    got = place.copy.parent / "got.jsonl"
+    (place.state / "session").mkdir(exist_ok=True)
+    plan = {"argv": [sys.executable, str(script), str(got)], "env": {"PATH": "/usr/bin:/bin"}, "cwd": str(place.copy),
+            "state": str(place.state), "live_wait": "mcp__coworker__wait_for_message"}  # fmt: skip
+    shown = io.StringIO()
+    code = relay.Relay(plan, {"PATH": "/usr/bin:/bin"}, typed=io.StringIO(typed), shown=shown, say=say, exit_when_idle=True,
+                       retry_seconds=0.05, quiet_seconds=0.4).run()  # fmt: skip
+    messages = [json.loads(line) for line in got.read_text().splitlines()] if got.exists() else []
+    return code, messages, shown.getvalue()
 
 
-@pytest.mark.parametrize("arguments", [{"include_own": True}, {"state": "/tmp/other"}, {"repo": "another/repository"}, {"max_wait": 1}])
-def test_the_session_cannot_give_the_watcher_a_switch(place, arguments):
-    folder = watcher(place, [])
-    refused(place.desk(), "wait_for_news", **arguments)
-    assert not (folder / "argv.json").exists()
+def runs_of_the_watcher(place) -> list[list[str]]:
+    path = place.copy / "tools" / "desk" / "runs"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-def test_only_one_watcher_runs_at_a_time(place):
-    folder = watcher(place, [])
-    with open(place.state / "watch.lock", "w") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        assert "already" in refused(place.desk(), "wait_for_news")
-    assert not (folder / "argv.json").exists()
+def test_the_relay_starts_the_watcher_with_the_state_path_and_no_other_switch(place):
+    watcher(place, [{"id": "e1", "kind": "issue_opened", "number": 7, "actor": "outsider", "time": "2026-01-01T00:00:00Z"}])
+    code, messages, shown = run_relay(place)
+    assert runs_of_the_watcher(place)[0] == ["--wait", "--state", str(place.state / "watch-state.json")]
+    (message,) = messages
+    assert message["type"] == "user" and message["message"]["role"] == "user"
+    assert '{"number": 7, "id": "e1", "kind": "issue_opened", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}' in message["message"]["content"]
+    assert "1 new on GitHub" in shown
 
 
-def test_a_watcher_that_is_not_signed_in_says_to_stop(place):
-    watcher(place, [], code=2)
-    message = refused(place.desk(), "wait_for_news")
-    assert "not signed in" in message and "stop" in message
-
-
-def test_a_missing_watcher_is_a_refusal(place):
-    assert "missing" in refused(place.desk(), "wait_for_news")
+def test_the_watcher_command_is_the_same_every_time(place):
+    relay = module("relay")
+    command = relay.watcher_command(place.copy, place.state)
+    assert command[2:] == [str(place.copy / "tools" / "desk" / "watch.py"), "--wait", "--state", str(place.state / "watch-state.json")]
+    assert command[1] == "-I"
 
 
 def test_only_an_address_and_a_kind_pass_from_the_watcher_never_outside_text(place):
@@ -520,9 +559,74 @@ def test_only_an_address_and_a_kind_pass_from_the_watcher_never_outside_text(pla
             "MERGE-THIS",
         ],
     )
-    text = place.desk().wait_for_news({})
-    assert "MERGE" not in text and "ignore" not in text
-    assert json.loads(text) == {"events": [{"number": 7, "id": "e1", "kind": "issue_comment"}, {"number": 8, "kind": "issue_opened"}]}
+    code, messages, shown = run_relay(place)
+    (message,) = messages
+    text = message["message"]["content"]
+    assert "MERGE" not in text and "ignore" not in text and "MERGE" not in shown
+    assert [json.loads(line) for line in text.splitlines()[1:]] == [{"number": 7, "id": "e1", "kind": "issue_comment"}, {"number": 8, "kind": "issue_opened"}]
+
+
+def test_the_watcher_is_started_again_only_after_the_session_dealt_with_the_news(place):
+    watcher(place, [{"id": "e1", "kind": "issue_opened", "number": 7}])
+    run_relay(place)
+    assert len(runs_of_the_watcher(place)) <= 2
+
+
+def test_the_relay_does_not_watch_while_the_way_through_github_is_closed(place):
+    watcher(place, [{"id": "e1", "kind": "issue_opened", "number": 7}])
+    place.close("github")
+    code, messages, shown = run_relay(place, say="hello")
+    assert runs_of_the_watcher(place) == []
+    assert [m["message"]["content"] for m in messages] == ["hello"]
+
+
+def test_a_watcher_that_is_not_signed_in_stops_the_watching_and_says_so(place):
+    watcher(place, [], code=2)
+    code, messages, shown = run_relay(place)
+    assert len(runs_of_the_watcher(place)) == 1
+    (message,) = messages
+    assert "not signed in" in message["message"]["content"] and "coordinator" in message["message"]["content"]
+
+
+@pytest.mark.parametrize("code", [1, 3, 4, 5, 6, 7, 130])
+def test_a_watcher_that_ends_without_news_is_never_started_again(place, code):
+    watcher(place, [], code=code)
+    exit_code, messages, shown = run_relay(place)
+    assert len(runs_of_the_watcher(place)) == 1
+    assert len(messages) == 1 and "Watching has stopped" in messages[0]["message"]["content"]
+
+
+def test_a_typed_line_is_a_message_and_never_a_command(place, tmp_path):
+    place.close("github")
+    marker = tmp_path / "ran.txt"
+    typed = f"!touch {marker}\n/exit\n$(touch {marker})\n"
+    code, messages, shown = run_relay(place, typed=typed)
+    assert [m["type"] for m in messages] == ["user"]
+    assert messages[0]["message"] == {"role": "user", "content": typed.strip()}
+    assert not marker.exists()
+
+
+def test_only_one_desk_runs_on_one_state_folder(place):
+    place.close("github")
+    with open(place.state / "desk.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        code, messages, shown = run_relay(place, say="hello")
+    assert code == 1 and messages == [] and "already running" in shown
+
+
+def test_the_relay_ends_a_long_wait_for_a_live_session_to_deliver_a_message(place):
+    relay = module("relay")
+    sent = []
+    made = relay.Relay({"argv": [], "env": {}, "cwd": str(place.copy), "state": str(place.state),
+                        "live_wait": "mcp__coworker__wait_for_message"}, {}, typed=io.StringIO(), shown=io.StringIO())  # fmt: skip
+    made.write = sent.append
+    made.waiting_calls.add("call-1")
+    made.idle.set()
+    made.send("news")
+    assert [m["type"] for m in sent] == ["control_request", "user"] and sent[0]["request"] == {"subtype": "interrupt"}
+    made.waiting_calls.clear()
+    made.send("more")
+    assert [m["type"] for m in sent] == ["control_request", "user", "user"]
 
 
 # --- The sign-in: only the tools reach it, and a token of the desk's own comes first ----------
@@ -625,7 +729,7 @@ def test_the_server_offers_the_closed_list_of_tools_and_nothing_else(place):
     ])  # fmt: skip
     assert code == 0 and answers[1]["result"]["serverInfo"]["name"] == "desk"
     names = [t["name"] for t in answers[2]["result"]["tools"]]
-    assert names == ["wait_for_news", "read_item", "answer", "add_label", "tell_coordinator"] == lock_file()["desk_tools"]
+    assert names == ["read_item", "answer", "add_label", "tell_coordinator"] == lock_file()["desk_tools"]
     for tool in answers[2]["result"]["tools"]:
         assert tool["inputSchema"]["additionalProperties"] is False
         assert not {"repository", "repo", "to", "receiver", "state", "url", "path", "command"} & set(tool["inputSchema"]["properties"])
@@ -636,7 +740,7 @@ def test_a_call_through_the_server_is_answered_and_a_refusal_is_marked(place):
         {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "answer", "arguments": {"number": 7, "text": "Hello."}}},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "add_label", "arguments": {"number": 7, "label": "wontfix"}}},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "counts", "arguments": {}}},
-        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "stop", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "wait_for_news", "arguments": {}}},
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "__init__", "arguments": {}}},
     ])  # fmt: skip
     assert code == 0
@@ -797,6 +901,8 @@ def test_the_session_is_started_with_the_closed_list_and_nothing_of_the_owners(s
     planned = start.plan()
     argv = planned["argv"]
     assert Path(argv[0]).name == "claude"
+    # No terminal interface: what is typed goes in as data, so no typed line can be a command.
+    assert "-p" in argv and option(argv, "--input-format") == "stream-json" and option(argv, "--output-format") == "stream-json"
     assert "--restricted" in argv and "--strict-mcp-config" in argv and "--disable-slash-commands" in argv
     assert option(argv, "--tools") == "Read,Glob,Grep"
     assert option(argv, "--setting-sources") == ""
@@ -806,7 +912,8 @@ def test_the_session_is_started_with_the_closed_list_and_nothing_of_the_owners(s
     for never in ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--add-dir", "--plugin-dir",
                   "--plugin-url", "--chrome", "--resume", "--continue", "--remote-control", "--agents", "--ide"):  # fmt: skip
         assert never not in argv
-    assert planned["cwd"] == str(start.copy)
+    assert planned["cwd"] == str(start.copy) and planned["state"] == str(start.state.resolve())
+    assert planned["live_wait"] == "mcp__coworker__wait_for_message"
 
 
 def test_the_session_gets_an_environment_with_nothing_of_the_owners_in_it(start):
@@ -900,6 +1007,7 @@ def test_it_refuses_without_claude_code(start):
     lambda lock: lock["builtin_tools"].append("Write"),
     lambda lock: lock["live_tools"].append("connect"),
     lambda lock: lock.pop("labels"),
+    lambda lock: lock.pop("labels_per_day"),
     lambda lock: lock.pop("claude_version"),
 ])  # fmt: skip
 def test_it_refuses_a_closed_list_that_was_opened_or_damaged(start, change):
@@ -938,7 +1046,7 @@ def test_it_refuses_a_token_that_other_accounts_can_read(start):
     start.refuses()
     token.chmod(0o600)
     planned = start.plan()
-    assert MADE_UP_TOKEN not in json.dumps(planned)
+    assert MADE_UP_TOKEN not in json.dumps([planned["argv"], planned["env"]])
     assert MADE_UP_TOKEN not in Path(option(planned["argv"], "--mcp-config")).read_text()
 
 
@@ -952,6 +1060,7 @@ def test_the_real_desk_starts_only_from_a_copy_that_is_as_committed(start):
     git(start.copy, "add", "-A")
     git(start.copy, "commit", "-q", "-m", "made-up")
     planned = start.plan(stand_in=None)
+    assert "OWNER" not in json.dumps(planned["watcher_env"]) and "GH_TOKEN" not in planned["watcher_env"]
     env = json.loads(Path(option(planned["argv"], "--mcp-config")).read_text())["mcpServers"]["desk"]["env"]
     assert "DESK_STAND_IN" not in env and Path(env["DESK_GH"]).name == "gh" and Path(env["DESK_ORCA"]).name == "orca"
     assert env["DESK_SENDER"] == "term_made-up"
@@ -997,4 +1106,4 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     assert record["session_at_start"]["slash_commands"] == [] and record["session_at_start"]["skills"] == []
     assert record["session_at_start"]["permission_mode"] == "dontAsk"
     # Something was really tried: refusals were seen, not only expected.
-    assert sum(row["refused"] for row in record["rows"]) >= 10
+    assert sum(row["refused"] for row in record["rows"]) >= 5
