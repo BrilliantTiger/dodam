@@ -68,7 +68,7 @@ PER_PAGE = 100
 
 STATE_FOLDER_NAME = ".dodam-desk"
 STATE_FILE_NAME = "watch-state.json"
-STATE_VERSION = 6
+STATE_VERSION = 7
 LEGACY_STATE_KEYS = frozenset({"baseline_cutoff", "pull_max_review_id", "pull_latest_review_ids"})
 
 # Explicit upper bounds on state. Evictable caches/windows drop only entries that monotonic
@@ -139,8 +139,11 @@ Options:
   -h, --help           Show this help text and exit 0.
 
 Notes:
-  - For pull_request_commits ("new commits"), actor (and the outside/own/bot check)
-    is the pull request's author, not the account that pushed the commits.
+  - Every event carries the numeric GitHub user id of the account that caused it
+    as a whole number under actor_id next to actor, or 0 when GitHub gives no
+    such id (for example, a deleted account). For pull_request_commits ("new
+    commits"), actor and actor_id (and the outside/own/bot check) come from the
+    pull request's author, not the account that pushed the commits.
   - One idle round makes one conditional GET per watched list (five repository lists
     plus one review tail page per open pull request — seven requests with two open
     pull requests, taking about 19 seconds including the 15-second pause) and uses
@@ -495,7 +498,7 @@ def _load_state(path: Path) -> dict[str, object]:
     base["seen_ids"] = dedup_seen[-MAX_SEEN_IDS:]
 
     pending = raw.get("pending", [])
-    allowed_ev_keys = {"id", "kind", "number", "actor", "time", "url"}
+    allowed_ev_keys = {"id", "kind", "number", "actor", "actor_id", "time", "url"}
     if not isinstance(pending, list) or len(pending) > MAX_PENDING_EVENTS:
         raise StateReadError("State file has invalid or oversized pending events.")
     for ev in pending:
@@ -506,6 +509,9 @@ def _load_state(path: Path) -> dict[str, object]:
             or not isinstance(ev.get("kind"), str)
             or isinstance(ev.get("number"), bool)
             or not isinstance(ev.get("number"), int)
+            or isinstance(ev.get("actor_id"), bool)
+            or not isinstance(ev.get("actor_id"), int)
+            or ev["actor_id"] < 0
             or not isinstance(ev.get("time"), str)
             or not isinstance(ev.get("url"), str)
             or ("actor" in ev and not isinstance(ev["actor"], str))
@@ -835,14 +841,16 @@ def _gh_get(endpoint: str, etag: str | None = None) -> tuple[int, dict[str, str]
     return (200, headers, parsed, poll_hint)
 
 
-def _fetch_signed_in_login() -> str:
+def _fetch_signed_in_account() -> tuple[str, int | None]:
     status, _, data, _ = _gh_get("user")
     if status != 200 or not isinstance(data, dict):
         raise TransientGitHubError("unexpected")
     login = data.get("login")
     if not isinstance(login, str) or not GITHUB_LOGIN_RE.fullmatch(login):
         raise TransientGitHubError("unexpected")
-    return login
+    raw_id = data.get("id")
+    own_id = raw_id if (isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id > 0) else None
+    return (login, own_id)
 
 
 def _item_dict(value: object) -> dict[str, object]:
@@ -920,25 +928,33 @@ def _record_seen_review(
     return (curr_latest_time, curr_recent_map, curr_floor, narrowed)
 
 
-def _classify_actor(user_obj: object, own_login: str, include_own: bool) -> tuple[bool, str | None]:
-    """Return (should_include, validated_login_or_none)."""
+def _classify_actor(
+    user_obj: object,
+    own_login: str,
+    include_own: bool,
+    own_id: int | None = None,
+) -> tuple[bool, str | None, int]:
+    """Return (should_include, validated_login_or_none, actor_id_or_zero)."""
     if user_obj is None:
-        return (True, None)
+        return (True, None, 0)
     if not isinstance(user_obj, dict):
         raise MalformedItemError()
     user_type = user_obj.get("type")
     if isinstance(user_type, str) and user_type.lower() == "bot":
-        return (False, None)
+        return (False, None, 0)
+    raw_uid = user_obj.get("id")
+    actor_id = raw_uid if (isinstance(raw_uid, int) and not isinstance(raw_uid, bool) and raw_uid > 0) else 0
     raw_login = user_obj.get("login")
-    if isinstance(raw_login, str):
-        if raw_login.lower().endswith("[bot]"):
-            return (False, None)
-        if not include_own and raw_login.lower() == own_login.lower():
-            return (False, None)
-        if GITHUB_LOGIN_RE.fullmatch(raw_login):
-            return (True, raw_login)
-        return (True, None)
-    return (True, None)
+    if isinstance(raw_login, str) and raw_login.lower().endswith("[bot]"):
+        return (False, None, 0)
+    if not include_own:
+        if own_id is not None and actor_id > 0 and actor_id == own_id:
+            return (False, None, actor_id)
+        if isinstance(raw_login, str) and raw_login.lower() == own_login.lower():
+            return (False, None, actor_id)
+    if isinstance(raw_login, str) and GITHUB_LOGIN_RE.fullmatch(raw_login):
+        return (True, raw_login, actor_id)
+    return (True, None, actor_id)
 
 
 def _build_event(
@@ -946,6 +962,7 @@ def _build_event(
     kind: str,
     number: int,
     actor_login: str | None,
+    actor_id: int,
     timestamp: str,
     url: str,
 ) -> dict[str, object]:
@@ -956,6 +973,7 @@ def _build_event(
     }
     if actor_login is not None:
         event["actor"] = actor_login
+    event["actor_id"] = actor_id
     event["time"] = timestamp
     event["url"] = url
     return event
@@ -1367,6 +1385,7 @@ def _poll_once(
     repo: str,
     own_login: str,
     include_own: bool,
+    own_id: int | None = None,
 ) -> tuple[dict[str, object], float, int, list[int]]:
     """Poll GitHub on a copy of state, stopping immediately without advancing past unqueued events if full."""
     working = copy.deepcopy(state)
@@ -1433,7 +1452,7 @@ def _poll_once(
         new_max_pull_upd = prev_max_pull_upd
 
         if changed:
-            parsed_pulls: list[tuple[str, int, dict[str, object], str, str, str, bool, bool, str | None]] = []
+            parsed_pulls: list[tuple[str, int, dict[str, object], str, str, str, bool, bool, str | None, int]] = []
             for raw_pr in pull_items:
                 try:
                     pr = _item_dict(raw_pr)
@@ -1447,18 +1466,20 @@ def _poll_once(
                         raise MalformedItemError()
                     head_sha = raw_sha.lower()
                     is_draft = bool(pr.get("draft", False))
-                    keep, actor = _classify_actor(pr.get("user"), own_login, include_own)
+                    keep, actor, actor_id = _classify_actor(pr.get("user"), own_login, include_own, own_id)
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_pulls.append((updated_at, pr_id, pr, created_at, head_sha, str(number), is_draft, keep, actor))
+                parsed_pulls.append(
+                    (updated_at, pr_id, pr, created_at, head_sha, str(number), is_draft, keep, actor, actor_id)
+                )
 
             # Oldest (updated_at, pr_id) first.
             parsed_pulls.sort(key=lambda t: (t[0], t[1]))
             current_open_seen: list[int] = []
             closed_this_poll: set[int] = set()
 
-            for updated_at, pr_id, pr, created_at, head_sha, num_key, is_draft, keep, actor in parsed_pulls:
+            for updated_at, pr_id, pr, created_at, head_sha, num_key, is_draft, keep, actor, actor_id in parsed_pulls:
                 number = int(num_key)
                 prev_sha = pull_heads.get(num_key)
                 prev_draft = pull_draft.get(num_key)
@@ -1479,6 +1500,7 @@ def _poll_once(
                                 "pull_request_opened",
                                 number,
                                 actor,
+                                actor_id,
                                 created_at,
                                 f"https://github.com/{repo}/pull/{number}",
                             )
@@ -1504,6 +1526,7 @@ def _poll_once(
                                     "pull_request_commits",
                                     number,
                                     actor,
+                                    actor_id,
                                     updated_at,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
@@ -1527,6 +1550,7 @@ def _poll_once(
                                     "pull_request_ready",
                                     number,
                                     actor,
+                                    actor_id,
                                     updated_at,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
@@ -1596,7 +1620,7 @@ def _poll_once(
         server_poll = max(server_poll, poll_hint)
         skipped += i_skip
         if i_changed:
-            parsed_issues: list[tuple[int, int, str, bool, bool, str | None]] = []
+            parsed_issues: list[tuple[int, int, str, bool, bool, str | None, int]] = []
             for raw_item in issue_items:
                 try:
                     item = _item_dict(raw_item)
@@ -1604,15 +1628,19 @@ def _poll_once(
                     number = _pos_int(item.get("number"))
                     created_at = _iso_utc(item.get("created_at"))
                     is_pr_item = "pull_request" in item and item["pull_request"] is not None
-                    keep, actor = (False, None) if is_pr_item else _classify_actor(item.get("user"), own_login, include_own)
+                    keep, actor, actor_id = (
+                        (False, None, 0)
+                        if is_pr_item
+                        else _classify_actor(item.get("user"), own_login, include_own, own_id)
+                    )
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_issues.append((item_id, number, created_at, is_pr_item, keep, actor))
+                parsed_issues.append((item_id, number, created_at, is_pr_item, keep, actor, actor_id))
 
             parsed_issues.sort(key=lambda t: t[0])
             new_max_issue_id = prev_max_issue_id
-            for item_id, number, created_at, is_pr_item, keep, actor in parsed_issues:
+            for item_id, number, created_at, is_pr_item, keep, actor, actor_id in parsed_issues:
                 if is_pr_item:
                     ensure_pr_tracked(number)
                     if item_id > new_max_issue_id:
@@ -1630,6 +1658,7 @@ def _poll_once(
                             "issue_opened",
                             number,
                             actor,
+                            actor_id,
                             created_at,
                             f"https://github.com/{repo}/issues/{number}",
                         )
@@ -1661,7 +1690,7 @@ def _poll_once(
         server_poll = max(server_poll, poll_hint)
         skipped += ie_skip
         if ie_changed:
-            parsed_ie: list[tuple[int, str, str | None, int | None, bool, bool, str | None]] = []
+            parsed_ie: list[tuple[int, str, str | None, int | None, bool, bool, str | None, int]] = []
             for raw_item in ie_items:
                 try:
                     item = _item_dict(raw_item)
@@ -1670,21 +1699,21 @@ def _poll_once(
                     ev_name_obj = item.get("event")
                     ev_name = ev_name_obj if isinstance(ev_name_obj, str) else None
                     if ev_name not in ("reopened", "ready_for_review"):
-                        parsed_ie.append((ev_num_id, created_at, None, None, False, False, None))
+                        parsed_ie.append((ev_num_id, created_at, None, None, False, False, None, 0))
                         continue
                     issue_obj = _item_dict(item.get("issue"))
                     number = _pos_int(issue_obj.get("number"))
                     is_pr = ("pull_request" in issue_obj and issue_obj["pull_request"] is not None) or (number in known_prs)
                     actor_obj = item.get("actor") if "actor" in item else item.get("user")
-                    keep, actor = _classify_actor(actor_obj, own_login, include_own)
+                    keep, actor, actor_id = _classify_actor(actor_obj, own_login, include_own, own_id)
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_ie.append((ev_num_id, created_at, ev_name, number, is_pr, keep, actor))
+                parsed_ie.append((ev_num_id, created_at, ev_name, number, is_pr, keep, actor, actor_id))
 
             parsed_ie.sort(key=lambda t: t[0])
             new_max_ev_id = prev_max_ev_id
-            for ev_num_id, created_at, ev_name, number, is_pr, keep, actor in parsed_ie:
+            for ev_num_id, created_at, ev_name, number, is_pr, keep, actor, actor_id in parsed_ie:
                 if ev_name is None or number is None:
                     if ev_num_id > new_max_ev_id:
                         new_max_ev_id = ev_num_id
@@ -1706,6 +1735,7 @@ def _poll_once(
                                     "pull_request_ready",
                                     number,
                                     actor,
+                                    actor_id,
                                     created_at,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
@@ -1727,7 +1757,7 @@ def _poll_once(
                             queue_filled = True
                             break
                         pending_ids.add(ev_id)
-                        discovered.append(_build_event(ev_id, kind, number, actor, created_at, url))
+                        discovered.append(_build_event(ev_id, kind, number, actor, actor_id, created_at, url))
 
                 if ev_num_id > new_max_ev_id:
                     new_max_ev_id = ev_num_id
@@ -1756,7 +1786,7 @@ def _poll_once(
         server_poll = max(server_poll, poll_hint)
         skipped += ic_skip
         if ic_changed:
-            parsed_ic: list[tuple[int, int, str, bool, bool, str | None]] = []
+            parsed_ic: list[tuple[int, int, str, bool, bool, str | None, int]] = []
             for raw_item in ic_items:
                 try:
                     item = _item_dict(raw_item)
@@ -1764,17 +1794,17 @@ def _poll_once(
                     created_at = _iso_utc(item.get("created_at"))
                     html_url = item.get("html_url")
                     number = _extract_number_from_urls(item.get("issue_url"), ISSUE_URL_NUM_RE, html_url)
-                    keep, actor = _classify_actor(item.get("user"), own_login, include_own)
+                    keep, actor, actor_id = _classify_actor(item.get("user"), own_login, include_own, own_id)
                 except MalformedItemError:
                     skipped += 1
                     continue
                 html_indicates_pr = isinstance(html_url, str) and bool(re.search(r"/pull/\d+(?:$|[#/?])", html_url))
                 is_pr = (number in known_prs) or html_indicates_pr or ("pull_request_url" in item)
-                parsed_ic.append((cid, number, created_at, is_pr, keep, actor))
+                parsed_ic.append((cid, number, created_at, is_pr, keep, actor, actor_id))
 
             parsed_ic.sort(key=lambda t: t[0])
             new_max_ic_id = prev_max_ic_id
-            for cid, number, created_at, is_pr, keep, actor in parsed_ic:
+            for cid, number, created_at, is_pr, keep, actor, actor_id in parsed_ic:
                 if is_pr:
                     ensure_pr_tracked(number)
                     kind = "pull_request_comment"
@@ -1788,7 +1818,7 @@ def _poll_once(
                         queue_filled = True
                         break
                     pending_ids.add(ev_id)
-                    discovered.append(_build_event(ev_id, kind, number, actor, created_at, url))
+                    discovered.append(_build_event(ev_id, kind, number, actor, actor_id, created_at, url))
                 if cid > new_max_ic_id:
                     new_max_ic_id = cid
 
@@ -1816,22 +1846,22 @@ def _poll_once(
         server_poll = max(server_poll, poll_hint)
         skipped += rc_skip
         if rc_changed:
-            parsed_rc: list[tuple[int, int, str, bool, str | None]] = []
+            parsed_rc: list[tuple[int, int, str, bool, str | None, int]] = []
             for raw_item in rc_items:
                 try:
                     item = _item_dict(raw_item)
                     cid = _pos_int(item.get("id"))
                     created_at = _iso_utc(item.get("created_at"))
                     number = _extract_number_from_urls(item.get("pull_request_url"), PULL_URL_NUM_RE, item.get("html_url"))
-                    keep, actor = _classify_actor(item.get("user"), own_login, include_own)
+                    keep, actor, actor_id = _classify_actor(item.get("user"), own_login, include_own, own_id)
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_rc.append((cid, number, created_at, keep, actor))
+                parsed_rc.append((cid, number, created_at, keep, actor, actor_id))
 
             parsed_rc.sort(key=lambda t: t[0])
             new_max_rc_id = prev_max_rc_id
-            for cid, number, created_at, keep, actor in parsed_rc:
+            for cid, number, created_at, keep, actor, actor_id in parsed_rc:
                 ensure_pr_tracked(number)
                 ev_id = f"pull_request_review_comment:{cid}"
                 url = f"https://github.com/{repo}/pull/{number}#discussion_r{cid}"
@@ -1840,7 +1870,9 @@ def _poll_once(
                         queue_filled = True
                         break
                     pending_ids.add(ev_id)
-                    discovered.append(_build_event(ev_id, "pull_request_review_comment", number, actor, created_at, url))
+                    discovered.append(
+                        _build_event(ev_id, "pull_request_review_comment", number, actor, actor_id, created_at, url)
+                    )
                 if cid > new_max_rc_id:
                     new_max_rc_id = cid
 
@@ -1886,7 +1918,7 @@ def _poll_once(
         curr_floor = _load_floor(pull_rev_floor, num_key)
 
         if r_changed:
-            parsed_revs: list[tuple[str, int, bool, str | None]] = []
+            parsed_revs: list[tuple[str, int, bool, str | None, int]] = []
             for raw_rev in r_items:
                 try:
                     rev = _item_dict(raw_rev)
@@ -1895,15 +1927,15 @@ def _poll_once(
                         continue
                     rid = _pos_int(rev.get("id"))
                     submitted_at = _iso_utc(rev.get("submitted_at") or rev.get("created_at"))
-                    keep, actor = _classify_actor(rev.get("user"), own_login, include_own)
+                    keep, actor, actor_id = _classify_actor(rev.get("user"), own_login, include_own, own_id)
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_revs.append((submitted_at, rid, keep, actor))
+                parsed_revs.append((submitted_at, rid, keep, actor, actor_id))
 
             parsed_revs.sort(key=lambda t: (t[0], t[1]))
             pr_narrowed = False
-            for submitted_at, rid, keep, actor in parsed_revs:
+            for submitted_at, rid, keep, actor, actor_id in parsed_revs:
                 if curr_latest_time:
                     cutoff_sec = _iso_to_epoch_seconds(curr_latest_time) - REVIEW_LAG_WINDOW_SECONDS
                     if _iso_to_epoch_seconds(submitted_at) < cutoff_sec:
@@ -1931,6 +1963,7 @@ def _poll_once(
                             "pull_request_review",
                             number,
                             actor,
+                            actor_id,
                             submitted_at,
                             f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}",
                         )
@@ -2049,6 +2082,7 @@ def main(argv: list[str] | None = None) -> int:
         started = clock()
         deadline = (started + ns.max_wait) if ns.max_wait is not None else None
         own_login: str | None = None
+        own_id: int | None = None
         consecutive_failures = 0
         last_failure_pause = 0.0
 
@@ -2076,7 +2110,7 @@ def main(argv: list[str] | None = None) -> int:
         # 1. Ask gh once at the start which account it is signed in as.
         while own_login is None:
             try:
-                own_login = _fetch_signed_in_login()
+                own_login, own_id = _fetch_signed_in_account()
                 consecutive_failures = 0
                 last_failure_pause = 0.0
             except TransientGitHubError as err:
@@ -2112,7 +2146,7 @@ def main(argv: list[str] | None = None) -> int:
             prev_pending_count = len(state["pending"])  # type: ignore[arg-type]
             try:
                 state, server_poll, skipped, narrowed_poll = _poll_once(
-                    state, ns.repo, own_login, ns.include_own
+                    state, ns.repo, own_login, ns.include_own, own_id
                 )
                 _report_skipped_items(skipped)
                 _report_narrowed_review_windows(narrowed_poll)
@@ -2141,7 +2175,7 @@ def main(argv: list[str] | None = None) -> int:
                     while True:
                         try:
                             state, _, skipped_after, narrowed_after = _poll_once(
-                                state, ns.repo, own_login, ns.include_own
+                                state, ns.repo, own_login, ns.include_own, own_id
                             )
                             _report_skipped_items(skipped_after)
                             _report_narrowed_review_windows(narrowed_after)
