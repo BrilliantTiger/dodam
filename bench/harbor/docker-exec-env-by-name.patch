@@ -1,0 +1,83 @@
+Dodam's one change to Harbor 0.25.0: harbor/environments/docker/docker.py
+
+Harbor starts every command in a task container with `docker compose exec -e NAME=VALUE ...`.
+The values of the agent's environment, the subscription token among them, then sit in the
+command line of host processes, which any process of the same user can read.
+
+With this change Harbor passes three names, and only these, by name (`-e NAME`):
+CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN, the names the pilot and
+Harbor's Claude Code agent pass credentials under. Their values reach the docker CLI through
+that process's environment, from which docker compose reads them. Every other variable is
+passed exactly as the released Harbor passes it, on the command line, and nothing else of the
+agent's environment enters the host docker CLI's own environment. So a secret under any other
+name (a proxy address with a password in it, OTEL_EXPORTER_OTLP_HEADERS, another agent's API
+key) is still on the command line: this change covers the listed names only, and the pilot
+refuses to pass its token under any other. Other container runtimes, such as Podman, are left
+as they were.
+
+Apply it from bench/ with `python -m dodambench.harbor_patch apply`. The pilot refuses to hand
+the token to a Harbor that is not 0.25.0 with exactly this change.
+
+License: every line below that does not start with "+" is Harbor's own source code, from the
+file src/harbor/environments/docker/docker.py of Harbor 0.25.0 (the PyPI package harbor 0.25.0,
+from the harbor-framework/harbor project). Those lines are under the Apache License, Version
+2.0, only, not under the MIT license this repository otherwise offers as an alternative. The
+full text of the Apache License is in LICENSE-APACHE at the root of this repository. The lines
+starting with "+" are this repository's change to that file.
+
+--- a/harbor/environments/docker/docker.py
++++ b/harbor/environments/docker/docker.py
+@@ -709,6 +709,7 @@
+         timeout_sec: int | None = None,
+         stdin_data: bytes | None = None,
+         on_output: OutputCallback | None = None,
++        exec_env: dict[str, str] | None = None,
+     ) -> ExecResult:
+         """Run a docker compose command and return the result."""
+         runtime = type(self).runtime()
+@@ -729,6 +730,10 @@
+         full_command.extend(command)
+ 
+         env = self._compose_env_vars(include_os_env=True)
++        if exec_env:
++            # Values of bare `-e NAME` flags: docker compose reads them from its
++            # own environment, so they never reach a host command line.
++            env.update(exec_env)
+ 
+         process = await asyncio.create_subprocess_exec(
+             *full_command,
+@@ -1415,9 +1420,25 @@
+         if cwd:
+             exec_command.extend(["-w", cwd])
+ 
++        exec_env: dict[str, str] = {}
+         if env:
++            # Dodam patch: the credential names below go by name only, and their
++            # values reach the docker CLI through that process's environment,
++            # from which docker compose reads them, so a credential stays off
++            # host command lines, which any process of the same user can read.
++            # Every other variable is passed exactly as before. Checked with
++            # docker compose only, so other runtimes are left as they were.
++            by_name = (
++                {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
++                if type(self).runtime() is DOCKER_RUNTIME
++                else set()
++            )
+             for key, value in env.items():
+-                exec_command.extend(["-e", f"{key}={value}"])
++                if key in by_name:
++                    exec_command.extend(["-e", key])
++                    exec_env[key] = value
++                else:
++                    exec_command.extend(["-e", f"{key}={value}"])
+ 
+         if user is not None:
+             exec_command.extend(["-u", str(user)])
+@@ -1442,6 +1463,7 @@
+             check=False,
+             timeout_sec=timeout_sec,
+             on_output=self._output_callback(),
++            exec_env=exec_env,
+         )
+ 
+     @override

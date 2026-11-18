@@ -6,6 +6,13 @@ import pytest
 CANARY = "dodam-bench-canary-00000000-0000-4000-8000-000000000001"
 
 
+@pytest.fixture(autouse=True)
+def pilot_guard_folder(tmp_path: Path, monkeypatch) -> Path:
+    """The pilot's five-hour guard lives in one folder per user; in tests, in each test's own folder."""
+    monkeypatch.setenv("DODAM_PILOT_GUARD_DIR", str(tmp_path))
+    return tmp_path
+
+
 def write(root: Path, rel: str, text: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

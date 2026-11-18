@@ -4,7 +4,7 @@
 
 A general-purpose language that AI writes correctly and robustly: secure, fast to run and fast to compile. No human needs to read it: AI refines it for AI, and people look only at the result and a security report. Security is enforced by the compiler, and the rules only ever tighten. Its first domain is the web, with one codebase for server and browser.
 
-> **Status: design phase.** There is no compiler yet. The current work is the design itself and the benchmark that every design decision will be measured against. AI agents build the language as well. 1.0 is expected around February 2032 (median estimate) with one subscription from each of three AI companies. For the time being the work uses Claude alone; if it stayed that way to the end, the median would move to November 2038.
+> **Status: design phase.** There is no compiler yet. The current work is the design itself and the benchmark that every design decision will be measured against. AI agents build the language as well. 1.0 is expected around February 2032 (median estimate; with 80% probability by January 2034) with one subscription from each of three AI companies. Both dates come from one seed of the schedule simulation; over 5 seeds the median moves between February 2032 and March 2032 and the 80% date between January 2034 and April 2034. For the time being the work uses one Claude account shared with the owner's other work; if it stayed that way to the end, the median would move to between May 2040 and January 2041, and the 80% date would lie beyond October 2042, where the schedule simulation stops. What one account gives in a week is an assumption that has not been measured yet.
 
 ## Why
 
@@ -52,3 +52,5 @@ Rules for outside work:
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+One file is an exception: `bench/harbor/docker-exec-env-by-name.patch` carries lines of the source code of Harbor 0.25.0 (the `harbor-framework/harbor` project), which are under the Apache License, Version 2.0, only. The MIT option does not apply to those lines.
