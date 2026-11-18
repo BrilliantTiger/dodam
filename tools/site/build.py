@@ -233,10 +233,12 @@ def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: 
         found.append("the limits are whole numbers above zero: " + ", ".join(LIMITS))
     elif limits["code_uses"] != 1:
         found.append("a connection code of AI coworker works once, and the page says once")
-    if set(coworker) != {"min_version", "released", "repository"} or not isinstance(coworker.get("released"), bool) \
+    if set(coworker) != {"min_version", "released", "checked_against", "repository"} or not isinstance(coworker.get("released"), bool) \
+            or not re.fullmatch(r"(?:\d+\.\d+\.\d+)?", str(coworker.get("checked_against"))) \
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(coworker.get("min_version"))) \
             or not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+", str(coworker.get("repository"))):
-        found.append("coworker names the lowest version, as 0.13.0, whether it is released, and the address of its repository on GitHub")
+        found.append("coworker names the lowest version, as 0.13.0, whether it is released, the version the page's sentences were "
+                     "checked against (or empty), and the address of its repository on GitHub")
     if set(form) != {"file", "label"} or not re.fullmatch(r"[a-z0-9-]+\.yml", str(form.get("file"))) \
             or not re.fullmatch(r"[a-z0-9-]+", str(form.get("label"))):
         found.append("form names the file of the request form, as live-session.yml, and its label")
@@ -271,6 +273,9 @@ def desk_problems(desk: dict | None = None, forms: Path | None = None, made_up: 
             found.append("the live way opened before the github way")
         if not coworker["released"]:
             found.append(f"the live way is open while AI coworker {coworker['min_version']} is not released")
+        if coworker["checked_against"] != coworker["min_version"]:
+            found.append(f"the live way is open while the page's sentences about AI coworker were checked against "
+                         f"{coworker['checked_against'] or 'no version'}, not against {coworker['min_version']}")
         path = forms / form["file"]
         if made_up:
             pass
@@ -296,7 +301,8 @@ def as_if_open(desk: dict, ways: list[str]) -> dict:
         if not made[way]["open"]:
             made[way] = {"open": True, "since": MADE_UP[way][0], "first_answer": dict(MADE_UP[way][1])}
     last = max([desk["as_of"]] + [made[way]["since"] for way in ways])
-    return desk | {"ways": made, "as_of": last, "coworker": desk["coworker"] | ({"released": True} if "live" in ways else {})}
+    return desk | {"ways": made, "as_of": last, "coworker": desk["coworker"] | (
+        {"released": True, "checked_against": desk["coworker"]["min_version"]} if "live" in ways else {})}
 
 
 def open_ways(desk: dict) -> list[str]:
@@ -840,6 +846,9 @@ def option(argv: list[str], name: str) -> str | None:
 
 def main(argv: list[str]) -> int:
     desk, as_if = load_desk(), option(argv, "--open")
+    if as_if and "--live" not in argv:
+        print("--open builds with made-up dates and times, so it needs --live DIR: it never writes the committed pages", file=sys.stderr)
+        return 2
     issues = problems() + desk_problems(desk)
     if as_if and not issues:
         desk = as_if_open(desk, as_if.split(","))

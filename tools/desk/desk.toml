@@ -10,7 +10,7 @@
 # open = true, set since to the date, fill in first_answer, and set as_of to that day. A way that is
 # open without those fails a test. The live way cannot be open while the GitHub way is closed, because
 # a connection code is asked for on GitHub; it also needs the lowest version of AI coworker to be
-# released, and the request form named below in .github/ISSUE_TEMPLATE, carrying the label named below.
+# released, the page's sentences about AI coworker checked against that version, and the request form named below in .github/ISSUE_TEMPLATE, carrying the label named below.
 
 name = "Dodam · desk"    # how the desk is named in AI coworker
 as_of = "2026-11-18"     # the day these facts were last checked; the page dates its answer with it
@@ -39,6 +39,8 @@ live_sessions = 5                # live sessions at once
 [coworker]
 min_version = "0.13.0"           # the lowest version of AI coworker an outside session needs
 released = false                 # whether that version is released; while it is not, the page says so
+checked_against = ""             # the version of AI coworker against whose published documents the page's sentences
+                                 # about AI coworker were last checked; the live way opens only when it is min_version
 repository = "https://github.com/BrilliantTiger/ai-coworker-without-me"
 
 [form]
