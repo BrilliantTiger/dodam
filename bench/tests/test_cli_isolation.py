@@ -1191,6 +1191,15 @@ def new_highs(result: dict) -> dict:
     return said
 
 
+def named(said: dict, case: str) -> dict:
+    """The record of the run of this case among the runs the result names. The case after it can
+    be named as well: while the cache a reader filled is still there, a plain run on top of it
+    makes a new high too."""
+    runs = [run for run in said["largest"] if case in run["case"]]
+    assert len(runs) == 1 and said["runs"] >= 1, f"the result was to name the run of {case}: {said}"
+    return runs[0]
+
+
 def test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case(tmp_path):
     """The kernel keeps the highest memory use of the container, but it counts the cache of files
     into it, and what it kept cannot be told apart afterwards. So a new high fails no case: the
@@ -1205,8 +1214,8 @@ def test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fa
     assert seen["limit"] is None and seen["exit_code"] == 0, f"no measurement saw this run, and the highest value alone fails no case: {seen}"
     assert outcomes(result) == {"test_before": "passed", "test_the_attack": "passed", "test_after": "passed"}, lost(result, unseen / "out")
     said = new_highs(result)
-    assert said["runs"] == 1 and "test_the_attack" in said["largest"][0]["case"], said
-    assert said["largest"][0]["limit_mb"] == 256 and said["largest"][0]["above_the_limit_mb"] >= 100, said
+    run = named(said, "test_the_attack")
+    assert run["limit_mb"] == 256 and run["above_the_limit_mb"] >= 100, said
     measured = tmp_path / "measured"
     measured.mkdir()
     result = judge_attack(measured, program, {"functional/test_limits.py": LIMIT_TESTS})
@@ -1338,8 +1347,8 @@ def test_a_program_inside_its_limits_that_reads_uncached_files_never_fails_for_m
     assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
     # the new high is in the result, as a number and as no judgement
     said = new_highs(result)
-    assert said["runs"] == 1 and "test_the_reader" in said["largest"][0]["case"], said
-    assert said["largest"][0]["limit_mb"] == int(memory_mb) and said["largest"][0]["above_the_limit_mb"] >= 50, said
+    run = named(said, "test_the_reader")
+    assert run["limit_mb"] == int(memory_mb) and run["above_the_limit_mb"] >= 50, said
 
 
 def test_memory_taken_for_a_moment_by_a_program_that_also_reads_from_disk_is_recorded_and_fails_no_case(tmp_path):
@@ -1357,7 +1366,7 @@ print("done")
     assert seen["limit"] is None and seen["exit_code"] == 0, f"the highest value alone fails no case: {seen}"
     assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
     said = new_highs(result)
-    assert said["runs"] == 1 and said["largest"][0]["above_the_limit_mb"] >= 100, said
+    assert named(said, "test_the_reader")["above_the_limit_mb"] >= 100, said
 
 
 # A hidden test that says how much memory the kernel held for names and file records before a
