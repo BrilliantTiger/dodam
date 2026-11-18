@@ -12,6 +12,7 @@ Rules for AI agents and humans contributing to this repository.
 - Documents people read (Markdown, HTML, video) carry no internal codes or section numbers and never send the reader to another document; write the meaning in place.
 - Paths, file names and identifiers are in English.
 - A change that alters what the introduction page says (the charter's version, dates and counts, the guarantees, the rules for taking part) updates the page in the same pull request, in all four languages: the strings in `tools/site/strings` and the pages built from them.
+- Before the visitor agrees, the public introduction page contacts no other host and sets no cookie; after agreeing, it contacts only Google's measurement, without advertising features. Changing this needs the owner's decision.
 - Commit messages carry no AI co-author or attribution trailers.
 - Never write the owner's real name or contact details in the repository, in commit messages or on work items. Write "the owner" (in Korean, 소유자).
 

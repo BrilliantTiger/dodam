@@ -510,12 +510,12 @@ def test_styles_and_script_reach_no_other_host():
             continue
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"@import|url\(\s*['\"]?(?:https?:)?//", text), path.name
-        if path.suffix == ".js":
+        if path.suffix == ".js" and path.name != "analytics.js":   # the measurement script has a test of its own
             assert not re.search(r"https?://|XMLHttpRequest|sendBeacon|WebSocket|import\(", text), path.name
 
 
 def test_script_is_one_small_file_of_our_own():
-    assert [p.name for p in site_files() if p.suffix == ".js"] == ["motion.js"]
+    assert sorted(p.name for p in site_files() if p.suffix == ".js") == ["analytics.js", "motion.js"]
 
 
 def test_site_respects_reduced_motion_color_schemes_and_each_script():
@@ -1116,3 +1116,276 @@ def test_what_is_published_holds_no_personal_details_and_no_internal_codes(tmp_p
         assert not re.search(r"/(?:Users|home)/[\w.-]+/", text), path.name
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert all(set(change) == {"date", "title", "url"} for change in status["changes"]), "the status file names an author"
+
+
+# --- measurement, only with the visitor's agreement --------------------------------------------
+#
+# The owner decided on 2026-11-18 that the page is measured with Google Analytics. The measurement ID
+# is one setting and it is empty until the owner has created the property. While it is empty the page
+# has no analytics code and reaches no other host. When it is set, nothing is loaded before the visitor
+# agrees. What happens in the browser (asking first, declining, the browser's refusing signals) is
+# checked by tools/site/sweep.py --consent.
+
+SAMPLE_ID = "G-SAMPLE0000"
+GOOGLE_NEEDS = {   # from Google's guide to content security policies for the Google tag, without advertising
+    "script-src": {"https://www.googletagmanager.com"},
+    "img-src": {"https://www.googletagmanager.com", "https://*.google-analytics.com"},
+    "connect-src": {"https://www.googletagmanager.com", "https://*.google-analytics.com", "https://*.google.com"},
+}
+CONSENT_KEYS = ["consent_label", "consent_text", "consent_yes", "consent_no", "consent_settings", "measure_p"]
+
+
+def policy_of(html_text: str) -> dict:
+    metas = [a for tag, a in Page(html_text).tags if tag == "meta" and (a.get("http-equiv") or "").lower() == "content-security-policy"]
+    assert len(metas) == 1, "the page declares no content security policy"
+    return {words[0]: set(words[1:]) for words in (part.split() for part in metas[0]["content"].split(";")) if words}
+
+
+def other_hosts(policy: dict) -> dict:
+    found = {name: {word for word in words if not word.startswith("'") and word != "data:"} for name, words in policy.items()}
+    return {name: words for name, words in found.items() if words}
+
+
+def measured(lang: str) -> str:
+    render = need("render")
+    assert "analytics" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a measurement ID"
+    return render(lang, analytics=SAMPLE_ID)
+
+
+MEASUREMENT_ID = "G-DHJKG68707"   # the owner's property, created on 2026-11-18
+
+
+def unmeasured(lang: str) -> str:
+    render = need("render")
+    assert "analytics" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a measurement ID"
+    return render(lang, analytics="")
+
+
+def test_the_measurement_id_is_one_setting_and_the_tag_is_loaded_by_it():
+    build = builder()
+    assert hasattr(build, "ANALYTICS_ID"), "the build script has no setting for the measurement ID"
+    assert build.ANALYTICS_ID == MEASUREMENT_ID, "the setting is not the owner's property"
+    assert (ROOT / "tools" / "site" / "build.py").read_text(encoding="utf-8").count(MEASUREMENT_ID) == 1, "the ID is set in more than one place"
+    for folder in ("tools/site", "site", ".github"):
+        for path in sorted((ROOT / folder).rglob("*")):
+            if path.is_file() and path.suffix in {".py", ".html", ".js", ".json", ".yml", ".txt", ".css"}:
+                text = path.read_text(encoding="utf-8")
+                assert set(re.findall(r"\bG-[A-Z0-9]{6,}\b", text)) <= {SAMPLE_ID, MEASUREMENT_ID}, f"{path.name} holds another measurement ID"
+                # A container can be given other tags later; the page promises measurement without advertising.
+                assert not re.search(r"\bGTM-[A-Z0-9]+|gtm\.js|googletagmanager\.com/ns", text), f"{path.name} uses a container"
+    for lang in LANGS:
+        scripts = [a for a in page(lang).all("script") if a.get("src")]
+        assert [a.get("data-id") for a in scripts if a["src"].endswith("analytics.js")] == [MEASUREMENT_ID], lang
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_without_a_measurement_id_the_page_has_no_analytics_code_and_may_reach_no_other_host(lang):
+    html_text = unmeasured(lang)
+    assert not re.search(r"google|gtag|analytics|consent|cookie|dataLayer", html_text, re.I), "the page carries analytics code"
+    assert [a.get("src") for a in Page(html_text).all("script") if a.get("src")] == [("" if lang == "en" else "../") + "motion.js"]
+    policy = policy_of(html_text)
+    assert policy["default-src"] == {"'self'"} and other_hosts(policy) == {}
+    assert not re.search(r"google|gtag|dataLayer", (SITE / "motion.js").read_text(encoding="utf-8"), re.I)
+
+
+def test_what_is_published_carries_the_measurement_script_only_with_an_id(tmp_path):
+    publish = need("publish")
+    assert "analytics" in publish.__code__.co_varnames[:publish.__code__.co_argcount], "what is published cannot be built with a measurement ID"
+    publish(tmp_path / "plain", sample(), analytics="")
+    assert not (tmp_path / "plain" / "analytics.js").exists(), "the measurement script is published although nothing uses it"
+    publish(tmp_path / "measured", sample(), analytics=SAMPLE_ID)
+    assert (tmp_path / "measured" / "analytics.js").is_file()
+    assert SAMPLE_ID in (tmp_path / "measured" / "index.html").read_text(encoding="utf-8")
+    publish(tmp_path / "set", sample())
+    assert (tmp_path / "set" / "analytics.js").is_file() and MEASUREMENT_ID in (tmp_path / "set" / "index.html").read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        publish(tmp_path / "wrong", sample(), analytics='G-X"><script>')
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_with_a_measurement_id_the_policy_names_the_page_and_google_s_measurement_and_nothing_else(lang):
+    html_text = measured(lang)
+    p = Page(html_text)
+    assert other_hosts(policy_of(html_text)) == GOOGLE_NEEDS
+    assert policy_of(html_text)["default-src"] == {"'self'"}
+    scripts = [a for a in p.all("script") if a.get("src")]
+    assert [is_local(a["src"]) for a in scripts] == [True, True] and scripts[1]["src"].endswith("analytics.js")
+    assert scripts[1].get("data-id") == SAMPLE_ID
+    assert p.inline_script.strip() == "", "the page has an inline script"
+    assert [name for _, attrs in p.tags for name in attrs if name.startswith("on")] == [], "the page has an inline handler"
+    outside_policy = re.sub(r'<meta http-equiv="Content-Security-Policy"[^>]*>', "", html_text)
+    assert not re.search(r"googletagmanager|google-analytics|gtag", outside_policy), "the page names Google's hosts outside its policy"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_with_a_measurement_id_the_page_asks_in_the_visitor_s_language_and_says_what_is_measured(lang):
+    strings = builder().load_strings(lang)
+    for key in CONSENT_KEYS:
+        assert strings.get(key, "").strip(), f"{lang}: the sentence {key} is missing"
+    assert "Google Analytics" in strings["consent_text"] and "Google Analytics" in strings["measure_p"]
+    html_text = measured(lang)
+    bar = re.search(r'<div class="consent" id="consent"[^>]*>(.*?)</div>\s*</div>', html_text, re.S)
+    assert bar and " hidden" in html_text.split('id="consent"', 1)[1].split(">", 1)[0], "the bar must start hidden: the script shows it"
+    buttons = re.findall(r'<button type="button" class="([^"]*)" data-consent="(yes|no)">([^<]+)</button>', bar.group(1))
+    assert [(kind, text) for _, kind, text in buttons] == [("yes", strings["consent_yes"]), ("no", strings["consent_no"])]
+    assert buttons[0][0] == buttons[1][0], "agree and decline are not the same kind of button"
+    shown = " ".join(Page(html_text).text.split())
+    for key in ("consent_text", "measure_p", "consent_settings"):
+        assert " ".join(strings[key].split()) in shown, key
+    assert re.search(r'<button[^>]* data-consent-open hidden>', html_text.split("<footer", 1)[1]), "the footer has no way to change the choice"
+
+
+def test_the_measurement_script_loads_nothing_by_itself_and_no_advertising_features():
+    path = SITE / "analytics.js"
+    assert path.is_file(), "the measurement script is not among the files of the site"
+    script = path.read_text(encoding="utf-8")
+    code = re.sub(r"(?m)^\s*//.*$", "", script)
+    assert re.findall(r"https?://[^\"' ]+", code) == ["https://www.googletagmanager.com/gtag/js?id="]
+    for signal in ("globalPrivacyControl", "doNotTrack"):
+        assert signal in code, f"a browser's {signal} signal is not read"
+    for off in ('ad_storage: "denied"', 'ad_user_data: "denied"', 'ad_personalization: "denied"', "allow_google_signals: false",
+                "allow_ad_personalization_signals: false"):
+        assert off in code, off
+    assert "localStorage" in code, "the choice is not remembered on the visitor's device"
+    assert not re.search(r"innerHTML|document\.write|\beval\(", code)
+
+
+def test_sharing_images_were_drawn_from_the_headline_status_line_and_colors_of_now():
+    """The images are drawn in a browser and committed. What each was drawn from is recorded beside them,
+    so a changed headline, status line or color without a new image fails here."""
+    source = need("card_source")
+    record = ROOT / "tools" / "site" / "cards.json"
+    assert record.is_file(), "what the sharing images were drawn from is not recorded"
+    drawn = json.loads(record.read_text(encoding="utf-8"))
+    for lang in LANGS:
+        assert drawn.get(lang) == source(lang), f"{lang}: the sharing image is older than its headline; run tools/site/card.py"
+    strings = builder().load_strings("en")
+    assert source("en", dict(strings, h1=strings["h1"][:-1] + ["*slow."])) != source("en")
+    assert source("en", dict(strings, status="Released")) != source("en")
+
+
+# What the owner's property collects for a visitor who agrees (as set on 2026-11-18, with the collection
+# of detailed location and device data switched off): the paragraph on the page names each item, the
+# cookies that agreeing sets, how to change the choice, and where the choice itself is kept.
+MEASURED_WORDS = {
+    "en": ["only for visitors who agree", "which pages are opened", "how long a page stays active in the foreground", "end of a page",
+           "links that leave the site", "browser", "operating system", "language", "kind of device", "country and region",
+           "derives from the IP address without storing the address", "where the visit came from",
+           "first-party cookies with a random identifier and the state of the session", "returning browser",
+           "change your choice below at any time", "stops the measurement and removes those cookies", "Advertising features are off",
+           "nothing is loaded from Google and no cookie is set", "remembered in the browser’s storage on your device"],
+    "ko": ["동의한 방문자에 한해", "어떤 페이지를 열었는지", "얼마나 오래", "끝까지", "바깥으로 나가는 링크", "브라우저", "운영체제", "언어", "기기 종류",
+           "나라와 지역", "IP 주소에서 알아내며 주소는 저장하지 않는다", "어디를 거쳐", "무작위 식별자와 세션 상태", "다시 온 브라우저",
+           "아래에서 언제든 바꿀 수 있고", "측정이 멈추고 그 쿠키가 지워진다", "광고 기능은 꺼져", "쿠키도 만들지 않는다", "브라우저 저장소에 기억된다"],
+    "ja": ["同意した訪問者についてのみ", "開かれたページ", "前面で表示されていた時間", "最後までスクロール", "サイトの外へ出るリンク", "ブラウザ", "OS", "言語",
+           "端末の種類", "国と地域", "IPアドレスから割り出し、アドレス自体は保存しません", "どこから来たか", "ランダムな識別子とセッションの状態", "再訪したブラウザ",
+           "いつでも変更でき", "計測が止まり、そのCookieは削除されます", "広告機能はオフ", "Cookieも設定しません", "ブラウザのストレージに記憶されます"],
+    "es": ["solo de quienes aceptan", "qué páginas se abren", "cuánto tiempo permanece una página activa en primer plano", "hasta el final de una página",
+           "enlaces que salen del sitio", "navegador", "sistema operativo", "idioma", "tipo de dispositivo", "país y región",
+           "deduce de la dirección IP sin guardarla", "de dónde llegó la visita", "identificador aleatorio y el estado de la sesión",
+           "navegador que vuelve", "cambiar su elección más abajo en cualquier momento", "detiene la medición y elimina esas cookies",
+           "funciones publicitarias están desactivadas", "ni se guarda ninguna cookie", "almacenamiento del navegador de su dispositivo"],
+}
+# Switched off in the property, so the page must not claim them: city, coordinates, screen size, device model.
+NOT_MEASURED = {"en": r"\bcity\b|screen|model|coordinates", "ko": r"도시|화면 크기|해상도|모델|좌표", "ja": r"都市|市区町村|画面|解像度|機種|座標",
+                "es": r"ciudad|pantalla|resolución|modelo|coordenadas"}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_paragraph_says_what_the_property_measures(lang):
+    paragraph = builder().load_strings(lang)["measure_p"]
+    for words in MEASURED_WORDS[lang]:
+        assert words in paragraph, f"{lang}: the paragraph does not say “{words}”"
+    assert not re.search(NOT_MEASURED[lang], paragraph, re.I), f"{lang}: the paragraph names something the property does not collect"
+    assert " ".join(paragraph.split()) in " ".join(page(lang).text.split()), "the published page does not carry the paragraph"
+    footer = page_path(lang).read_text(encoding="utf-8").split("<footer", 1)[1]
+    assert footer.index("data-consent-open") > footer.index(paragraph[:20]), "the way to change the choice is not below the paragraph"
+
+
+def test_japanese_writes_browser_one_way():
+    text = json.dumps(builder().load_strings("ja"), ensure_ascii=False)
+    assert "ブラウザ" in text and "ブラウザー" not in text
+
+
+def test_agreeing_again_resumes_measurement_and_a_second_run_of_the_script_does_nothing():
+    """What the script does in a browser is checked by tools/site/sweep.py --consent; this pins its shape."""
+    script = (SITE / "analytics.js").read_text(encoding="utf-8")
+    measure = script.split("function measure()", 1)[1].split("\n  }\n", 1)[0]
+    assert measure.index('window["ga-disable-" + id] = false') < measure.index("if (loaded) return"), \
+        "agreeing again after declining leaves the measurement switched off until a reload"
+    start = script.split("function start()", 1)[1]
+    assert re.search(r"if \(.*data-measure.*\) return;", start) and 'setAttribute("data-measure"' in start, \
+        "the script would attach its handlers twice if it were evaluated twice"
+
+
+def test_working_rules_say_what_the_public_page_may_contact():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    line = next((l for l in rules.splitlines() if "no other host" in l), "")
+    for words in ("Before the visitor agrees", "no cookie", "without advertising features", "owner's decision"):
+        assert words in line, words
+
+
+class Answer:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, *args):
+        return self.body
+
+
+def digest_when(monkeypatch, outcome):
+    import urllib.error
+    import urllib.request
+
+    def fake(request, timeout=None):
+        assert request.full_url == SITE_URL + "status.json"
+        if isinstance(outcome, Exception):
+            raise outcome
+        return Answer(outcome)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return need("published_digest")()
+
+
+def test_only_a_missing_status_file_counts_as_nothing_published(monkeypatch):
+    import urllib.error
+
+    assert digest_when(monkeypatch, b'{"version": 1, "digest": "abc"}') == "abc"
+    missing = urllib.error.HTTPError(SITE_URL + "status.json", 404, "Not Found", None, None)
+    assert digest_when(monkeypatch, missing) is None
+    for fault in (urllib.error.HTTPError(SITE_URL + "status.json", 500, "Server Error", None, None),
+                  urllib.error.HTTPError(SITE_URL + "status.json", 403, "Forbidden", None, None),
+                  urllib.error.URLError("no route"), TimeoutError("timed out"), b"<html>not a status</html>", b'{"version": 1}'):
+        with pytest.raises(Exception):
+            digest_when(monkeypatch, fault)   # the run fails and nothing is deployed, instead of deploying every hour unseen
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_sharing_locale_is_a_language_with_its_territory(lang):
+    metas = {m.get("property"): m.get("content") for m in page(lang).all("meta") if m.get("property")}
+    assert metas.get("og:locale") == {"en": "en_US", "ko": "ko_KR", "ja": "ja_JP", "es": "es_ES"}[lang]
+
+
+def test_rules_the_guide_takes_from_the_working_rules_are_the_working_rules_words():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace("`", "")
+    wanted = [line[2:] for line in rules.splitlines()
+              if line.startswith("- ") and ("before sending a large change" in line or "no right to share" in line)]
+    assert len(wanted) == 2
+    guide = need("guide")(sample())
+    for line in wanted:
+        assert line in guide, f"the guide does not say, in the working rules' words: {line}"
+    template = (ROOT / "tools" / "site" / "guide.txt").read_text(encoding="utf-8")
+    assert "large change" not in template and "no right to share" not in template, "the guide writes a working rule in words of its own"
+
+
+def test_each_language_uses_one_word_for_an_issue():
+    build = builder()
+    text = lambda lang: json.dumps(build.load_strings(lang), ensure_ascii=False)
+    assert "イシュー" in text("ja") and not re.search(r"Issue", text("ja")), "Japanese writes an issue in more than one way"
+    assert not re.search(r"\b(?:una issue|issues? abiertas?|las issues)\b", text("es"), re.I), "Spanish gives an issue more than one gender"

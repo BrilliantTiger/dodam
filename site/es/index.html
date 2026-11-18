@@ -6,12 +6,13 @@
   <title>Dodam — un lenguaje para que la IA escriba bien, seguro y rápido (fase de diseño)</title>
   <meta name="description" content="Dodam es un lenguaje de propósito general que se está diseñando para que la IA lo escriba de forma correcta y robusta: seguro y rápido. Está en fase de diseño y aún no hay compilador. Según el diseño, el compilador impone las reglas de seguridad, las personas leen un informe de seguridad en lugar del código y los propios agentes de IA construyen el lenguaje. Abierto a personas y a agentes de IA.">
   <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; connect-src 'self' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta property="og:type" content="website">
   <meta property="og:title" content="Dodam — un lenguaje para que la IA escriba bien, seguro y rápido (fase de diseño)">
   <meta property="og:description" content="En fase de diseño: aún no hay compilador. El objetivo es un lenguaje cuyo compilador imponga las reglas de seguridad, en el que las personas lean un informe de seguridad en lugar del código y que los propios agentes de IA construyan. Abierto a personas y a agentes de IA.">
   <meta property="og:url" content="https://brillianttigercorp.com/dodam/es/">
   <meta property="og:site_name" content="Dodam">
-  <meta property="og:locale" content="es">
+  <meta property="og:locale" content="es_ES">
   <meta property="og:image" content="https://brillianttigercorp.com/dodam/card-es.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -28,6 +29,7 @@
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="../style.css">
   <script src="../motion.js"></script>
+  <script src="../analytics.js" data-id="G-DHJKG68707" defer></script>
   <script type="application/ld+json">
 {
  "@context": "https://schema.org",
@@ -85,7 +87,7 @@
      "name": "¿Qué es Dodam?",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "Dodam es un lenguaje de programación de propósito general que se está diseñando para que los agentes de programación con IA escriban de forma correcta y robusta: seguro y rápido. En Dodam el compilador impone las reglas de seguridad, y las personas leen el resultado y un informe de seguridad en lugar del código. Dodam está en fase de diseño y aún no hay compilador."
+      "text": "Dodam es un lenguaje de programación de propósito general que se está diseñando para que los agentes de programación con IA lo escriban de forma correcta y robusta: seguro y rápido. En Dodam el compilador impone las reglas de seguridad, y las personas miran el resultado y leen un informe de seguridad en lugar del código. Dodam está en fase de diseño y aún no hay compilador."
      }
     },
     {
@@ -109,7 +111,7 @@
      "name": "¿Cómo participa en Dodam una persona o un agente de IA?",
      "acceptedAnswer": {
       "@type": "Answer",
-      "text": "Dodam está abierto a personas y a agentes de IA con las mismas reglas. Una persona o un agente elige una issue abierta con la etiqueta ai-welcome en el repositorio de Dodam en GitHub y envía una pull request con una prueba que falla antes del cambio y pasa después. Un agente lee el archivo AGENTS.md del repositorio, que contiene las reglas de trabajo."
+      "text": "Dodam está abierto a personas y a agentes de IA con las mismas reglas. Una persona o un agente elige un issue abierto con la etiqueta ai-welcome en el repositorio de Dodam en GitHub y envía una pull request con una prueba que falla antes del cambio y pasa después. Un agente lee el archivo AGENTS.md del repositorio, que contiene las reglas de trabajo."
      }
     },
     {
@@ -136,6 +138,12 @@
 </head>
 <body>
   <a class="skip" href="#what">Saltar al contenido</a>
+  <div class="consent" id="consent" role="region" aria-label="Medición" hidden>
+    <div class="wrap">
+      <p>¿Puede esta página contar su visita con Google Analytics? No se carga nada ni se guarda ninguna cookie si no acepta.</p>
+      <p class="choices"><button type="button" class="choice" data-consent="yes">Aceptar</button><button type="button" class="choice" data-consent="no">Rechazar</button></p>
+    </div>
+  </div>
   <div class="progress" aria-hidden="true"></div>
 
   <header class="top">
@@ -319,10 +327,10 @@
           <ul class="plain">
             <li>La carta de diseño de Dodam está en la versión <span data-live="charter.version"></span>, con fecha del <time data-live-date="charter.date" datetime=""></time>.</li>
             <li>Dodam está en la etapa «<span data-live-pick="step.index" data-options="Fijar el rumbo|Un lenguaje mínimo|Primera versión pública, 0.1|Uso real|1.0"></span>».</li>
-            <li>La puerta que cierra esta etapa está prevista para el <time data-live-date="step.gate_plan" datetime=""></time> con la capacidad del plan.</li>
-            <li data-live-show="step.gate_today" hidden>En las condiciones de hoy, con los valores medidos en la prueba de ejecución, la mediana que da la carta para esa puerta es el <time data-live-date="step.gate_today" datetime=""></time>, y la probabilidad de llegar a ella en la fecha del plan es del <span data-live="step.gate_today_chance"></span>%.</li>
+            <li>El hito de control que cierra esta etapa está previsto para el <time data-live-date="step.gate_plan" datetime=""></time> con la capacidad del plan.</li>
+            <li data-live-show="step.gate_today" hidden>En las condiciones de hoy, con los valores medidos en la prueba de ejecución, la mediana que da la carta para ese hito es el <time data-live-date="step.gate_today" datetime=""></time>, y la probabilidad de alcanzarlo para la fecha del plan es del <span data-live="step.gate_today_chance"></span>%.</li>
             <li>Tareas del benchmark listas: <span data-live="tasks.ready"></span> de las primeras <span data-live="tasks.first"></span>.</li>
-            <li>Issues abiertas para colaboradores externos: <span data-live="open_issues"></span>.</li>
+            <li>Issues abiertos para colaboradores externos: <span data-live="open_issues"></span>.</li>
             <li>Esta página se generó por última vez el <time data-live-time="built" datetime=""></time>.</li>
           </ul>
           <h4>Últimos cambios integrados en Dodam</h4>
@@ -405,10 +413,10 @@
           <h2>Respuestas breves.</h2>
         </header>
         <div class="faq" data-stagger>
-          <div><h3>¿Qué es Dodam?</h3><p>Dodam es un lenguaje de programación de propósito general que se está diseñando para que los agentes de programación con IA escriban de forma correcta y robusta: seguro y rápido. En Dodam el compilador impone las reglas de seguridad, y las personas leen el resultado y un informe de seguridad en lugar del código. Dodam está en fase de diseño y aún no hay compilador.</p></div>
+          <div><h3>¿Qué es Dodam?</h3><p>Dodam es un lenguaje de programación de propósito general que se está diseñando para que los agentes de programación con IA lo escriban de forma correcta y robusta: seguro y rápido. En Dodam el compilador impone las reglas de seguridad, y las personas miran el resultado y leen un informe de seguridad en lugar del código. Dodam está en fase de diseño y aún no hay compilador.</p></div>
           <div><h3>¿Para quién es Dodam?</h3><p>Dodam es para los agentes de programación con IA, que escriben el código, y para las personas que confían en lo que esos agentes construyen sin leerlo. El primer ámbito de Dodam es la web, con una sola base de código para servidor y navegador, y el diseño es de propósito general desde el principio.</p></div>
           <div><h3>¿Se puede usar Dodam hoy?</h3><p>No. Dodam está en fase de diseño y aún no hay compilador. El trabajo actual es la carta de diseño y un benchmark de tareas de programación habituales, medido primero en 7 lenguajes existentes, que fija las cifras que Dodam debe superar.</p></div>
-          <div><h3>¿Cómo participa en Dodam una persona o un agente de IA?</h3><p>Dodam está abierto a personas y a agentes de IA con las mismas reglas. Una persona o un agente elige una issue abierta con la etiqueta ai-welcome en el repositorio de Dodam en GitHub y envía una pull request con una prueba que falla antes del cambio y pasa después. Un agente lee el archivo AGENTS.md del repositorio, que contiene las reglas de trabajo.</p></div>
+          <div><h3>¿Cómo participa en Dodam una persona o un agente de IA?</h3><p>Dodam está abierto a personas y a agentes de IA con las mismas reglas. Una persona o un agente elige un issue abierto con la etiqueta ai-welcome en el repositorio de Dodam en GitHub y envía una pull request con una prueba que falla antes del cambio y pasa después. Un agente lee el archivo AGENTS.md del repositorio, que contiene las reglas de trabajo.</p></div>
           <div><h3>¿Cuándo estará listo Dodam?</h3><p>Dodam 1.0 se estima hacia el 25 de febrero de 2032 con la capacidad del plan, que es una suscripción de cada una de 3 empresas de IA; esa fecha es la mediana de una simulación del calendario, no una promesa. En las condiciones de hoy, una sola suscripción de Claude compartida con el resto del trabajo del propietario, la misma simulación sitúa la mediana de Dodam 1.0 entre mayo de 2040 y enero de 2041. La primera versión pública, la 0.1, está prevista hacia el 4 de abril de 2029 con la capacidad del plan.</p></div>
           <div><h3>¿En qué se diferencia Dodam de hacer que la IA escriba con más cuidado en los lenguajes existentes?</h3><p>Las instrucciones cuidadosas y la revisión dejan la seguridad al azar: en el informe de Veracode de julio de 2026, el código escrito por IA superó las pruebas de seguridad el 56% de las veces de media. Dodam traslada las reglas al lenguaje, de modo que el código que incumple una regla de seguridad no compila, sea cual sea el modelo que lo escribió. Las reglas de Dodam solo pueden endurecerse con el tiempo, y relajar una requiere la aprobación del propietario.</p></div>
         </div>
@@ -429,6 +437,8 @@
         <a class="link" href="https://github.com/BrilliantTiger/dodam/discussions">Debates</a>
         <a class="link" href="https://github.com/BrilliantTiger/dodam/security/policy">Política de seguridad</a>
       </p>
+      <p class="note">Esta página cuenta las visitas con Google Analytics, solo de quienes aceptan. Registra qué páginas se abren y cuánto tiempo permanece una página activa en primer plano, si quien visita llega hasta el final de una página, los clics en enlaces que salen del sitio, el navegador, el sistema operativo, el idioma y el tipo de dispositivo, la ubicación aproximada por país y región, que Google deduce de la dirección IP sin guardarla, y de dónde llegó la visita. Si acepta, Google Analytics guarda cookies propias con un identificador aleatorio y el estado de la sesión, con las que distingue un navegador que vuelve de uno nuevo. Puede cambiar su elección más abajo en cualquier momento, lo que detiene la medición y elimina esas cookies. Las funciones publicitarias están desactivadas. Si rechaza, o su navegador envía una señal que rechaza el seguimiento, no se carga nada de Google ni se guarda ninguna cookie. Su elección se recuerda en el almacenamiento del navegador de su dispositivo.</p>
+      <p class="foot"><button type="button" class="link" data-consent-open hidden>Cambiar la elección de medición</button></p>
       <p class="foot" aria-label="Idioma">
         <a class="link" href="../" lang="en" hreflang="en">English</a>
         <a class="link" href="../ko/" lang="ko" hreflang="ko">한국어</a>
