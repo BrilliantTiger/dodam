@@ -549,7 +549,7 @@ def test_what_is_published_is_never_built_as_if_a_way_were_open():
 
 def test_the_checks_main_requires_keep_their_names():
     text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    # the three that main requires come first under their names; the two after them are not required yet
+    # the three that were required before the command-line judge come first under their names; the two it added follow
     assert re.findall(r"(?m)^  ([\w-]+):\n    runs-on:", text) == ["bench", "variants", "recorded", "attacks", "protections"]
     assert re.findall(r"(?m)^          - (\S+\.py --check --part \S+)$", text) == [
         "pilot_replan.py --check --part schedule", "pilot_replan.py --check --part forecast",
