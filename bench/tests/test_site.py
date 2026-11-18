@@ -744,7 +744,7 @@ def test_only_two_readmes_exist():
 NOW = dt.datetime(2026, 12, 1, 8, 30, tzinfo=dt.timezone.utc)
 SAMPLE = ROOT / "tools" / "site" / "sample_status.json"
 MARKUP = '<img src=x onerror=alert(1)> & "quoted" </a><script>alert(2)</script>'
-STATUS_FIELDS = {"version", "built", "charter", "step", "tasks", "open_issues", "changes", "digest"}
+STATUS_FIELDS = {"version", "built", "charter", "step", "tasks", "open_issues", "changes", "desk", "digest"}
 
 
 def need(name: str):
@@ -781,7 +781,7 @@ def live_section(html_text: str) -> str:
 
 def test_the_status_is_what_the_charter_says_about_now():
     c, status = charter_figures(charter()), made_status()
-    assert set(status) == STATUS_FIELDS and status["version"] == 1
+    assert set(status) == STATUS_FIELDS and status["version"] == 2
     assert status["built"] == "2026-12-01T08:30:00Z"
     assert status["charter"] == {"version": c["version"], "date": c["issued"]}
     gate = re.search(r"방향 고정 관문은 시범에서 잰 값을 넣으면 지금 조건에서 가운데 (\d{4}-\d\d-\d\d), .*?닿을 확률 (\d+)%", charter())
@@ -792,7 +792,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.10 (2026-11-18)", "- 판: v0.11 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.11", "2026-12-24")),
+    ("- 판: v0.11 (2026-11-18)", "- 판: v0.12 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.12", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
@@ -935,7 +935,8 @@ def test_an_open_page_reads_the_status_file_from_its_own_address_and_sets_text_o
 
 def test_the_published_build_writes_the_pages_the_status_file_and_the_guide(tmp_path):
     out, status = published(tmp_path), sample()
-    assert json.loads((out / "status.json").read_text(encoding="utf-8")) == status
+    # The desk's part of the status file is always what the facts of the desk say, whatever status is given.
+    assert json.loads((out / "status.json").read_text(encoding="utf-8")) == status | {"desk": need("desk_status")()}
     assert (out / "status.json").stat().st_size < 4096, "the status file is not small"
     for lang in LANGS:
         name = "index.html" if lang == "en" else f"{lang}/index.html"
