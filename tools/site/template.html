@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{title}}</title>
+  <meta name="description" content="{{description}}">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{{title}}">
+  <meta property="og:description" content="{{og_description}}">
+  <meta property="og:url" content="{{canonical}}">
+  <link rel="canonical" href="{{canonical}}">
+  {{alternates}}
+  <link rel="icon" href="{{root}}favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{root}}style.css">
+  <script src="{{root}}motion.js"></script>
+</head>
+<body>
+  <a class="skip" href="#what">{{skip}}</a>
+  <div class="progress" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="{{home}}"><i></i>Dodam</a>
+      <nav class="nav" aria-label="{{nav_label}}">
+        <details class="langs">
+          <summary><span class="sr">{{lang_label}}: </span>{{this_language}}</summary>
+          <ul>
+{{switcher}}
+          </ul>
+        </details>
+        <a href="{{repo}}">GitHub</a>
+        <button class="theme" type="button" hidden aria-label="{{theme_label}}"><i></i></button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="blobs" data-loop aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="wrap">
+        <p class="status fade" style="--i:0"><i></i>{{status}}</p>
+        <h1>{{h1}}</h1>
+        <p class="lede fade" style="--i:8">{{lede}}</p>
+        <p class="cta fade" style="--i:10">
+          <a class="btn" href="#join">{{cta_join}} <span class="arr" aria-hidden="true">→</span></a>
+          <a class="btn ghost" href="{{repo}}">{{cta_github}}</a>
+        </p>
+        <a class="cue fade" style="--i:13" href="#what"><i></i>{{cue}}</a>
+      </div>
+    </div>
+
+    <section id="what">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{what_k}}</p>
+          <h2>{{what_h}}</h2>
+          <p class="lead">{{what_p1}}</p>
+          <p class="lead">{{what_p2}}</p>
+        </header>
+        <figure class="dam reveal" data-loop>
+          <div class="dam-labels" aria-hidden="true"><span>{{dam_l1}}</span><span>{{dam_l2}}</span><span>{{dam_l3}}</span></div>
+        <svg viewBox="0 0 640 316" role="img" aria-label="{{dam_alt}}">
+          <path class="guide" d="M0 50h300M0 105h300M0 160h300M324 50h150M324 105h150M324 160h150"/>
+          <g class="pc ok" style="--d:0s;--sx:40px"><g transform="translate(0 37)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc no" style="--d:-3s;--sx:236px"><g transform="translate(0 37)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc ok" style="--d:-6s;--sx:400px"><g transform="translate(0 37)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-1s;--sx:130px"><g transform="translate(0 92)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-4s;--sx:384px"><g transform="translate(0 92)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc no" style="--d:-7s;--sx:236px"><g transform="translate(0 92)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc no" style="--d:-2s;--sx:236px"><g transform="translate(0 147)"><rect class="no-box" width="60" height="26" rx="7"/><path class="no-line" d="M12 10h20M12 17h12"/><path class="no-x" d="M42 8l10 10M52 8l-10 10"/></g></g>
+          <g class="pc ok" style="--d:-5s;--sx:64px"><g transform="translate(0 147)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <g class="pc ok" style="--d:-8s;--sx:408px"><g transform="translate(0 147)"><rect class="ok-box" width="60" height="26" rx="7"/><path class="ok-line" d="M12 10h30M12 17h20"/></g></g>
+          <rect class="wall" x="300" y="14" width="24" height="226" rx="6"/>
+          <path class="brick" d="M300 52h24M300 90h24M300 128h24M300 166h24M300 204h24"/>
+          <path class="pipe" d="M312 240v22h168"/>
+          <circle class="drip" style="--k:0" cx="312" cy="240" r="3.5"/>
+          <circle class="drip" style="--k:1" cx="312" cy="240" r="3.5"/>
+          <rect class="frame" x="480" y="22" width="140" height="166" rx="10"/>
+          <circle class="dot" cx="495" cy="37" r="3"/>
+          <circle class="dot" cx="506" cy="37" r="3"/>
+          <circle class="dot" cx="517" cy="37" r="3"/>
+          <rect class="soft bar" style="--k:0" x="494" y="58" width="112" height="12" rx="4"/>
+          <rect class="soft bar" style="--k:1" x="494" y="80" width="80" height="12" rx="4"/>
+          <rect class="soft bar" style="--k:2" x="494" y="102" width="96" height="12" rx="4"/>
+          <rect class="pill" x="494" y="150" width="48" height="20" rx="10"/>
+          <rect class="frame" x="480" y="206" width="140" height="98" rx="10"/>
+          <rect class="rl" style="--k:0" x="496" y="223" width="96" height="6" rx="3"/>
+          <rect class="rl dim" style="--k:1" x="496" y="241" width="72" height="6" rx="3"/>
+          <rect class="rl dim" style="--k:2" x="496" y="259" width="104" height="6" rx="3"/>
+          <rect class="rl dim" style="--k:3" x="496" y="277" width="58" height="6" rx="3"/>
+        </svg>
+          <figcaption>
+            <ol class="steps">
+              <li>{{step1}}</li>
+              <li>{{step2}}</li>
+              <li>{{step3}}</li>
+              <li>{{step4}}</li>
+            </ol>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="why">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{why_k}}</p>
+          <h2>{{why_h}}</h2>
+          <p class="lead">{{why_p}}</p>
+        </header>
+        <div class="stats" data-stagger>
+          <div class="stat">
+            <span class="lbl">{{stat1_l}}</span>
+            <span class="num"><span data-count="45">45</span><small>%</small></span>
+            <p>{{stat1}}</p>
+            <span class="src">{{src1}}</span>
+          </div>
+          <div class="stat">
+            <span class="lbl">{{stat2_l}}</span>
+            <span class="num"><span data-count="55">55</span><small>%</small></span>
+            <p>{{stat2}}</p>
+            <span class="src">{{src2}}</span>
+          </div>
+          <div class="stat">
+            <span class="lbl">{{stat3_l}}</span>
+            <span class="num"><span data-count="56">56</span><small>%</small></span>
+            <p>{{stat3}}</p>
+            <span class="src">{{src3}}</span>
+          </div>
+        </div>
+        <p class="note reveal">{{why_note}}</p>
+      </div>
+    </section>
+
+    <section id="guarantees">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{g_k}}</p>
+          <h2>{{g_h}}</h2>
+          <p class="lead">{{g_p}}</p>
+        </header>
+        <ul class="grid three" data-stagger>
+          <li><div class="card"><span class="n">01</span><h3>{{g1_h}}</h3><p>{{g1_p}}</p></div></li>
+          <li><div class="card"><span class="n">02</span><h3>{{g2_h}}</h3><p>{{g2_p}}</p></div></li>
+          <li><div class="card"><span class="n">03</span><h3>{{g3_h}}</h3><p>{{g3_p}}</p></div></li>
+          <li><div class="card"><span class="n">04</span><h3>{{g4_h}}</h3><p>{{g4_p}}</p></div></li>
+          <li><div class="card"><span class="n">05</span><h3>{{g5_h}}</h3><p>{{g5_p}}</p></div></li>
+          <li><div class="card"><span class="n">06</span><h3>{{g6_h}}</h3><p>{{g6_p}}</p></div></li>
+          <li><div class="card"><span class="n">07</span><h3>{{g7_h}}</h3><p>{{g7_p}}</p></div></li>
+          <li><div class="card"><span class="n">08</span><h3>{{g8_h}}</h3><p>{{g8_p}}</p></div></li>
+          <li><div class="card"><span class="n">09</span><h3>{{g9_h}}</h3><p>{{g9_p}}</p></div></li>
+          <li><div class="card"><span class="n">10</span><h3>{{g10_h}}</h3><p>{{g10_p}}</p></div></li>
+        </ul>
+        <h3 class="sub reveal">{{more_h}}</h3>
+        <ul class="plain" data-stagger>
+          <li>{{more1}}</li>
+          <li>{{more2}}</li>
+          <li>{{more3}}</li>
+          <li>{{more4}}</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="how">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{how_k}}</p>
+          <h2>{{how_h}}</h2>
+          <p class="lead">{{how_p}}</p>
+        </header>
+        <ul class="grid four" data-stagger>
+          <li><div class="card"><span class="n">{{r1_n}}</span><h3>{{r1_h}}</h3><p>{{r1_p}}</p></div></li>
+          <li><div class="card"><span class="n">{{r2_n}}</span><h3>{{r2_h}}</h3><p>{{r2_p}}</p></div></li>
+          <li><div class="card"><span class="n">{{r3_n}}</span><h3>{{r3_h}}</h3><p>{{r3_p}}</p></div></li>
+          <li><div class="card"><span class="n">{{r4_n}}</span><h3>{{r4_h}}</h3><p>{{r4_p}}</p></div></li>
+        </ul>
+        <ul class="plain" data-stagger>
+          <li>{{how1}}</li>
+          <li>{{how2}}</li>
+          <li>{{how3}}</li>
+          <li>{{how4}}</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="now">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{now_k}}</p>
+          <h2>{{now_h}}</h2>
+          <p class="lead">{{now_p}}</p>
+        </header>
+        <div class="marquee reveal" data-loop>
+          <ul class="track" aria-label="{{langs_label}}"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
+          <ul class="track" aria-hidden="true"><li>Python</li><li>TypeScript</li><li>Java</li><li>C#</li><li>Go</li><li>Rust</li><li>C++</li></ul>
+        </div>
+        <p class="note reveal">{{now_cap}}</p>
+        <ol class="timeline">
+          <li><span class="when"><span class="cap">{{cap_plan}}</span> {{t1_w}} <span class="tag">{{here}}</span></span><h3>{{t1_h}}</h3><p>{{t1_p}}</p></li>
+          <li><span class="when"><span class="cap">{{cap_plan}}</span> {{t2_w}}</span><h3>{{t2_h}}</h3><p>{{t2_p}}</p></li>
+          <li><span class="when"><span class="cap">{{cap_plan}}</span> {{t3_w}}</span><h3>{{t3_h}}</h3><p>{{t3_p}}</p></li>
+          <li><span class="when"><span class="cap">{{cap_plan}}</span> {{t4_w}}</span><h3>{{t4_h}}</h3><p>{{t4_p}}</p></li>
+          <li><span class="when"><span class="cap">{{cap_plan}}</span> {{t5_w}}</span><span class="when"><span class="cap">{{cap_today}}</span> {{t5_today}}</span><h3>{{t5_h}}</h3><p>{{t5_p}}</p></li>
+        </ol>
+        <p class="note reveal">{{now_note}}</p>
+      </div>
+    </section>
+
+    <section id="join">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{join_k}}</p>
+          <h2>{{join_h}}</h2>
+          <p class="lead">{{join_p}}</p>
+        </header>
+        <ul class="grid" data-stagger>
+          <li><div class="card big">
+            <h3>{{people_h}}</h3>
+            <ul>
+              <li>{{people1}}</li>
+              <li>{{people2}}</li>
+              <li>{{people3}}</li>
+              <li>{{people4}}</li>
+            </ul>
+            <p class="more">
+              <a class="link" href="{{repo}}/issues?q=is%3Aopen+label%3Aai-welcome">{{issues}} <span class="arr" aria-hidden="true">→</span></a>
+              <a class="link" href="{{repo}}/discussions">{{discussions}} <span class="arr" aria-hidden="true">→</span></a>
+            </p>
+          </div></li>
+          <li><div class="card big">
+            <h3>{{agents_h}}</h3>
+            <p>{{agents_p}}</p>
+            <pre>{{agent_prompt}}</pre>
+            <p class="more">
+              <a class="link" href="{{repo}}/blob/main/AGENTS.md">{{agents_rules}} <span class="arr" aria-hidden="true">→</span></a>
+              <a class="link" href="{{repo}}">{{repo_label}} <span class="arr" aria-hidden="true">→</span></a>
+            </p>
+          </div></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="rules">
+      <div class="wrap">
+        <header class="reveal">
+          <p class="kicker">{{rules_k}}</p>
+          <h2>{{rules_h}}</h2>
+          <p class="lead">{{rules_p}}</p>
+        </header>
+        <ul class="rules" data-stagger>
+          <li><strong>{{rule1_h}}</strong><span>{{rule1_p}}</span></li>
+          <li><strong>{{rule2_h}}</strong><span>{{rule2_p}}</span></li>
+          <li><strong>{{rule3_h}}</strong><span>{{rule3_p}}</span></li>
+          <li><strong>{{rule4_h}}</strong><span>{{rule4_p}}</span></li>
+          <li><strong>{{rule5_h}}</strong><span>{{rule5_p}}</span></li>
+          <li><strong>{{rule6_h}}</strong><span>{{rule6_p}} <a class="link" href="{{repo}}/security/policy">{{policy}} <span class="arr" aria-hidden="true">→</span></a></span></li>
+          <li><strong>{{rule7_h}}</strong><span>{{rule7_p}}</span></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer id="license">
+    <div class="wrap">
+      <div class="reveal">
+        <p class="kicker">{{lic_k}}</p>
+        <h2>{{lic_h}}</h2>
+        <p class="lead">{{name_p}}</p>
+      </div>
+      <p class="foot">
+        <a class="link" href="{{repo}}">{{repo_label}}</a>
+        <a class="link" href="{{repo}}/issues?q=is%3Aopen+label%3Aai-welcome">{{issues}}</a>
+        <a class="link" href="{{repo}}/discussions">{{discussions}}</a>
+        <a class="link" href="{{repo}}/security/policy">{{policy}}</a>
+      </p>
+      <p class="foot" aria-label="{{lang_label}}">
+{{foot_languages}}
+      </p>
+    </div>
+  </footer>
+</body>
+</html>
