@@ -1356,6 +1356,60 @@ print("done")
     assert said["runs"] == 1 and said["largest"][0]["above_the_limit_mb"] >= 100, said
 
 
+# A hidden test that says how much memory the kernel held for names and file records before and
+# after a program that only looks at files, and hands back how the run was judged.
+LOOK_TESTS = '''
+def given_back_mb():
+    stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
+    return int(stat["slab_reclaimable"]) // 2**20
+
+
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_the_one_that_looks():
+    with case() as c:
+        before = given_back_mb()
+        r = c.run(["look"])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:],
+                       "before_mb": before, "after_mb": given_back_mb()}, f)
+        assert r.exit_code == 0 and r.out == "done\\n", r
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+'''
+
+
+def test_a_program_that_only_looks_at_files_never_fails_for_memory(tmp_path):
+    """A program that holds a few MB looks at every file of the image and asks for 200,000 names
+    that are not there. It reads nothing and takes nothing; the kernel keeps a record of every
+    name, well above the case's limit of 64 MB, and gives those records back when memory is needed."""
+    program = PLAIN + r'''
+for top, folders, files in os.walk("/"):
+    if top.startswith(("/proc", "/sys", "/dev")):
+        folders[:] = []
+for number in range(200000):
+    try:
+        os.lstat(f"/usr/lib/not-there-{number}")
+    except OSError:
+        pass
+print("done")
+'''
+    result = judge_attack(tmp_path, program, {"functional/test_look.py": LOOK_TESTS}, CASE_MEMORY_MB="64",
+                          CASE_TIMEOUT_SEC="60")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"a program inside its limits failed for {seen['limit']}: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_one_that_looks": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    # the test shows something only when the kernel held more than the limit for the names
+    assert seen["after_mb"] >= seen["before_mb"] + 100, f"the kernel was to hold more than the limit for the names: {seen}"
+
+
 # What the kernel ends first when the container's memory runs out is the judge's decision, not a
 # matter of which process happens to hold more: the program's side, then the case runner, and the
 # judge last.

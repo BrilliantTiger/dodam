@@ -725,6 +725,24 @@ def test_memory_moved_out_to_swap_is_counted_as_memory(tmp_path):
     assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
 
 
+def test_memory_the_kernel_gives_back_like_the_cache_is_not_counted_as_memory(tmp_path):
+    """For every name a program looks at, and for every page of the cache, the kernel keeps a
+    record of its own. It gives them back whenever memory is needed, as it does the cache, and
+    says how much they are. They are no memory of the program's."""
+    group = tmp_path / "group"
+    group.mkdir()
+    (group / "memory.current").write_text(f"{300 * 2**20}\n")
+    (group / "memory.max").write_text(f"{1024 * 2**20}\n")
+    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n"
+                                       f"slab_reclaimable {30 * 2**20}\nslab_unreclaimable {5 * 2**20}\n")
+    counted = judge_module.container_memory(group=group)
+    assert counted["taken"] == (300 - 100 + 10 - 30) * 2**20, f"{counted['taken'] // 2**20} MB counted as taken"
+    assert counted["all"] == 300 * 2**20
+    # a kernel that does not say how much it can give back: everything it holds is counted
+    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n")
+    assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
+
+
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():
     """How far a new high of the container's memory lies above what the case may take, counted
     from the memory that could not be given back when the run began. It is the most the program
