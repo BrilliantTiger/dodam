@@ -181,5 +181,11 @@
   "a6": "Careful prompting and review leave security to chance: in Veracode’s report of {m:2026-07}, AI-written code passed on security 56% of the time on average. Dodam moves the rules into the language, so code that breaks a security rule does not compile, whichever model wrote it. Dodam’s rules can only tighten over time, and relaxing one needs the owner’s approval.",
   "lic_k": "License",
   "lic_h": "MIT or Apache-2.0, at your option.",
-  "name_p": "Dodam (<span lang=\"ko\">도담</span>) comes from the Korean “dodam-dodam”: a child growing up healthy and sound, without mishap."
+  "name_p": "Dodam (<span lang=\"ko\">도담</span>) comes from the Korean “dodam-dodam”: a child growing up healthy and sound, without mishap.",
+  "consent_label": "Measurement",
+  "consent_text": "May this page count your visit with Google Analytics? Nothing is loaded and no cookie is set unless you agree.",
+  "consent_yes": "Agree",
+  "consent_no": "Decline",
+  "consent_settings": "Change measurement choice",
+  "measure_p": "This page counts visits with Google Analytics, only for visitors who agree: which pages are opened, from what kind of device and from which country, and where the visit came from. Advertising features are off. If you decline, or your browser sends a signal that refuses tracking, nothing is loaded from Google and no cookie is set."
 }

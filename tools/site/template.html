@@ -6,6 +6,7 @@
   <title>{{title}}</title>
   <meta name="description" content="{{description}}">
   <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="{{csp}}">
   <meta property="og:type" content="website">
   <meta property="og:title" content="{{title}}">
   <meta property="og:description" content="{{og_description}}">
@@ -24,12 +25,23 @@
   <link rel="icon" href="{{root}}favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="{{root}}style.css">
   <script src="{{root}}motion.js"></script>
+<!--measured-->
+  <script src="{{root}}analytics.js" data-id="{{analytics_id}}" defer></script>
+<!--/measured-->
   <script type="application/ld+json">
 {{structured}}
   </script>
 </head>
 <body>
   <a class="skip" href="#what">{{skip}}</a>
+<!--measured-->
+  <div class="consent" id="consent" role="region" aria-label="{{consent_label}}" hidden>
+    <div class="wrap">
+      <p>{{consent_text}}</p>
+      <p class="choices"><button type="button" class="choice" data-consent="yes">{{consent_yes}}</button><button type="button" class="choice" data-consent="no">{{consent_no}}</button></p>
+    </div>
+  </div>
+<!--/measured-->
   <div class="progress" aria-hidden="true"></div>
 
   <header class="top">
@@ -320,6 +332,10 @@
         <a class="link" href="{{repo}}/discussions">{{discussions}}</a>
         <a class="link" href="{{repo}}/security/policy">{{policy}}</a>
       </p>
+<!--measured-->
+      <p class="note">{{measure_p}}</p>
+      <p class="foot"><button type="button" class="link" data-consent-open hidden>{{consent_settings}}</button></p>
+<!--/measured-->
       <p class="foot" aria-label="{{lang_label}}">
 {{foot_languages}}
       </p>

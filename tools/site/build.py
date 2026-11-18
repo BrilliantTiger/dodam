@@ -24,6 +24,7 @@ llms.txt, the guide for AI agents. Whatever comes from outside the template is e
         --issues N     use N instead of asking GitHub for the number of open issues
         --status FILE  use this status instead of computing one (the layout check does)
         --compare      print "changed=false" when the published status.json shows the same digest
+        --analytics ID build with this measurement ID instead of the setting ANALYTICS_ID (the layout check does)
 """
 
 import datetime as dt
@@ -45,6 +46,16 @@ CHARTER = ROOT / "docs" / "charter.ko.md"
 TASKS = ROOT / "bench" / "tasks"
 SITE_URL = "https://brillianttigercorp.com/dodam/"
 REPO_URL = "https://github.com/BrilliantTiger/dodam"
+# The measurement ID of Google Analytics: this one setting, empty until the owner has created the
+# property. While it is empty the built pages hold no analytics code and name no other host.
+ANALYTICS_ID = ""
+MEASURED = re.compile(r"<!--measured-->\n(.*?)<!--/measured-->\n", re.S)   # parts of the template that exist only with an ID
+# What Google's measurement needs, from Google's guide to content security policies for the Google tag.
+GOOGLE_NEEDS = {
+    "script-src": ["https://www.googletagmanager.com"],
+    "img-src": ["https://www.googletagmanager.com", "https://*.google-analytics.com"],
+    "connect-src": ["https://www.googletagmanager.com", "https://*.google-analytics.com", "https://*.google.com"],
+}
 REPO = REPO_URL.split("github.com/", 1)[1]
 WELCOME = "ai-welcome"   # the label of issues open to outside contributors
 STATUS_VERSION = 1
@@ -63,7 +74,7 @@ PLACE = re.compile(r"\{(?:(d|m|n):([0-9-]+)|(repo))\}")
 LIVE = re.compile(r"\[([a-z_]+(?:\.[a-z_]+)?)\]")   # a value of the status, as [tasks.ready]
 LIVE_DATES = {"charter.date", "step.gate_plan", "step.gate_today"}
 LIVE_NUMBERS = {"charter.version", "step.gate_today_chance", "tasks.ready", "tasks.first", "open_issues"}
-COMPUTED = {"changes", "gate_today_hidden", "live_hidden", "structured"}   # filled in by render()
+COMPUTED = {"changes", "gate_today_hidden", "live_hidden", "structured", "csp", "analytics_id"}   # filled in by render()
 LIVE_NAMES = LIVE_DATES | LIVE_NUMBERS | {"step.name", "built"}
 ALLOWED_TAGS = {"strong", "code", "span"}
 # Counts are written in digits so that a differing count shows up as a differing number.
@@ -223,7 +234,7 @@ def inputs_digest(status: dict) -> str:
     file the pages are built from. The scheduled build deploys only when it differs from the published one."""
     shown = {key: value for key, value in status.items() if key not in {"built", "digest"}}
     sha = hashlib.sha256(json.dumps(shown, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    sources = [HERE / "template.html", HERE / "guide.txt", Path(__file__)] + sorted((HERE / "strings").glob("*.json"))
+    sources = [HERE / "template.html", HERE / "guide.txt", HERE / "analytics.js", Path(__file__)] + sorted((HERE / "strings").glob("*.json"))
     sources += sorted(p for p in OUT.rglob("*") if p.is_file() and p.name != "index.html")
     for path in sources:
         sha.update(path.name.encode("utf-8") + b"\0" + path.read_bytes())
@@ -323,6 +334,17 @@ def structured(lang: str, strings: dict) -> dict:
     }
 
 
+def card_source(lang: str, strings: dict | None = None) -> str:
+    """One value for everything a sharing image is drawn from: the headline, the status line, the colors
+    of the page and the drawing itself. card.py records it in cards.json when it draws the image."""
+    strings = strings if strings is not None else load_strings(lang)
+    css = (OUT / "style.css").read_text(encoding="utf-8").split("@media", 1)[0]
+    colors = sorted(re.findall(r"--(?:bg|surface|ink|muted|line|accent|glow|sans):\s*[^;]+;", css))
+    drawing = (HERE / "card.py").read_text(encoding="utf-8")
+    parts = [lang, json.dumps(strings["h1"], ensure_ascii=False), strings["status"], "\n".join(colors), drawing, str(CARD)]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
 def sitemap() -> str:
     rows = ['<?xml version="1.0" encoding="UTF-8"?>',
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">']
@@ -387,33 +409,57 @@ def specials(lang: str) -> dict:
     }
 
 
-def render(lang: str, strings: dict | None = None, status: dict | None = None) -> str:
+def measurement(analytics: str | None) -> str:
+    ident = ANALYTICS_ID if analytics is None else analytics
+    if ident and not re.fullmatch(r"G-[A-Z0-9]{4,20}", ident):
+        raise ValueError("a measurement ID of Google Analytics is G- followed by letters and digits")
+    return ident
+
+
+def policy(ident: str) -> str:
+    """The content security policy: the page's own address, and with a measurement ID what Google's
+    measurement needs. Styles may be inline because the headline's words carry their order in a style
+    attribute; scripts may not."""
+    needs = GOOGLE_NEEDS if ident else {}
+    rules = {"default-src": [], "script-src": needs.get("script-src", []), "style-src": ["'unsafe-inline'"],
+             "img-src": ["data:"] + needs.get("img-src", []), "connect-src": needs.get("connect-src", []),
+             "object-src": None, "base-uri": [], "form-action": None}
+    return "; ".join(f"{name} 'none'" if extra is None else " ".join([name, "'self'"] + extra) for name, extra in rules.items())
+
+
+def render(lang: str, strings: dict | None = None, status: dict | None = None, analytics: str | None = None) -> str:
     strings = strings if strings is not None else load_strings(lang)
+    ident = measurement(analytics)
     values = specials(lang)
+    values["analytics_id"] = ident
+    values["csp"] = policy(ident)
     for key, text in strings.items():
         values[key] = headline(lang, text) if isinstance(text, list) else live(lang, expand(lang, text), status, strings)
     values["live_hidden"] = "" if status else " hidden"
     values["gate_today_hidden"] = "" if status and status["step"]["gate_today"] else " hidden"
     values["changes"] = changes_list(lang, status)
     values["structured"] = json.dumps(structured(lang, strings), ensure_ascii=False, indent=1).replace("<", "\\u003c")
-    return KEY.sub(lambda m: values[m.group(1)], template())
+    return KEY.sub(lambda m: values[m.group(1)], MEASURED.sub(r"\1" if ident else "", template()))
 
 
-def pages(status: dict | None = None) -> dict[str, str]:
-    built = {page_file(lang): render(lang, status=status) for lang in LANGS}
+def pages(status: dict | None = None, analytics: str | None = None) -> dict[str, str]:
+    built = {page_file(lang): render(lang, status=status, analytics=analytics) for lang in LANGS}
     if status is None:
         built["sitemap.xml"] = sitemap()
     return built
 
 
-def publish(out: Path, status: dict) -> None:
+def publish(out: Path, status: dict, analytics: str | None = None) -> None:
     """What is deployed: the files of site/, the pages with the section about now filled in, the status
-    file and the guide for AI agents."""
+    file and the guide for AI agents. The measurement script is among them only with a measurement ID."""
+    ident = measurement(analytics)
     if out.exists():
         shutil.rmtree(out)
     shutil.copytree(OUT, out, ignore=shutil.ignore_patterns("__pycache__"))
-    for name, text in pages(status).items():
+    for name, text in pages(status, ident).items():
         (out / name).write_text(text, encoding="utf-8")
+    if ident:
+        shutil.copyfile(HERE / "analytics.js", out / "analytics.js")
     (out / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     (out / "llms.txt").write_text(guide(status), encoding="utf-8")
 
@@ -485,7 +531,7 @@ def main(argv: list[str]) -> int:
             now = json.loads(Path(given).read_text(encoding="utf-8"))
         else:
             now = status(issues=None if count is None else int(count))
-        publish(Path(option(argv, "--live")), now)
+        publish(Path(option(argv, "--live")), now, option(argv, "--analytics"))
         if "--compare" in argv:
             print("changed=" + ("false" if published_digest() == now["digest"] else "true"))
         return 0

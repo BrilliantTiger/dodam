@@ -185,5 +185,11 @@
   "a6": "Las instrucciones cuidadosas y la revisión dejan la seguridad al azar: en el informe de Veracode de {m:2026-07}, el código escrito por IA superó las pruebas de seguridad el 56% de las veces de media. Dodam traslada las reglas al lenguaje, de modo que el código que incumple una regla de seguridad no compila, sea cual sea el modelo que lo escribió. Las reglas de Dodam solo pueden endurecerse con el tiempo, y relajar una requiere la aprobación del propietario.",
   "lic_k": "Licencia",
   "lic_h": "MIT o Apache-2.0, a elección.",
-  "name_p": "Dodam (<span lang=\"ko\">도담</span>) viene del coreano «dodam-dodam»: un niño que crece sano y fuerte, sin contratiempos."
+  "name_p": "Dodam (<span lang=\"ko\">도담</span>) viene del coreano «dodam-dodam»: un niño que crece sano y fuerte, sin contratiempos.",
+  "consent_label": "Medición",
+  "consent_text": "¿Puede esta página contar su visita con Google Analytics? No se carga nada ni se guarda ninguna cookie si no acepta.",
+  "consent_yes": "Aceptar",
+  "consent_no": "Rechazar",
+  "consent_settings": "Cambiar la elección de medición",
+  "measure_p": "Esta página cuenta las visitas con Google Analytics, solo de quienes aceptan: qué páginas se abren, desde qué tipo de dispositivo y desde qué país, y de dónde llegó la visita. Las funciones publicitarias están desactivadas. Si rechaza, o su navegador envía una señal que rechaza el seguimiento, no se carga nada de Google ni se guarda ninguna cookie."
 }

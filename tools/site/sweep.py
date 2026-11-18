@@ -144,7 +144,12 @@ CHECK = """
     const headH = head.getBoundingClientRect().height;
     if (stuck && headH > Math.max(vh * 0.16, 1)) out.push(`the fixed header takes ${Math.round(headH)} of ${vh} px`);
     const h1 = document.querySelector('h1').getBoundingClientRect();
-    if (h1.bottom > vh + 0.5) out.push(`the headline does not fit the first screen (${Math.round(h1.bottom)} > ${vh})`);
+    // While the question about measurement is open it stands above the page, in the flow, and covers
+    // nothing. The headline must then fit one screen counted from below the question.
+    const asking = document.querySelector('#consent');
+    const pushed = asking && !asking.hidden ? asking.getBoundingClientRect().height : 0;
+    if (pushed > vh * 0.45) out.push(`the question about measurement takes ${Math.round(pushed)} of ${vh} px`);
+    if (h1.bottom - pushed > vh + 0.5) out.push(`the headline does not fit the first screen (${Math.round(h1.bottom - pushed)} > ${vh})`);
     const svg = document.querySelector('.dam svg').getBoundingClientRect();
     const room = vh - (stuck ? headH : 0);
     if (svg.height > room + 0.5) out.push(`the diagram is taller than the screen (${Math.round(svg.height)} > ${Math.round(room)})`);

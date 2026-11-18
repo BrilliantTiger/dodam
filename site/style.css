@@ -1105,6 +1105,71 @@ code {
   display: none;
 }
 
+/* The question about measurement: in the flow at the top of the page, so it covers nothing */
+
+.consent {
+  padding-block: calc(0.9rem + env(safe-area-inset-top)) 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font-size: 0.9375rem;
+}
+
+.consent[hidden] {
+  display: none;
+}
+
+.consent .wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+}
+
+.consent p {
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+
+.consent .choices {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.choice {
+  flex: 1 1 0;
+  min-width: 7rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 1.25rem;
+  border: 1.5px solid var(--ink);
+  border-radius: 99rem;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.link {
+  min-height: 2.75rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.link[hidden] {
+  display: none;
+}
+
 /* The section about now, and the questions */
 
 .live {
@@ -1902,5 +1967,17 @@ footer h2 {
   }
   to {
     transform: scaleX(1);
+  }
+}
+
+/* On a screen with a hinge the question about measurement sits left of it and the two answers right of it. */
+@media (horizontal-viewport-segments: 2) {
+  .consent .wrap {
+    display: grid;
+    align-items: center;
+  }
+
+  .consent .wrap > p:first-child {
+    grid-column: 1;
   }
 }
