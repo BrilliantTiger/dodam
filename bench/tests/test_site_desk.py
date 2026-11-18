@@ -535,7 +535,7 @@ def test_the_layout_check_runs_with_no_way_open_with_one_open_and_with_both_open
     jobs = re.findall(r"(?m)^  ([\w-]+):\n    runs-on:", text)
     limits = [int(n) for n in re.findall(r"timeout-minutes: (\d+)", text)]
     # The job desk also runs the desk's own tests, so its limit is the larger one.
-    assert jobs == ["layout", "desk"] and limits == [20, 30]
+    assert jobs == ["layout", "desk"] and limits == [20, 40]
     assert "write" not in text and "secrets." not in text
     uses = re.findall(r"uses:\s*(\S+)", text)
     assert uses and [u for u in uses if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", u)] == []
