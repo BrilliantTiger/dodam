@@ -15,7 +15,8 @@ SEP = "/"
 # Home-directory paths, written so that this file does not contain one itself.
 HOME_PATH = re.compile((SEP + "(?:Users|home)" + SEP + r"[A-Za-z0-9._-]+" + SEP).encode())
 # Names that are not a person: accounts that exist on every build machine or container.
-GENERIC = {b"runner", b"user", b"app", b"agent", b"nonroot", b"node", b"ubuntu", b"dodam", b"you", b"me"}
+GENERIC = {b"runner", b"user", b"app", b"agent", b"nonroot", b"node", b"ubuntu", b"dodam", b"you", b"me",
+           b"somebody-local"}   # the last is the made-up name in the pilot record's tests
 
 
 def git(*args: str) -> subprocess.CompletedProcess:

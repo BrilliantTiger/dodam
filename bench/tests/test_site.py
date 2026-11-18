@@ -230,32 +230,242 @@ def test_guarantee_cards_are_the_ten_in_the_charter(lang):
     assert re.search(r"(?<!\d)10(?!\d)", Page("<main>" + section.split("<ul", 1)[0]).text)
 
 
-def test_dates_and_numbers_are_the_charter_s():
-    build, text = builder(), charter()
-    research = (ROOT / "docs" / "research" / "2026-10-28-design-research.ko.md").read_text(encoding="utf-8")
-    en = build.load_strings("en")
-    found = set()
-    for value in en.values():
-        found.update(re.findall(r"\{(d|m|n):([0-9-]+)\}", "".join(value) if isinstance(value, list) else value))
-    needed = {("d", "2027-02-24"), ("d", "2028-05-10"), ("d", "2029-04-04"), ("d", "2030-10-30"), ("d", "2032-02-25"),
-              ("d", "2034-01-18"), ("m", "2038-11"), ("d", "2026-11-17"), ("n", "2000"), ("n", "1200")}
-    assert needed - found == set()
-    for kind, value in sorted(found):
-        if kind == "n":
-            assert f"{int(value):,}번" in text or (value == "2000" and "2천 번" in text), value
-        elif kind == "m" and f"Veracode {value}" in research:
+# --- the figures the page takes from the charter -----------------------------------------------
+#
+# The charter gives two sets of dates: the plan's dates at the plan's capacity, and the dates under
+# today's conditions. charter_figures() reads every date, count and percentage the page uses out of
+# the charter's own sentences; page_figures() says which string of the page carries which of them.
+# A figure changed by hand in the charter, or in the strings of one language, is then a fault.
+
+
+def iso(year: str, month: str, day: str = "") -> str:
+    return f"{year}-{int(month):02d}" + (f"-{int(day):02d}" if day else "")
+
+
+def charter_figures(text: str) -> dict:
+    def one(pattern: str, where: str) -> tuple:
+        found = re.findall(pattern, where, re.M)
+        assert len(found) == 1, f"the charter does not say this once: {pattern} ({len(found)})"
+        return found[0] if isinstance(found[0], tuple) else (found[0],)
+
+    schedule = text.split("\n## 일정\n", 1)[1].split("\n## ", 1)[0]
+    rows = re.findall(r"^\| (?:[^|]*~ )?(\d{4})년 (\d+)월 (\d+)일 \| ([^|]+) \|", schedule, re.M)
+    assert len(rows) == 5 and rows[-1][3] == "1.0", rows
+    span = r"(\d{4}-\d\d-\d\d)~(\d{4}-\d\d-\d\d)"
+    months = r"(\d{4})년 (\d+)월~(\d{4})년 (\d+)월"
+    low50, high50, pct, low80, high80 = one(rf"1\.0의 가운데 날짜는 {span}\(\d+주 폭\), (\d+)% 날짜는 {span}\(", schedule)
+    seeds, runs, y1, m1, y2, m2 = one(rf"씨앗 (\d+)개로 ([\d,]+)번씩 돌리면, 끝까지 지금 조건으로 갈 때 1\.0의 가운데 날짜는 씨앗에 따라 {months}이고", schedule)
+    pct_stop, ys, ms = one(r"두 경우 모두 (\d+)% 날짜는 시뮬레이션이 멈추는 (\d{4})년 (\d+)월보다 늦다", schedule)
+    assert pct == pct_stop
+    version, issued = one(r"^- 판: v(\d+\.\d+) \((\d{4}-\d\d-\d\d)\)$", text)
+    roles = text.split("\n| 역할 | 하는 일 |\n", 1)[1].split("\n\n", 1)[0].splitlines()[1:]
+    return {
+        "milestones": [iso(y, m, d) for y, m, d, _ in rows],
+        "plan_runs": one(r"터지게 해서 ([\d,]+)번 돌렸다", schedule)[0].replace(",", ""),
+        "plan_days": one(r"위 표와 문단의 날짜는 계획의 기준 용량\(AI 회사마다 계정 하나, 주 약 (\d+)작업일\)", schedule)[0],
+        "companies": str(len(set(re.findall(r"Claude Max 20x|ChatGPT Pro|Google AI Ultra", one(r"^\| AI 모델 사용 \|.*$", text)[0])))),
+        "median": [low50, high50],
+        "pct": pct,
+        "by_pct": [low80, high80],
+        "today_days": one(r"이 조건을 주 약 (\d+)작업일로", schedule)[0],
+        "today_seeds": seeds,
+        "today_runs": runs.replace(",", ""),
+        "today_median": [iso(y1, m1), iso(y2, m2)],
+        "stop": iso(ys, ms),
+        "version": version,
+        "issued": issued,
+        "guarantees": str(len(charter_guarantees())),
+        "roles": str(len(roles)),
+        "languages": one(r"기존 언어 (\d+)개로 잰 비교 기준", schedule)[0],
+        "tasks_first": one(r"벤치마크 과제 (\d+)개\(웹", schedule)[0],
+        "tasks_public": one(r"편집기 지원\(LSP\), 벤치마크 과제 (\d+)개", schedule)[0],
+        "service_months": one(r"실서비스 하나를 (\d+)개월 넘게", schedule)[0],
+    }
+
+
+def page_figures(c: dict) -> dict:
+    """For each string of the page that carries a figure: its placeholders and its plain numbers.
+    Names of releases and of the license are names, not figures."""
+    d = lambda value: "{d:%s}" % value
+    m = lambda value: "{m:%s}" % value
+    n = lambda value: "{n:%s}" % value
+    plan = {f"t{i}_w": ([d(day)], []) for i, day in enumerate(c["milestones"], 1)}
+    return plan | {
+        "t5_today": ([m(c["today_median"][0]), m(c["today_median"][1])], []),
+        "now_cap": ([], [c["companies"]]),
+        "now_note": ([n(c["plan_runs"]), d(c["issued"]), d(c["median"][0]), d(c["median"][1]), d(c["by_pct"][0]), d(c["by_pct"][1]),
+                      n(c["today_runs"]), m(c["today_median"][0]), m(c["today_median"][1]), m(c["stop"])],
+                     [c["companies"], c["plan_days"], c["version"], c["pct"], c["pct"], c["today_days"], c["today_seeds"]]),
+        "g_p": ([], [c["guarantees"]]),
+        "how_p": ([], [c["roles"]]),
+        "now_p": ([], [c["languages"]]),
+        "langs_label": ([], [c["languages"]]),
+        "t1_p": ([], [c["tasks_first"], c["languages"]]),
+        "t3_p": ([], [c["tasks_public"]]),
+        "t4_p": ([], [c["service_months"]]),
+    }
+
+
+NAMES_NOT_FIGURES = r"(?<![\d.])(?:1\.0|0\.1|2\.0|5\.5)(?![\d.])"   # releases, the license, a model's name
+FROM_RESEARCH = {"stat1", "stat2", "stat3", "src1", "src2", "src3", "why_note"}   # sources kept as they are
+
+
+def figure_faults(charter_text: str, strings: dict) -> list[str]:
+    """Every way the page's figures differ from the charter's, in any of the four languages."""
+    build = builder()
+    try:
+        want = page_figures(charter_figures(charter_text))
+    except AssertionError as error:
+        return [str(error)]
+    faults = list(build.problems(strings))
+    en = strings["en"]
+    for key, value in en.items():
+        if key in FROM_RESEARCH or isinstance(value, list):
             continue
-        elif value == "2026-10-28":
-            continue  # the date of the research notes read above
-        else:
-            assert build.spell("ko", kind, value) in text, value
-    assert "판: v0.7 (2026-11-17)" in text and "0.7" in en["now_note"]
-    for fact, key in (("벤치마크 과제 30개", "t1_p"), ("기존 언어 7개", "t1_p"), ("벤치마크 과제 100개", "t3_p"), ("3개월 넘게", "t4_p")):
-        assert fact in text
-        assert re.search(r"\d+", fact).group(0) in re.findall(r"\d+", en[key]), key
-    for line, key in (("45%가 불안전했고, Java는 70% 넘게", "stat1"), ("95%를 넘었는데 보안은 약 55%", "stat2"), ("평균 56%, 최고는 GPT-5.5의 68%", "stat3")):
-        assert line in research
-        assert set(re.findall(r"\d+(?:\.\d+)?", line)) - {"45", "56"} <= set(re.findall(r"\d+(?:\.\d+)?", en[key])), key
+        places = sorted(match.group(0) for match in build.PLACE.finditer(value) if match.group(1))
+        plain = sorted(re.findall(r"\d+(?:\.\d+)*", re.sub(NAMES_NOT_FIGURES, " ", build.PLACE.sub(" ", value))))
+        wanted_places, wanted_plain = want.get(key, ([], []))
+        if places != sorted(wanted_places):
+            faults.append(f"{key}: dates and large numbers {places}, the charter gives {sorted(wanted_places)}")
+        if plain != sorted(wanted_plain):
+            faults.append(f"{key}: numbers {plain}, the charter gives {sorted(wanted_plain)}")
+    faults += [f"{key}: the page has no such string" for key in want if key not in en]
+    return faults
+
+
+def all_strings() -> dict:
+    build = builder()
+    return {lang: build.load_strings(lang) for lang in build.LANGS}
+
+
+def test_every_date_count_and_percentage_from_the_charter_is_the_charter_s():
+    assert figure_faults(charter(), all_strings()) == []
+
+
+def now_section(lang: str) -> str:
+    return page_path(lang).read_text(encoding="utf-8").split('id="now"', 1)[1].split('id="join"', 1)[0]
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_built_page_spells_the_charter_s_dates_in_its_own_language(lang):
+    build, c = builder(), charter_figures(charter())
+    text = Page("<main>" + now_section(lang)).text
+    for day in c["milestones"] + c["median"] + c["by_pct"] + [c["issued"]]:
+        assert build.spell(lang, "d", day) in text, day
+    for month in c["today_median"] + [c["stop"]]:
+        assert build.spell(lang, "m", month) in text, month
+    for runs in (c["plan_runs"], c["today_runs"]):
+        assert build.spell(lang, "n", runs) in text, runs
+    assert re.search(rf"(?<![\d.]){re.escape(c['version'])}(?![\d.])", text), "the page does not name the charter's version"
+    assert re.search(rf"(?<!\d){c['pct']}\s?%", text)
+
+
+# One figure of the charter changed by hand, each as the charter writes it.
+CHARTER_VARIANTS = [
+    ("~ 2028년 5월 10일 | 최소 언어", "~ 2028년 6월 10일 | 최소 언어"),
+    ("~ 2032년 2월 25일 | 1.0", "~ 2032년 2월 26일 | 1.0"),
+    ("터지게 해서 2,000번 돌렸다", "터지게 해서 3,000번 돌렸다"),
+    ("계획의 기준 용량(AI 회사마다 계정 하나, 주 약 15작업일)에서의 계획 날짜다", "계획의 기준 용량(AI 회사마다 계정 하나, 주 약 16작업일)에서의 계획 날짜다"),
+    ("1.0의 가운데 날짜는 2032-02-11~", "1.0의 가운데 날짜는 2032-02-12~"),
+    ("~2032-03-24(6주 폭)", "~2032-03-31(6주 폭)"),
+    ("80% 날짜는 2034-01-18~2034-04-19(13주 폭)", "80% 날짜는 2034-01-18~2034-05-19(13주 폭)"),
+    ("80% 날짜는 2034-01-18~2034-04-19(13주 폭)", "70% 날짜는 2034-01-18~2034-04-19(13주 폭)"),
+    ("이 조건을 주 약 4작업일로", "이 조건을 주 약 5작업일로"),
+    ("씨앗 5개로 1,200번씩 돌리면, 끝까지", "씨앗 6개로 1,200번씩 돌리면, 끝까지"),
+    ("씨앗 5개로 1,200번씩 돌리면, 끝까지", "씨앗 5개로 1,300번씩 돌리면, 끝까지"),
+    ("씨앗에 따라 2040년 5월~2041년 1월이고", "씨앗에 따라 2040년 4월~2041년 1월이고"),
+    ("씨앗에 따라 2040년 5월~2041년 1월이고", "씨앗에 따라 2040년 5월~2041년 2월이고"),
+    ("시뮬레이션이 멈추는 2042년 10월보다 늦다", "시뮬레이션이 멈추는 2042년 11월보다 늦다"),
+    ("기존 언어 7개로 잰 비교 기준", "기존 언어 8개로 잰 비교 기준"),
+    ("벤치마크 과제 30개(웹", "벤치마크 과제 40개(웹"),
+    ("편집기 지원(LSP), 벤치마크 과제 100개", "편집기 지원(LSP), 벤치마크 과제 200개"),
+    ("실서비스 하나를 3개월 넘게", "실서비스 하나를 6개월 넘게"),
+    ("| 정리하는 AI |", "| 정리하는 AI | 한 줄 더 |\n| 지켜보는 AI |"),
+]
+
+
+def test_the_page_names_the_version_of_the_charter_it_takes_its_figures_from():
+    text = charter()
+    version, issued = re.search(r"^- 판: v(\d+\.\d+) \((\d{4}-\d\d-\d\d)\)$", text, re.M).groups()
+    later = text.replace(f"- 판: v{version} ({issued})", "- 판: v9.9 (2031-01-01)", 1)
+    assert figure_faults(later, all_strings()) != []
+    assert f"version {version}," in all_strings()["en"]["now_note"]
+
+
+@pytest.mark.parametrize("old,new", CHARTER_VARIANTS)
+def test_a_figure_changed_by_hand_in_the_charter_is_caught(old, new):
+    text = charter()
+    assert text.count(old) == 1, old
+    assert figure_faults(text.replace(old, new), all_strings()) != []
+
+
+# One figure changed by hand in the strings of one language.
+STRING_VARIANTS = [
+    ("t5_today", "{m:2040-05}", "{m:2039-05}"),
+    ("t5_today", "{m:2041-01}", "{m:2041-02}"),
+    ("t5_w", "{d:2032-02-25}", "{d:2031-02-25}"),
+    ("t1_w", "{d:2027-02-24}", "{d:2027-02-25}"),
+    ("now_note", "{m:2042-10}", "{m:2042-09}"),
+    ("now_note", "{d:2034-04-19}", "{d:2034-04-18}"),
+    ("now_note", "{n:1200}", "{n:2000}"),
+    ("now_note", "80", "90"),
+    ("now_note", "15", "30"),
+    ("now_cap", "3", "2"),
+]
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("key,old,new", STRING_VARIANTS)
+def test_a_figure_changed_by_hand_in_one_language_is_caught(lang, key, old, new):
+    strings = all_strings()
+    assert old in strings[lang][key], f"{lang} {key} does not carry {old}"
+    strings[lang][key] = strings[lang][key].replace(old, new, 1)
+    assert figure_faults(charter(), strings) != []
+
+
+# What charter versions 0.8 and 0.9 withdrew: the single dates for Claude alone, for a shared account and
+# for two companies, and the statement that each month with Claude alone costs about two weeks.
+WITHDRAWN_DATES = ["2038-11-10", "2040-07-11", "2033-08-31"]
+TWO_WEEKS = {"en": r"\b(?:two|2) weeks\b", "ko": r"(?:두|2) ?주", "ja": r"(?:2|二)週間", "es": r"\b(?:dos|2) semanas\b"}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_nothing_the_charter_withdrew_is_on_the_page(lang):
+    build = builder()
+    text = page(lang).text
+    for day in WITHDRAWN_DATES:
+        assert build.spell(lang, "d", day) not in text, day
+        month = build.spell(lang, "m", day[:7])
+        today_range = [build.spell(lang, "m", value) for value in charter_figures(charter())["today_median"]]
+        assert month not in text or month in today_range, month
+    assert not re.search(TWO_WEEKS[lang], text, re.I)
+    assert not re.search(r"(?<![\d.])0\.7(?![\d.])", text), "the page still names charter version 0.7"
+
+
+# The timeline is read on its own: each date there names the capacity it assumes, and the date for 1.0
+# under today's conditions stands beside the plan's, as the same kind of element.
+@pytest.mark.parametrize("lang", LANGS)
+def test_each_date_of_the_timeline_names_its_capacity_and_1_0_has_today_s_beside_the_plan_s(lang):
+    build, c = builder(), charter_figures(charter())
+    strings = build.load_strings(lang)
+    assert "cap_plan" in strings and "cap_today" in strings, "the capacities have no name on the page"
+    plan, today = strings["cap_plan"], strings["cap_today"]
+    timeline = now_section(lang).split('<ol class="timeline">', 1)[1].split("</ol>", 1)[0]
+    items = re.findall(r"<li>(.*?)</li>", timeline, re.S)
+    assert len(items) == 5
+    dates = [re.findall(r'<span class="when"><span class="cap">(.*?)</span>(.*?)(?=<span class="(?:when|tag)"|<h3>)', item, re.S) for item in items]
+    for index, found in enumerate(dates):
+        assert item_has_no_bare_date(items[index]), "a date of the timeline does not name its capacity"
+        assert [cap for cap, _ in found] == ([plan, today] if index == 4 else [plan]), (lang, index)
+        assert build.spell(lang, "d", c["milestones"][index]) in found[0][1]
+    for month in c["today_median"]:
+        assert build.spell(lang, "m", month) in dates[4][1][1]
+    assert plan != today and plan.strip() and today.strip()
+
+
+def item_has_no_bare_date(item: str) -> bool:
+    return item.count('<span class="when">') == item.count('<span class="when"><span class="cap">')
+
 
 
 # --- the site as a whole --------------------------------------------------------------------
