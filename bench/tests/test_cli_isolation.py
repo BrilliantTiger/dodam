@@ -1136,14 +1136,18 @@ NO_STOPS = (("dodam_judge.py", "MEMORY_RESERVE_MB = 128", "MEMORY_RESERVE_MB = 0
             ("dodam_cli.py", "WATCH = 0.002", "WATCH = 3600.0"))
 
 
-def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_path):
-    """Really out of memory, five times over: the container is full and the kernel ends a process."""
+@pytest.mark.parametrize("measuring, turns", [("switched off", 5), ("every 0.002 seconds", 3)])
+def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_path, measuring, turns):
+    """Really out of memory, several times over: the container is full and the kernel ends a process.
+    The judge's stop below the cap is taken out and the case's limit is above the cap, so the
+    judge ends nothing. Once the case runner sleeps meanwhile, once it measures as it always does."""
     limit, body = BREAKS["memory"]
-    for turn in range(5):
+    for turn in range(turns):
         where = tmp_path / str(turn)
         where.mkdir()
         result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS},
-                              room={"memory_mb": 640, "changed": NO_STOPS}, CASE_MEMORY_MB="100000")
+                              room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1]},
+                              CASE_MEMORY_MB="100000")
         assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
         assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
         if (where / "out/attack.json").is_file():
@@ -1356,8 +1360,10 @@ print("done")
     assert said["runs"] == 1 and said["largest"][0]["above_the_limit_mb"] >= 100, said
 
 
-# A hidden test that says how much memory the kernel held for names and file records before and
-# after a program that only looks at files, and hands back how the run was judged.
+# A hidden test that says how much memory the kernel held for names and file records before a
+# program that only looks at files, and hands back how the run was judged. The program says the
+# most the kernel held of them while it ran: the kernel gives them back whenever it likes, so what
+# is left after the run shows nothing.
 LOOK_TESTS = '''
 def given_back_mb():
     stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
@@ -1376,7 +1382,7 @@ def test_the_one_that_looks():
         with open("/logs/verifier/attack.json", "w") as f:
             json.dump({"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-300:],
                        "before_mb": before, "after_mb": given_back_mb()}, f)
-        assert r.exit_code == 0 and r.out == "done\\n", r
+        assert r.exit_code == 0 and r.out.startswith("done "), r
 
 
 def test_after():
@@ -1386,19 +1392,27 @@ def test_after():
 
 
 def test_a_program_that_only_looks_at_files_never_fails_for_memory(tmp_path):
-    """A program that holds a few MB looks at every file of the image and asks for 200,000 names
+    """A program that holds a few MB looks at every file of the image and asks for 400,000 names
     that are not there. It reads nothing and takes nothing; the kernel keeps a record of every
     name, well above the case's limit of 64 MB, and gives those records back when memory is needed."""
     program = PLAIN + r'''
+def given_back_mb():
+    stat = dict(line.split() for line in open("/sys/fs/cgroup/memory.stat"))
+    return int(stat["slab_reclaimable"]) // MB
+
+
 for top, folders, files in os.walk("/"):
     if top.startswith(("/proc", "/sys", "/dev")):
         folders[:] = []
-for number in range(200000):
+most = 0
+for number in range(400000):
     try:
         os.lstat(f"/usr/lib/not-there-{number}")
     except OSError:
         pass
-print("done")
+    if number % 10000 == 9999:
+        most = max(most, given_back_mb())
+print("done", most)
 '''
     result = judge_attack(tmp_path, program, {"functional/test_look.py": LOOK_TESTS}, CASE_MEMORY_MB="64",
                           CASE_TIMEOUT_SEC="60")
@@ -1407,7 +1421,7 @@ print("done")
     assert seen["limit"] is None and seen["exit_code"] == 0, f"a program inside its limits failed for {seen['limit']}: {seen}"
     assert outcomes(result) == {"test_before": "passed", "test_the_one_that_looks": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
     # the test shows something only when the kernel held more than the limit for the names
-    assert seen["after_mb"] >= seen["before_mb"] + 100, f"the kernel was to hold more than the limit for the names: {seen}"
+    assert int(seen["out"].split()[1]) >= seen["before_mb"] + 64, f"the kernel was to hold more than the limit for the names: {seen}"
 
 
 # What the kernel ends first when the container's memory runs out is the judge's decision, not a
@@ -1438,16 +1452,6 @@ print(json.dumps({"mark": int(open("/proc/self/oom_score_adj").read()), "score":
     marks = [seen[who]["mark"] for who in ("program", "case_runner", "judge")]
     assert marks == [1000, 500, 0], f"the marks by which the kernel chooses what it ends: {seen}"
     assert seen["program"]["score"] > seen["case_runner"]["score"] > seen["judge"]["score"], seen
-
-
-def test_where_the_kernel_keeps_no_count_of_what_was_read_the_check_fails_no_case_and_the_result_says_so(tmp_path):
-    """A judge that finds no count of what its container read from disk cannot tell cache from
-    memory in the highest value. There the check is not used, and the result says that and why."""
-    result, seen = reads_from_disk(tmp_path, READERS["reads a file of 400 MB in blocks of 1 MB and holds about 10 MB"],
-                                   room={"changed": (("dodam_judge.py", '"io.stat"', '"io.none"'),)})
-    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
-    check = result["report"]["memory"].get("new_high_check")
-    assert check and check["available"] is False and "no count" in check["why_not"], check
 
 
 # The listing of a case's files, which a hidden test asks for, against what a program can leave.

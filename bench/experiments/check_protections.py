@@ -42,8 +42,10 @@ def broken_copy(protection: dict, where: Path) -> Path:
     path = copy / protection["file"]
     text = path.read_text(encoding="utf-8")
     for change in protection["change"]:
-        if change["find"] not in text:
-            raise SystemExit(f"{protection['what']}: the text to break is not in {protection['file']} any more")
+        # one entry is one place: a text that occurs twice would take two places out together
+        if text.count(change["find"]) != 1:
+            raise SystemExit(f"{protection['what']}: the text to break must occur exactly once in "
+                             f"{protection['file']}, and it occurs {text.count(change['find'])} times")
         text = text.replace(change["find"], change["put"])
     path.write_text(text, encoding="utf-8")
     return copy

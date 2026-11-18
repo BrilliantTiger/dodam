@@ -9,6 +9,12 @@ runs it: a container of the Python image without network, capped in memory and p
     python experiments/memory_overshoot.py --quick     # every row once: whether the table still comes out
 
 The script ends with an error when a row does not come out; the automatic check runs the quick mode.
+A row has come out when every run of it gave what such a run may give. With the judge's stop that
+is one thing: the hidden test handed back what it measured, the case of the program failed and
+the cases before and after it passed. Without the stop the kernel ends something, the program's
+side first and the case runner after it. So there a run may also hand back no measurement, if the
+case failed, the others passed and the result says that the kernel ended the case runner. A run
+that did not start, or that gave no judgement, is an error in every row.
 
 For every run it records, from inside the container:
 
@@ -174,8 +180,21 @@ def judged(program: str, memory_mb: int, limit_mb: int, stop: bool) -> dict:
         finally:
             subprocess.run(["docker", "rm", "--force", name], capture_output=True)
         seen = json.loads((out / "overshoot.json").read_text()) if (out / "overshoot.json").is_file() else {}
-        cases = (json.loads((out / "details.json").read_text())["tests"] if (out / "details.json").is_file() else [])
-        return {**seen, "exit_code": done.returncode, "outcomes": [c["outcome"] for c in cases]}
+        report = json.loads((out / "details.json").read_text()) if (out / "details.json").is_file() else {}
+        return {**seen, "exit_code": done.returncode, "outcomes": [c["outcome"] for c in report.get("tests", [])],
+                "kernel_ended_the_case_runner": any(end["kernel_kills_after"] > end["kernel_kills_before"]
+                                                    for end in report.get("runner_ended", []))}
+
+
+def as_meant(run: dict) -> bool:
+    return run["outcomes"] == ["passed", "failed", "passed"] and run["exit_code"] == 0
+
+
+def gave_what_it_may(run: dict, stop: bool) -> bool:
+    """Whether one run gave what a run of its row may give; see the top of this file."""
+    if not as_meant(run):
+        return False
+    return "high_after_mb" in run or (not stop and run["kernel_ended_the_case_runner"])
 
 
 def main(runs_each: int = RUNS) -> None:
@@ -187,8 +206,10 @@ def main(runs_each: int = RUNS) -> None:
             row = {"container_mb": memory_mb, "limit_mb": limit_mb, "stop_128_mb_below_the_cap": stop,
                    "program": name, "runs": len(runs), "measured_runs": sum("high_after_mb" in r for r in runs),
                    "outcomes_and_exit_codes": sorted({json.dumps([r["outcomes"], r["exit_code"]]) for r in runs}),
-                   "judged_as_meant": sum(r["outcomes"] == ["passed", "failed", "passed"] and r["exit_code"] == 0
-                                          for r in runs),
+                   "judged_as_meant": sum(as_meant(r) for r in runs),
+                   "kernel_ended_the_case_runner": sum(as_meant(r) and "high_after_mb" not in r
+                                                       and r["kernel_ended_the_case_runner"] for r in runs),
+                   "gave_what_a_run_may": sum(gave_what_it_may(r, stop) for r in runs),
                    "ended_for_memory": sum(r.get("limit") == "memory" for r in runs),
                    "kernel_had_to_end_a_process": sum(r.get("ended_by_the_kernel", 0) > 0 for r in runs),
                    "reached_mb": {"lowest": round(reached[0]), "median": round(statistics.median(reached)),
@@ -199,13 +220,11 @@ def main(runs_each: int = RUNS) -> None:
             table.append(row)
             print(f"{memory_mb:5} MB  limit {limit_mb:6}  stop {stop!s:5}  {name:56}  {row['reached_mb']}  gap {row['longest_gap_ms']} ms  "
                   f"kernel {row['kernel_had_to_end_a_process']}  as meant {row['judged_as_meant']}", file=sys.stderr, flush=True)
-    # A row has come out when every run handed back what it measured and every case was judged as
-    # meant. Without the judge's stop the kernel chooses what it ends, the case runner or the judge
-    # among them: there the row is the count of what happened, and it has come out when it is there.
-    missing = [f"{row['container_mb']} MB, limit {row['limit_mb']}, {row['program']}: measured in "
-               f"{row['measured_runs']} and judged as meant in {row['judged_as_meant']} of {row['runs']} runs"
-               for row in table if row["stop_128_mb_below_the_cap"]
-               and (row["measured_runs"] != row["runs"] or row["judged_as_meant"] != row["runs"])]
+    missing = [f"{row['container_mb']} MB, limit {row['limit_mb']}, "
+               f"{'with' if row['stop_128_mb_below_the_cap'] else 'without'} the stop, {row['program']}: measured in "
+               f"{row['measured_runs']}, judged as meant in {row['judged_as_meant']}, the case runner ended by the "
+               f"kernel in {row['kernel_ended_the_case_runner']} of {row['runs']} runs; {row['outcomes_and_exit_codes']}"
+               for row in table if row["gave_what_a_run_may"] != row["runs"]]
     print(json.dumps({"runs_each": runs_each, "rows": table, "rows_that_did_not_come_out": missing}, indent=1))
     if missing:
         raise SystemExit("a row did not come out: " + "; ".join(missing))

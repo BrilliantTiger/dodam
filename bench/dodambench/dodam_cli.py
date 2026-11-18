@@ -71,40 +71,30 @@ except ImportError:
 
 resource = _judge.resource
 CONFIG_ENV = "DODAM_CLI_CONFIG"
-# How often the judge looks at the program: whether it ended, and how much memory the container holds.
 def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
     """The container's memory ran out during the run and the kernel ended a process for it."""
     return killed_now > killed_before
 
 
-def _passed_unseen(high_before: int, high_now: int, all_before: int, allowed: int, from_disk: int | None) -> bool:
-    """The container's memory made a new high during the run, and what is left of it when everything
-    the cache of files on disk can account for is taken out lies further above what the container
-    held when the run began than the case may take in memory and files together.
+def _above_in_a_new_high(high_before: int, high_now: int, taken_before: int, allowed: int) -> int:
+    """How far a new high of the container's memory lies above what the case may take in memory
+    and files together, counted from the memory that could not be given back when the run began;
+    0 when the run made no new high, or one within that.
 
-    The kernel keeps the high whatever happens between two measurements, but it counts the cache of
-    files on disk, which is no memory of the program's: the kernel gives it back whenever memory is
-    needed. During the run that cache can have grown by no more than `from_disk`: what the container
-    read from disk meanwhile, by the kernel's own count, and what files in folders mounted from
-    elsewhere can hold. So a program that only reads never fails here, however much it reads and
-    whether or not it was in the cache before. None means the count cannot be relied on in this
-    container: then no case fails by this check. The high never goes down, so a run that stays
-    below an earlier high is not seen this way; nor is one that reads as much from disk as it
-    goes above its limit."""
-    if from_disk is None:
-        return False
-    return high_now > high_before and high_now - all_before - from_disk > allowed
-
-
-def _cache_can_account_for(read_before: int | None, read_now: int | None, elsewhere: int) -> int | None:
-    """The most the cache of files on disk can have grown by during a run: what the container read
-    from disk meanwhile, and what the files in folders mounted from elsewhere can hold, since the
-    kernel does not count reads there. None when the count of reads cannot be relied on."""
-    if read_before is None or read_now is None:
-        return None
-    return read_now - read_before + elsewhere
+    The kernel keeps the high whatever happens between two measurements. But it counts the cache
+    of files into it, which is no memory of the program's and which grows in ways the kernel
+    counts nowhere for the container: by reading a file that is on disk, by reading one that has
+    holes or room that was never written, by writing. What the kernel kept cannot be told apart
+    afterwards. So this number is the most the program can have held at once, not what it held;
+    it is written into the result and fails no case. A case fails for memory by what the judge
+    measured, or because the kernel ended a process. The high never goes down, so a run that
+    stays below an earlier high of the container gives 0 here whatever it took."""
+    if high_now <= high_before:
+        return 0
+    return max(high_now - taken_before - allowed, 0)
 
 
+# How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
 PR_SET_CHILD_SUBREAPER = 36
@@ -353,6 +343,13 @@ class Case:
 
         if not self.work.is_dir():
             raise fault("the case's working folder is gone")
+        # What the run starts from is read before the program exists, so that nothing the program
+        # does in its first moments is in it.
+        separated = self._side is not None
+        killed_before = _judge.killed_for_memory() if separated else 0
+        high_before = _judge.highest_memory() if separated else 0
+        held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
+        memory_before = held_before["taken"] - _files_held(self._cfg["work_root"]) if separated else 0
         started = time.monotonic()
         try:
             proc = subprocess.Popen(argv, cwd=self.work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -364,41 +361,50 @@ class Case:
                 raise fault(f"cannot start a process for the program: {exc}") from None
             # the program is not there or cannot be run as built: the program's failure
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
-        killed_before = _judge.killed_for_memory() if self._side is not None else 0
-        high_before = _judge.highest_memory() if self._side is not None else 0
-        all_before = _judge.container_memory()["all"] if self._side is not None else 0
-        read_before = self._read_from_disk()
         try:
-            result = self._watch(proc, stdin, started, left)
+            result = self._watch(proc, stdin, started, left, memory_before)
             if result.limit is None and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
             self._end(proc)
-        if self._side is not None and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
+        if separated and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
-        from_disk = _cache_can_account_for(read_before, self._read_from_disk(),
-                                           self._cfg.get("new_high", {}).get("elsewhere_bytes", 0))
-        high_now = _judge.highest_memory() if self._side is not None else 0
-        self.measured.update(high_before=high_before, high_now=high_now, held_before=all_before, from_disk=from_disk)
-        if self._side is not None and result.limit is None and _passed_unseen(
-                high_before, high_now, all_before, (limits["memory_mb"] + limits["disk_mb"]) * 2**20, from_disk):
-            result.limit, result.exit_code = "memory", None
+        high_now = _judge.highest_memory() if separated else 0
+        above = _above_in_a_new_high(high_before, high_now, held_before["taken"],
+                                     (limits["memory_mb"] + limits["disk_mb"]) * 2**20)
+        self.measured.update(high_before=high_before, high_now=high_now, taken_before=held_before["taken"],
+                             held_before=held_before["all"], above_the_limit=above)
+        if above:
+            # written into the result as a number; the judgement of the case is what the measuring gave
+            self._record_high(high_before, high_now, held_before, above)
         result.seconds = time.monotonic() - started
         _spent[self._key] = _spent.get(self._key, 0.0) + result.seconds
         return self._note(result)
 
-    def _read_from_disk(self) -> int | None:
-        """What the container has read from disk so far; None where that count cannot be relied on."""
-        if self._side is None or not self._cfg.get("new_high", {}).get("available"):
-            return None
-        return _judge.disk_read()
+    def _record_high(self, high_before: int, high_now: int, held_before: dict, above: int) -> None:
+        """Hand the judge the numbers of a run in which the container's memory made a new high
+        above what the case may take."""
+        path = self._cfg.get("highs_file")
+        if not path:
+            return
+        mb = 2**20
+        record = {"case": self._key, "limit_mb": self._limits["memory_mb"], "files_mb": self._limits["disk_mb"],
+                  "high_before_mb": high_before // mb, "high_mb": high_now // mb,
+                  "taken_before_mb": held_before["taken"] // mb, "held_before_mb": held_before["all"] // mb,
+                  "above_the_limit_mb": above // mb}
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError:
+            pass
 
     def _note(self, result: Result) -> Result:
         if result.limit:
             self._broken.append(result.limit)
         return result
 
-    def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float) -> Result:
+    def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float,
+               memory_before: int) -> Result:
         limits = self._limits
         max_out = limits["output_kb"] * 1024
         max_memory = limits["memory_mb"] * 1024 * 1024
@@ -414,7 +420,6 @@ class Case:
             now = _judge.container_memory()
             return bool(now["cap"]) and now["taken"] > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
 
-        memory_before = memory_taken() if self._side is not None else 0
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
         limit = None
@@ -521,7 +526,7 @@ class Case:
         except (ProcessLookupError, PermissionError):
             pass
         if self._side is not None and not self._side.end():
-            raise fault("processes of the program could not be ended")
+            raise fault("processes of the program could not be ended after its run")
         try:
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -544,7 +549,7 @@ class Case:
     def close(self) -> None:
         """Give back what the case took. What cannot be removed fails the case: the program made it."""
         if self._side is not None and not self._side.end():
-            raise fault("processes of the program could not be ended")
+            raise fault("processes of the program could not be ended when its case closed")
         try:
             _judge.remove_tree(self.root)
         except OSError as exc:

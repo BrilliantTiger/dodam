@@ -399,7 +399,7 @@ tests = [
 class = "memory"
 name = "memory taken and given back between two measurements"
 tries = "the program takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
-must = "the case fails for memory: the kernel kept the container's highest use, and the judge reads it after the run and takes out of it what the container read from disk meanwhile"
+must = "not stopped by the design when no measurement falls into that moment: the case passes. The kernel's highest value for the container counts the cache of files, so it fails no case; the result names the run and says how far above the limit the new high lay. With the judge measuring every 0.002 seconds as it does, the program of this test fails for memory"
 tests = [
     "tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case",
 ]
@@ -581,7 +581,7 @@ tests = [
 class = "memory"
 name = "memory taken for a moment by a program that also reads from disk"
 tries = "the program reads 50 MB of a file that is not in the cache, then takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
-must = "the case fails for memory: what was read from disk accounts for 50 MB of the container's new high and no more"
+must = "not stopped by the design when no measurement falls into that moment: the case passes, and the result names the run and says how far above the limit the new high lay"
 tests = [
     "tests/test_cli_isolation.py::test_memory_taken_for_a_moment_by_a_program_that_also_reads_from_disk_is_recorded_and_fails_no_case",
 ]

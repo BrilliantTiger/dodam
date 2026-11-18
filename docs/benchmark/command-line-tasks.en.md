@@ -187,21 +187,31 @@ A limit is a bound, not a measurement. For each resource there is a line that ca
 | Output | the output limit plus what one pipe holds | the judge keeps what fits in the limit, reads no more and ends the program | fails |
 | Processes and threads | the limit itself | the kernel refuses that user a process or thread beyond the limit; the user is this judging's alone | cannot be taken |
 | Files | the limit itself, and 20,000 entries | the container caps the memory-backed folder the case's folder lives in at that size. Many small files, deep folders, files deleted while open, the home and temporary folders are all inside it, so together they come to that size. One file cannot be made larger than the limit, not even a sparse one (the kernel) | cannot be taken. A program the kernel ended for making one file too large fails |
-| Memory | the container's memory cap, and beside it only the swap the container is allowed (none on every path of this repository) | as often as it gets to run, and at most every 0.002 seconds, the judge measures the memory of the whole container and ends the program above the limit. After the run it reads the highest value the kernel kept for the container and takes out of a new high what the cache of files on disk can account for; what is left above the limit fails the case as well. What gets past the measuring is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case during which the kernel ended a process |
+| Memory | the container's memory cap, and beside it only the swap the container is allowed (none on every path of this repository) | as often as it gets to run, and at most every 0.002 seconds, the judge measures the memory of the whole container and ends the program above the limit. After the run it reads the highest value the kernel kept for the container; a new high above the limit is written into the result and fails no case. What gets past the measuring is stopped by the kernel at the container's cap, where the kernel ends the program first | fails; so does a case during which the kernel ended a process |
 
-**What counts as memory.** Not the memory of the processes alone but everything the kernel counts for the container: the memory of all processes, memory files that belong to no process, pipes and what the kernel keeps for them. Memory the kernel moved out to swap is counted as memory. The cache of files on disk and the files in the case's folder are taken out (the case's files count against the file limit). What was there when the run began is subtracted; the rest is the case's memory.
+**What counts as memory.** Not the memory of the processes alone but everything the kernel counts for the container: the memory of all processes, memory files that belong to no process, pipes and what the kernel keeps for them. Memory the kernel moved out to swap is counted as memory. The cache of files on disk and the files in the case's folder are taken out (the case's files count against the file limit). Taken out as well are the records the kernel keeps of the names and files that were looked at and of the pages of that cache: the kernel gives them back whenever memory is needed, as it does the cache, and says how much they are. They are no small thing: a program that held 4 MB and asked for 900,000 names that are not there made the kernel hold 669 MB of such records. A program that only looks at files, or only reads them, therefore never fails for memory. What a program can keep the kernel from giving back of these records is the names in its case's folder, which the container caps at 20,000 entries: 14 MB, measured with as many folders as fit, each with a name of 250 letters. What was there when the run began is subtracted; the rest is the case's memory.
 
 **What cannot be made.** Memory that stays when its processes have ended, which is System V shared memory, message queues and semaphores, and POSIX message queues: the kernel refuses the calls themselves. The folder for POSIX shared memory is closed to writing. So once the program's processes are ended, nothing of its memory is left but the files in the case's folder.
 
 **How far memory can really be passed.** Memory alone can be passed between two measurements. The line that cannot be passed is the container's memory cap; the most a program can be above its limit is that cap less the limit and less what the judge uses. How far programs that try got, and how long the judge went without measuring while they kept both processors busy, is in "The numbers": the judge does not measure every 0.002 seconds under such a load.
 
-**The highest value the kernel kept.** The kernel keeps the highest memory use of the container, whatever happens between two measurements. The judge reads it before and after every run. That value counts more than memory. It counts the cache of files on disk, which the kernel fills whenever something is read from disk and gives back whenever memory is needed; it is no memory of the program's. So the judge takes out of a new high everything that cache can account for. Before and after the run it reads the kernel's own count of what the container read from disk, and takes out what was read during the run. To that it adds the size of every file in folders mounted into the container from outside the Docker machine's disks, because what is read there is cache as well but is not in that count. When what is left of the new high lies further above what the container held at the start of the run than the case may take in memory and files together, the case fails for memory.
+**The highest value the kernel kept.** The kernel keeps the highest memory use of the container, whatever happens between two measurements. The judge reads it before and after every run, and it fails no case by itself. A case fails for memory when the judge measured the program above its limit, or when the kernel ended a process during the run.
 
-A program that only reads files therefore never fails this way: however much it reads, whether or not the files were in the cache before, and whether it reads them, maps them into its memory or drops them from the cache and reads them again. When the judging begins the judge tries the count once: it writes a file of 4 MB, drops it from the cache, reads it back and looks whether the count grew by 4 MB. Where the kernel keeps no such count, or the count does not move, this check fails no case, and the result says that it was not available and why.
+The reason is what that value counts. It counts the cache of files, which is no memory of the program's, and the kernel keeps no count from which the judge could tell afterwards how much of a new high was cache. Reading a file that is on disk fills the cache, and that much the kernel counts for the container as bytes read from disk. But the cache grows in other ways that the kernel counts nowhere:
 
-What this check cannot see. The value never goes down, so a run that stays below an earlier high, for example below what the build took, is not seen this way. A program that is above its limit only for moments and reads at least as much from disk during the same run is not seen either, because what it read is taken out whether or not it was still in the cache at that moment. And the value does not count memory moved out to swap. For all three the judge's own measuring and the container's cap remain.
+- reading a file that has holes, or one whose room on disk was set aside and never written, by reading it or by mapping it into memory: the cache fills with empty pages and nothing is read from disk;
+- reading a file in a folder that does not lie on one of the Docker machine's disks;
+- writing a file: what is written is in the cache before it is on disk. The judged program can write nowhere on disk, but the build does, and the judge does;
+- pages of a file that several processes map together, which the kernel counts for whichever container touched them first;
+- the kernel's own records of names, files and pages of the cache, which are in that value too.
 
-**The stop at 128 MB.** Whatever the case's limit is, the judge ends a program when the container has less than 128 MB left. This is a second line of defence. A case during which the kernel ended a process fails anyway, and the other cases are judged whatever the kernel ends. What the stop does is keep the kernel from having to choose: in the runs of "The numbers" the kernel ended nothing with the stop in place, and without it ended a process in every run of the programs that fill the container. Without the stop the kernel's choice could one day be the judge itself, and then the judging ends without a result.
+A judge that failed a case on a new high after taking out what the container had read from disk was tried here first. A program that held 10 MB and read a file of 400 MB with nothing but a hole in it failed for memory in every judging, at limits of 256 MB and of 64 MB. No count closes all of these ways, so the value judges nothing.
+
+What the judge does with it. When a run made a new high for the container, and that high lies further above the memory that could not be given back when the run began than the case may take in memory and files together, the result names the case and gives the numbers (`memory.highs_above_the_limit` in `details.json`: how many such runs there were, and for the ten that lay furthest above, the limit, the high before and after, what the container held before, and how far above the limit the high lay). That figure is the most the program can have held at once, not what it held. For a program that held 10 MB and read a file of 400 MB it says about 120 MB above a limit of 256 MB; for one that took 400 MB for a moment under the same limit it says the same.
+
+What this record cannot show. A run is in it only when it made a new high for the container. The value never goes down, and it counts the cache of files: so everything the container ever held at one moment before, the cache of the build and of earlier cases included, hides a later run that stays below it. The value does not count memory moved out to swap. And a run that is in the record need not have taken anything: reading alone makes a new high. For all of these the judge's own measuring and the container's cap remain.
+
+**The stop at 128 MB.** Whatever the case's limit is, the judge ends a program when the container has less than 128 MB left. This is a second line of defence. A case during which the kernel ended a process fails anyway, and the other cases are judged whatever the kernel ends. What the stop does is keep the kernel from having to choose: in the runs of "The numbers" the kernel ended nothing with the stop in place, and without it ended a process in every run of the programs that fill the container. What the kernel chooses then is the judge's decision and not a matter of which process happens to hold more. Every process of the program's side carries the kernel's highest mark for being ended first (1,000), the case runner carries 500 and the judge none. In a container of 640 MB the kernel's score, by which it chooses, was 1,339 for the program, 1,016 for the case runner and 676 for the judge. Before the case runner had a mark it stood at 683 against the judge's 677, only because it holds more memory (about 51 MB against about 32 MB), and in one run of the automatic check without the stop the hidden test handed nothing back: the kernel had ended the case runner in the moment the program's memory was being released. So without the stop the kernel ends the program and, when that does not free memory soon enough, the case runner; the case fails for memory and a new runner judges the cases after it. The judge is the kernel's last choice. If it were ended, the judging would end without a result.
 
 **A machine with swap.** A container that may swap could hold more than its memory cap. The checking tool gives its containers no swap beyond the memory cap, and the container settings file of a converted task takes away the swap Harbor would otherwise allow (as much again as the memory cap). The judge does not rest on that: it reads at its start how much swap its container may use, writes it into the result (`swap_mb`, 0 on every path of this repository), and counts swapped memory as memory, so a program above its limit fails also when part of it was swapped out. Where a container is allowed swap, the line that cannot be passed is the memory cap plus that allowance.
 
@@ -349,20 +359,20 @@ Four programs that try to get past the limit were each judged twenty times in a 
 
 | Program | Container 1,024 MB: lowest, median, highest | Container 640 MB: lowest, median, highest | Longest time between two measurements |
 |---|---|---|---|
-| One process, block after block | 260 · 264 · 277 MB | 257 · 273 · 283 MB | 5.7 ms |
-| Eight processes, 64 MB each | 259 · 267 · 294 MB | 259 · 283 · 314 MB | 14.0 ms |
-| One process with two threads asking for memory the kernel fills at once | 259 · 270 · 298 MB | 260 · 274 · 293 MB | 3.9 ms |
-| Fifteen processes that take memory at the same moment | 259 · 273 · 303 MB | 258 · 276 · 320 MB | 17.9 ms |
+| One process, block after block | 258 · 268 · 280 MB | 257 · 262 · 279 MB | 5.6 ms |
+| Eight processes, 64 MB each | 257 · 269 · 323 MB | 263 · 273 · 292 MB | 15.9 ms |
+| One process with two threads asking for memory the kernel fills at once | 259 · 265 · 279 MB | 262 · 265 · 283 MB | 4.9 ms |
+| Fifteen processes that take memory at the same moment | 258 · 274 · 306 MB | 258 · 276 · 315 MB | 20.8 ms |
 
-In all 160 runs the case failed for memory, the cases before and after it passed, and the kernel ended nothing. The programs reached 257 to 320 MB. While a program kept both processors busy the judge did not measure every 0.002 seconds: the longest time between two measurements was 17.9 ms, and in the shortest run the judge measured 7 times before the program was ended.
+In all 160 runs the case failed for memory, the cases before and after it passed, and the kernel ended nothing. The programs reached 257 to 323 MB. While a program kept both processors busy the judge did not measure every 0.002 seconds: the longest time between two measurements was 20.8 ms, and in the shortest run the judge measured 9 times before the program was ended. Every one of these cases failed by the judge's own measuring; the kernel's highest value fails no case.
 
-The table gives the ranges measured in this run, not a bound. In the review a program of the same kind (fifteen processes starting together, limit 256 MB, container 1,024 MB) reached 334, 344, 387, 488 and 506 MB in five runs, 186 MB above the highest value of this table. The bound is the container's cap.
+The table gives the ranges measured in this run, not a bound. In the review a program of the same kind (fifteen processes starting together, limit 256 MB, container 1,024 MB) reached 334, 344, 387, 488 and 506 MB in five runs, 183 MB above the highest value of this table. The bound is the container's cap.
 
-Under a limit the container cannot give, in the container of 640 MB, the only stop is the judge's own line 128 MB below the cap, at 512 MB of the container's memory. There the same four programs reached 446 to 493 MB above what the container held before. The container's highest use was 560 MB, 48 MB past that line and 80 MB below the cap. The kernel ended nothing in 80 runs. With that line taken out, the three programs that take memory without end filled the container, and the kernel ended a process in 60 of 60 runs. In every one of them the case failed for memory and the cases before and after it were judged. The fourth program takes 512 MB and waits, so it does not fill that container; its case fails at the time limit.
+Under a limit the container cannot give, in the container of 640 MB, the only stop is the judge's own line 128 MB below the cap, at 512 MB of the container's memory. There the same four programs reached 455 to 523 MB above what the container held before. The container's highest use was 589 MB, 77 MB past that line and 51 MB below the cap. The kernel ended nothing in 80 runs. With that line taken out, the three programs that take memory without end filled the container, and the kernel ended a process in 60 of 60 runs. In 59 of them it ended the program and the hidden test handed back what it had measured. In 1, a run of the two threads, it went on to end the case runner, which is what the judge's marks make it choose after the program: the hidden test handed nothing back, and the result says that the kernel ended the case runner. In all 60 the case failed for memory and the cases before and after it passed. The fourth program takes 512 MB and waits, so it does not fill that container; in its 20 runs the kernel ended nothing and the case failed at the time limit. A run without that line may be one of these two things and nothing else: the script ends in an error for a run that did not start or that gave no judgement.
 
 ### How long judging takes
 
-The time to judge the change step of the right solution (50 tests) inside the image, in the run after the last change. It includes making the container and building. In the two full runs of the design experiment after the last change, one plain case took 6.81 and 12.5 ms for the program alone and 8.40 and 8.73 ms as a whole case of the judge (median of 200, Python). The figure for the program alone moves with what else the machine is doing.
+The time to judge the change step of the right solution (50 tests) inside the image, in the run after the last change. It includes making the container and building. In the two full runs of the design experiment after the last change, one plain case took 6.81 and 12.5 ms for the program alone and 8.40 and 8.73 ms as a whole case of the judge (median of 200, Python); in the full run after this round's change, 7.49 ms and 9.46 ms. The figure for the program alone moves with what else the machine is doing.
 
 | | Python | TypeScript | Java | C# | Go | Rust | C++ |
 |---|---|---|---|---|---|---|---|
@@ -398,7 +408,7 @@ The first part of a cell is what the program really wrote, the second the judgem
 | Attack | The kernel's file-size limit only | The judge walking the folder (chosen before) | **Chosen**: a size-capped memory-backed folder |
 |---|---|---|---|
 | One huge file | 32 MB, passes | 32 MB, passes | 32 MB, passes |
-| 400 files of 1 MB | 400 MB, passes | 43 MB, fails (files) | 32 MB, passes |
+| 400 files of 1 MB | 400 MB, passes | 41 MB, fails (files) | 32 MB, passes |
 | 240 MB in files deleted while open | 240 MB, passes | 240 MB, passes | 32 MB, passes |
 | 240 MB below 1,100 folders | 244 MB, passes | 244 MB, fails (files) | 32 MB, passes |
 | 200,000 empty files | 200,000 entries, passes | 200,000 entries, passes | 19,998 entries, passes |
@@ -411,10 +421,10 @@ The first part of a cell is the memory the container used more before the progra
 
 | Attack | Adding up the processes' memory (chosen before) | **Chosen**: the whole container |
 |---|---|---|
-| One process | 267 MB, fails (memory) | 266 MB, fails (memory) |
-| Eight processes, 64 MB each | 207 MB, fails (memory) | 269 MB, fails (memory) |
-| Memory files mapped by no process | 1,007 MB, up to the container's cap, where the kernel ended the program; fails (memory) | 267 MB, fails (memory) |
-| 320 MB of shared memory filled by short-lived processes | 331 MB, passes | 259 MB, fails (memory) |
+| One process | 272 MB, fails (memory) | 267 MB, fails (memory) |
+| Eight processes, 64 MB each | 174 MB, fails (memory) | 270 MB, fails (memory) |
+| Memory files mapped by no process | up to the container's cap, where the kernel ended the judging process itself: no result (in the run before this one it ended the program, at 1,007 MB) | 267 MB, fails (memory) |
+| 320 MB of shared memory filled by short-lived processes | 330 MB, passes | 260 MB, fails (memory) |
 
 "Adding up the processes' memory", chosen before, did not count memory that is in no process. Memory files went up to the container's cap, and shared memory passed above the limit. Counting the whole container, all four attacks are ended near the limit and fail. (This table was measured with shared memory allowed. In the chosen design it cannot be made.)
 
@@ -434,25 +444,25 @@ A cell holds the largest number of processes and threads seen, the time until th
 
 | Attack | The judge counting only | Kernel cap one above the limit, and counting (chosen before) | **Chosen**: the kernel cap |
 |---|---|---|---|
-| Forking without end | 598, 8.71 s, fails (processes) | 10, 0.08 s, fails (processes) | 16, 5.02 s, fails (time) |
-| Threads without end | 62, 0.07 s, fails (processes) | 17, 0.06 s, fails (processes) | 17, 5.01 s, fails (time) |
+| Forking without end | 598, 18.49 s, fails (processes) | 17, 0.08 s, fails (processes) | 16, 5.03 s, fails (time) |
+| Threads without end | 26, 0.07 s, fails (processes) | 18, 0.07 s, fails (processes) | 16, 5.01 s, fails (time) |
 
-Counting alone depends on the judge counting in time. In this run it ended the forking program only after 8.7 seconds at 598 processes, nearly the container's cap of 600; in an earlier run it had ended it at once. (The number seen is counted while threads start and end, and can read one high: 17 where the kernel allows 16.) A kernel cap holds it. What was chosen before was a kernel cap one above the limit, with the judge seeing that one and failing the case at once; it ended a program that forks without end within 0.1 seconds. Now only the kernel cap is left. Processes cannot pass the limit, and a program that tries without end is ended at its time limit (5 seconds) and fails. Judging it takes 5 seconds longer; in return one thing holds the bound, and a test fails without it.
+Counting alone depends on the judge counting in time. In this run it ended the forking program only after 18.5 seconds at 598 processes, nearly the container's cap of 600; in an earlier run it had ended it at once. (The number seen is counted while threads start and end, and can read one high: 18 where the kernel allows 17.) A kernel cap holds it. What was chosen before was a kernel cap one above the limit, with the judge seeing that one and failing the case at once; it ended a program that forks without end within 0.1 seconds. Now only the kernel cap is left. Processes cannot pass the limit, and a program that tries without end is ended at its time limit (5 seconds) and fails. Judging it takes 5 seconds longer; in return one thing holds the bound, and a test fails without it.
 
 ### How a case is ended
 
 | Candidate | A process that made itself a daemon | A process that keeps making children | Time taken |
 |---|---|---|---|
 | Signalling the process group | 1 survived | 0 | 0.0 s |
-| Walking the list of processes and ending each | 0 | 0 | 0.011 to 0.014 s |
-| **Chosen**: becoming that user and signalling all of its processes at once | 0 | 0 | 0.012 to 0.017 s |
+| Walking the list of processes and ending each | 0 | 0 | 0.013 to 0.015 s |
+| **Chosen**: becoming that user and signalling all of its processes at once | 0 | 0 | 0.013 to 0.017 s |
 
 ### How what a case left is removed
 
 | Candidate | 1,100 folders inside each other | 20,000 empty files |
 |---|---|---|
-| The standard library's removal | fails: too many open files | 0.131 s |
-| **Chosen**: a removal that holds two folders open on its way down | removed, 0.048 s | 0.111 s |
+| The standard library's removal | fails: too many open files | 0.145 s |
+| **Chosen**: a removal that holds two folders open on its way down | removed, 0.063 s | 0.128 s |
 
 ### How often the judge measures
 
@@ -460,14 +470,14 @@ What one process taking memory as fast as it can reached before it was ended (li
 
 | Interval | At the least | Median | At the most | Processor the judge uses |
 |---|---|---|---|---|
-| 0.010 s | 261 MB | 316 MB | 332 MB | 0.7% to 0.8% |
-| 0.005 s | 256 MB | 296 MB | 311 MB | 1.1% to 1.3% |
-| **0.002 s** | 257 MB | 272 MB | 284 MB | 2.1% to 2.3% |
-| 0.001 s | 259 MB | 267 MB | 277 MB | 3.8% to 10.7% |
+| 0.010 s | 267 MB | 304 MB | 315 MB | 1.8% to 2.0% |
+| 0.005 s | 265 MB | 278 MB | 304 MB | 2.2% to 2.5% |
+| **0.002 s** | 261 MB | 269 MB | 277 MB | 3.8% to 4.6% |
+| 0.001 s | 262 MB | 267 MB | 279 MB | 5.8% to 7.1% |
 
-0.002 seconds stays. Its largest value is below those of 0.010 and 0.005 seconds. 0.001 seconds lowers it only a little more and uses more processor. The choice matters less than it did, though: the line that cannot be passed is now the container's cap, not the interval. The table compares intervals with one process that takes memory block after block. What programs that try harder reach is under "How far memory is really passed".
+0.002 seconds stays. Its largest value is below those of 0.010 and 0.005 seconds. 0.001 seconds does not lower it further in this run and uses one and a half times the processor. The choice matters less than it did, though: the line that cannot be passed is now the container's cap, not the interval. The table compares intervals with one process that takes memory block after block. What programs that try harder reach is under "How far memory is really passed".
 
-The processor figure depends on the state of the Docker machine more than on the judge. One measurement reads four of the kernel's counter files for the container, and what that costs is the kernel's work. At 0.002 seconds, on the same code, the judge used 2.1% to 2.5% in the two full runs after the last change and 9.9% in a short run a few hours earlier; the review measured 9.6% to 10.6%, and the run before the swap count was added 8.2% to 9.2%. That count is the fourth file. Read in a loop, one measurement costs 45 to 49 millionths of a second with it and 38 to 45 without. The decision does not rest on which of these days it is: in every run 0.001 seconds used about one and a half times the processor of 0.002 seconds or more, and lowered the largest value by 8 MB at most.
+The processor figure depends on the state of the Docker machine more than on the judge. One measurement reads four of the kernel's counter files for the container, and what that costs is the kernel's work. At 0.002 seconds the judge used 3.8% to 4.6% in the full run after this round's change; in the round before, on one and the same code, 2.1% to 2.5% in two full runs and 9.9% in a short run a few hours earlier; the review measured 9.6% to 10.6%, and the run before the swap count was added 8.2% to 9.2%. That count is the fourth file. Read in a loop, one measurement costs 45 to 49 millionths of a second with it and 38 to 45 without. The decision does not rest on which of these days it is: in every run 0.001 seconds used about one and a half times the processor of 0.002 seconds or more, and lowered the largest value by 8 MB at most, in the last run not at all.
 
 ### Why memory is not bounded by address space
 
@@ -485,7 +495,7 @@ A kernel limit on address space would need a different value for each language. 
 
 ### What the chosen design does not stop
 
-- **Memory can pass the limit between two measurements.** The line that cannot be passed is the container's cap, plus the swap a container is allowed (none on any path here). A program that was above the limit and came back below it between two measurements fails only when it made a new high for the container, and only by what the container's reading from disk during that run does not account for.
+- **Memory can pass the limit between two measurements.** The line that cannot be passed is the container's cap, plus the swap a container is allowed (none on any path here). A program that was above the limit and came back below it between two measurements passes its case. The kernel's highest value for the container fails no case, because it counts the cache of files and a program that only reads would fail by it. The result names such a run only when it made a new high for the container, and every earlier high hides it: whatever the container held at one moment before, the cache of files left by the build or by an earlier case included, a later run can take for moments without being named. How far programs that try got above the limit while the judge measured is in "The numbers".
 - **What a build writes into `/app` has no cap.** Only the size of one file and the build's 900 seconds bound it.
 - **A program that stopped at a cap does not fail.** Writing files up to the limit and being refused more, or making processes up to the limit and being refused more, is not by itself a failure.
 - **A plain user can see that the judge's processes exist, their state, how much memory they hold, when they started, their processor time and scheduling counters, the kernel limits they run under, and the list of mounted file systems.** None of it names a test.
@@ -493,7 +503,7 @@ A kernel limit on address space would need a different value for each language. 
 
 ## Every protection, and the test that fails without it
 
-For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 94 of them). `python experiments/check_protections.py` takes the protections out of a copy of the repository one at a time and runs that protection's tests. The tests catch 88 of them, and the check fails when a protection can be taken out without a test failing. The other 6 are second lines of defence: without them the attack still gets nothing, and the table says which other protections see to that. For those the check runs the attack tests without the protection and fails if one of them fails. A test also checks that this table and that file hold the same protections. The list was made from the code and not from this document: both judges, the converter and the script that starts the judge were read statement by statement, and every statement that is there only for separation, for a limit or for giving back got an entry. Where a protection sits in more than one place of the code, each place is an entry of its own.
+For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 93 of them). `python experiments/check_protections.py` takes the protections out of a copy of the repository one at a time and runs that protection's tests. The tests catch 86 of them, and the check fails when a protection can be taken out without a test failing. The other 7 are second lines of defence: without them the attack still gets nothing, and the table says which other protections see to that. For those the check runs the attack tests without the protection and fails if one of them fails. A test also checks that this table and that file hold the same protections. The list was made from the code and not from this document: both judges, the converter and the script that starts the judge were read statement by statement, and every statement that is there only for separation, for a limit or for giving back got an entry. Where a protection sits in more than one place of the code, each place is an entry of its own: the text a variant takes out occurs exactly once in its file, and the check refuses an entry whose text occurs twice or not at all.
 
 | Protection | The attack its test makes |
 |---|---|
@@ -522,11 +532,12 @@ For every protection there is one variant of the code without it (`bench/experim
 | The judge refuses a container without the cases' capped folder | the judge is started without that folder |
 | The judge measures all memory of the container and ends the program above the limit | the program takes memory as fast as it can; it must be ended before the kernel steps in |
 | A program the kernel ended for memory fails its case | the case runner is told that the kernel ended a process for memory during the run |
-| The judge ends a program that leaves the container too little memory | the case's limit is set above the container's cap and memory is taken to the end, with this stop and without it. **Second line of defence:** the attack gets nothing without it either, because a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose |
+| The judge ends a program that leaves the container too little memory | the case's limit is set above the container's cap and memory is taken to the end, with this stop and without it. **Second line of defence:** the attack gets nothing without it either, because a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose. What the kernel chooses is settled by the marks the judge sets: the program first, then the case runner, the judge last. When it is the case runner, the hidden test hands nothing back, the case fails for memory and a new runner judges the rest; the test accepts both. It is run twice, with the judge measuring every 0.002 seconds as it does and with the measuring switched off, so that the case runner sleeps while the kernel ends the program. The measuring cannot end the program in either: the case's limit is above the container's cap |
 | The program is ended at the case's time limit | the program hangs |
 | The judge stops reading output at the limit | the program prints without end |
 | A program that leaves a process behind fails its case | the program leaves a daemon and ends |
-| After a run and after a case nothing of the program runs | the case after one that left a daemon counts its user's processes |
+| After a run nothing of the program runs | the case after one that left a daemon counts its user's processes |
+| When a case closes nothing of the program runs | a program leaves a daemon in a session of its own; one case leaves what it can for the next. **Second line of defence:** the attack gets nothing without it either, because every run of the program ends with all processes of the program's user ended, a hidden test can start the program only through a run, and between two files of tests the judge ends them once more |
 | The case's folder is removed when the case ends | after a case that filled the folder, the folder is looked at |
 | Before a case anything left in the cases' folder is removed | the case after one whose removal failed looks at the folder |
 | Removing is bounded for any depth and follows no link | 1,500 folders inside each other, links pointing outside, closed folders and a named pipe are removed |
@@ -556,12 +567,10 @@ For every protection there is one variant of the code without it (`bench/experim
 | The container's caps are checked for a web task as for a command-line task | the judge of a web task is started without a cap on processes, and with a memory cap above the machine's memory |
 | The judge's result says how much its container may swap | the judge is given container descriptions with and without a swap allowance |
 | Memory moved out to swap counts as memory | the judge is given a container description with 50 MB moved out to swap |
-| A new high of the container's memory above the limit fails the case | the program takes 400 MB and gives it back while the judge does not measure |
-| What the container read from disk is taken out of a new high before it fails a case | a program that holds 10 MB reads a file of 400 MB that was not in the cache, maps it and touches every page, or reads it and drops it from the cache three times, under a limit of 256 MB and of 64 MB |
-| Where the count of what was read from disk cannot be relied on, a new high fails no case | the judge is started where the kernel keeps no such count, and the program reads a file of 400 MB that was not in the cache |
-| What files in folders mounted from elsewhere can hold is taken out of a new high as well | the case runner is asked what the cache can account for when a folder shared from another machine holds files |
-| The judge measures what folders mounted from elsewhere hold, within a bound | the judge is shown a folder mounted from elsewhere with a file of 5,000 bytes, and then one with more entries than it measures |
-| The judge tries the kernel's count of what the container read from disk before it relies on it | the judge is shown a count that does not move when a file is read |
+| A run that made a new high of the container's memory above the limit is named in the result | the program takes 400 MB and gives it back while the judge does not measure; the case passes and the result is read |
+| The kernel ends the case runner before the judge | a hidden test reads the kernel's mark and score of the program, of the case runner and of the judge in a container of 640 MB |
+| A run reads its starting values before the program is started | the case runner is watched: what the kernel had ended, the highest value and what the container held are read, and only then the program is started |
+| The records the kernel keeps of files that were only looked at are not counted as the program's memory | a program that holds a few MB looks at every file of the image and asks for 400,000 names that are not there, under a limit of 64 MB |
 | A build during which the kernel ended a process fails | the build runs the container out of memory and then ends as if all were well |
 | Processes are ended even when no new process can be made | three processes are to be ended while no process can be made |
 | When no new process can be made, the processes are stopped before they are ended | three processes are to be ended while no process can be made, and the order of the signals is read: a stopped process makes no new ones, so every one is stopped before any is ended |
@@ -597,8 +606,8 @@ For every protection there is one variant of the code without it (`bench/experim
 | Check | Where | Numbers |
 |---|---|---|
 | All tests that need no image | automatically on every push | 654 tests pass, 5 min 10 s (time limit 15 minutes) |
-| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that read files that are not in the cache; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 96 tests pass, 10 min 42 s (time limit 30 minutes) |
-| Taking each of the 94 protections out in turn | automatically on every push | the tests catch 88, the 6 second lines hold, 10 min 59 s (time limit 40 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that only read files that are not in the cache, of three kinds, and one that only looks at files; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 96 tests pass, 10 min 42 s (time limit 40 minutes) |
+| Taking each of the 93 protections out in turn | automatically on every push | the tests catch 86, the 7 second lines hold, 10 min 59 s (time limit 40 minutes) |
 | The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written, once after the last change and five times over before it |
 | The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
 | Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
