@@ -2664,6 +2664,9 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
     assert "no changed lines and no file names" in low
     # What the desk does not see, stated in place: edits after handling, discussions, comments on commits.
     assert "edits" in low and "discussions" in low and "commits" in low
+    # And what is true of reviews: their text is not read, and such an arrival is passed on unread.
+    assert "does not read the text of a review or of its inline comments" in low
+    assert "makes no request for them" in low and "passed on to the coordinator unread" in low
 
 
 def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_general_rules():

@@ -403,9 +403,9 @@ def allowed_code_points() -> set[int]:
     import unicodedata as u
 
     spanish = set("áéíóúüñÁÉÍÓÚÜÑ¡¿«»ºª")
-    # With what ordinary answers use: the times sign, at most and at least, the bullet, the reference mark, the
-    # lenticular brackets, the wave dash and the fullwidth tilde.
-    marks = set("·–—‘’“”…→、。々「」『』！（），：；？×≤≥•※【】〜～")
+    # With what ordinary answers use: the times sign, the minus sign, at most and at least, the bullet, the
+    # reference mark, the lenticular brackets, the wave dash and the fullwidth tilde.
+    marks = set("·–—‘’“”…→、。々「」『』！（），：；？×−≤≥•※【】〜～")
     allowed = {9, 10} | set(range(0x20, 0x7F)) | {ord(c) for c in spanish | marks}
     for code in range(0x3000, 0xD7B0):
         name = u.name(chr(code), "") if not 0x3100 <= code < 0xAC00 or 0x3131 <= code <= 0x3163 else ""
@@ -3511,17 +3511,13 @@ def test_honest_text_does_not_suffer():
         for sentence in found:
             for kind in guard.leaks(sentence, ORDINARY_NAMES, ROOT):
                 refused_for.setdefault(kind, []).append(sentence)
-    # Nothing is refused for a value that is not there. What is refused:
-    # - four sentences of the charters that hold one of the made-up values itself, the computer's name, written "Mac mini";
-    # - two that hold the minus sign, which is not on the list of characters.
-    assert set(refused_for) <= {"the computer's name", guard.NOT_ALLOWED}, {kind: found[:2] for kind, found in refused_for.items()}
-    assert all("mac mini" in sentence.casefold() for sentence in refused_for.get("the computer's name", []))
-    assert all("−" in sentence for sentence in refused_for.get(guard.NOT_ALLOWED, []))
-    count = sum(map(len, refused_for.values()))
-    assert count * 1000 <= 5 * total, f"{count} of {total} honest sentences are refused"
-    # Without the value that the charter really holds, and with the minus sign written as a hyphen, none is refused.
+    # Nothing is refused for a value that is not there, and nothing for a character. What is refused: four sentences
+    # of the charters that hold one of the made-up values itself, the computer's name, written "Mac mini".
+    assert set(refused_for) == {"the computer's name"}, {kind: found[:2] for kind, found in refused_for.items()}
+    assert len(refused_for["the computer's name"]) == 4 and all("mac mini" in sentence.casefold() for sentence in refused_for["the computer's name"])
+    # Without the value that the charter really holds, none is refused.
     names = [(kind, value) for kind, value in ORDINARY_NAMES if value != "Mac-mini"]
-    assert [s for found in sentences.values() for s in found if guard.leaks(s.replace("−", "-"), names, ROOT)] == []
+    assert [s for found in sentences.values() for s in found if guard.leaks(s, names, ROOT)] == []
 
 
 def test_what_no_check_of_text_can_find_is_stated_by_name():
@@ -3748,6 +3744,32 @@ def test_a_session_is_charged_to_the_account_whose_arrival_set_it_off(place, mon
     assert running.start_one() is True
     (session,) = counted(place)["sessions"]
     assert session.get("account") == 941 and session["number"] == 7 and session.get("ended") is False
+
+
+def test_a_session_the_service_did_not_let_in_counts_against_nobodys_share_and_holds_nobody_back(place, monkeypatch):
+    spending = lock_file()["spending"]
+    share, per_item = spending.get("sessions_per_account_per_day", 8), spending["sessions_per_item_per_day"]
+    running, clock, ran = in_process(place, monkeypatch)
+    let_in = running.run_session
+    # Twice the service refuses the desk's sign-in when a session for this account's arrival starts. The account did nothing.
+    running.run_session = lambda text, env: {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
+    running.take(arrivals(event(7, 960, "asked")))
+    assert running.start_one() is True and running.start_one() is True
+    assert [e["number"] for e in kept(place)] == [7] and len(counted(place)["sessions"]) == 2
+    running.run_session = let_in
+    # The account still has its whole share: the kept arrival and seven more of its own, and then no more.
+    assert running.start_one() is True and ran[-1][1] == "7"
+    for n in range(share - 1):
+        running.take(arrivals(event(900 + n, 960, f"m{n}")))
+        assert running.start_one() is True, n
+    running.take(arrivals(event(999, 960, "past")))
+    assert running.start_one() is False
+    # Neither the account nor the item is held back as after a session that had to be ended, and the item still
+    # has its sessions of a day: another account's arrivals on it are handled.
+    assert not any(session.get("ended") for session in counted(place)["sessions"])
+    for n in range(per_item - 1):
+        running.take(arrivals(event(7, 970 + n, f"other{n}")))
+        assert running.start_one() is True, n
 
 
 def test_an_account_that_is_held_back_cannot_hold_up_another_accounts_arrival_by_writing_after_it(place, monkeypatch):
@@ -4225,3 +4247,69 @@ def test_a_search_is_charged_the_lines_asked_for_and_the_two_of_claude_codes_own
     # Thirty lines asked for come back as up to thirty-two, and a line that counts carries a number after the path.
     assert json.loads((place.state / "session" / "reads-s1.json").read_text())["bytes"] == 32 * 212
     assert guard.bytes_of(a_call("Grep", pattern="x", output_mode="count", head_limit=1), lock_file(), place.copy) == 3 * 212
+
+
+# =================================================================================================
+# The reading tool against GitHub's real answers
+# =================================================================================================
+
+# For three pull requests of this repository, what GitHub answered to the requests the reading tool makes was
+# recorded and reduced to the fields the tool reads. The tool's own code runs on them. Each verdict here was worked
+# out by hand from the list of files, with the tests and task folders that the recorded tip of main holds.
+REAL_PULLS = {
+    # 71 files. It changes the workflow, the measuring tools, the images' notes, existing tests (conftest.py and three
+    # test files are modified; the files under bench/tests/runtimes/ are not tests directly in the folder) and a file
+    # of the existing task web-signup: all five protected folders. The files of the new task cli-csv-json are a new
+    # task and protect nothing. It adds new tests directly in bench/tests/ (test_attack_list.py and others).
+    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/"], "adds_new_test": True, "ready_for_review": False},
+    # 4 files, all added. It is merged, so the test it added (test_desk.py) is at the tip of main today: by today's
+    # answers it is a change to an existing test and not a new one.
+    17: {"protected_folders": ["bench/tests/"], "adds_new_test": False, "ready_for_review": False},
+    # 14 files. test_desk.py is modified (an existing test); test_desk_lock.py is added and is not at the tip of main.
+    19: {"protected_folders": ["bench/tests/"], "adds_new_test": True, "ready_for_review": False},
+}
+
+
+@pytest.mark.parametrize("number", sorted(REAL_PULLS))
+def test_the_reading_tool_gives_the_verdict_worked_out_by_hand_on_githubs_real_answers(place, monkeypatch, number):
+    tools = module("tools")
+    recorded = json.loads((ROOT / "bench" / "tests" / "desk_github" / f"pull-{number}.json").read_text(encoding="utf-8"))
+    answers, asked = recorded["answers"], []
+    assert all(answer["status"] == 200 for answer in answers.values())
+
+    def api(backend, method, path, body=None):
+        asked.append(path)
+        assert method == "GET"
+        if path.endswith(f"/issues/{number}"):
+            # The item itself is made up; of the real one only that it is a pull request, and its state.
+            assert recorded["issue"]["is_pull_request"] is True
+            return {"state": recorded["issue"]["state"], "title": "t", "body": "b", "user": {"login": "outsider"}, "labels": [], "comments": 0, "pull_request": {}}
+        return answers[path]["body"]
+
+    monkeypatch.setattr(tools.GitHub, "_api", api)
+    desk = place.desk(item=number)
+    desk.backend = tools.GitHub("BrilliantTiger/dodam", "/usr/bin/false", place.state, "/usr/bin:/bin", lock_file()["read"])
+    text = desk.read_item({"number": number})
+    assert json.loads(text)["pull_request_files"] == REAL_PULLS[number]
+    # Every recorded answer was asked for, by exactly the request it was recorded under, and nothing else was asked.
+    assert set(asked) == set(answers) | {f"repos/BrilliantTiger/dodam/issues/{number}"}
+    # No name of a changed file reaches the session.
+    files = [entry["filename"] for path, answer in answers.items() if "/files?" in path for entry in answer["body"]]
+    assert len(files) == answers[f"repos/BrilliantTiger/dodam/pulls/{number}"]["body"]["changed_files"]
+    assert not [name for name in files if name in text]
+
+
+def test_githubs_real_answers_have_the_shape_the_reading_tool_counts_on():
+    import re
+
+    for number in REAL_PULLS:
+        answers = json.loads((ROOT / "bench" / "tests" / "desk_github" / f"pull-{number}.json").read_text(encoding="utf-8"))["answers"]
+        pull = answers[f"repos/BrilliantTiger/dodam/pulls/{number}"]["body"]
+        assert isinstance(pull["changed_files"], int) and isinstance(pull["draft"], bool) and pull["base"]["ref"] == "main"
+        assert re.fullmatch(r"[0-9a-f]{40}", pull["base"]["sha"]) and re.fullmatch(r"[0-9a-f]{40}", pull["head"]["sha"])
+        for path, answer in answers.items():
+            if "/contents/" in path:
+                assert answer["body"] and all(set(entry) == {"name", "type"} and entry["type"] in ("dir", "file") for entry in answer["body"])
+            if "/files?" in path:
+                # A file that was not renamed has no earlier path at all, and the status is one small word.
+                assert all({"filename", "status"} <= set(entry) and entry["status"] in ("added", "modified", "removed", "renamed") for entry in answer["body"])
