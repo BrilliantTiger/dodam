@@ -1116,3 +1116,119 @@ def test_what_is_published_holds_no_personal_details_and_no_internal_codes(tmp_p
         assert not re.search(r"/(?:Users|home)/[\w.-]+/", text), path.name
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert all(set(change) == {"date", "title", "url"} for change in status["changes"]), "the status file names an author"
+
+
+# --- measurement, only with the visitor's agreement --------------------------------------------
+#
+# The owner decided on 2026-11-18 that the page is measured with Google Analytics. The measurement ID
+# is one setting and it is empty until the owner has created the property. While it is empty the page
+# has no analytics code and reaches no other host. When it is set, nothing is loaded before the visitor
+# agrees. What happens in the browser (asking first, declining, the browser's refusing signals) is
+# checked by tools/site/sweep.py --consent.
+
+SAMPLE_ID = "G-SAMPLE0000"
+GOOGLE_NEEDS = {   # from Google's guide to content security policies for the Google tag, without advertising
+    "script-src": {"https://www.googletagmanager.com"},
+    "img-src": {"https://www.googletagmanager.com", "https://*.google-analytics.com"},
+    "connect-src": {"https://www.googletagmanager.com", "https://*.google-analytics.com", "https://*.google.com"},
+}
+CONSENT_KEYS = ["consent_label", "consent_text", "consent_yes", "consent_no", "consent_settings", "measure_p"]
+
+
+def policy_of(html_text: str) -> dict:
+    metas = [a for tag, a in Page(html_text).tags if tag == "meta" and (a.get("http-equiv") or "").lower() == "content-security-policy"]
+    assert len(metas) == 1, "the page declares no content security policy"
+    return {words[0]: set(words[1:]) for words in (part.split() for part in metas[0]["content"].split(";")) if words}
+
+
+def other_hosts(policy: dict) -> dict:
+    found = {name: {word for word in words if not word.startswith("'") and word != "data:"} for name, words in policy.items()}
+    return {name: words for name, words in found.items() if words}
+
+
+def measured(lang: str) -> str:
+    render = need("render")
+    assert "analytics" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a measurement ID"
+    return render(lang, analytics=SAMPLE_ID)
+
+
+def test_the_measurement_id_is_one_setting_and_it_is_empty():
+    build = builder()
+    assert hasattr(build, "ANALYTICS_ID"), "the build script has no setting for the measurement ID"
+    assert build.ANALYTICS_ID == "", "the owner has not created the property yet"
+    for folder in ("tools/site", "site", ".github"):
+        for path in sorted((ROOT / folder).rglob("*")):
+            if path.is_file() and path.suffix in {".py", ".html", ".js", ".json", ".yml", ".txt", ".css"}:
+                ids = set(re.findall(r"\bG-[A-Z0-9]{6,}\b", path.read_text(encoding="utf-8")))
+                assert ids <= {SAMPLE_ID}, f"{path.name} holds a measurement ID of its own"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_without_a_measurement_id_the_page_has_no_analytics_code_and_may_reach_no_other_host(lang):
+    html_text = page_path(lang).read_text(encoding="utf-8")
+    assert not re.search(r"google|gtag|analytics|consent|cookie|dataLayer", html_text, re.I), "the page carries analytics code"
+    assert [a.get("src") for a in Page(html_text).all("script") if a.get("src")] == [("" if lang == "en" else "../") + "motion.js"]
+    policy = policy_of(html_text)
+    assert policy["default-src"] == {"'self'"} and other_hosts(policy) == {}
+    assert not re.search(r"google|gtag|dataLayer", (SITE / "motion.js").read_text(encoding="utf-8"), re.I)
+    assert not (SITE / "analytics.js").exists(), "the measurement script is served although nothing uses it"
+
+
+def test_what_is_published_carries_the_measurement_script_only_with_an_id(tmp_path):
+    publish = need("publish")
+    publish(tmp_path / "plain", sample())
+    assert not (tmp_path / "plain" / "analytics.js").exists()
+    assert "analytics" in publish.__code__.co_varnames[:publish.__code__.co_argcount], "what is published cannot be built with a measurement ID"
+    publish(tmp_path / "measured", sample(), analytics=SAMPLE_ID)
+    assert (tmp_path / "measured" / "analytics.js").is_file()
+    assert SAMPLE_ID in (tmp_path / "measured" / "index.html").read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        publish(tmp_path / "wrong", sample(), analytics='G-X"><script>')
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_with_a_measurement_id_the_policy_names_the_page_and_google_s_measurement_and_nothing_else(lang):
+    html_text = measured(lang)
+    p = Page(html_text)
+    assert other_hosts(policy_of(html_text)) == GOOGLE_NEEDS
+    assert policy_of(html_text)["default-src"] == {"'self'"}
+    scripts = [a for a in p.all("script") if a.get("src")]
+    assert [is_local(a["src"]) for a in scripts] == [True, True] and scripts[1]["src"].endswith("analytics.js")
+    assert scripts[1].get("data-id") == SAMPLE_ID
+    assert p.inline_script.strip() == "", "the page has an inline script"
+    assert [name for _, attrs in p.tags for name in attrs if name.startswith("on")] == [], "the page has an inline handler"
+    outside_policy = re.sub(r'<meta http-equiv="Content-Security-Policy"[^>]*>', "", html_text)
+    assert not re.search(r"googletagmanager|google-analytics|gtag", outside_policy), "the page names Google's hosts outside its policy"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_with_a_measurement_id_the_page_asks_in_the_visitor_s_language_and_says_what_is_measured(lang):
+    strings = builder().load_strings(lang)
+    for key in CONSENT_KEYS:
+        assert strings.get(key, "").strip(), f"{lang}: the sentence {key} is missing"
+    assert "Google Analytics" in strings["consent_text"] and "Google Analytics" in strings["measure_p"]
+    html_text = measured(lang)
+    bar = re.search(r'<div class="consent" id="consent"[^>]*>(.*?)</div>\s*</div>', html_text, re.S)
+    assert bar and " hidden" in html_text.split('id="consent"', 1)[1].split(">", 1)[0], "the bar must start hidden: the script shows it"
+    buttons = re.findall(r'<button type="button" class="([^"]*)" data-consent="(yes|no)">([^<]+)</button>', bar.group(1))
+    assert [(kind, text) for _, kind, text in buttons] == [("yes", strings["consent_yes"]), ("no", strings["consent_no"])]
+    assert buttons[0][0] == buttons[1][0], "agree and decline are not the same kind of button"
+    shown = " ".join(Page(html_text).text.split())
+    for key in ("consent_text", "measure_p", "consent_settings"):
+        assert " ".join(strings[key].split()) in shown, key
+    assert re.search(r'<button[^>]* data-consent-open hidden>', html_text.split("<footer", 1)[1]), "the footer has no way to change the choice"
+
+
+def test_the_measurement_script_loads_nothing_by_itself_and_no_advertising_features():
+    path = ROOT / "tools" / "site" / "analytics.js"
+    assert path.is_file(), "there is no measurement script"
+    script = path.read_text(encoding="utf-8")
+    code = re.sub(r"(?m)^\s*//.*$", "", script)
+    assert re.findall(r"https?://[^\"' ]+", code) == ["https://www.googletagmanager.com/gtag/js?id="]
+    for signal in ("globalPrivacyControl", "doNotTrack"):
+        assert signal in code, f"a browser's {signal} signal is not read"
+    for off in ('ad_storage: "denied"', 'ad_user_data: "denied"', 'ad_personalization: "denied"', "allow_google_signals: false",
+                "allow_ad_personalization_signals: false"):
+        assert off in code, off
+    assert "localStorage" in code, "the choice is not remembered on the visitor's device"
+    assert not re.search(r"innerHTML|document\.write|\beval\(", code)

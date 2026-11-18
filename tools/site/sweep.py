@@ -190,6 +190,96 @@ LIVE = """async () => {
 }"""
 
 
+# Measurement asks first. Every request to another host is answered here with an empty script, so the
+# check itself never reaches Google; it only records what the page tried to reach, and when.
+BAR = """() => {
+  const bar = document.querySelector('#consent');
+  if (!bar) return {missing: true};
+  const buttons = [...bar.querySelectorAll('button')].map(b => {
+    const r = b.getBoundingClientRect(), s = getComputedStyle(b);
+    return [Math.round(r.width), Math.round(r.height), s.backgroundColor, s.color, s.fontWeight, s.fontSize, s.borderTopWidth];
+  });
+  const open = document.querySelector('[data-consent-open]');
+  return {shown: !bar.hidden && bar.getBoundingClientRect().height > 0, buttons, open: !!open && !open.hidden,
+          cookie: document.cookie, lang: (bar.closest('[lang]') || document.documentElement).lang};
+}"""
+
+
+def consent(browser, base: str, path: str, lang: str, ident: str, report) -> None:
+    def visit(setup: str | None = None):
+        context = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
+        outside, blocked = [], []
+        context.route(lambda url: not url.startswith(base),
+                      lambda route: (outside.append(route.request.url), route.fulfill(status=200, content_type="text/javascript", body=""))[1])
+        if setup:
+            context.add_init_script(setup)
+        page = context.new_page()
+        page.on("console", lambda message: blocked.append(message.text) if "Content Security Policy" in message.text else None)
+        page.goto(base + path)
+        page.wait_for_timeout(400)
+        return context, page, outside, blocked
+
+    where = f"{lang} measurement"
+    context, page, outside, blocked = visit()
+    state = page.evaluate(BAR)
+    if state.get("missing"):
+        report(where, ["a measurement ID is set but the page has no bar that asks"])
+        context.close()
+        return
+    found = []
+    if not state["shown"]:
+        found.append("the bar that asks is not shown to a visitor who has not chosen")
+    if outside:
+        found.append(f"the page reached another host before the visitor agreed: {outside[0]}")
+    if state["cookie"]:
+        found.append("a cookie is set before the visitor agreed")
+    if len(state["buttons"]) != 2 or state["buttons"][0][1:] != state["buttons"][1][1:] or abs(state["buttons"][0][0] - state["buttons"][1][0]) > 1:
+        found.append(f"agree and decline do not have equal weight: {state['buttons']}")
+
+    page.click('#consent [data-consent="no"]')
+    page.wait_for_timeout(300)
+    page.reload()
+    page.wait_for_timeout(400)
+    state = page.evaluate(BAR)
+    if state["shown"]:
+        found.append("the bar asks again after the visitor declined")
+    if outside or state["cookie"]:
+        found.append("declining loaded something or set a cookie")
+    if not state["open"]:
+        found.append("the footer has no way to change the choice")
+    else:
+        page.click("[data-consent-open]")
+        if not page.evaluate(BAR)["shown"]:
+            found.append("the link in the footer does not bring the question back")
+        else:
+            page.click('#consent [data-consent="yes"]')
+            page.wait_for_timeout(500)
+            if not any(url.startswith("https://www.googletagmanager.com/gtag/js?id=" + ident) for url in outside):
+                found.append("agreeing did not load the measurement")
+            allowed = ("https://www.googletagmanager.com/", ".google-analytics.com/", ".google.com/")
+            found += [f"after agreeing the page reached a host outside its policy: {url}" for url in outside
+                      if not any(part in url.split("?")[0] for part in allowed)]
+            page.reload()
+            page.wait_for_timeout(500)
+            if page.evaluate(BAR)["shown"] or not outside:
+                found.append("the choice to agree is not remembered")
+    found += [f"the page's own policy blocked something: {text[:160]}" for text in blocked]
+    report(where, found)
+    context.close()
+
+    for name, setup in (("a global privacy control signal", "Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', {get: () => true})"),
+                        ("a do-not-track signal", "Object.defineProperty(Navigator.prototype, 'doNotTrack', {get: () => '1'})")):
+        context, page, outside, blocked = visit(setup)
+        state = page.evaluate(BAR)
+        found = []
+        if state["shown"]:
+            found.append(f"the bar asks although the browser sends {name}")
+        if outside or state["cookie"]:
+            found.append(f"something was loaded or a cookie set although the browser sends {name}")
+        report(where, found)
+        context.close()
+
+
 def serve() -> str:
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *args):
@@ -230,6 +320,7 @@ def main() -> int:
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--shots")
     parser.add_argument("--site", help="the built site to check (default: the committed site/)")
+    parser.add_argument("--consent", metavar="ID", help="the site was built with this measurement ID: check that it asks first")
     args = parser.parse_args()
     global SITE
     SITE = Path(args.site).resolve() if args.site else SITE
@@ -242,6 +333,8 @@ def main() -> int:
         browser = launch(p)
         for lang, path in LANGS.items():
             still = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
+            if args.consent:
+                consent(browser, base, path, lang, args.consent, report)
             asked: list[str] = []
             still.on("request", lambda request: asked.append(request.url))
             page = still.new_page()
