@@ -1,4 +1,9 @@
 .DS_Store
+
+# Compiled Python embeds the full path of its source, account name included. Never track it.
+__pycache__/
+*.pyc
+*.pyo
 /target/
 node_modules/
 *.log

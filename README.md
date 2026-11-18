@@ -1,6 +1,6 @@
 # Dodam
 
-[한국어](README.ko.md)
+[한국어](README.ko.md) · [Introduction page](https://brillianttigercorp.com/dodam/), available in four languages: English, [한국어](https://brillianttigercorp.com/dodam/ko/), [日本語](https://brillianttigercorp.com/dodam/ja/) and [Español](https://brillianttigercorp.com/dodam/es/)
 
 A general-purpose language that AI writes correctly and robustly: secure, fast to run and fast to compile. No human needs to read it: AI refines it for AI, and people look only at the result and a security report. Security is enforced by the compiler, and the rules only ever tighten. Its first domain is the web, with one codebase for server and browser.
 
