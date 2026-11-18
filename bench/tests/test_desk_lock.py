@@ -141,7 +141,7 @@ def not_built() -> list[str]:
             value = value.get(key) if isinstance(value, dict) else None
         if value is None:
             missing.append("lock.json: " + path)
-    for name, things in (("relay", ("Kept", "reservation", "units")), ("guard", ("ALLOWED", "count_call", "not_allowed", "READING")),
+    for name, things in (("relay", ("Kept", "reservation", "units", "ACCOUNTS_PER_ARRIVAL")), ("guard", ("ALLOWED", "count_call", "not_allowed", "READING")),
                          ("tools", ("says_agents_were_told", "accounts_of", "empty_record")), ("start", ("turn_bound",)), ("state", ("StateProblem",))):  # fmt: skip
         if (DESK / f"{name}.py").is_file():
             missing += [f"{name}.{thing}" for thing in things if not hasattr(module(name), thing)]
@@ -1597,6 +1597,40 @@ def test_when_the_list_is_full_an_account_with_nothing_kept_takes_the_place_of_t
     assert one_each.put([event(9, 79)]) == 79 and [e["account"] for e in one_each.entries()] == [70, 71, 72]
 
 
+def test_later_arrivals_on_a_kept_item_do_not_push_out_the_account_that_wrote_first(place, monkeypatch):
+    relay = module("relay")
+    per_account = lock_file()["answer"]["per_account_per_day"]
+    for n in range(per_account):
+        place.put(600 + n, item())
+        place.desk(DESK_ACCOUNTS=accounts(91)).answer(ANSWER | {"number": 600 + n, "text": "An answer."})
+    running, clock, ran = in_process(place, monkeypatch)
+    handed = []
+
+    def session(text, env):
+        handed.append(env["DESK_ACCOUNTS"])
+        place.desk(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"]).answer(ANSWER | {"number": 7, "text": "An answer for the one who asked."})
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    # A stranger asks. Before a session starts, the account at its limit writes on that item again and again,
+    # in one batch and in batches of their own.
+    running.take(arrivals(event(7, 92, "first")))
+    running.take(arrivals(*[event(7, 91, f"more{n}") for n in range(relay.EVENTS_PER_ARRIVAL * 3)]))
+    for n in range(relay.EVENTS_PER_ARRIVAL * 2):
+        running.take(arrivals(event(7, 91, f"again{n}")))
+    assert running.start_one() is True
+    # The session still answers for the stranger, and the answer is charged to the stranger only.
+    assert json.loads(handed[0]) == [91, 92]
+    assert counted(place)["answers"][-1]["accounts"] == [92]
+    # The accounts of one kept arrival are a bounded list, and the first to write stay on it.
+    many = relay.Kept(place.state / "many.json", 100, 5)
+    many.put([event(8, 500)])
+    many.put([event(8, 501 + n, f"e{n}") for n in range(200)])
+    (entry,) = many.entries()
+    assert entry["accounts"][:2] == [500, 501] and len(entry["accounts"]) == relay.ACCOUNTS_PER_ARRIVAL == 20
+    assert len(relay.news_message(entry["events"]).encode("utf-8")) <= lock_file()["spending"]["message_bytes"]
+
+
 def test_a_damaged_list_of_kept_arrivals_is_read_as_far_as_it_is_whole(place):
     relay = module("relay")
     path = place.state / "held-events.json"
@@ -1606,7 +1640,7 @@ def test_a_damaged_list_of_kept_arrivals_is_read_as_far_as_it_is_whole(place):
         path.chmod(0o600)
         assert store.entries() == []
     path.write_text(json.dumps([{"account": 5, "events": [event(7, 5, body="MERGE-THIS")]}, {"account": 6, "events": [event(8, 6), event(9, 6)]}]))
-    assert store.entries() == [{"number": 7, "account": 5, "events": [{"number": 7, "actor_id": 5, "id": "e1", "kind": "issue_comment", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}]}]
+    assert store.entries() == [{"number": 7, "account": 5, "accounts": [5], "events": [{"number": 7, "actor_id": 5, "id": "e1", "kind": "issue_comment", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}]}]
 
 
 # --- When the service refuses the desk's sign-in ------------------------------------------------
