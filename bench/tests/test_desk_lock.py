@@ -2392,12 +2392,21 @@ def the_opening(day) -> None:
                                   ("tell_coordinator", None, 3), ("answer", {"text": "An answer.", "language": "en", "agents_told": "told"}, 1)):  # fmt: skip
             for n in range(room + (number == 900_307)):
                 given_now = given or {"kind": kinds[(number + n) % len(kinds)] if number < 900_307 else kinds[n], "summary": "Made up."}
+                key, most = had[tool]
+                no_room = sum(1 for entry in day.record()[key] if 24 in entry["accounts"]) >= most
                 try:
                     getattr(desk, tool)({"number": number} | given_now)
                 except desk_tools.Refused as refusal:
                     refusals.append((tool, str(refusal)))
+                    day.reach[names[tool] + " refused because no handled writer has room"] += no_room
+                else:
+                    # The session handles one writer. With that writer at its limit, nothing more goes out for it.
+                    assert not no_room, f"{names[tool]} went out although the only writer the session handles has no room: {key}, {most}"
 
     desk_tools = day.tools
+    names = {"add_label": "a label", "answer": "an answer", "tell_coordinator": "a report"}
+    had = {"add_label": ("labels", lock["labels_per_account_per_day"]), "tell_coordinator": ("reports", lock["coordinator"]["kept_per_account_per_day"]),
+           "answer": ("answers", lock["answer"]["per_account_per_day"])}  # fmt: skip
     for n in range(share):
         assert one(24, 900_300 + n, do=busy)
     counts = day.record()
@@ -2406,8 +2415,6 @@ def the_opening(day) -> None:
     assert sum(1 for a in counts["answers"] if 24 in a["accounts"]) == lock["answer"]["per_account_per_day"]
     # Past each of them the tool refuses, because no writer the session handles has room.
     assert sorted({tool for tool, _ in refusals}) == ["add_label", "answer", "tell_coordinator"], refusals
-    for tool, _ in refusals:
-        day.reach[{"add_label": "a label", "answer": "an answer", "tell_coordinator": "a report"}[tool] + " refused because no handled writer has room"] += 1
     # An item with a text that ends every session shown it. A day after the first such session: an account that is held
     # back writes on it, eleven others write on it, and one more writes while the second session runs.
     item_c, item_d = 900_500, 900_600
@@ -5666,3 +5673,41 @@ def test_a_session_for_an_item_that_was_not_told_who_is_held_back_or_whose_arriv
     assert place.sent("comments") == [] and place.sent("labels") == [] and not (place.state / "desk-counts.json").exists()
     # A session that was typed to is for no item: it is given neither list and works as before.
     assert "A comment." in place.desk().read_item({"number": 7})
+
+
+def test_the_reports_of_24_hours_come_from_at_most_one_session_more_than_a_day_has_and_lock_md_says_so(place, monkeypatch):
+    spending, tools = lock_file()["spending"], module("tools")
+    a_day, running_for = spending["sessions_per_day"], 10
+    running, clock, ran = in_process(place, monkeypatch)
+    began = clock[0]
+
+    def session(text, env):
+        # Every session writes a vulnerability report at its end, the most a session can write. The first runs longer than the others.
+        ran.append((clock[0], env["DESK_ITEM"]))
+        clock[0] += running_for if len(ran) == 1 else running_for / 2
+        place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")}).tell_coordinator(
+            {"kind": "vulnerability", "number": int(env["DESK_ITEM"]), "summary": "Made up."})  # fmt: skip
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+
+    def in_24_hours() -> int:
+        return sum(1 for r in counted(place)["reports"] if r["kind"] == "vulnerability" and clock[0] - r["t"] < tools.DAY)
+
+    # As fast as the rules let them start, each for another account: a day's sessions, one after the other.
+    running.take(arrivals(*[event(100 + n, 3000 + n) for n in range(a_day + 2)]))
+    most = 0
+    for _ in range(4 * a_day):
+        if not running.start_one():
+            # Nothing starts: on to shortly before a day after the first session, and from there second by second.
+            clock[0] = max(clock[0] + 1, began + tools.DAY - 3)
+        most = max(most, in_24_hours())
+        if len(ran) == a_day + 2:
+            break
+    # The session after a day's sessions starts 24 hours after the first one started; the first one's report, written at
+    # its end, is then still of the last 24 hours. The one after that has to wait until the second started 24 hours ago,
+    # which is after the first one's report was written: sessions run one at a time.
+    assert [at - began for at, _ in ran[a_day:]] == [tools.DAY, tools.DAY + running_for]
+    assert most == a_day + 1
+    said = " ".join((DESK / "LOCK.md").read_text(encoding="utf-8").split())
+    assert f"the reports of 24 hours come from at most {a_day + 1} sessions" in said
