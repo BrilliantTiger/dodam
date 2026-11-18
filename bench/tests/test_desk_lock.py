@@ -230,6 +230,33 @@ def test_an_ordinary_answer_passes(text):
     assert module("guard").leaks(text, MACHINE) == []
 
 
+KNOWN = MACHINE + [("the account's email address", "somebody@example.invalid")]
+
+
+@pytest.mark.parametrize("value", [word for _, word in KNOWN])
+@pytest.mark.parametrize("spell", [
+    str.upper, str.lower, str.swapcase,
+    " ".join, ".".join, "-".join, "_".join, " / ".join, "\n".join, "*".join, " \u00b7 ".join,
+    lambda value: " ".join(value.upper()),
+    lambda value: value.replace("@", " at ").replace(".", " dot ") if "@" in value else "-".join(value),
+])  # fmt: skip
+def test_a_known_value_is_found_in_any_letter_case_and_with_anything_between_its_letters(value, spell):
+    spelled = spell(value)
+    if "dot" in spelled:
+        pytest.skip("words put in place of signs are another value; see what the lock does not do")
+    assert module("guard").leaks(f"It is {spelled} here.", KNOWN) != []
+
+
+def test_the_values_the_start_command_wrote_down_are_refused_by_the_tools(place):
+    known = place.state / "known.json"
+    known.write_text(json.dumps([["the account's email address", "somebody@example.invalid"]]), encoding="utf-8")
+    desk = place.desk(DESK_KNOWN=str(known))
+    desk.machine = module("guard").machine_words(known)
+    for text in ("Write to somebody@example.invalid.", "Write to SOMEBODY@EXAMPLE.INVALID.", "s o m e b o d y @ e x a m p l e . i n v a l i d"):
+        assert "email" in refused(desk, "answer", number=7, text=text)
+    assert place.sent("comments") == []
+
+
 def test_a_refusal_names_the_kind_of_thing_and_never_the_thing(place):
     desk = place.desk()
     message = refused(desk, "answer", number=7, text=f"The key is {MADE_UP_TOKEN} on Somebodys-MacBook")
@@ -488,15 +515,15 @@ if code == 0:
 raise SystemExit(code)
 """
 
-# In place of Claude Code: takes messages as data, notes each one, and ends its turn.
+# In place of Claude Code: takes messages as data, notes each one with its own process number, and ends its turn.
 SESSION = """
-import json, sys
+import json, os, sys
 from pathlib import Path
 got = Path(sys.argv[1])
 for line in sys.stdin:
     message = json.loads(line)
     with open(got, "a") as handle:
-        handle.write(json.dumps(message) + "\\n")
+        handle.write(json.dumps(message | {"process": os.getpid()}) + "\\n")
     if message.get("type") == "user":
         print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "noted"}]}}), flush=True)
         print(json.dumps({"type": "result", "subtype": "success", "is_error": False}), flush=True)
@@ -518,7 +545,7 @@ def run_relay(place, typed: str = "", say=None):
     got = place.copy.parent / "got.jsonl"
     (place.state / "session").mkdir(exist_ok=True)
     plan = {"argv": [sys.executable, str(script), str(got)], "env": {"PATH": "/usr/bin:/bin"}, "cwd": str(place.copy),
-            "state": str(place.state), "live_wait": "mcp__coworker__wait_for_message"}  # fmt: skip
+            "state": str(place.state)}  # fmt: skip
     shown = io.StringIO()
     code = relay.Relay(plan, {"PATH": "/usr/bin:/bin"}, typed=io.StringIO(typed), shown=shown, say=say, exit_when_idle=True,
                        retry_seconds=0.05, quiet_seconds=0.4).run()  # fmt: skip
@@ -537,8 +564,9 @@ def test_the_relay_starts_the_watcher_with_the_state_path_and_no_other_switch(pl
     assert runs_of_the_watcher(place)[0] == ["--wait", "--state", str(place.state / "watch-state.json")]
     (message,) = messages
     assert message["type"] == "user" and message["message"]["role"] == "user"
+    assert "item 7" in message["message"]["content"].splitlines()[0]
     assert '{"number": 7, "id": "e1", "kind": "issue_opened", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}' in message["message"]["content"]
-    assert "1 new on GitHub" in shown
+    assert "news on 1 item" in shown
 
 
 def test_the_watcher_command_is_the_same_every_time(place):
@@ -560,10 +588,27 @@ def test_only_an_address_and_a_kind_pass_from_the_watcher_never_outside_text(pla
         ],
     )
     code, messages, shown = run_relay(place)
-    (message,) = messages
-    text = message["message"]["content"]
-    assert "MERGE" not in text and "ignore" not in text and "MERGE" not in shown
-    assert [json.loads(line) for line in text.splitlines()[1:]] == [{"number": 7, "id": "e1", "kind": "issue_comment"}, {"number": 8, "kind": "issue_opened"}]
+    texts = [m["message"]["content"] for m in messages]
+    assert "MERGE" not in "".join(texts) and "ignore" not in "".join(texts) and "MERGE" not in shown
+    assert [[json.loads(line) for line in text.splitlines()[1:]] for text in texts] == [
+        [{"number": 7, "id": "e1", "kind": "issue_comment"}], [{"number": 8, "kind": "issue_opened"}]]
+
+
+def test_every_item_gets_a_fresh_session_that_hears_of_that_item_only(place):
+    watcher(place, [{"id": "a1", "kind": "issue_opened", "number": 7}, {"id": "b1", "kind": "pull_request_opened", "number": 8},
+                    {"id": "a2", "kind": "issue_comment", "number": 7}])  # fmt: skip
+    code, messages, shown = run_relay(place, typed="a typed line\n")
+    by_process = {}
+    for message in messages:
+        by_process.setdefault(message["process"], []).append(message["message"]["content"])
+    # One process for each item and one for what was typed; no process hears of two things.
+    assert len(by_process) == 3 and all(len(heard) == 1 for heard in by_process.values())
+    heard = sorted(text for texts in by_process.values() for text in texts)
+    item_7 = next(text for text in heard if "item 7" in text)
+    item_8 = next(text for text in heard if "item 8" in text)
+    assert '"a1"' in item_7 and '"a2"' in item_7 and '"b1"' not in item_7 and "item 8" not in item_7
+    assert '"b1"' in item_8 and '"a1"' not in item_8 and '"a2"' not in item_8 and "item 7" not in item_8
+    assert "a typed line" in heard
 
 
 def test_the_watcher_is_started_again_only_after_the_session_dealt_with_the_news(place):
@@ -612,21 +657,6 @@ def test_only_one_desk_runs_on_one_state_folder(place):
         fcntl.flock(held, fcntl.LOCK_EX)
         code, messages, shown = run_relay(place, say="hello")
     assert code == 1 and messages == [] and "already running" in shown
-
-
-def test_the_relay_ends_a_long_wait_for_a_live_session_to_deliver_a_message(place):
-    relay = module("relay")
-    sent = []
-    made = relay.Relay({"argv": [], "env": {}, "cwd": str(place.copy), "state": str(place.state),
-                        "live_wait": "mcp__coworker__wait_for_message"}, {}, typed=io.StringIO(), shown=io.StringIO())  # fmt: skip
-    made.write = sent.append
-    made.waiting_calls.add("call-1")
-    made.idle.set()
-    made.send("news")
-    assert [m["type"] for m in sent] == ["control_request", "user"] and sent[0]["request"] == {"subtype": "interrupt"}
-    made.waiting_calls.clear()
-    made.send("more")
-    assert [m["type"] for m in sent] == ["control_request", "user", "user"]
 
 
 # --- The sign-in: only the tools reach it, and a token of the desk's own comes first ----------
@@ -850,14 +880,14 @@ class Start:
         self.place = Place(tmp, facts)
         self.copy, self.state = self.place.copy, self.place.state
         desk = self.copy / "tools" / "desk"
-        for name in ("lock.json",):
+        for name in ("lock.json", "guard.py", "facts.py"):
             (desk / name).write_text((DESK / name).read_text(encoding="utf-8"), encoding="utf-8")
         (desk / "brief.md").write_text("Standing instructions for the desk.\n", encoding="utf-8")
         (desk / "watch.py").write_text("print('{}')\n", encoding="utf-8")
         self.bin = tmp / "bin"
         self.bin.mkdir()
         version = claude_version or lock_file()["claude_version"]
-        self.command("claude", f'echo "{version} (Claude Code)"')
+        self.command("claude", f"""if [ "$1" = auth ]; then echo '{{"loggedIn": true, "email": "somebody@example.invalid"}}'; else echo "{version} (Claude Code)"; fi""")
         self.command("gh", "exit 0")
         self.command("orca", "exit 0")
         self.environ = {"HOME": str(tmp / "home"), "USER": "somebody-local", "LOGNAME": "somebody-local", "LANG": "en_US.UTF-8",
@@ -879,7 +909,7 @@ class Start:
 
     def plan(self, **changes):
         arguments = {"coordinator": "the-coordinator", "state": self.state, "stand_in": self.place.stand_in,
-                     "environ": self.environ, "copy": self.copy} | changes  # fmt: skip
+                     "environ": self.environ, "copy": self.copy, "machine": MACHINE} | changes  # fmt: skip
         return self.start.plan(**arguments)
 
     def refuses(self, **changes) -> str:
@@ -913,12 +943,13 @@ def test_the_session_is_started_with_the_closed_list_and_nothing_of_the_owners(s
                   "--plugin-url", "--chrome", "--resume", "--continue", "--remote-control", "--agents", "--ide"):  # fmt: skip
         assert never not in argv
     assert planned["cwd"] == str(start.copy) and planned["state"] == str(start.state.resolve())
-    assert planned["live_wait"] == "mcp__coworker__wait_for_message"
 
 
 def test_the_session_gets_an_environment_with_nothing_of_the_owners_in_it(start):
     env = start.plan()["env"]
-    assert set(env) <= {"HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR", "PATH", "DISABLE_AUTOUPDATER"}
+    assert set(env) <= {"HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR", "PATH", "DISABLE_AUTOUPDATER", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"}
+    # The owner's git name and address are not read when Claude Code describes the folder to the session.
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null" and env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert "CANARY" not in json.dumps(env) and "somewhere" not in json.dumps(env)
 
@@ -1084,9 +1115,111 @@ def test_the_command_says_why_it_did_not_start_and_starts_nothing(start, capsys,
     monkeypatch.setattr(start.start, "COPY", start.copy)
     monkeypatch.setattr(start.start.os, "execve", lambda *a: pytest.fail("the session was started"))
     real = start.start.plan
-    monkeypatch.setattr(start.start, "plan", lambda coordinator, state, stand_in: real(coordinator, state, start.place.stand_in, start.environ, start.copy))
+    monkeypatch.setattr(start.start, "plan", lambda coordinator, state, stand_in: real(coordinator, state, start.place.stand_in, start.environ, start.copy, MACHINE))
     assert start.start.main(["--coordinator", "the-coordinator", "--state", str(start.state)]) == 1
     assert "was not started" in capsys.readouterr().err
+
+
+# --- The check before every tool call fails closed --------------------------------------------
+
+LIVE_CALL = {"tool_name": "mcp__coworker__reply", "tool_input": {"thread": "t", "text": "Hello."}}
+
+
+def check(start, interpreter: str, call: dict, seconds: float = 20, live: bool = True):
+    desk = start.copy / "tools" / "desk"
+    if live:
+        (desk / "desk.toml").write_text(LIVE_FACTS, encoding="utf-8")
+    known = start.state / "known.json"
+    known.write_text("[]", encoding="utf-8")
+    command = start.start.check_command(interpreter, desk, known, seconds)
+    return subprocess.run(command, shell=True, input=json.dumps(call), capture_output=True, text=True, timeout=60)
+
+
+def test_the_check_allows_a_live_session_call_only_with_a_clean_answer(start):
+    assert check(start, sys.executable, LIVE_CALL).returncode == 0
+    assert check(start, sys.executable, {"tool_name": "Bash", "tool_input": {}}).returncode == 2
+
+
+def test_with_the_interpreter_pointing_nowhere_a_live_session_call_is_blocked(start, tmp_path):
+    done = check(start, str(tmp_path / "no-such-interpreter"), LIVE_CALL)
+    assert done.returncode == 2 and "could not be checked" in done.stderr
+
+
+@pytest.mark.parametrize("body, seconds", [("exit 1", 20), ("exit 0; ", 20), ("kill -9 $$", 20), ("exit 137", 20), ("sleep 30", 1)])
+def test_a_check_that_crashes_is_killed_or_hangs_blocks_the_call(start, body, seconds):
+    start.command("broken", body)
+    done = check(start, str(start.bin / "broken"), LIVE_CALL, seconds)
+    if body.startswith("exit 0"):
+        # The one clean ending. Shown here so that the other endings are known to differ from it.
+        assert done.returncode == 0
+    else:
+        assert done.returncode == 2
+
+
+def test_a_check_without_the_values_to_keep_out_blocks_the_call(start):
+    desk = start.copy / "tools" / "desk"
+    command = start.start.check_command(sys.executable, desk, start.state / "no-such-known.json")
+    done = subprocess.run(command, shell=True, input=json.dumps({"tool_name": "Read", "tool_input": {}}), capture_output=True, text=True)
+    assert done.returncode == 2
+
+
+def test_the_start_command_runs_the_check_once_and_refuses_when_it_does_not_answer(start):
+    start.plan()
+    (start.copy / "tools" / "desk" / "guard.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    assert "check" in start.refuses()
+    (start.copy / "tools" / "desk" / "guard.py").unlink()
+    assert "check" in start.refuses()
+
+
+def test_the_session_is_told_to_run_the_wrapped_check_with_time_to_spare(start):
+    settings = json.loads(Path(option(start.plan()["argv"], "--settings")).read_text())
+    hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+    assert hook["command"].startswith("/bin/sh -c ") and "exit 2" in hook["command"]
+    assert hook["timeout"] > start.start.CHECK_SECONDS
+
+
+# --- What the session knows without reading anything -----------------------------------------
+
+
+def test_the_desk_does_not_start_from_a_path_that_names_the_account_or_the_computer(start, tmp_path):
+    for name in ("somebody-local", "Somebodys-MacBook", "SOMEBODY-LOCAL"):
+        moved = tmp_path / name / "copy"
+        moved.parent.mkdir()
+        start.copy.rename(moved)
+        assert "path" in start.refuses(copy=moved)
+        moved.rename(start.copy)
+        moved.parent.rmdir()
+    start.plan()
+
+
+def test_the_accounts_address_is_written_where_the_tools_read_it_and_nowhere_else(start):
+    planned = start.plan()
+    servers = json.loads(Path(option(planned["argv"], "--mcp-config")).read_text())["mcpServers"]
+    known = Path(servers["desk"]["env"]["DESK_KNOWN"])
+    assert known.is_relative_to(start.state.resolve()) and stat.S_IMODE(known.stat().st_mode) == 0o600
+    assert ["the account's email address", "somebody@example.invalid"] in json.loads(known.read_text())
+    assert "somebody@example.invalid" not in json.dumps([planned["argv"], planned["env"]])
+    assert str(known) in json.loads(Path(option(planned["argv"], "--settings")).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
+def test_it_refuses_to_start_when_the_accounts_address_cannot_be_read(start):
+    start.command("claude", f'if [ "$1" = auth ]; then exit 1; else echo "{lock_file()["claude_version"]} (Claude Code)"; fi')
+    assert "address" in start.refuses()
+
+
+# --- The live way stays shut until its limits are kept by a tool -------------------------------
+
+
+def test_the_real_desk_does_not_start_with_the_live_way_open(tmp_path, monkeypatch):
+    start = Start(tmp_path, monkeypatch, LIVE_FACTS)
+    start.live_server()
+    git(start.copy, "init", "-q")
+    git(start.copy, "add", "-A")
+    git(start.copy, "commit", "-q", "-m", "made-up")
+    assert "not enforced yet" in start.refuses(stand_in=None)
+    start.place.close("live")
+    git(start.copy, "commit", "-q", "-am", "made-up")
+    start.plan(stand_in=None)
 
 
 # --- The record of the check on the real session --------------------------------------------
@@ -1098,7 +1231,12 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     record, lock = json.loads(path.read_text(encoding="utf-8")), lock_file()
     assert record["held"] is True and all(row["held"] for row in record["rows"])
     assert record["claude_code"] == lock["claude_version"]
-    assert set(record["runs"]) == {"asked plainly", "asked by text planted in a made-up issue", "removed tools put back", "closed ways"}
+    assert set(record["runs"]) == {"asked plainly", "asked by text planted in a made-up issue", "removed tools put back", "closed ways",
+                                   "the check cannot run", "what the session knows"}  # fmt: skip
+    assert record["fresh_start"]["input_tokens"] > 0
+    # What the session knows is recorded by kind, never by value.
+    assert all(set(row) == {"what", "in_the_session", "refused_by_the_answering_tool"} for row in record["known_without_reading"])
+    assert all(row["refused_by_the_answering_tool"] for row in record["known_without_reading"] if row["in_the_session"] and row["what"] not in ("the date", "the model", "the operating system"))
     module("guard")
     allowed = {"Read", "Glob", "Grep"} | {f"mcp__desk__{t}" for t in lock["desk_tools"]} | {f"mcp__coworker__{t}" for t in lock["live_tools"]}
     assert set(record["session_at_start"]["tools"]) == allowed
