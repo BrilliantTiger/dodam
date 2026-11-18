@@ -1333,9 +1333,9 @@ else echo "{version} (Claude Code)"; fi""")
         token.chmod(mode)
         return token
 
-    def committed(self) -> None:
+    def committed(self, git_folder: Path | None = None) -> None:
         """Make the copy a clean copy of a commit, with its git folder kept outside it."""
-        self.git_folder = self.copy.parent / "copy-git"
+        self.git_folder = git_folder or self.copy.parent / "copy-git"
         git(self.copy, "init", "-q", "--separate-git-dir", str(self.git_folder))
         git(self.copy, "add", "-A")
         git(self.copy, "commit", "-q", "-m", "made-up")
@@ -1684,6 +1684,14 @@ def test_the_real_desk_refuses_a_copy_whose_git_folder_a_session_could_read(star
     assert "git folder" in start.refuses(stand_in=None)
 
 
+def test_the_real_desk_refuses_a_git_folder_whose_path_names_the_account(start, tmp_path):
+    # The copy holds one line that says where its git folder is, and a session can read that line.
+    start.own_sign_in()
+    (tmp_path / "somebody-local").mkdir()
+    start.committed(tmp_path / "somebody-local" / "git")
+    assert "git folder" in start.refuses(stand_in=None)
+
+
 def test_starting_the_desk_writes_nothing_into_the_copy(start):
     start.own_sign_in()
     start.committed()
@@ -1700,6 +1708,8 @@ def test_the_watcher_gets_the_desks_own_token_for_github_and_nothing_else_of_the
     token.chmod(0o600)
     env = start.plan(stand_in=None)["watcher_env"]
     assert env["GH_TOKEN"] == MADE_UP_TOKEN
+    # The watcher is run from the copy and must leave no compiled file in it.
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "CANARY" not in json.dumps(env) and "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
