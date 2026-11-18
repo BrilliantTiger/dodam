@@ -68,13 +68,15 @@ PER_PAGE = 100
 
 STATE_FOLDER_NAME = ".dodam-desk"
 STATE_FILE_NAME = "watch-state.json"
-STATE_VERSION = 5
+STATE_VERSION = 6
 LEGACY_STATE_KEYS = frozenset({"baseline_cutoff", "pull_max_review_id", "pull_latest_review_ids"})
 
 # Explicit upper bounds on state. Evictable caches/windows drop only entries that monotonic
-# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_WINDOW_REVIEW_IDS,
-# MAX_STATE_BYTES) end with exit code 8 instead of forgetting per-pull-request history, and
-# MAX_PENDING_EVENTS pauses polling without advancing watermarks past unqueued events.
+# watermarks or narrowed floors cover; past MAX_WINDOW_REVIEW_IDS on one pull request the watcher
+# keeps the newest numbers, narrows that pull request's window, logs once on stderr, and continues.
+# Non-evictable bounds (MAX_TRACKED_PULLS, MAX_STATE_BYTES) end with exit code 8 instead of
+# forgetting per-pull-request history, and MAX_PENDING_EVENTS pauses polling without advancing
+# watermarks past unqueued events.
 REVIEW_LAG_WINDOW_SECONDS = 300
 MAX_OPEN_PR_REVIEWS_POLLED = 25
 MAX_SEEN_IDS = 5_000
@@ -147,7 +149,10 @@ Notes:
     what is queued and asks GitHub for nothing more until there is room, without
     moving any watermark past unqueued events.
   - Reviews sent up to 5 minutes before the latest review time seen on a pull request
-    remain candidates (remembered up to MAX_WINDOW_REVIEW_IDS = 1,000 per pull request).
+    remain candidates (remembered up to MAX_WINDOW_REVIEW_IDS = 1,000 per pull request;
+    past that bound the watcher keeps the newest numbers, narrows that pull request's
+    window, logs once on standard error, and goes on, so a review that first appears
+    late among the forgotten ones is not reported).
     Restarting from page 1 of reviews on a pull request with more than 100 reviews
     relies on GitHub marking a pull request as updated when a review is sent.
 
@@ -160,7 +165,7 @@ Exit codes:
   5    State location cannot be written (checked before calling GitHub).
   6    Another watcher is already holding the lock on this --state file.
   7    Events JSON was printed on standard output, then saving state failed.
-  8    A non-evictable state capacity bound (tracked pull requests, review window ids, or state bytes) was reached.
+  8    A non-evictable state capacity bound (tracked pull requests or state bytes) was reached.
   130  Interrupted by signal (SIGINT).
 """
 
@@ -357,12 +362,14 @@ def _empty_state() -> dict[str, object]:
         "known_pr_numbers": [],
         "open_pr_numbers": [],
         "reviews_baselined": [],
+        "review_window_warned_prs": [],
         "pull_heads": {},
         "pull_seq": {},
         "pull_draft": {},
         "pull_ready_seq": {},
         "pull_latest_review_time": {},
         "pull_recent_reviews": {},
+        "pull_review_floor": {},
         "pull_baseline_updated_at": {},
         "pull_reviews_checked": {},
         "pull_review_page": {},
@@ -389,12 +396,14 @@ def _check_and_bound_state(state: dict[str, object]) -> None:
     pull_heads: dict[str, str] = state["pull_heads"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = state["pull_latest_review_time"]  # type: ignore[assignment]
     pull_recent_revs: dict[str, dict[str, str]] = state["pull_recent_reviews"]  # type: ignore[assignment]
+    pull_rev_floor: dict[str, list[object]] = state["pull_review_floor"]  # type: ignore[assignment]
 
     all_pr_nums = (
         set(known_prs)
         | {int(k) for k in pull_heads if k.isdigit()}
         | {int(k) for k in pull_rev_time if k.isdigit()}
         | {int(k) for k in pull_recent_revs if k.isdigit()}
+        | {int(k) for k in pull_rev_floor if k.isdigit()}
         | set(dedup_open)
     )
     if len(all_pr_nums) > MAX_TRACKED_PULLS:
@@ -404,6 +413,8 @@ def _check_and_bound_state(state: dict[str, object]) -> None:
     state["known_pr_numbers"] = sorted(all_pr_nums)
     baselined: list[int] = state["reviews_baselined"]  # type: ignore[assignment]
     state["reviews_baselined"] = sorted({n for n in baselined if n in all_pr_nums})
+    warned: list[int] = state["review_window_warned_prs"]  # type: ignore[assignment]
+    state["review_window_warned_prs"] = sorted({n for n in warned if n in all_pr_nums})
 
     etags: dict[str, str] = state["etags"]  # type: ignore[assignment]
     core_keys = {"pulls", "issues", "issue_events", "issue_comments", "pull_comments"}
@@ -550,6 +561,29 @@ def _load_state(path: Path) -> dict[str, object]:
         parsed_recent_revs[k] = clean_inner
     base["pull_recent_reviews"] = parsed_recent_revs
 
+    floor_map = raw.get("pull_review_floor", {})
+    if not isinstance(floor_map, dict):
+        raise StateReadError("State file has invalid pull_review_floor.")
+    parsed_floors: dict[str, list[object]] = {}
+    for k, pair in floor_map.items():
+        if (
+            not isinstance(k, str)
+            or not isinstance(pair, list)
+            or len(pair) != 2
+            or not isinstance(pair[0], str)
+            or not ISO_UTC_RE.fullmatch(pair[0])
+            or isinstance(pair[1], bool)
+            or not isinstance(pair[1], int)
+            or pair[1] <= 0
+        ):
+            raise StateReadError("State file has invalid pull_review_floor entry.")
+        try:
+            _iso_to_epoch_seconds(pair[0])
+        except MalformedItemError as exc:
+            raise StateReadError("State file has invalid pull_review_floor timestamp.") from exc
+        parsed_floors[k] = [pair[0], pair[1]]
+    base["pull_review_floor"] = parsed_floors
+
     for int_map in ("pull_seq", "pull_ready_seq", "pull_review_page"):
         val = raw.get(int_map, {})
         if not isinstance(val, dict) or not all(
@@ -578,7 +612,7 @@ def _load_state(path: Path) -> dict[str, object]:
                 raise StateReadError("State file has a negative watermark.")
             target_wm[k] = v
 
-    for list_key in ("known_pr_numbers", "open_pr_numbers", "reviews_baselined"):
+    for list_key in ("known_pr_numbers", "open_pr_numbers", "reviews_baselined", "review_window_warned_prs"):
         vals = raw.get(list_key, [])
         if not isinstance(vals, list) or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in vals):
             raise StateReadError(f"State file has invalid {list_key}.")
@@ -851,8 +885,9 @@ def _record_seen_review(
     submitted_at: str,
     curr_latest_time: str,
     curr_recent_map: dict[str, str],
-) -> tuple[str, dict[str, str]]:
-    """Advance latest review time if newer and remember review ids inside the 5-minute lag window."""
+    curr_floor: tuple[str, int] | None,
+) -> tuple[str, dict[str, str], tuple[str, int] | None, bool]:
+    """Advance latest review time, remember window ids, and narrow the window past MAX_WINDOW_REVIEW_IDS."""
     rev_sec = _iso_to_epoch_seconds(submitted_at)
     if not curr_latest_time or submitted_at > curr_latest_time:
         curr_latest_time = submitted_at
@@ -862,15 +897,27 @@ def _record_seen_review(
             for k, ts in curr_recent_map.items()
             if _iso_to_epoch_seconds(ts) >= cutoff_sec
         }
+        if curr_floor is not None and _iso_to_epoch_seconds(curr_floor[0]) < cutoff_sec:
+            curr_floor = None
     else:
         cutoff_sec = _iso_to_epoch_seconds(curr_latest_time) - REVIEW_LAG_WINDOW_SECONDS
         if rev_sec < cutoff_sec:
-            return (curr_latest_time, curr_recent_map)
+            return (curr_latest_time, curr_recent_map, curr_floor, False)
+        if curr_floor is not None and (submitted_at, rid) <= curr_floor:
+            return (curr_latest_time, curr_recent_map, curr_floor, False)
 
     curr_recent_map[str(rid)] = submitted_at
+    narrowed = False
     if len(curr_recent_map) > MAX_WINDOW_REVIEW_IDS:
-        raise StateFullError("Recent review window id set reached MAX_WINDOW_REVIEW_IDS.")
-    return (curr_latest_time, curr_recent_map)
+        ordered = sorted((ts, int(rk)) for rk, ts in curr_recent_map.items())
+        evicted = ordered[:-MAX_WINDOW_REVIEW_IDS]
+        kept = ordered[-MAX_WINDOW_REVIEW_IDS:]
+        evicted_floor = evicted[-1]
+        if curr_floor is None or evicted_floor > curr_floor:
+            curr_floor = evicted_floor
+        curr_recent_map = {str(item_rid): item_ts for item_ts, item_rid in kept}
+        narrowed = True
+    return (curr_latest_time, curr_recent_map, curr_floor, narrowed)
 
 
 def _classify_actor(user_obj: object, own_login: str, include_own: bool) -> tuple[bool, str | None]:
@@ -1087,25 +1134,45 @@ def _report_skipped_items(count: int) -> None:
         sys.stderr.flush()
 
 
+def _report_narrowed_review_windows(pr_numbers: list[int]) -> None:
+    for number in pr_numbers:
+        sys.stderr.write(
+            f"Pull request #{number} exceeded {MAX_WINDOW_REVIEW_IDS} reviews in 5 minutes; "
+            "narrowed its late-review window.\n"
+        )
+    if pr_numbers:
+        sys.stderr.flush()
+
+
+def _load_floor(pull_rev_floor: dict[str, list[object]], num_key: str) -> tuple[str, int] | None:
+    raw = pull_rev_floor.get(num_key)
+    if raw is None:
+        return None
+    return (str(raw[0]), int(raw[1]))  # type: ignore[arg-type]
+
+
 def _initialize_baseline(
     state: dict[str, object],
     repo: str,
-) -> tuple[dict[str, object], float, int]:
+) -> tuple[dict[str, object], float, int, list[int]]:
     """Snapshot existing repository watermarks on first run without dropping concurrent arrivals."""
     working = copy.deepcopy(state)
     etags: dict[str, str] = working["etags"]  # type: ignore[assignment]
     wm: dict[str, object] = working["watermarks"]  # type: ignore[assignment]
     known_prs: set[int] = set(working["known_pr_numbers"])  # type: ignore[arg-type]
+    warned_prs: set[int] = set(working["review_window_warned_prs"])  # type: ignore[arg-type]
     pull_heads: dict[str, str] = working["pull_heads"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
     pull_recent_revs: dict[str, dict[str, str]] = working["pull_recent_reviews"]  # type: ignore[assignment]
+    pull_rev_floor: dict[str, list[object]] = working["pull_review_floor"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
 
     server_poll = 0.0
     skipped = 0
+    newly_warned: list[int] = []
 
     # 1. Pull requests (all pages at initial setup so every existing PR head, draft state, and id is known)
     _, p_etag, pull_items, hint, p_skip = _fetch_paginated_list(
@@ -1268,17 +1335,31 @@ def _initialize_baseline(
         baseline_revs.sort(key=lambda t: (t[0], t[1]))
         latest_time = pull_rev_time.get(num_key, "")
         recent_map: dict[str, str] = dict(pull_recent_revs.get(num_key, {}))
+        curr_floor = _load_floor(pull_rev_floor, num_key)
+        pr_narrowed = False
         for submitted_at, rid in baseline_revs:
-            latest_time, recent_map = _record_seen_review(rid, submitted_at, latest_time, recent_map)
+            latest_time, recent_map, curr_floor, did_narrow = _record_seen_review(
+                rid, submitted_at, latest_time, recent_map, curr_floor
+            )
+            if did_narrow:
+                pr_narrowed = True
         if latest_time:
             pull_rev_time[num_key] = latest_time
             pull_recent_revs[num_key] = recent_map
+            if curr_floor is not None:
+                pull_rev_floor[num_key] = [curr_floor[0], curr_floor[1]]
+            else:
+                pull_rev_floor.pop(num_key, None)
+        if pr_narrowed and num not in warned_prs:
+            warned_prs.add(num)
+            newly_warned.append(num)
 
     working["initialized"] = True
     working["known_pr_numbers"] = sorted(known_prs)
     working["reviews_baselined"] = reviews_baselined
+    working["review_window_warned_prs"] = sorted(warned_prs)
     _check_and_bound_state(working)
-    return (working, server_poll, skipped)
+    return (working, server_poll, skipped, newly_warned)
 
 
 def _poll_once(
@@ -1286,7 +1367,7 @@ def _poll_once(
     repo: str,
     own_login: str,
     include_own: bool,
-) -> tuple[dict[str, object], float, int]:
+) -> tuple[dict[str, object], float, int, list[int]]:
     """Poll GitHub on a copy of state, stopping immediately without advancing past unqueued events if full."""
     working = copy.deepcopy(state)
     etags: dict[str, str] = working["etags"]  # type: ignore[assignment]
@@ -1297,12 +1378,14 @@ def _poll_once(
     known_prs: set[int] = set(working["known_pr_numbers"])  # type: ignore[arg-type]
     open_prs: list[int] = list(working["open_pr_numbers"])  # type: ignore[arg-type]
     reviews_baselined: set[int] = set(working["reviews_baselined"])  # type: ignore[arg-type]
+    warned_prs: set[int] = set(working["review_window_warned_prs"])  # type: ignore[arg-type]
     pull_heads: dict[str, str] = working["pull_heads"]  # type: ignore[assignment]
     pull_seq: dict[str, int] = working["pull_seq"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_ready_seq: dict[str, int] = working["pull_ready_seq"]  # type: ignore[assignment]
     pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
     pull_recent_revs: dict[str, dict[str, str]] = working["pull_recent_reviews"]  # type: ignore[assignment]
+    pull_rev_floor: dict[str, list[object]] = working["pull_review_floor"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
@@ -1310,6 +1393,7 @@ def _poll_once(
     discovered: list[dict[str, object]] = []
     server_poll = 0.0
     skipped = 0
+    newly_warned: list[int] = []
     ready_emitted_prs: set[int] = set()
     queue_filled = len(pending_list) >= MAX_PENDING_EVENTS
 
@@ -1799,6 +1883,7 @@ def _poll_once(
         was_baselined = number in reviews_baselined
         curr_latest_time = pull_rev_time.get(num_key, "")
         curr_recent_map: dict[str, str] = dict(pull_recent_revs.get(num_key, {}))
+        curr_floor = _load_floor(pull_rev_floor, num_key)
 
         if r_changed:
             parsed_revs: list[tuple[str, int, bool, str | None]] = []
@@ -1817,17 +1902,22 @@ def _poll_once(
                 parsed_revs.append((submitted_at, rid, keep, actor))
 
             parsed_revs.sort(key=lambda t: (t[0], t[1]))
+            pr_narrowed = False
             for submitted_at, rid, keep, actor in parsed_revs:
                 if curr_latest_time:
                     cutoff_sec = _iso_to_epoch_seconds(curr_latest_time) - REVIEW_LAG_WINDOW_SECONDS
                     if _iso_to_epoch_seconds(submitted_at) < cutoff_sec:
                         continue
+                    if curr_floor is not None and (submitted_at, rid) <= curr_floor:
+                        continue
                     if str(rid) in curr_recent_map:
                         continue
                 if not was_baselined and pr_cutoff and submitted_at <= pr_cutoff:
-                    curr_latest_time, curr_recent_map = _record_seen_review(
-                        rid, submitted_at, curr_latest_time, curr_recent_map
+                    curr_latest_time, curr_recent_map, curr_floor, did_narrow = _record_seen_review(
+                        rid, submitted_at, curr_latest_time, curr_recent_map, curr_floor
                     )
+                    if did_narrow:
+                        pr_narrowed = True
                     continue
                 ev_id = f"pull_request_review:{rid}"
                 if keep and ev_id not in seen and ev_id not in pending_ids:
@@ -1845,13 +1935,22 @@ def _poll_once(
                             f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}",
                         )
                     )
-                curr_latest_time, curr_recent_map = _record_seen_review(
-                    rid, submitted_at, curr_latest_time, curr_recent_map
+                curr_latest_time, curr_recent_map, curr_floor, did_narrow = _record_seen_review(
+                    rid, submitted_at, curr_latest_time, curr_recent_map, curr_floor
                 )
+                if did_narrow:
+                    pr_narrowed = True
 
             if curr_latest_time:
                 pull_rev_time[num_key] = curr_latest_time
                 pull_recent_revs[num_key] = curr_recent_map
+                if curr_floor is not None:
+                    pull_rev_floor[num_key] = [curr_floor[0], curr_floor[1]]
+                else:
+                    pull_rev_floor.pop(num_key, None)
+            if pr_narrowed and number not in warned_prs:
+                warned_prs.add(number)
+                newly_warned.append(number)
             if not queue_filled:
                 reviews_baselined.add(number)
                 pull_rev_page[num_key] = tail_page
@@ -1881,8 +1980,9 @@ def _poll_once(
     working["seen_ids"] = seen.to_list()
     working["known_pr_numbers"] = sorted(known_prs)
     working["reviews_baselined"] = sorted(reviews_baselined)
+    working["review_window_warned_prs"] = sorted(warned_prs)
     _check_and_bound_state(working)
-    return (working, server_poll, skipped)
+    return (working, server_poll, skipped, newly_warned)
 
 
 def _failure_message(kind: str, pause: float) -> str:
@@ -1986,8 +2086,9 @@ def main(argv: list[str] | None = None) -> int:
         # 2. If no state file existed yet, snapshot the baseline once and persist it before waiting.
         while not bool(state["initialized"]):
             try:
-                state, server_poll, skipped = _initialize_baseline(state, ns.repo)
+                state, server_poll, skipped, narrowed_init = _initialize_baseline(state, ns.repo)
                 _report_skipped_items(skipped)
+                _report_narrowed_review_windows(narrowed_init)
                 _save_state_before_print(ns.state_path, state)
                 consecutive_failures = 0
                 last_failure_pause = 0.0
@@ -2010,8 +2111,11 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             prev_pending_count = len(state["pending"])  # type: ignore[arg-type]
             try:
-                state, server_poll, skipped = _poll_once(state, ns.repo, own_login, ns.include_own)
+                state, server_poll, skipped, narrowed_poll = _poll_once(
+                    state, ns.repo, own_login, ns.include_own
+                )
                 _report_skipped_items(skipped)
+                _report_narrowed_review_windows(narrowed_poll)
                 consecutive_failures = 0
                 last_failure_pause = 0.0
             except TransientGitHubError as err:
@@ -2036,8 +2140,11 @@ def main(argv: list[str] | None = None) -> int:
                     sleep(settle_wait)
                     while True:
                         try:
-                            state, _, skipped_after = _poll_once(state, ns.repo, own_login, ns.include_own)
+                            state, _, skipped_after, narrowed_after = _poll_once(
+                                state, ns.repo, own_login, ns.include_own
+                            )
                             _report_skipped_items(skipped_after)
+                            _report_narrowed_review_windows(narrowed_after)
                             consecutive_failures = 0
                             last_failure_pause = 0.0
                             break
