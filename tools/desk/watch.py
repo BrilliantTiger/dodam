@@ -67,15 +67,16 @@ PER_PAGE = 100
 
 STATE_FOLDER_NAME = ".dodam-desk"
 STATE_FILE_NAME = "watch-state.json"
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 # Explicit upper bounds on state. Evictable caches/windows drop only entries that monotonic
-# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_STATE_BYTES) end with
-# exit code 8 instead of forgetting per-pull-request history, and MAX_PENDING_EVENTS pauses
-# polling without advancing watermarks past unqueued events.
+# watermarks already cover; non-evictable bounds (MAX_TRACKED_PULLS, MAX_SAME_SECOND_REVIEW_IDS,
+# MAX_STATE_BYTES) end with exit code 8 instead of forgetting per-pull-request history, and
+# MAX_PENDING_EVENTS pauses polling without advancing watermarks past unqueued events.
 MAX_OPEN_PR_REVIEWS_POLLED = 25
 MAX_SEEN_IDS = 5_000
 MAX_TRACKED_PULLS = 10_000
+MAX_SAME_SECOND_REVIEW_IDS = 1_000
 MAX_REVIEW_ETAGS = 100
 MAX_PENDING_EVENTS = 1_000
 MAX_STATE_BYTES = 16 * 1024 * 1024
@@ -353,7 +354,8 @@ def _empty_state() -> dict[str, object]:
         "pull_seq": {},
         "pull_draft": {},
         "pull_ready_seq": {},
-        "pull_max_review_id": {},
+        "pull_latest_review_time": {},
+        "pull_latest_review_ids": {},
         "pull_baseline_updated_at": {},
         "pull_reviews_checked": {},
         "pull_review_page": {},
@@ -378,11 +380,19 @@ def _check_and_bound_state(state: dict[str, object]) -> None:
 
     known_prs: list[int] = state["known_pr_numbers"]  # type: ignore[assignment]
     pull_heads: dict[str, str] = state["pull_heads"]  # type: ignore[assignment]
-    pull_max_rev: dict[str, int] = state["pull_max_review_id"]  # type: ignore[assignment]
+    pull_rev_time: dict[str, str] = state["pull_latest_review_time"]  # type: ignore[assignment]
+    pull_rev_ids: dict[str, list[int]] = state["pull_latest_review_ids"]  # type: ignore[assignment]
+    for rk, rids in list(pull_rev_ids.items()):
+        dedup_rids = sorted(set(rids))
+        if len(dedup_rids) > MAX_SAME_SECOND_REVIEW_IDS:
+            raise StateFullError("Same-second review id set reached MAX_SAME_SECOND_REVIEW_IDS.")
+        pull_rev_ids[rk] = dedup_rids
+
     all_pr_nums = (
         set(known_prs)
         | {int(k) for k in pull_heads if k.isdigit()}
-        | {int(k) for k in pull_max_rev if k.isdigit()}
+        | {int(k) for k in pull_rev_time if k.isdigit()}
+        | {int(k) for k in pull_rev_ids if k.isdigit()}
         | set(dedup_open)
     )
     if len(all_pr_nums) > MAX_TRACKED_PULLS:
@@ -481,7 +491,30 @@ def _load_state(path: Path) -> dict[str, object]:
             raise StateReadError(f"State file has invalid {str_map}.")
         base[str_map] = dict(val)
 
-    for int_map in ("pull_seq", "pull_ready_seq", "pull_max_review_id", "pull_review_page"):
+    rev_time_map = raw.get("pull_latest_review_time", {})
+    if not isinstance(rev_time_map, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and bool(ISO_UTC_RE.fullmatch(v))
+        for k, v in rev_time_map.items()
+    ):
+        raise StateReadError("State file has invalid pull_latest_review_time.")
+    base["pull_latest_review_time"] = dict(rev_time_map)
+
+    rev_ids_map = raw.get("pull_latest_review_ids", {})
+    if not isinstance(rev_ids_map, dict):
+        raise StateReadError("State file has invalid pull_latest_review_ids.")
+    parsed_rev_ids: dict[str, list[int]] = {}
+    for k, v in rev_ids_map.items():
+        if (
+            not isinstance(k, str)
+            or not isinstance(v, list)
+            or len(v) > MAX_SAME_SECOND_REVIEW_IDS
+            or not all(isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in v)
+        ):
+            raise StateReadError("State file has invalid or oversized pull_latest_review_ids.")
+        parsed_rev_ids[k] = sorted(set(v))
+    base["pull_latest_review_ids"] = parsed_rev_ids
+
+    for int_map in ("pull_seq", "pull_ready_seq", "pull_review_page"):
         val = raw.get(int_map, {})
         if not isinstance(val, dict) or not all(
             isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool) and v >= 0
@@ -985,7 +1018,8 @@ def _initialize_baseline(
     known_prs: set[int] = set(working["known_pr_numbers"])  # type: ignore[arg-type]
     pull_heads: dict[str, str] = working["pull_heads"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
-    pull_max_rev: dict[str, int] = working["pull_max_review_id"]  # type: ignore[assignment]
+    pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
+    pull_rev_ids: dict[str, list[int]] = working["pull_latest_review_ids"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
@@ -1127,7 +1161,7 @@ def _initialize_baseline(
             max_rc_id = cid
     wm["max_review_comment_id"] = max_rc_id
 
-    # 6. Existing reviews on the polled open pull requests (recording highest review id per PR)
+    # 6. Existing reviews on the polled open pull requests (recording latest sending time and same-second review ids)
     reviews_baselined: list[int] = []
     for num in polled_open_prs:
         _, tail_page, r_etag, r_items, hint = _fetch_reviews_from_tail(
@@ -1138,7 +1172,8 @@ def _initialize_baseline(
         pull_rev_page[num_key] = tail_page
         _set_review_etag(etags, num, tail_page, r_etag)
         reviews_baselined.append(num)
-        highest_rid = pull_max_rev.get(num_key, 0)
+        latest_time = pull_rev_time.get(num_key, "")
+        same_sec_ids: set[int] = set(pull_rev_ids.get(num_key, []))
         for raw_rev in r_items:
             try:
                 rev = _item_dict(raw_rev)
@@ -1146,13 +1181,18 @@ def _initialize_baseline(
                 if isinstance(rev_state, str) and rev_state.upper() == "PENDING":
                     continue
                 rid = _pos_int(rev.get("id"))
-                _iso_utc(rev.get("submitted_at") or rev.get("created_at"))
+                submitted_at = _iso_utc(rev.get("submitted_at") or rev.get("created_at"))
             except MalformedItemError:
                 skipped += 1
                 continue
-            if rid > highest_rid:
-                highest_rid = rid
-        pull_max_rev[num_key] = highest_rid
+            if submitted_at > latest_time:
+                latest_time = submitted_at
+                same_sec_ids = {rid}
+            elif submitted_at == latest_time:
+                same_sec_ids.add(rid)
+        if latest_time:
+            pull_rev_time[num_key] = latest_time
+            pull_rev_ids[num_key] = sorted(same_sec_ids)
 
     working["initialized"] = True
     working["known_pr_numbers"] = sorted(known_prs)
@@ -1181,7 +1221,8 @@ def _poll_once(
     pull_seq: dict[str, int] = working["pull_seq"]  # type: ignore[assignment]
     pull_draft: dict[str, bool] = working["pull_draft"]  # type: ignore[assignment]
     pull_ready_seq: dict[str, int] = working["pull_ready_seq"]  # type: ignore[assignment]
-    pull_max_rev: dict[str, int] = working["pull_max_review_id"]  # type: ignore[assignment]
+    pull_rev_time: dict[str, str] = working["pull_latest_review_time"]  # type: ignore[assignment]
+    pull_rev_ids: dict[str, list[int]] = working["pull_latest_review_ids"]  # type: ignore[assignment]
     pull_base_upd: dict[str, str] = working["pull_baseline_updated_at"]  # type: ignore[assignment]
     pull_rev_checked: dict[str, str] = working["pull_reviews_checked"]  # type: ignore[assignment]
     pull_rev_page: dict[str, int] = working["pull_review_page"]  # type: ignore[assignment]
@@ -1647,7 +1688,7 @@ def _poll_once(
         elif rc_etag:
             etags["pull_comments"] = rc_etag
 
-    # 6. Reviews on open or updated pull requests (guarded per PR by pull_max_review_id)
+    # 6. Reviews on open or updated pull requests (recognised per PR by latest sending time + same-second review ids)
     checked_review_prs: set[int] = set()
     for number in prs_to_check_reviews:
         if queue_filled or not has_room():
@@ -1655,10 +1696,15 @@ def _poll_once(
             break
         ensure_pr_tracked(number)
         num_key = str(number)
-        start_page = max(1, pull_rev_page.get(num_key, 1))
-        cached_etag = etags.get(f"reviews:{number}:p{start_page}") or (
-            etags.get(f"reviews:{number}") if start_page == 1 else None
-        )
+        saved_tail_page = max(1, pull_rev_page.get(num_key, 1))
+        if number in prs_with_updated_timestamp and saved_tail_page > 1:
+            start_page = 1
+            cached_etag = None
+        else:
+            start_page = saved_tail_page
+            cached_etag = etags.get(f"reviews:{number}:p{start_page}") or (
+                etags.get(f"reviews:{number}") if start_page == 1 else None
+            )
         r_changed, tail_page, r_etag, r_items, poll_hint = _fetch_reviews_from_tail(
             repo,
             number,
@@ -1670,10 +1716,11 @@ def _poll_once(
 
         pr_cutoff = pull_base_upd.get(num_key, "")
         was_baselined = number in reviews_baselined
-        prev_max_rid = pull_max_rev.get(num_key, 0)
+        curr_latest_time = pull_rev_time.get(num_key, "")
+        curr_same_sec_ids: set[int] = set(pull_rev_ids.get(num_key, []))
 
         if r_changed:
-            parsed_revs: list[tuple[int, str, bool, str | None]] = []
+            parsed_revs: list[tuple[str, int, bool, str | None]] = []
             for raw_rev in r_items:
                 try:
                     rev = _item_dict(raw_rev)
@@ -1686,15 +1733,21 @@ def _poll_once(
                 except MalformedItemError:
                     skipped += 1
                     continue
-                parsed_revs.append((rid, submitted_at, keep, actor))
+                parsed_revs.append((submitted_at, rid, keep, actor))
 
-            parsed_revs.sort(key=lambda t: t[0])
-            new_max_rid = prev_max_rid
-            for rid, submitted_at, keep, actor in parsed_revs:
-                if rid <= new_max_rid:
-                    continue
+            parsed_revs.sort(key=lambda t: (t[0], t[1]))
+            for submitted_at, rid, keep, actor in parsed_revs:
+                if curr_latest_time:
+                    if submitted_at < curr_latest_time:
+                        continue
+                    if submitted_at == curr_latest_time and rid in curr_same_sec_ids:
+                        continue
                 if not was_baselined and pr_cutoff and submitted_at <= pr_cutoff:
-                    new_max_rid = rid
+                    if submitted_at > curr_latest_time:
+                        curr_latest_time = submitted_at
+                        curr_same_sec_ids = {rid}
+                    else:
+                        curr_same_sec_ids.add(rid)
                     continue
                 ev_id = f"pull_request_review:{rid}"
                 if keep and ev_id not in seen and ev_id not in pending_ids:
@@ -1712,9 +1765,17 @@ def _poll_once(
                             f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}",
                         )
                     )
-                new_max_rid = rid
+                if submitted_at > curr_latest_time:
+                    curr_latest_time = submitted_at
+                    curr_same_sec_ids = {rid}
+                else:
+                    curr_same_sec_ids.add(rid)
+                if len(curr_same_sec_ids) > MAX_SAME_SECOND_REVIEW_IDS:
+                    raise StateFullError("Same-second review id set reached MAX_SAME_SECOND_REVIEW_IDS.")
 
-            pull_max_rev[num_key] = new_max_rid
+            if curr_latest_time:
+                pull_rev_time[num_key] = curr_latest_time
+                pull_rev_ids[num_key] = sorted(curr_same_sec_ids)
             if not queue_filled:
                 reviews_baselined.add(number)
                 pull_rev_page[num_key] = tail_page
@@ -1723,8 +1784,8 @@ def _poll_once(
                     pull_rev_checked[num_key] = valid_pulls_seen[number]
                 checked_review_prs.add(number)
             else:
-                pull_rev_page[num_key] = start_page
-                _set_review_etag(etags, number, start_page, None)
+                pull_rev_page[num_key] = saved_tail_page
+                _set_review_etag(etags, number, saved_tail_page, None)
         else:
             pull_rev_page[num_key] = tail_page
             _set_review_etag(etags, number, tail_page, r_etag)
