@@ -73,8 +73,13 @@ class _BytesStdin:
         self.buffer = io.BytesIO(data)
 
 
-def run_pr_files(monkeypatch, raw_stdin: str | bytes, argv: list[str] | None = None) -> tuple[int, str, str]:
-    mod = load_pr_files()
+def run_pr_files(
+    monkeypatch,
+    raw_stdin: str | bytes,
+    argv: list[str] | None = None,
+    module=None,
+) -> tuple[int, str, str]:
+    mod = load_pr_files() if module is None else module
     assert mod is not None, "tools/desk/pr_files.py does not exist yet"
     assert hasattr(mod, "main"), "pr_files.py must expose main(argv)"
     data = raw_stdin.encode("utf-8") if isinstance(raw_stdin, str) else raw_stdin
@@ -2608,18 +2613,52 @@ def _stream_pr_check_stdin(
     *,
     changed_files: object = ...,
     draft: object = ...,
+    base_ref: object = "main",
     task_folders: object = ...,
+    main_task_folders: object = ("web-signup",),
+    main_test_entries: object = ("test_site.py",),
+    include_point7: str | bool = "auto",
 ) -> str:
+    use_point7 = bool(include_point7)
+    if include_point7 == "auto":
+        mod = load_pr_files()
+        use_point7 = bool(
+            mod is not None
+            and hasattr(mod, "classify_pr_files")
+            and "base_ref" in inspect.signature(mod.classify_pr_files).parameters
+        )
     chunks: list[str] = []
     meta: dict[str, object] = {}
     if changed_files is not ...:
         meta["changed_files"] = changed_files
     if draft is not ...:
         meta["draft"] = draft
+    if use_point7 and base_ref is not ...:
+        meta["base_ref"] = base_ref
     if meta:
         chunks.append(json.dumps(meta))
     if task_folders is not ...:
         chunks.append(json.dumps({"task_folders": task_folders}))
+    if use_point7 and main_task_folders is not ...:
+        chunks.append(
+            json.dumps(
+                {
+                    "main_task_folders": list(main_task_folders)
+                    if isinstance(main_task_folders, tuple)
+                    else main_task_folders
+                }
+            )
+        )
+    if use_point7 and main_test_entries is not ...:
+        chunks.append(
+            json.dumps(
+                {
+                    "main_test_entries": list(main_test_entries)
+                    if isinstance(main_test_entries, tuple)
+                    else main_test_entries
+                }
+            )
+        )
     for page in pages:
         chunks.append(json.dumps(page))
     return "\n".join(chunks)
@@ -2690,6 +2729,16 @@ def _call_classify_compat(
 ) -> dict[str, object]:
     params = inspect.signature(mod.classify_pr_files).parameters
     effective_tasks = ["web-signup"] if tasks is None else tasks
+    if "base_ref" in params and "main_task_folders" in params and "main_test_entries" in params:
+        return mod.classify_pr_files(
+            files,
+            changed_files=len(files),
+            draft=draft,
+            base_ref="main",
+            task_folders=effective_tasks,
+            main_task_folders=effective_tasks,
+            main_test_entries=["test_site.py"],
+        )
     if "changed_files" in params and "task_folders" in params:
         return mod.classify_pr_files(
             files,
@@ -3028,6 +3077,13 @@ def test_pr_files_refuses_incomplete_capped_or_missing_counts_draft_or_base_task
 
     # 4. Base-commit task_folders: a folder on the base commit that the local copy lacks counts as existing;
     #    local copy folders also still count when omitted from task_folders; missing or non-list is refused.
+    extra_valid: dict[str, object] = {}
+    if "base_ref" in inspect.signature(classify).parameters:
+        extra_valid = {
+            "base_ref": "main",
+            "main_task_folders": ["web-signup"],
+            "main_test_entries": ["test_site.py"],
+        }
     assert classify(
         [
             {"status": "added", "filename": "bench/tasks/added-after-desk-started/task.yaml"},
@@ -3036,6 +3092,7 @@ def test_pr_files_refuses_incomplete_capped_or_missing_counts_draft_or_base_task
         changed_files=2,
         draft=False,
         task_folders=["web-signup", "added-after-desk-started"],
+        **extra_valid,
     ) == {
         "protected_folders": ["bench/tasks/"],
         "adds_new_test": True,
@@ -3049,15 +3106,18 @@ def test_pr_files_refuses_incomplete_capped_or_missing_counts_draft_or_base_task
         changed_files=2,
         draft=False,
         task_folders=[],
+        **extra_valid,
     ) == {
         "protected_folders": ["bench/tasks/"],
         "adds_new_test": True,
         "ready_for_review": False,
     }
-    assert_refused(classify(sample_new_test, changed_files=1, draft=False))
-    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders=None))
-    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders={"name": "web-signup"}))
-    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders="web-signup"))
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, **extra_valid))
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders=None, **extra_valid))
+    assert_refused(
+        classify(sample_new_test, changed_files=1, draft=False, task_folders={"name": "web-signup"}, **extra_valid)
+    )
+    assert_refused(classify(sample_new_test, changed_files=1, draft=False, task_folders="web-signup", **extra_valid))
 
     # CLI also refuses when file list or metadata is missing from piped stream.
     c_bare, o_bare, _ = run_pr_files(monkeypatch, json.dumps(sample_new_test))
@@ -3096,6 +3156,354 @@ def test_pr_files_treats_other_spellings_of_added_as_changes_to_existing_files()
         }
 
 
+def _make_behind_main_desk_copy(tmp_path: Path) -> Path:
+    desk_copy = tmp_path / "desk-copy"
+    (desk_copy / "bench" / "tasks" / "local-only-task").mkdir(parents=True, exist_ok=True)
+    (desk_copy / "bench" / "tests").mkdir(parents=True, exist_ok=True)
+    (desk_copy / "bench" / "tests" / "test_local_only.py").write_text("# local\n", encoding="utf-8")
+    return desk_copy
+
+
+def test_pr_files_refuses_missing_malformed_or_thousand_entry_github_directory_listings(monkeypatch, tmp_path):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    classify = mod.classify_pr_files
+    params = inspect.signature(classify).parameters
+    desk_copy = _make_behind_main_desk_copy(tmp_path)
+    sample_ok = [{"status": "added", "filename": "bench/tests/test_fresh_case.py"}]
+
+    def assert_refused(verdict: dict[str, object]) -> None:
+        assert verdict.get("refused") is True, f"expected refusal, got {verdict}"
+        assert verdict.get("ready_for_review") is False
+        reason = verdict.get("reason")
+        assert isinstance(reason, str) and len(reason) > 0
+
+    thousand = [f"entry-{i}" for i in range(1000)]
+    thousand_five = [f"entry-{i}" for i in range(1005)]
+    nine_hundred_ninety_nine = [f"entry-{i}" for i in range(999)]
+
+    # Behavioural check on task_folders at 1,000 entries (GitHub's directory listing truncation cap).
+    extra_kw: dict[str, object] = {}
+    if "base_ref" in params:
+        extra_kw = {
+            "base_ref": "main",
+            "main_task_folders": ["local-only-task"],
+            "main_test_entries": ["test_local_only.py"],
+        }
+    assert_refused(
+        classify(
+            sample_ok,
+            changed_files=1,
+            draft=False,
+            task_folders=thousand,
+            repo_root=desk_copy,
+            **extra_kw,
+        )
+    )
+
+    for required_param in ("task_folders", "main_task_folders", "main_test_entries"):
+        assert required_param in params, f"classify_pr_files() must accept {required_param}"
+
+    base_kwargs: dict[str, object] = {
+        "changed_files": 1,
+        "draft": False,
+        "base_ref": "main",
+        "task_folders": ["base-only-task"],
+        "main_task_folders": ["base-only-task"],
+        "main_test_entries": ["test_local_only.py"],
+        "repo_root": desk_copy,
+    }
+
+    for listing_key in ("task_folders", "main_task_folders", "main_test_entries"):
+        missing_kw = {k: v for k, v in base_kwargs.items() if k != listing_key}
+        assert_refused(classify(sample_ok, **missing_kw))
+        assert_refused(classify(sample_ok, **{**base_kwargs, listing_key: None}))
+
+        for bad_val in (
+            "not-a-list",
+            {"name": "x"},
+            42,
+            True,
+            [123],
+            [""],
+            ["nested/entry"],
+            [".."],
+            ["bad\\slash"],
+            ["bad\nline"],
+        ):
+            assert_refused(classify(sample_ok, **{**base_kwargs, listing_key: bad_val}))
+
+        assert_refused(classify(sample_ok, **{**base_kwargs, listing_key: thousand}))
+        assert_refused(classify(sample_ok, **{**base_kwargs, listing_key: thousand_five}))
+        assert classify(sample_ok, **{**base_kwargs, listing_key: nine_hundred_ninety_nine}) == {
+            "protected_folders": [],
+            "adds_new_test": True,
+            "ready_for_review": True,
+        }
+
+        stream_missing_kw: dict[str, object] = {
+            "changed_files": 1,
+            "draft": False,
+            "base_ref": "main",
+            "task_folders": ["base-only-task"],
+            "main_task_folders": ["base-only-task"],
+            "main_test_entries": ["test_local_only.py"],
+            "include_point7": True,
+        }
+        stream_missing_kw[listing_key] = ...
+        cm, om, _ = run_pr_files(monkeypatch, _stream_pr_check_stdin([sample_ok], **stream_missing_kw))
+        assert cm != 0
+        assert_refused(json.loads(om))
+
+        stream_cap_kw = dict(stream_missing_kw)
+        stream_cap_kw[listing_key] = thousand
+        cc, oc, _ = run_pr_files(monkeypatch, _stream_pr_check_stdin([sample_ok], **stream_cap_kw))
+        assert cc != 0
+        assert_refused(json.loads(oc))
+
+
+def test_pr_files_requires_main_base_branch_and_refuses_other_or_missing_base_ref(monkeypatch, tmp_path):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    classify = mod.classify_pr_files
+    params = inspect.signature(classify).parameters
+    desk_copy = _make_behind_main_desk_copy(tmp_path)
+    sample_ok = [{"status": "added", "filename": "bench/tests/test_fresh_case.py"}]
+
+    def assert_refused(verdict: dict[str, object]) -> None:
+        assert verdict.get("refused") is True, f"expected refusal, got {verdict}"
+        assert verdict.get("ready_for_review") is False
+        reason = verdict.get("reason")
+        assert isinstance(reason, str) and len(reason) > 0
+
+    # Omitting base_ref must be refused even when changed_files, draft, and listings are valid.
+    extra_listings: dict[str, object] = {}
+    if "main_task_folders" in params and "main_test_entries" in params:
+        extra_listings = {
+            "main_task_folders": ["local-only-task"],
+            "main_test_entries": ["test_local_only.py"],
+        }
+    assert_refused(
+        classify(
+            sample_ok,
+            changed_files=1,
+            draft=False,
+            task_folders=["local-only-task"],
+            repo_root=desk_copy,
+            **extra_listings,
+        )
+    )
+    assert "base_ref" in params, "classify_pr_files() must accept base_ref"
+
+    base_kwargs: dict[str, object] = {
+        "changed_files": 1,
+        "draft": False,
+        "task_folders": ["local-only-task"],
+        "main_task_folders": ["local-only-task"],
+        "main_test_entries": ["test_local_only.py"],
+        "repo_root": desk_copy,
+    }
+    for bad_branch in (
+        None,
+        "",
+        123,
+        True,
+        ["main"],
+        "develop",
+        "release/1.0",
+        "Main",
+        "MAIN",
+        "refs/heads/main",
+        "evil-ref-@owner",
+    ):
+        verdict_b = classify(sample_ok, base_ref=bad_branch, **base_kwargs)
+        assert_refused(verdict_b)
+        assert "evil-ref-@owner" not in str(verdict_b)
+
+    cb, ob, eb = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(
+            [sample_ok],
+            changed_files=1,
+            draft=False,
+            base_ref="evil-ref-@owner",
+            task_folders=["local-only-task"],
+            main_task_folders=["local-only-task"],
+            main_test_entries=["test_local_only.py"],
+            include_point7=True,
+        ),
+    )
+    assert cb != 0
+    assert_refused(json.loads(ob))
+    assert "evil-ref-@owner" not in ob and "evil-ref-@owner" not in eb
+
+
+def test_pr_files_checks_tip_of_main_tasks_and_tests_and_behind_main_pull_request_end_to_end(
+    monkeypatch, tmp_path
+):
+    mod = load_pr_files()
+    assert mod is not None, "tools/desk/pr_files.py does not exist yet"
+    params = inspect.signature(mod.classify_pr_files).parameters
+    for required_param in (
+        "changed_files",
+        "draft",
+        "base_ref",
+        "task_folders",
+        "main_task_folders",
+        "main_test_entries",
+    ):
+        assert required_param in params, f"classify_pr_files() must accept {required_param}"
+
+    classify = mod.classify_pr_files
+    desk_copy = _make_behind_main_desk_copy(tmp_path)
+
+    # 1. A task folder that exists ONLY at the tip of main (absent from PR's base commit and local copy)
+    #    counts as existing (including in other capitals and decomposed NFD), as do base-only and local-only.
+    for existing_task_path in (
+        "bench/tasks/tip-of-main-only/task.yaml",
+        "bench/tasks/Tip-Of-Main-Only/task.yaml",
+        "bench/tasks/CAFE\u0301-MAIN/task.yaml",
+        "bench/tasks/base-only-task/task.yaml",
+        "bench/tasks/local-only-task/task.yaml",
+    ):
+        assert classify(
+            [
+                {"status": "added", "filename": existing_task_path},
+                {"status": "added", "filename": "bench/tests/test_companion_ok.py"},
+            ],
+            changed_files=2,
+            draft=False,
+            base_ref="main",
+            task_folders=["base-only-task"],
+            main_task_folders=["tip-of-main-only", "caf\u00e9-main"],
+            main_test_entries=["test_local_only.py"],
+            repo_root=desk_copy,
+        ) == {
+            "protected_folders": ["bench/tasks/"],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
+
+    # 2. An existing test file that exists ONLY at the tip of main (absent from local copy),
+    #    added again in other capitals (or same case, or NFD vs NFC) is protected and NOT a new test.
+    for colliding_test in (
+        "bench/tests/TEST_ONLY_ON_MAIN.py",
+        "bench/tests/Test_Only_On_Main.py",
+        "bench/tests/test_only_on_main.py",
+        "bench/tests/TEST_CAFE\u0301_MAIN.py",
+    ):
+        assert classify(
+            [{"status": "added", "filename": colliding_test}],
+            changed_files=1,
+            draft=False,
+            base_ref="main",
+            task_folders=["base-only-task"],
+            main_task_folders=["base-only-task"],
+            main_test_entries=["test_only_on_main.py", "test_caf\u00e9_main.py"],
+            repo_root=desk_copy,
+        ) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": False,
+            "ready_for_review": False,
+        }
+        assert classify(
+            [
+                {"status": "added", "filename": colliding_test},
+                {"status": "added", "filename": "bench/tests/test_genuinely_new.py"},
+            ],
+            changed_files=2,
+            draft=False,
+            base_ref="main",
+            task_folders=["base-only-task"],
+            main_task_folders=["base-only-task"],
+            main_test_entries=["test_only_on_main.py", "test_caf\u00e9_main.py"],
+            repo_root=desk_copy,
+        ) == {
+            "protected_folders": ["bench/tests/"],
+            "adds_new_test": True,
+            "ready_for_review": False,
+        }
+
+    # 3. Whole pull request case where BOTH the PR's base commit (12 commits behind main) AND the desk's
+    #    local copy are behind main, run end-to-end through the CLI piped stream.
+    monkeypatch.setattr(mod, "ROOT", desk_copy)
+    c_behind_task, o_behind_task, e_behind_task = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(
+            [
+                [
+                    {"status": "added", "filename": "bench/tasks/landed-on-main-later/extra.yaml"},
+                    {"status": "added", "filename": "bench/tests/test_pr_new.py"},
+                ]
+            ],
+            changed_files=2,
+            draft=False,
+            base_ref="main",
+            task_folders=["local-only-task"],
+            main_task_folders=["local-only-task", "landed-on-main-later"],
+            main_test_entries=["test_local_only.py", "test_landed_on_main_later.py"],
+            include_point7=True,
+        ),
+        module=mod,
+    )
+    assert c_behind_task == 0 and e_behind_task == ""
+    assert json.loads(o_behind_task) == {
+        "protected_folders": ["bench/tasks/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+
+    c_behind_test, o_behind_test, e_behind_test = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(
+            [
+                [
+                    {"status": "added", "filename": "bench/tests/TEST_LANDED_ON_MAIN_LATER.py"},
+                    {"status": "modified", "filename": "docs/notes.md"},
+                ]
+            ],
+            changed_files=2,
+            draft=False,
+            base_ref="main",
+            task_folders=["local-only-task"],
+            main_task_folders=["local-only-task", "landed-on-main-later"],
+            main_test_entries=["test_local_only.py", "test_landed_on_main_later.py"],
+            include_point7=True,
+        ),
+        module=mod,
+    )
+    assert c_behind_test == 0 and e_behind_test == ""
+    assert json.loads(o_behind_test) == {
+        "protected_folders": ["bench/tests/"],
+        "adds_new_test": False,
+        "ready_for_review": False,
+    }
+
+    c_behind_ok, o_behind_ok, e_behind_ok = run_pr_files(
+        monkeypatch,
+        _stream_pr_check_stdin(
+            [
+                [{"status": "added", "filename": "bench/tasks/genuinely-new-task/task.yaml"}],
+                [{"status": "added", "filename": "bench/tests/test_genuinely_new_task.py"}],
+            ],
+            changed_files=2,
+            draft=False,
+            base_ref="main",
+            task_folders=["local-only-task"],
+            main_task_folders=["local-only-task", "landed-on-main-later"],
+            main_test_entries=["test_local_only.py", "test_landed_on_main_later.py"],
+            include_point7=True,
+        ),
+        module=mod,
+    )
+    assert c_behind_ok == 0 and e_behind_ok == ""
+    assert json.loads(o_behind_ok) == {
+        "protected_folders": [],
+        "adds_new_test": True,
+        "ready_for_review": True,
+    }
+
+
 def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
@@ -3103,10 +3511,14 @@ def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlist
     assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
     assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Outside PR: passes changed_files, draft, base-commit task_folders, and paginated files JSON into pr_files.py;
-    # states refusal / no-object handling (not ready, not worked out by hand, tells coordinator once kind trouble).
-    assert "pulls/<number>" in text and "changed_files" in text and "draft" in text
+    # Outside PR: passes changed_files, draft, base_ref, base-commit task_folders, tip-of-main task_folders
+    # and test entries, and paginated files JSON into pr_files.py; states refusal / no-object handling.
+    assert "pulls/<number>" in text and "changed_files" in text and "draft" in text and "base_ref: .base.ref" in text
     assert "contents/bench/tasks?ref=$base" in text and "task_folders" in text
+    assert "contents/bench/tasks?ref=main" in text and "main_task_folders" in text
+    assert "contents/bench/tests?ref=main" in text and "main_test_entries" in text
+    assert "when `base_ref` is not `main`" in low
+    assert "has `1,000` entries or more" in low
     assert "gh api --paginate repos/BrilliantTiger/dodam/pulls/<number>/files; } | python3 tools/desk/pr_files.py" in text
     assert "never work out protected folders, new tests, or readiness from file names yourself" in low
     assert "prints no object or prints a refusal" in low
