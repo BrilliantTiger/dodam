@@ -4201,6 +4201,24 @@ def test_a_file_of_another_account_is_refused(place, monkeypatch):
             use()
 
 
+def test_a_path_given_from_the_copy_is_charged_like_the_same_path_in_full(place, counting, monkeypatch, tmp_path_factory):
+    guard = module("guard")
+    # Claude Code reads a path that does not start at the root from the session's working folder, which is the copy.
+    # What the check charges must not depend on the folder the check itself happens to run in.
+    monkeypatch.chdir(tmp_path_factory.mktemp("elsewhere"))
+    in_full = guard.bytes_of(a_call("Read", file_path=str(place.copy / "notes.md"), limit=10), lock_file(), place.copy)
+    assert in_full > 0
+    assert guard.bytes_of(a_call("Read", file_path="notes.md", limit=10), lock_file(), place.copy) == in_full
+    assert counting(a_call("Read", file_path="notes.md", limit=10)) is None
+    assert json.loads((place.state / "session" / "reads-s1.json").read_text())["bytes"] == in_full
+    # A search in a folder of the copy, named from the copy, is a search inside the copy.
+    (place.copy / "docs").mkdir(exist_ok=True)
+    assert isinstance(guard.bytes_of(a_call("Grep", pattern="x", path="docs", output_mode="count", head_limit=1), lock_file(), place.copy), int)
+    # And a path that leaves the copy that way is still outside it.
+    assert guard.bytes_of(a_call("Read", file_path="../outside.md", limit=10), lock_file(), place.copy) == 0
+    assert isinstance(guard.bytes_of(a_call("Grep", pattern="x", path="..", output_mode="count", head_limit=1), lock_file(), place.copy), str)
+
+
 def test_a_search_is_charged_the_lines_asked_for_and_the_two_of_claude_codes_own(place, counting):
     guard = module("guard")
     assert counting(a_call("Grep", pattern="x", output_mode="files_with_matches", head_limit=30)) is None
