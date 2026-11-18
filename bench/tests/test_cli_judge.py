@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1204,3 +1205,163 @@ def test_a_run_during_which_the_kernel_ended_a_process_for_memory_is_told():
     told = getattr(runner, "_ended_by_the_kernel", None)
     assert told is not None, "the case runner does not look whether the kernel ended something"
     assert told(3, 4) is True and told(3, 3) is False
+
+
+# The tests of the judging in a container read what a container really holds through a helper
+# that stands outside it and holds what a judged container must never get. The three tests below
+# pin where that helper is and what it touches.
+HELPERS_NAMES = ("memory" + ".reclaim", "cgroup" + ".freeze", "drop" + "_caches", "/logs/" + "reading")
+
+
+def test_nothing_that_judges_names_the_tests_helper_or_the_files_it_writes(cli_task_dir, tmp_path):
+    """The helper is in the file of the container tests and nowhere else: not in the judge, the
+    case runner, the vetting tool or the converter, not in an image, a task or a workflow, and not
+    in a task as it is handed to Harbor. So no judging that counts starts it or mounts what it
+    needs."""
+    repository = Path(__file__).resolve().parents[2]
+    bench = repository / "bench"
+    harbor = to_harbor(load_task(cli_task_dir), "python", tmp_path / "harbor")
+    places = [bench / "dodambench", bench / "images", bench / "tasks", bench / "harbor", bench / "experiments",
+              bench / "tests", repository / ".github", harbor]
+    the_tests_own = {bench / "tests/test_cli_isolation.py"}
+    looked_at, named = 0, []
+    for place in places:
+        for path in sorted(place.rglob("*")):
+            if not path.is_file() or path in the_tests_own or "__pycache__" in path.parts:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            looked_at += 1
+            named += [f"{path.relative_to(repository) if repository in path.parents else path.name}: {name}"
+                      for name in HELPERS_NAMES if name in text]
+    assert looked_at > 100, f"only {looked_at} files were looked at"
+    assert named == [], f"the tests' helper, or a file of the kernel's that it writes, is named outside the container tests: {named}"
+    from test_cli_isolation import READER
+    assert all(name in READER for name in HELPERS_NAMES[:2]) and '"/drop"' in READER, (
+        "the helper no longer writes the files this test looks for")
+
+
+def test_the_tests_helper_is_given_the_judged_containers_folder_and_nothing_else_of_the_machine():
+    from test_cli_isolation import IMAGE, READER, reader_command
+    command = reader_command("judged", "docker/0123abcd")
+    given = [command[i + 1] for i, word in enumerate(command) if word == "--volume"]
+    assert given == ["/sys/fs/cgroup/docker/0123abcd:/group", "/proc/sys/vm/drop" + "_caches:/drop", "judged-asked:/reading"], (
+        f"the helper is given other things than the judged container's folder, the file for letting go and the asking folder: {given}")
+    assert command[:3] == ["docker", "run", "--detach"] and command[-4:] == [IMAGE, "python3", "-c", READER]
+    options = command[3:-4]
+    assert [options[i + 1] for i, word in enumerate(options) if word == "--network"] == ["none"]
+    assert "--memory" in options and "--pids-limit" in options
+    allowed = {"--name", "--network", "--user", "--memory", "--pids-limit", "--volume"}
+    assert {word for word in options if word.startswith("--")} == allowed, (
+        f"the helper is started with more than its caps and its three folders: {options}")
+
+
+WATCHED = r'''
+import os, sys
+log = os.open(sys.argv[1], os.O_WRONLY | os.O_APPEND)
+CHANGES = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+
+
+def watch(event, args):
+    if event == "open":
+        if isinstance(args[2], int) and args[2] & CHANGES:
+            os.write(log, f"writes\t{args[0]}\n".encode())
+    elif event.split(".")[0] in ("os", "shutil", "subprocess", "socket", "ctypes") and event not in (
+            "os.listdir", "os.scandir"):
+        os.write(log, f"{event}\t{args[0] if args else ''}\n".encode())
+
+
+sys.addaudithook(watch)
+exec(compile(open(sys.argv[2]).read(), "helper", "exec"))
+'''
+
+
+def test_the_tests_helper_changes_nothing_outside_the_three_folders_it_is_given(tmp_path):
+    """The helper's program is run here, outside any container, on a folder made up to look like
+    a container's folder of the kernel's, and everything it does is watched: every file it opens
+    for writing, and every act on files, processes or the network. It writes the two files of the
+    kernel's in the folder it was given, the file for letting go, and its answers in the folder it
+    is asked through. Nothing else."""
+    from test_cli_isolation import READER
+    asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
+    reclaim, freeze = HELPERS_NAMES[:2]
+    asked.mkdir()
+    held.mkdir()
+    for name, text in {"memory.current": "1048576\n", "memory.swap.current": "0\n", "cgroup.events": "populated 1\nfrozen 1\n",
+                       freeze: "0\n", reclaim: "", "memory.stat": "anon 4096\nfile 0\nfile_dirty 0\n"}.items():
+        (held / name).write_text(text)
+    drop.write_text("")
+    machine.write_text("".join(f"{name}: 1000 kB\n" for name in ("MemTotal", "MemFree", "Buffers", "Cached", "Shmem", "SReclaimable")))
+    program = READER
+    for path, here in (('asked, held = "/reading", "/group"', f'asked, held = "{asked}", "{held}"'),
+                       ('open("/drop", "wb"', f'open("{drop}", "wb"'),
+                       ('open("/proc/meminfo")', f'open("{machine}")')):
+        assert program.count(path) == 1, f"the helper no longer names {path} once"
+        program = program.replace(path, here)
+    (tmp_path / "helper.py").write_text(program)
+    (tmp_path / "watched.py").write_text(WATCHED)
+    (tmp_path / "log").write_text("")
+    helper = subprocess.Popen([sys.executable, str(tmp_path / "watched.py"), str(tmp_path / "log"), str(tmp_path / "helper.py")],
+                              cwd=tmp_path, stderr=subprocess.PIPE)
+    try:
+        (asked / "ask-one").write_text("one")
+        deadline = time.monotonic() + 30
+        while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
+            time.sleep(0.01)
+        assert (asked / "answer-one").exists(), f"the helper gave no answer: {helper.stderr.read()[-2000:] if helper.poll() is not None else 'it is still running'}"
+        answer = json.loads((asked / "answer-one").read_text())
+    finally:
+        helper.kill()
+        helper.wait()
+    assert answer["charged"] == 1048576 and answer["dropped"] is True
+    assert (held / freeze).read_text() == "0", "the helper left the container it read standing still"
+    done = [line.split("\t") for line in (tmp_path / "log").read_text().splitlines()]
+    written = {path for event, path in done if event == "writes"}
+    assert written == {str(held / freeze), str(held / reclaim), str(drop), str(asked / "answer.tmp")}, (
+        f"the helper opened other files for writing than the two of the kernel's in its folder, the file for letting go and its answer: {sorted(written)}")
+    other = sorted({(event, path) for event, path in done if event != "writes"})
+    assert other == [("os.chmod", str(asked)), ("os.rename", str(asked / "answer.tmp"))], (
+        f"the helper did more than close its asking folder to others and hand over its answer: {other}")
+
+
+FLOODS_BOTH = '''
+import os, sys
+block = b"x" * 65536
+if "floods" in sys.argv:
+    while True:
+        os.write(1, block)
+        os.write(2, block)
+print("ok")
+'''
+
+
+def test_what_a_program_can_make_the_case_runner_hold_is_bounded_by_the_limit_on_output(tmp_path):
+    """The case runner's own memory is left out of a case's memory. What a program can put into
+    that memory is its output, and the runner keeps no more of it than the limit on output. A
+    program floods both of its outputs until it is ended; the most memory the runner's Python had
+    in use during that run, above what it had before, stays within four times the limit of 64 KB
+    and 1 MB."""
+    seen = tmp_path / "seen.json"
+    result = judge_program(tmp_path, FLOODS_BOTH, {"functional/test_flood.py": f'''
+import tracemalloc
+
+
+def test_the_flood():
+    with case() as c:
+        tracemalloc.start()
+        before, _ = tracemalloc.get_traced_memory()
+        r = c.run(["floods"])
+        _, highest = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        with open({str(seen)!r}, "w") as f:
+            json.dump({{"limit": r.limit, "kept": len(r.out) + len(r.err), "grew": highest - before}}, f)
+'''})
+    assert outcomes(result) == {"test_the_flood": "failed"} and "output" in message(result, "test_the_flood"), result["report"]
+    measured = json.loads(seen.read_text())
+    limit = int(LIMITS["CASE_OUTPUT_KB"]) * 1024
+    assert measured["limit"] == "output" and measured["kept"] <= limit, measured
+    assert measured["grew"] <= 4 * limit + 2**20, (
+        f"the case runner's memory grew by {measured['grew']} bytes while a program flooded its output, "
+        f"with a limit of {limit} bytes on output")

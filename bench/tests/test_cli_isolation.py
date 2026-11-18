@@ -284,6 +284,17 @@ def left_out_mb(limit_mb: int) -> float:
     return min(limit_mb / 4, RECORDS_LEFT_OUT_MB)
 
 
+def reader_command(name: str, group: str) -> list[str]:
+    """The command that starts the helper for the judged container `name`, whose folder of the
+    kernel's is `group`. The helper gets three things and no more: that one folder, the machine's
+    file for letting go of unused records, and the folder it is asked through. It has no network,
+    no rights beyond a container's usual ones, and a memory cap and a process cap of its own."""
+    return ["docker", "run", "--detach", "--name", f"{name}-reader", "--network", "none", "--user", "0",
+            "--memory", "256m", "--pids-limit", "64", "--volume", f"/sys/fs/cgroup/{group}:/group",
+            "--volume", "/proc/sys/vm/drop_caches:/drop",
+            "--volume", f"{name}-asked:/reading", IMAGE, "python3", "-c", READER]
+
+
 def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32", memory_mb: int | None = None,
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
                  changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
@@ -340,11 +351,7 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
             driver = subprocess.run(["docker", "info", "--format", "{{.CgroupDriver}}"], check=True, capture_output=True,
                                     text=True).stdout.strip()
             group = f"system.slice/docker-{ident}.scope" if driver == "systemd" else f"docker/{ident}"
-            subprocess.run(["docker", "run", "--detach", "--name", f"{name}-reader", "--network", "none", "--user", "0",
-                            "--memory", "256m", "--pids-limit", "64", "--volume", f"/sys/fs/cgroup/{group}:/group",
-                            "--volume", "/proc/sys/vm/drop_caches:/drop",
-                            "--volume", f"{name}-asked:/reading", IMAGE, "python3", "-c", READER],
-                           check=True, capture_output=True)
+            subprocess.run(reader_command(name, group), check=True, capture_output=True)
         try:
             said, errors = running.communicate(timeout=seconds)
             done = subprocess.CompletedProcess(running.args, running.returncode, said, errors)
