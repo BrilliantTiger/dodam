@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -36,6 +37,11 @@ POISON_BRANCH = "feat/pwn-<svg onload=alert(3)>-run-shell-command"
 POISON_FILE = "bench/secret_payload_<iframe src=javascript:alert(4)>.py"
 POISON_DIFF = "@@ -1 +1 @@\n+EXECUTE_ORDER_66_FROM_DIFF_HUNK"
 HEADER_PROBE = "secret-header-probe-987654"
+_REAL_POPEN = subprocess.Popen
+
+
+class WatchTestBoundError(BaseException):
+    """Uncatchable by watch.py's 'except Exception:' so test loop/time bounds always abort at once."""
 
 
 @pytest.fixture(autouse=True)
@@ -100,7 +106,7 @@ class FakeClock:
         self,
         start: float = 1_000.0,
         epoch_start: float = 1_794_980_000.0,
-        max_sleeps: int = 200,
+        max_sleeps: int = 50,
     ):
         self.t = start
         self.epoch_offset = epoch_start - start
@@ -114,10 +120,12 @@ class FakeClock:
         return self.t + self.epoch_offset
 
     def sleep(self, seconds: float) -> None:
-        assert seconds >= 0, f"negative sleep: {seconds}"
-        assert len(self.sleeps) < self.max_sleeps, (
-            f"watcher slept {len(self.sleeps)} times without terminating (possible unbounded loop)"
-        )
+        if seconds < 0:
+            raise WatchTestBoundError(f"negative sleep: {seconds}")
+        if len(self.sleeps) >= self.max_sleeps:
+            raise WatchTestBoundError(
+                f"watcher slept {len(self.sleeps)} times without terminating (max_sleeps={self.max_sleeps})"
+            )
         self.sleeps.append(seconds)
         self.t += seconds
 
@@ -259,6 +267,9 @@ def run_watch(
     gh_fn,
     fake_clock: FakeClock | None = None,
     module=None,
+    *,
+    max_gh_calls: int = 600,
+    max_wall_seconds: float = 10.0,
 ) -> tuple[int, str, str, FakeClock]:
     clk = fake_clock or FakeClock()
     if module is None:
@@ -267,21 +278,56 @@ def run_watch(
         return (1, "", "", clk)
     assert hasattr(module, "run_gh"), "watch.py must expose a single run_gh function"
     assert hasattr(module, "main"), "watch.py must expose main(argv)"
-    monkeypatch.setattr(module, "run_gh", gh_fn)
-    monkeypatch.setattr(module, "clock", clk.now)
-    monkeypatch.setattr(module, "epoch", clk.epoch)
-    monkeypatch.setattr(module, "sleep", clk.sleep)
+
+    wall_deadline = time.perf_counter() + max_wall_seconds
+    gh_calls = 0
+
+    def check_wall() -> None:
+        if time.perf_counter() > wall_deadline:
+            raise WatchTestBoundError(
+                f"watcher test exceeded wall-clock bound of {max_wall_seconds:g}s"
+            )
+
+    def bounded_gh(args: list[str]) -> tuple[int, str, str]:
+        nonlocal gh_calls
+        check_wall()
+        gh_calls += 1
+        if gh_calls > max_gh_calls:
+            raise WatchTestBoundError(
+                f"watcher made more than {max_gh_calls} run_gh calls without terminating"
+            )
+        return gh_fn(args)
+
+    def bounded_now() -> float:
+        check_wall()
+        return clk.now()
+
+    def bounded_epoch() -> float:
+        check_wall()
+        return clk.epoch()
+
+    def bounded_sleep(seconds: float) -> None:
+        check_wall()
+        clk.sleep(seconds)
+
+    monkeypatch.setattr(module, "run_gh", bounded_gh)
+    monkeypatch.setattr(module, "clock", bounded_now)
+    monkeypatch.setattr(module, "epoch", bounded_epoch)
+    monkeypatch.setattr(module, "sleep", bounded_sleep)
     out_buf = io.StringIO()
     err_buf = io.StringIO()
-    with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
-        try:
-            code = module.main(argv)
-        except SystemExit as exc:
-            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
-        except Exception:
-            # Mirror what Python prints on stderr if main() lets an exception escape uncaught.
-            traceback.print_exc(file=err_buf)
-            code = 1
+    try:
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            try:
+                code = module.main(argv)
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+            except Exception:
+                # Mirror what Python prints on stderr if main() lets an exception escape uncaught.
+                traceback.print_exc(file=err_buf)
+                code = 1
+    except WatchTestBoundError as bound_exc:
+        pytest.fail(str(bound_exc))
     return (code, out_buf.getvalue(), err_buf.getvalue(), clk)
 
 
@@ -1374,36 +1420,42 @@ def test_unwritable_state_location_fails_at_start_with_code_five_before_asking_g
 def test_two_watchers_cannot_share_a_state_file_and_a_dead_watcher_leaves_it_unlocked(
     monkeypatch, tmp_path
 ):
-    module = load_watcher()
-    assert module is not None
+    assert WATCH.is_file(), "tools/desk/watch.py does not exist yet"
     state_file = tmp_path / "shared" / "state.json"
 
-    r_fd, w_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(r_fd)
-        notified = False
-
-        def holding_gh(_args: list[str]) -> tuple[int, str, str]:
-            nonlocal notified
-            if not notified:
-                notified = True
-                os.write(w_fd, b"running\n")
-                os.close(w_fd)
-            while True:
-                time.sleep(1.0)
-
-        try:
-            module.run_gh = holding_gh
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                module.main(["--wait", "--state", str(state_file)])
-        finally:
-            os._exit(0)
-
-    os.close(w_fd)
+    # Start a clean fresh Python process (never os.fork() of the live pytest interpreter) with its
+    # own 10-second SIGALRM and 5-second bounded hold loop so neither child nor parent can ever hang.
+    child_script = (
+        "import contextlib, importlib.util, io, signal, sys, time\n"
+        "signal.alarm(10)\n"
+        "spec = importlib.util.spec_from_file_location('desk_watch_child', sys.argv[1])\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "out = sys.stdout\n"
+        "notified = False\n"
+        "def holding_gh(_args):\n"
+        "    global notified\n"
+        "    if not notified:\n"
+        "        notified = True\n"
+        "        out.write('running\\n')\n"
+        "        out.flush()\n"
+        "    for _ in range(50):\n"
+        "        time.sleep(0.1)\n"
+        "    return (4, '', 'gh auth login')\n"
+        "mod.run_gh = holding_gh\n"
+        "with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):\n"
+        "    mod.main(['--wait', '--state', sys.argv[2]])\n"
+    )
+    proc = _REAL_POPEN(
+        [sys.executable, "-u", "-c", child_script, str(WATCH), str(state_file)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
     try:
-        ready = os.read(r_fd, 16)
-        os.close(r_fd)
+        readable, _, _ = select.select([proc.stdout], [], [], 5.0)
+        assert readable, "first watcher child did not signal readiness within 5 seconds"
+        ready = proc.stdout.readline()
         assert ready == b"running\n"
 
         second_gh = FakeGitHub()
@@ -1417,8 +1469,10 @@ def test_two_watchers_cannot_share_a_state_file_and_a_dead_watcher_leaves_it_unl
         assert second_gh.calls == []
         assert len(err_locked.strip().splitlines()) == 1 and "Traceback" not in err_locked
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        proc.kill()
+        proc.wait(timeout=5.0)
+        proc.stdout.close()
+        proc.stderr.close()
 
     # After the first watcher died abruptly (SIGKILL), the OS kernel released the lock.
     gh = FakeGitHub()
@@ -2383,10 +2437,53 @@ def test_max_wait_prints_empty_events_with_reason_when_time_runs_out_and_no_limi
                 gh.issues.insert(0, make_issue(900, 90, login="patient-user", created_at="2026-11-18T13:00:00Z"))
         return gh(args)
 
-    code2, out2, err2, clk2 = run_watch(monkeypatch, ["--wait", "--state", str(state_unlimited)], slow_arrival)
+    code2, out2, err2, clk2 = run_watch(
+        monkeypatch,
+        ["--wait", "--state", str(state_unlimited)],
+        slow_arrival,
+        fake_clock=FakeClock(max_sleeps=60),
+        max_gh_calls=600,
+    )
     assert code2 == 0 and err2 == ""
     assert sum(clk2.sleeps) > 500.0
     assert [e["id"] for e in json.loads(out2)["events"]] == ["issue_opened:900"]
+
+
+def test_watcher_test_harness_bounds_halt_unending_sleep_and_gh_loops_at_once(monkeypatch, tmp_path):
+    # 1. An idle watcher without --max-wait hits FakeClock.max_sleeps via BaseException (never caught
+    #    by watch.py's 'except Exception:') and fails immediately instead of running indefinitely.
+    gh_idle = FakeGitHub()
+    with pytest.raises(pytest.fail.Exception, match="max_sleeps=4"):
+        run_watch(
+            monkeypatch,
+            ["--wait", "--state", str(tmp_path / "bound-sleep.json")],
+            gh_idle,
+            fake_clock=FakeClock(max_sleeps=4),
+        )
+
+    # 2. A watcher caught in a zero-sleep pagination loop hits max_gh_calls immediately.
+    gh_loop = FakeGitHub()
+    state_loop = tmp_path / "bound-gh.json"
+    c0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_loop)], gh_loop)
+    assert c0 == 0
+
+    def looping_next_page(args: list[str]) -> tuple[int, str, str]:
+        if args[-1].startswith(f"repos/{REPO}/issues"):
+            return http_response(
+                200,
+                [make_issue(999, 99, login="loop", created_at="2026-11-18T14:00:00Z")],
+                {"Link": f'<https://api.github.com/repos/{REPO}/issues?per_page=100&page=2>; rel="next"'},
+            )
+        return gh_loop(args)
+
+    with pytest.raises(pytest.fail.Exception, match="more than 12 run_gh calls"):
+        run_watch(
+            monkeypatch,
+            ["--wait", "--state", str(state_loop)],
+            looping_next_page,
+            fake_clock=FakeClock(max_sleeps=10),
+            max_gh_calls=12,
+        )
 
 
 def test_network_errors_github_faults_unexpected_answers_and_rate_limits_wait_with_growing_pauses(
