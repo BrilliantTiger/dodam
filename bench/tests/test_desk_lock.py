@@ -1786,6 +1786,10 @@ class Day:
         self.handled_now: set = set()
         self.waited_for_units: set = set()
         self.bursts = 0
+        # The test's own account of items: sessions in a row that had to be ended and were shown the item's text, and when an item was closed.
+        self.in_a_row: dict = {}
+        self.closed_at: dict = {}
+        self.closings = self.openings = 0
         self.refusals_in_a_row = 0
         place.facts.write_text(FACTS, encoding="utf-8")
         outer = self
@@ -1824,8 +1828,20 @@ class Day:
         self.relay.run_session = self.session
         settle = self.relay.settle
 
-        def settled(entry, counts, charged, ended=False, waits=()):
-            settle(entry, counts, charged, ended, waits)
+        def settled(entry, counts, charged, ended=False, waits=(), read=False):
+            settle(entry, counts, charged, ended, waits, read)
+            number = entry["number"]
+            if number is not None and entry.get("let_in", True):
+                # A session that had to be ended counts toward closing its item only when it was shown text of that item.
+                assert read is bool(self.shown) or not ended
+                if ended and self.shown:
+                    self.in_a_row[number] = self.in_a_row.get(number, 0) + 1
+                    if self.in_a_row[number] >= self.lock["spending"]["ended_in_a_row_per_item"]:
+                        # After it opens again its count stands at one.
+                        self.closed_at[number], self.in_a_row[number] = self.desk_time, 1
+                        self.closings += 1
+                elif not ended:
+                    self.in_a_row.pop(number, None)
             (written,) = [s for s in self.record()["sessions"] if s["id"] == entry["id"] and s["t"] == entry["t"]]
             # A session has one payer, the newest writer it handles, and counts against nobody else.
             assert written["account"] == self.payer and written["accounts"] == self.handles and written["ended"] is ended
@@ -1884,6 +1900,8 @@ class Day:
         self.payer = self.handles[0] if self.handles else None
         self.shown = set()
         self.handled_now |= set(self.handles)
+        # No session starts for an item while it is closed.
+        assert number not in self.closed_now(), number
         if number is not None:
             # The newest arrival the session is told of is the payer's, and it is told of nobody it does not handle.
             lines = [json.loads(line) for line in text.splitlines()[1:]]
@@ -2065,6 +2083,14 @@ class Day:
         assert chosen == without and not {p["account"] for p in chosen} & waiting
         return [(p["number"], p["account"]) for p in chosen]
 
+    def closed_now(self) -> set:
+        """The items that are closed by the test's own account: for seven days after the session that closed them, and no longer."""
+        seconds = self.lock["spending"]["item_closed_days"] * self.DAY
+        for number in [n for n, at in self.closed_at.items() if self.desk_time - at >= seconds]:
+            del self.closed_at[number]
+            self.openings += 1
+        return set(self.closed_at)
+
     def tally_the_units_share(self) -> None:
         """Note the places that wait for nothing but their account's share of the day's units."""
         record = self.record()
@@ -2078,6 +2104,9 @@ class Day:
         lock, spending, settings = self.lock, self.lock["spending"], self.lock["coordinator"]
         assert "vulnerability_kept_per_day" in settings and "sessions_per_account_per_day" in spending, "lock.json: the numbers are not there yet"
         self.next_start()
+        # An item is closed only after two sessions in a row that had to be ended and were shown its text (after it
+        # opened again: one), and never for longer than seven days after the session that closed it.
+        assert self.relay.closed_items() == self.closed_now()
         started = self.within(self.started)
         assert len(started) <= spending["sessions_per_day"]
         per_item: dict = {}
@@ -2143,6 +2172,8 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     assert {kind for _, kind in day.messages} == {"vulnerability", "desk_down", "limit_reached", "digest"}
     # Sessions were ended at a bound, payers did wait, and accounts that are held back did write on other accounts' items.
     assert sum(1 for s in day.sessions if s[3]) > 5 and sum(1 for s in day.sessions if s[4]) > 2 and day.bursts > 5
+    # Items were closed, and closed items did open again.
+    assert day.closings > 0 and day.openings > 0, (day.closings, day.openings)
     # What the share of a day's units costs: no account with a few items of its own ever waited for it.
     assert [waited for waited in day.waited_for_units if waited[0] >= 100] == [], sorted(day.waited_for_units)
     print(f"seed {seed}: {len(day.started)} sessions; places that waited for the share of units alone: {len(day.waited_for_units)} "
@@ -4759,26 +4790,53 @@ def test_when_the_first_writer_of_an_item_is_held_back_its_title_and_body_are_no
     assert json.loads((place.state / "session" / "shown.json").read_text()) == [200, 666]
 
 
-def test_after_two_sessions_in_a_row_had_to_be_ended_on_an_item_no_further_session_starts_for_it(place, monkeypatch):
+def test_two_sessions_in_a_row_that_had_to_be_ended_close_an_item_for_seven_days_and_then_one_more_does(place, monkeypatch):
+    days = lock_file()["spending"].get("item_closed_days")
+    assert days == 7, "lock.json: spending.item_closed_days"
     running, clock, ran = in_process(place, monkeypatch)
     plain = running.run_session
-    place.put(7, written(950, by(951), by(952), by(953)))
-    # A session that was not ended between two that were begins the count anew.
-    for n, played in enumerate((reading(place, ENDED), plain, reading(place, ENDED), reading(place, ENDED))):
-        running.run_session = played
+    place.put(7, written(950, *[by(951 + n) for n in range(12)]))
+    # A session that was not ended begins the count anew, and one that was ended before it read anything says nothing
+    # about the item: of these six, only the last two count, one after the other.
+    played = (reading(place, ENDED), plain, reading(place, ENDED), ended_session, ended_session, reading(place, ENDED))
+    for n, how in enumerate(played):
+        assert running.closed_items() == set(), n
+        running.run_session = how
         running.take(arrivals(event(7, 951 + n, f"e{n}")))
         assert running.start_one() is True, n
         clock[0] += 86_400 + 1
     running.run_session = plain
-    assert [s["ended"] for s in counted(place)["sessions"]] == [True]  # the older ones are a day old and counted no more
-    # The item is closed: an arrival on it is counted and not kept, and the digest names the item.
+    closed_at = clock[0] - 86_400 - 1
+    assert running.closed_items() == {7}
+    # The item is closed: an arrival on it is counted and not kept, and the digest names the item and the day it opens again.
     running.take(arrivals(event(7, 960, "next"), event(9, 960, "elsewhere")))
     assert [(e["number"], e["account"]) for e in kept(place)] == [(9, 960)]
     assert running.start_one() is True and ran[-1][1] == "9" and running.start_one() is False
     assert running.desk.digest(force=True)
     digest = notices(place, "digest")[-1]
-    assert "- item_closed, item 7: Two sessions in a row had to be ended on this item." in digest
-    assert "- not handled (arrivals on items for which no session is started any more): 1" in digest
+    opens = time.strftime("%Y-%m-%d", time.gmtime(closed_at + days * 86_400))
+    assert f"- item_closed, item 7: Two sessions in a row that were shown this item had to be ended. No session is started for it until {opens}" in digest
+    assert "- not handled (arrivals on items for which no session is started now): 1" in digest
+    # Seven days after the session that closed it, to the second, it opens again by itself.
+    clock[0] = closed_at + days * 86_400 - 1
+    running.take(arrivals(event(7, 961, "too early")))
+    assert kept(place) == [] and running.closed_items() == {7}
+    clock[0] = closed_at + days * 86_400
+    assert running.closed_items() == set()
+    running.take(arrivals(event(7, 962, "after a week")))
+    # Its count stands at one: the first session after that which has to be ended and was shown its text closes it again.
+    running.run_session = reading(place, ENDED)
+    assert running.start_one() is True and running.closed_items() == {7}
+    running.run_session = plain
+    clock[0] += days * 86_400
+    # And after a session that was not ended it takes two again.
+    for n, how in enumerate((plain, reading(place, ENDED), reading(place, ENDED))):
+        assert running.closed_items() == set(), n
+        running.run_session = how
+        running.take(arrivals(event(7, 970 + n, f"l{n}")))
+        assert running.start_one() is True, n
+        clock[0] += 86_400 + 1
+    assert running.closed_items() == {7}
 
 
 def test_a_session_that_cost_more_than_a_session_may_makes_its_item_and_its_payer_wait_like_any_other_bound(place, monkeypatch):
@@ -4923,6 +4981,10 @@ def least_accounts(lock: dict) -> dict:
     # The kept reports cannot be filled at all: twice the sessions of a day cannot write as many as are kept.
     writable = 2 * spending["sessions_per_day"] * (coordinator["reports_per_session"] + 2)
     found["kept reports"] = None if writable <= coordinator["kept_per_day"] else by_division(coordinator["kept_per_day"], coordinator["kept_per_account_per_day"])
+    # The room for vulnerability reports: a session writes one, and no account has a cap of its own there. It is filled
+    # only when the sessions of two days' worth, which is the most that 24 hours of reports can come from, are more than the room.
+    in_a_day = 2 * spending["sessions_per_day"]
+    found["vulnerability reports kept"] = None if in_a_day <= coordinator["vulnerability_kept_per_day"] else -(-coordinator["vulnerability_kept_per_day"] // spending["sessions_per_account_per_day"])
     return found
 
 
@@ -4933,7 +4995,11 @@ def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_sta
     # One outside account alone never closes a day, for any bound.
     assert all(count is None or count > 1 for count in needed.values()), needed
     assert needed == {"a day": 2, "sessions": 5, "units": 2, "the kept list filled": 20, "the kept list closed to a newcomer": 100,
-                      "answers": 6, "labels": 10, "sent at once": 5, "kept reports": None}  # fmt: skip
+                      "answers": 6, "labels": 10, "sent at once": 5, "kept reports": None, "vulnerability reports kept": None}  # fmt: skip
+    # With a smaller room, or more sessions in a day, accounts could fill it, and the search says how many.
+    smaller = json.loads(json.dumps(lock))
+    smaller["coordinator"]["vulnerability_kept_per_day"] = 20
+    assert least_accounts(smaller)["vulnerability reports kept"] == 3
     # Without one account's share of the units, one account does it alone: that is what the share is for.
     without = json.loads(json.dumps(lock))
     del without["spending"]["units_per_account_per_day"]
@@ -4944,7 +5010,10 @@ def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_sta
         "The kept list closed to an account that holds nothing": needed["the kept list closed to a newcomer"],
         "A day's answers": needed["answers"], "A day's labels": needed["labels"],
         "Vulnerability reports sent at once": needed["sent at once"], "The reports kept in a day": "no number of accounts",
+        "The room for vulnerability reports kept in a day": "no number of accounts",
     }  # fmt: skip
+    # What happens to a vulnerability report that arrives when its room is full all the same is said in plain words.
+    assert "is not kept and not sent" in text
     for what, count in rows.items():
         assert f"| {what} | {count} |" in text, (what, count)
     assert "one outside account alone never closes a day" in text.lower()
