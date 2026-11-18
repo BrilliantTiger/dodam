@@ -1448,7 +1448,7 @@ time.sleep(0.2)
 # programs below hold on to as many as they can in five ways, and say what the container really
 # held at the end; the hidden test says what the judge counted.
 HOLDS = r"""
-import ctypes, resource
+import ctypes, mmap, resource
 libc = ctypes.CDLL(None, use_errno=True)
 libc.mmap.restype = ctypes.c_void_p
 libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
@@ -1535,6 +1535,9 @@ ways = {"open files": open_files, "memory files, mapped and closed": memory_file
         "shared mappings without a file": shared_mappings_without_a_file,
         "the image's files, mapped": the_images_files_mapped,
         "far-apart pages in the case folder": far_apart_pages_in_the_case_folder}
+# the ordinary memory is set aside before anything is held, untouched and so not yet taken: where a
+# process may have few mappings, none would be left for it afterwards
+aside = mmap.mmap(-1, (limit_mb + left_out_mb + 64) * MB, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
 held_first, records_first = held()
 left_out, kept, steps = left_out_mb * MB, [], 0
 # "within": as many records as are left out and a little more, then ordinary memory up to just below
@@ -1555,7 +1558,8 @@ except OSError:
 now, records = held()
 if goal is None:
     goal = (limit_mb - 26) * MB + min(max(records - records_first, 0), left_out)
-block = bytearray(b"x") * max(goal - (now - held_first), 0)
+for at in range(0, min(max(goal - (now - held_first), 0), len(aside)), 4096):
+    aside[at] = 1
 now, records = held()
 print(json.dumps({"held_mb": now / MB, "records_mb": records / MB, "steps": steps}), flush=True)
 time.sleep(0.3)
