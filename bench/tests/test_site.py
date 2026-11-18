@@ -414,6 +414,55 @@ def test_the_english_charter_carries_the_same_version_and_date_as_the_korean_one
         assert text.rstrip().splitlines()[-1].startswith(marker), "the last row of the history is not this version"
 
 
+# Charter version 0.12: Google's models work in the project since 2026-11-18, through Google's own tool, in
+# working sessions only. The charter, the working rules and the page say so in the same way.
+def test_the_charter_names_the_three_official_tools_and_the_basis_for_using_google_s():
+    english = (ROOT / "docs" / "charter.en.md").read_text(encoding="utf-8")
+    rows = [next(line for line in text.splitlines() if line.startswith(start))
+            for text, start in ((charter(), "| AI 모델 사용 |"), (english, "| AI model use |"))]
+    for row in rows:
+        assert "Claude Code · Codex CLI · Antigravity CLI" in row, "the row does not name the three official tools"
+        assert "AGY_CLI_DISABLE_AUTO_UPDATE=true" in row, "the row does not name the official switch that holds the version"
+        for address in ("https://github.com/google-gemini/gemini-cli/blob/main/README.md", "https://antigravity.google/docs/cli/headless",
+                        "https://antigravity.google/terms", "https://antigravity.google/docs/faq",
+                        "https://antigravity.google/docs/cli/troubleshooting", "https://antigravity.google/docs/settings"):
+            assert address in row, f"the basis is not written beside the judgement: {address}"
+        assert re.search(r"2026-11-\d\d", row), "the row does not say when the documents were read"
+    assert "다른 프로그램으로 감싸 쓰는 것을 지원하지 않는다 |" not in rows[0], "the sentence about wrapping is the old one"
+    assert "wrapped and used by another program |" not in rows[1], "the sentence about wrapping is the old one"
+
+
+def test_the_charter_says_measurement_with_google_s_models_has_not_started_and_versions_are_not_held_yet():
+    english = (ROOT / "docs" / "charter.en.md").read_text(encoding="utf-8")
+    for text, said in ((charter(), ("Google 모델로 하는 측정은 시작하지 않았다", "한 회사의 구독에 묶여 오는 다른 회사 모델은 쓰지 않는다",
+                                    "작업 세션의 판을 붙잡는 일이 남아 있다", "이 구독 없이 계산한 값이다")),
+                       (english, ("measurement with Google models has not started", "bundled in one company's subscription are not used",
+                                  "holding the version for working sessions is still to be done", "computed without this subscription"))):
+        for words in said:
+            assert words in text, words
+    current = [line for line in charter().splitlines() if not line.startswith("| v")]
+    assert not any("당분간은 Claude끼리 한다" in line for line in current), "the charter still says the work uses Claude only"
+
+
+def test_the_working_rules_name_the_three_tools_and_keep_google_s_models_out_of_measurement():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    line = next((l for l in rules.splitlines() if "subscriptions and official CLIs" in l), "")
+    for words in ("Claude Code, Codex CLI, Antigravity CLI", "not the API", "one account per company", "unmodified", "pinned version",
+                  "not yet in measurement"):
+        assert words in line, words
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_wherever_the_page_describes_today_s_conditions_it_names_the_second_subscription(lang):
+    """The page names the model, Gemini: without a measurement ID it may not carry the name of the company that measures."""
+    strings = all_strings()[lang]
+    for key in ("now_cap", "now_note", "a5"):
+        assert "Claude" in strings[key] and "Gemini" in strings[key], f"{lang} {key} describes today's conditions without the Gemini subscription"
+    assert "Gemini" in strings["how1"], f"{lang} how1 does not say which model of another company reviews today"
+    guide = (ROOT / "tools" / "site" / "guide.txt").read_text(encoding="utf-8")
+    assert "A Gemini subscription is in use as well" in guide, "the guide describes today's conditions without the Gemini subscription"
+
+
 def test_the_tools_of_the_page_use_no_withdrawn_date_even_as_an_example():
     build = builder()
     for path in sorted((ROOT / "tools" / "site").rglob("*")):
@@ -792,7 +841,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.11 (2026-11-18)", "- 판: v0.12 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.12", "2026-12-24")),
+    ("- 판: v0.12 (2026-11-19)", "- 판: v0.13 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.13", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
