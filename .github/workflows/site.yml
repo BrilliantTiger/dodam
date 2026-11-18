@@ -42,12 +42,13 @@ jobs:
       - name: Lay that out as well, and check that it asks no other host for anything
         run: python tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"
 
-  # The same check with a way to the desk open. The facts of the desk are the real ones; only the opening
-  # dates and the measured times are made up, because no way is open yet. It runs beside the job above so
-  # that neither comes near its time limit.
+  # Everything about the desk: its own tests (the tools, the relay, the lock), and the same check of the layout
+  # with a way to the desk open. The facts of the desk are the real ones; only the opening dates and the measured
+  # times are made up, because no way is open yet. It runs beside the job above, and its limit leaves the tests
+  # and the layout together inside half of it on a slow runner.
   desk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -46,6 +46,19 @@ MAX_NUMBER = 10_000_000
 TOKEN_FILE = "github-token"
 COUNTS_FILE = "desk-counts.json"
 SHOWN_FILE = "shown.json"
+# Every limit whose reaching the coordinator is told of, once a day each, and whether one outside account alone can
+# bring it about: by its own item's sessions, by its own arrivals past its places, by its own answers and its own kept
+# reports. The others take several accounts, by the numbers of the closed list.
+LIMITS = {
+    "answers in a day": False,
+    "answers to one account in a day": True,
+    "labels in a day": False,
+    "reports kept in a day": True,
+    "sessions for one item in a day": True,
+    "sessions in a day": False,
+    "what a day may cost": False,
+    "arrivals kept for later; more were dropped": True,
+}
 SETTINGS = (
     "DESK_LOCK",
     "DESK_FACTS",
@@ -366,6 +379,9 @@ class Desk:
         self.accounts = accounts_of(env.get("DESK_ACCOUNTS"))
         # The accounts that get no session now. What they wrote is not shown to this session.
         self.held_back = set(accounts_of(env.get("DESK_HELD_BACK")))
+        # A session for an item is told whose arrivals it handles and who is held back. A list that is missing is not an
+        # empty list: without either, the tools of such a session do nothing.
+        self.not_told = self.only_item is not None and (env.get("DESK_ACCOUNTS") is None or env.get("DESK_HELD_BACK") is None)
         # The items for which a report was accepted in this session, and those for which one was refused.
         self.passed_on: set[int] = set()
         self.not_passed_on: set[int] = set()
@@ -391,6 +407,8 @@ class Desk:
         return facts
 
     def number(self, value) -> int:
+        if self.not_told:
+            raise Refused("This session was not told whose arrivals it handles and who is held back. Stop and tell the coordinator.")
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_NUMBER:
             raise Refused("Give the number of one issue or pull request of the repository, as a whole number.")
         if self.only_item is not None and value != self.only_item:
@@ -690,8 +708,9 @@ class Desk:
 
         issue = raw.get("issue") if isinstance(raw.get("issue"), dict) else {}
         comments = [c for c in (raw.get("comments") or []) if isinstance(c, dict)]
-        # What an account wrote that gets no session now is left out, before anything is counted or cut: such an
-        # account changes neither what the session reads of the others nor what a session that has to be ended costs them.
+        # What an account wrote that gets no session now is left out, before the newest comments are counted off and cut,
+        # so that it does not push the others' comments out of what is shown. It can still push them out of what is
+        # fetched: only the newest one to two hundred comments of an item are asked for.
         first_writer_waits = account_of(issue.get("user")) in self.held_back
         not_shown = int(first_writer_waits) + sum(1 for c in comments if account_of(c.get("user")) in self.held_back)
         comments = [c for c in comments if account_of(c.get("user")) not in self.held_back]

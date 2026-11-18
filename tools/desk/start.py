@@ -374,6 +374,11 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
             or lock["answer"]["per_account_per_day"] >= facts.answers_per_day
             or lock["coordinator"]["at_once"]["vulnerability_per_account"] >= lock["coordinator"]["at_once"]["vulnerability_per_day"]):  # fmt: skip
         raise Problem("The closed list (lock.json) lets one account alone use up a day for everyone.")
+    # The notices that a limit was reached: one account alone can bring about some of them, and they must not be all there are in a day.
+    if lock["coordinator"]["at_once"]["limit_notices_per_day"] <= sum(tools.LIMITS.values()):
+        raise Problem("The closed list (lock.json) lets one account alone use up a day's notices that a limit was reached.")
+    if spending["ended_in_a_row_per_item"] < 2:
+        raise Problem("The closed list (lock.json) closes an item after fewer than two sessions in a row that had to be ended.")
     # What the sessions of a day can write must fit in what is kept, by the numbers alone. Twice the sessions of a
     # day, because the reports of 24 hours can come from sessions counted in the 24 hours before as well.
     reports = lock["coordinator"]

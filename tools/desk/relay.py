@@ -154,9 +154,11 @@ class Kept:
 
     One place for an item and an account, holding that account's own arrivals on that item and nobody else's;
     at most a few places for one account, and a fixed number in all. What another account writes therefore
-    touches no place but its own. The one exception: when every place is taken, an arrival of an account that
-    holds nothing and is not held back takes the oldest place of the account that holds the most, and only
-    while that account holds more than one, so that no account loses its last place.
+    touches no place but its own, with two exceptions. When every place is taken and a writer that is not held
+    back needs one, a place of an account that is held back goes first, even its last; only when no held-back
+    account holds a place does an account that holds nothing take the oldest place of the account that holds
+    the most, and only while that account holds more than one. And when an item is closed, every arrival kept
+    on it goes with it.
     """
 
     def __init__(self, path: Path, most: int, most_per_account: int):
@@ -200,9 +202,14 @@ class Kept:
             return account
         dropped = None
         if len(entries) >= self.most:
-            # The account with the most places; among equals, the one whose oldest arrival is the oldest.
-            most = max(held, key=lambda a: (held[a], -min(i for i, e in enumerate(entries) if e["account"] == a)))
-            if account in held or account in held_back or held[most] <= 1:
+            if account in held_back:
+                return account
+            # The places of accounts that are held back never stand in the way of one that is not: one of them goes
+            # first. Otherwise the account with the most places gives one, while it holds more than one, to an account
+            # that holds none. Among equals it is the one whose oldest arrival is the oldest.
+            waiting = [a for a in held if a in held_back]
+            most = max(waiting or held, key=lambda a: (held[a], -min(i for i, e in enumerate(entries) if e["account"] == a)))
+            if not waiting and (account in held or held[most] <= 1):
                 return account
             entries.remove(next(e for e in entries if e["account"] == most))
             dropped = most
@@ -230,12 +237,12 @@ class Kept:
                         entry["events"] = [event for event in entry["events"] if event not in place["events"]]
             self._write([entry for entry in entries if entry["events"]])
 
-    def forget(self, number: int) -> int:
-        """Take away every place on one item. Returns how many there were."""
+    def forget(self, number: int) -> list[int]:
+        """Take away every place on one item. Returns the accounts whose places they were."""
         with self.guard:
             entries = self.entries()
             self._write([entry for entry in entries if entry["number"] != number])
-            return sum(1 for entry in entries if entry["number"] == number)
+            return [entry["account"] for entry in entries if entry["number"] == number]
 
 
 class Relay:
@@ -465,17 +472,17 @@ class Relay:
             self.desk.count("arrivals that could not be read", by=malformed)
         dropped: dict[int, int] = {}
         closed = self.closed_items()
-        on_closed = [event for event in events if event["number"] in closed]
-        if on_closed:
-            # No session is started for such an item any more, so nothing waits for one.
-            self.desk.count("arrivals on items for which no session is started now", by=len(on_closed))
+        for event in events:
+            if event["number"] in closed:
+                # No session is started for such an item now, so nothing waits for one: counted for its account like any dropped arrival.
+                dropped[event["actor_id"]] = dropped.get(event["actor_id"], 0) + 1
         before = len(self.kept.entries())
         for account in self.kept.put_all(by_place([event for event in events if event["number"] not in closed]), self.held_back()):
             dropped[account] = dropped.get(account, 0) + 1
         for account, count in dropped.items():
             self.desk.count("arrivals dropped", account=account, by=count)
         if dropped:
-            self.show(f"relay: {sum(dropped.values())} arrival(s) were dropped, the list of kept arrivals has no room for them")
+            self.show(f"relay: {sum(dropped.values())} arrival(s) were dropped: the list of kept arrivals has no room for them, or their item is closed")
             try:
                 with self.desk.counts() as record:
                     self.desk.limit_reached(record, "arrivals kept for later; more were dropped")
@@ -532,10 +539,14 @@ class Relay:
             self.kept.done(places)
             closed = self.closed_since()
             if number in closed:
+                # Every arrival kept on the item goes with it, whoever wrote it: each is counted for its account, and the digest names them.
                 gone = self.kept.forget(number)
-                opens = time.strftime("%Y-%m-%d", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
-                self.desk.note("item_closed", f"Two sessions in a row that were shown this item had to be ended. No session is started for it until {opens}, "
-                               f"by the desk's clock; {gone} arrival(s) that waited on it are not handled.", number)  # fmt: skip
+                for account in gone:
+                    self.desk.count("arrivals dropped", account=account)
+                opens = time.strftime("%Y-%m-%d UTC", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
+                named = ", ".join(str(account) for account in gone[:8]) + (f" and {len(gone) - 8} more" if len(gone) > 8 else "")
+                self.desk.note("item_closed", f"Closed until {opens} after two sessions in a row that were shown it had to be ended. "
+                               f"{len(gone)} arrival(s) kept on it went" + (f", of accounts {named}." if gone else "."), number)  # fmt: skip
         return True
 
     # -- one session for one message ----------------------------------------
