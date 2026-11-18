@@ -14,7 +14,7 @@
   "github": {"open": false, "since": null},
   "live": {"open": false, "since": null},
   "limits": {"answers_per_item_per_hour": 3, "answers_per_day": 30, "code_uses": 1, "code_minutes": 60, "codes_per_author_per_day": 3, "live_sessions": 5},
-  "coworker_min_version": "0.13.0",
+  "coworker_min_version": "0.14.0",
   "coworker_min_version_released": false
  },
  "digest": "sample"
