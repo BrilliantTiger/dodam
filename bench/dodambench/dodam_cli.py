@@ -87,7 +87,7 @@ def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
 
 def _above_in_a_new_high(high_before: int, high_now: int, taken_before: int, allowed: int) -> int:
     """How far a new high of the container's memory lies above what the case may take in memory
-    and files together, counted from the memory that could not be given back when the run began;
+    and files together, counted from the judge's count for the container when the run began;
     0 when the run made no new high, or one within that.
 
     The kernel keeps the high whatever happens between two measurements. But it counts the cache

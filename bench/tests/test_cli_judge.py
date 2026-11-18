@@ -748,11 +748,10 @@ def test_memory_the_kernel_gives_back_like_the_cache_is_not_counted_as_memory(tm
     assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
 
 
-def test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory(tmp_path):
-    """Pages of files are left out because the kernel gives them back when memory is needed. It
-    keeps those on two lists. A page of a file that stands on neither, because it is locked or for
-    any other reason, cannot be given back, and counts. Ordinary and shared memory that is locked
-    is counted as it always was, once."""
+def test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memory(tmp_path):
+    """The pages of files that stand on the kernel's two lists for pages of files are left out of
+    the count. A page of a file that stands on neither, because it is locked or for any other
+    reason, counts. Ordinary and shared memory that is locked is counted as it always was, once."""
     group = tmp_path / "group"
     group.mkdir()
     mb = 2**20
@@ -767,7 +766,7 @@ def test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory(tmp_p
     assert taken(anon=200, file=200, shmem=0, inactive_file=150, active_file=50, unevictable=0) == 200
     # 128 MB of them locked: they stand on neither list, and count
     assert taken(anon=200, file=200, shmem=0, inactive_file=50, active_file=22, unevictable=128) == 328, \
-        "pages of files that cannot be given back were left out of the count"
+        "pages of files that stand on neither list were left out of the count"
     # locked ordinary memory and locked shared memory were counted before and are not counted twice
     assert taken(anon=200, file=200, shmem=40, inactive_file=120, active_file=40, unevictable=90) == 240
     # a kernel that does not say which pages stand on its lists: every page of a file is counted
@@ -860,7 +859,7 @@ def test_the_kernels_records_are_left_out_only_up_to_a_bound():
 
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():
     """How far a new high of the container's memory lies above what the case may take, counted
-    from the memory that could not be given back when the run began. It is the most the program
+    from the judge's count for the container when the run began. It is the most the program
     can have held at once; cache of files is in it, so it is recorded and fails no case."""
     from dodambench import dodam_cli as runner
     above = getattr(runner, "_above_in_a_new_high", None)

@@ -214,7 +214,7 @@ find = '''        if not mounted or size != disk_mb or room.f_files > CASE_ENTRI
 put = '''        if False:'''
 
 [[protection]]
-what = "The judge measures all memory of the container and ends the program above the limit"
+what = "The judge measures its count of the container's memory and ends the program above the limit"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory]"]
 [[protection.change]]
@@ -983,7 +983,7 @@ put = '''                (0x15, 0, 0, CRYPTO_SOCKETS),'''
 [[protection]]
 what = "A page of a file that stands on neither of the kernel's two lists counts as memory"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory", "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case"]
+tests = ["tests/test_cli_judge.py::test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memory", "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case"]
 [[protection.change]]
 find = '''    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))'''
 put = '''    can_be_given_back = int(stat_lines["file"]) - int(stat_lines["shmem"])'''

@@ -195,7 +195,7 @@ SOCKET_CALL = {"x86_64": 41, "aarch64": 198}
 CRYPTO_SOCKETS = 38
 INVALID_ARGUMENT = 22              # the error number the page-moving calls are answered with
 # The call that makes a ring of the kernel's older asynchronous input and output. The pages of such
-# a ring are charged as pages of a file and stand on the lists of pages that can be given back,
+# a ring are charged as pages of a file and stand on the kernel's two lists for pages of files,
 # but cannot be given back while the ring is there. The call answers that the kernel has no such
 # call, as a kernel built without it does.
 OLDER_ASYNC_CALL = {"x86_64": 206, "aarch64": 0}
