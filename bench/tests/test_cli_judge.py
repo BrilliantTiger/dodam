@@ -924,6 +924,39 @@ def test_processes_are_ended_even_when_no_new_process_can_be_made(monkeypatch):
             p.wait()
 
 
+def test_when_no_new_process_can_be_made_every_process_is_stopped_before_any_is_ended(monkeypatch):
+    """A stopped process makes no new ones. Ending them one by one while the others run lets each
+    place that comes free be taken again; so all are stopped first and ended after."""
+    import signal
+    import subprocess
+    running = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"]) for _ in range(3)]
+    mine = {p.pid for p in running}
+    side = judge_module.Side(os.getuid(), os.getgid())
+    monkeypatch.setattr(side, "alive", lambda: [p.pid for p in running if p.poll() is None])
+
+    def no_process(*args):
+        raise OSError(11, "Resource temporarily unavailable")
+
+    sent, really = [], os.kill
+
+    def note(pid, sig):
+        if pid in mine:
+            sent.append((pid, sig))
+        really(pid, sig)
+
+    monkeypatch.setattr(judge_module.os, "fork", no_process)
+    monkeypatch.setattr(judge_module.os, "kill", note)
+    try:
+        assert side.end() is True
+    finally:
+        monkeypatch.undo()
+        for p in running:
+            p.kill()
+            p.wait()
+    first_end = next(i for i, (pid, sig) in enumerate(sent) if sig == signal.SIGKILL)
+    assert {pid for pid, sig in sent[:first_end] if sig == signal.SIGSTOP} == mine, sent
+
+
 def test_each_judging_draws_a_user_number_of_its_own():
     drawn = {judge_module.free_user_id() for _ in range(20)}
     assert len(drawn) == 20 and all(number >= 200_000 for number in drawn)

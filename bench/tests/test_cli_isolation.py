@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+import warnings
 from pathlib import Path
 
 import pytest
@@ -1265,7 +1266,9 @@ def reads_from_disk(tmp_path: Path, body: str, **changes) -> tuple[dict, dict]:
     """Judge a program whose case first gets an uncached file of 400 MB; the judging and what the
     hidden test saw. Fails when the file was in the cache after all, or when the container's
     highest memory use was not low before the run: then the test would show nothing."""
-    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_cold.py": COLD_TESTS}, **changes)
+    # reading 400 MB from disk three times over takes longer than five seconds on a slow disk
+    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_cold.py": COLD_TESTS},
+                          **{"CASE_TIMEOUT_SEC": "60", **changes})
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
     assert seen["before"]["cache_mb"] < 200, f"the file was to be out of the cache before the run: {seen}"
@@ -1523,6 +1526,11 @@ def test_the_memory_experiment_gives_every_row_the_document_cites():
     assert code is not None, "the memory experiment did not end in 300 seconds"
     assert report.get("rows_that_did_not_come_out") == [], (report.get("rows_that_did_not_come_out"), said)
     assert code == 0 and len(report["rows"]) == 16, said
+    # without the judge's stop the kernel chooses what it ends; what it chose here is said, not asserted
+    unstopped = [row for row in report["rows"] if not row["stop_128_mb_below_the_cap"]]
+    if any(row["judged_as_meant"] != row["runs"] or row["measured_runs"] != row["runs"] for row in unstopped):
+        warnings.warn("without the stop: " + json.dumps([[row["program"], row["measured_runs"], row["judged_as_meant"],
+                                                          row["outcomes_and_exit_codes"]] for row in unstopped]))
 
 
 # ---------------------------------------------------------------------------------------------

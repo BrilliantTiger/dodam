@@ -645,8 +645,7 @@ put = '''                stopped: set[int] = set()
 [[protection]]
 what = "When no new process can be made, the processes are stopped before they are ended"
 file = "dodambench/judge.py"
-second_line = "the judge signals every process of the user in one pass and repeats the pass until none is left, and as soon as one process can be made it signals all of them at once as that user"
-tests = ["tests/test_cli_judge.py::test_processes_are_ended_even_when_no_new_process_can_be_made", "tests/test_cli_isolation.py::test_a_build_that_fills_the_containers_process_cap_is_ended_all_the_same", "tests/test_cli_isolation.py::test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same"]
+tests = ["tests/test_cli_judge.py::test_when_no_new_process_can_be_made_every_process_is_stopped_before_any_is_ended"]
 [[protection.change]]
 find = '''                            os.kill(other, signal.SIGSTOP)'''
 put = '''                            os.kill(other, signal.SIGKILL)'''

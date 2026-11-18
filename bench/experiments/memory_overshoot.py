@@ -186,6 +186,7 @@ def main(runs_each: int = RUNS) -> None:
             reached = sorted(r["high_after_mb"] - r["held_before_mb"] for r in runs if "high_after_mb" in r)
             row = {"container_mb": memory_mb, "limit_mb": limit_mb, "stop_128_mb_below_the_cap": stop,
                    "program": name, "runs": len(runs), "measured_runs": sum("high_after_mb" in r for r in runs),
+                   "outcomes_and_exit_codes": sorted({json.dumps([r["outcomes"], r["exit_code"]]) for r in runs}),
                    "judged_as_meant": sum(r["outcomes"] == ["passed", "failed", "passed"] and r["exit_code"] == 0
                                           for r in runs),
                    "ended_for_memory": sum(r.get("limit") == "memory" for r in runs),
@@ -198,9 +199,13 @@ def main(runs_each: int = RUNS) -> None:
             table.append(row)
             print(f"{memory_mb:5} MB  limit {limit_mb:6}  stop {stop!s:5}  {name:56}  {row['reached_mb']}  gap {row['longest_gap_ms']} ms  "
                   f"kernel {row['kernel_had_to_end_a_process']}  as meant {row['judged_as_meant']}", file=sys.stderr, flush=True)
-    # a row has come out when every run handed back what it measured and every case was judged
-    missing = [f"{row['container_mb']} MB, limit {row['limit_mb']}, {row['program']}" for row in table
-               if row["reached_mb"] is None or row["measured_runs"] != row["runs"] or row["judged_as_meant"] != row["runs"]]
+    # A row has come out when every run handed back what it measured and every case was judged as
+    # meant. Without the judge's stop the kernel chooses what it ends, the case runner or the judge
+    # among them: there the row is the count of what happened, and it has come out when it is there.
+    missing = [f"{row['container_mb']} MB, limit {row['limit_mb']}, {row['program']}: measured in "
+               f"{row['measured_runs']} and judged as meant in {row['judged_as_meant']} of {row['runs']} runs"
+               for row in table if row["stop_128_mb_below_the_cap"]
+               and (row["measured_runs"] != row["runs"] or row["judged_as_meant"] != row["runs"])]
     print(json.dumps({"runs_each": runs_each, "rows": table, "rows_that_did_not_come_out": missing}, indent=1))
     if missing:
         raise SystemExit("a row did not come out: " + "; ".join(missing))
