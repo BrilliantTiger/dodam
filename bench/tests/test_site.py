@@ -588,8 +588,8 @@ def test_check_rejects_a_count_written_as_a_word_even_in_every_language():
 
 def test_check_catches_a_different_date():
     def change(s):
-        key = text_key(s, "{m:2038-11}")
-        s["es"][key] = s["es"][key].replace("{m:2038-11}", "{m:2037-11}")
+        key = text_key(s, "{m:2042-10}")
+        s["es"][key] = s["es"][key].replace("{m:2042-10}", "{m:2041-10}")
 
     assert edited(change)
 
