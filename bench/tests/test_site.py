@@ -406,6 +406,25 @@ def test_the_page_names_the_version_of_the_charter_it_takes_its_figures_from():
     assert f"version {version}," in all_strings()["en"]["now_note"]
 
 
+def test_the_english_charter_carries_the_same_version_and_date_as_the_korean_one():
+    version, issued = re.search(r"^- 판: v(\d+\.\d+) \((\d{4}-\d\d-\d\d)\)$", charter(), re.M).groups()
+    english = (ROOT / "docs" / "charter.en.md").read_text(encoding="utf-8")
+    assert re.findall(r"^- Version: .*$", english, re.M) == [f"- Version: v{version} ({issued})"]
+    for text, marker in ((charter(), f"| v{version} | {issued} |"), (english, f"| v{version} | {issued} |")):
+        assert text.rstrip().splitlines()[-1].startswith(marker), "the last row of the history is not this version"
+
+
+def test_the_tools_of_the_page_use_no_withdrawn_date_even_as_an_example():
+    build = builder()
+    for path in sorted((ROOT / "tools" / "site").rglob("*")):
+        if path.suffix not in {".py", ".html", ".json", ".txt"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for day in WITHDRAWN_DATES:
+            assert day not in text and day[:7] not in text, f"{path.name} still writes {day[:7]}"
+            assert build.spell("en", "m", day[:7]) not in text, path.name
+
+
 @pytest.mark.parametrize("old,new", CHARTER_VARIANTS)
 def test_a_figure_changed_by_hand_in_the_charter_is_caught(old, new):
     text = charter()
@@ -734,6 +753,13 @@ def need(name: str):
     return getattr(build, name)
 
 
+def rendered(lang: str, status: dict | None = None) -> str:
+    """The page of one language, built with a status."""
+    render = need("render")
+    assert "status" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a status"
+    return render(lang, status=status)
+
+
 def made_status(text: str | None = None, now: dt.datetime = NOW, issues: int = 2, ready: int = 1, changes=()) -> dict:
     return need("status")(now=now, issues=issues, charter=charter() if text is None else text, changes=list(changes), ready=ready)
 
@@ -852,7 +878,7 @@ def test_no_figure_in_the_section_about_now_is_typed_by_hand(lang):
 @pytest.mark.parametrize("lang", LANGS)
 def test_the_section_about_now_shows_the_status_in_each_language(lang):
     build, status = builder(), sample()
-    html_text = need("render")(lang, status=status)
+    html_text = rendered(lang, status=status)
     block = live_section(html_text)
     assert " hidden" not in block.split(">", 1)[0]
     text = Page("<main><div " + block).text
@@ -864,33 +890,33 @@ def test_the_section_about_now_shows_the_status_in_each_language(lang):
     assert build.load_strings(lang)["t1_h"] in text
     for change in status["changes"]:
         assert build.spell(lang, "d", change["date"]) in text and change["url"] in block
-    without = live_section(need("render")(lang))
+    without = live_section(rendered(lang))
     assert without.split(">", 1)[0].endswith(" hidden"), "a page built without a status shows an empty section"
     assert re.findall(r'<span data-live="[a-z_.]+">([^<]*)</span>', without) == [""] * 5 and "<li><time" not in without
     later = dict(status, step=dict(status["step"], index=2, gate_today=None, gate_today_chance=None))
-    assert '<li data-live-show="step.gate_today" hidden>' in need("render")(lang, status=later)
-    assert build.load_strings(lang)["t2_h"] in Page("<main><div " + live_section(need("render")(lang, status=later))).text
+    assert '<li data-live-show="step.gate_today" hidden>' in rendered(lang, status=later)
+    assert build.load_strings(lang)["t2_h"] in Page("<main><div " + live_section(rendered(lang, status=later))).text
 
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_a_title_that_carries_markup_reaches_the_page_as_text(lang):
     status = sample()
     assert status["changes"][0]["title"].endswith(MARKUP)
-    html_text = need("render")(lang, status=status)
+    html_text = rendered(lang, status=status)
     block = live_section(html_text)
     assert "<img" not in block and "<script" not in block and "onerror=alert(1)>" not in block
     assert "&lt;img src=x onerror=alert(1)&gt; &amp; &quot;quoted&quot; &lt;/a&gt;&lt;script&gt;" in block
     shown = Page("<main><div " + block)
     assert MARKUP in shown.text and "img" not in [tag for tag, _ in shown.tags]
     bad = dict(status, changes=[{"date": "2027-01-04", "title": "x", "url": 'https://example.com/"><b>'}])
-    assert '"><b>' not in live_section(need("render")(lang, status=bad))
+    assert '"><b>' not in live_section(rendered(lang, status=bad))
 
 
 @pytest.mark.parametrize("lang", [lang for lang in LANGS if lang != "en"])
 def test_other_languages_say_that_titles_are_shown_in_english(lang):
     word = {"ko": "영어", "ja": "英語", "es": "inglés"}[lang]
     assert word in builder().load_strings(lang).get("changes_note", "")
-    links = re.findall(r"<a [^>]*>", live_section(need("render")(lang, status=sample())).split('class="changes"', 1)[1])
+    links = re.findall(r"<a [^>]*>", live_section(rendered(lang, status=sample())).split('class="changes"', 1)[1])
     assert links and all('lang="en"' in link for link in links)
 
 
@@ -913,7 +939,7 @@ def test_the_published_build_writes_the_pages_the_status_file_and_the_guide(tmp_
     assert (out / "status.json").stat().st_size < 4096, "the status file is not small"
     for lang in LANGS:
         name = "index.html" if lang == "en" else f"{lang}/index.html"
-        assert (out / name).read_text(encoding="utf-8") == need("render")(lang, status=status)
+        assert (out / name).read_text(encoding="utf-8") == rendered(lang, status=status)
     for name in ("style.css", "motion.js", "favicon.svg", "sitemap.xml", "llms.txt") + tuple(f"card-{lang}.png" for lang in LANGS):
         assert (out / name).is_file(), name
     assert not list(out.rglob("__pycache__"))
