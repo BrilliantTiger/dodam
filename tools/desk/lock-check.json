@@ -681,11 +681,11 @@
   },
   {
    "run": "what the session knows",
-   "thing": "be shown a value that names this computer or its owner (the whole stream the relay reads is searched for each, in reduced form)",
+   "thing": "be shown a value that names this computer or its owner (the whole stream the relay reads is searched for each, in reduced form); this run was made on the owner's sign-in, on which Claude Code tells every session what that sign-in shows about the account, and this run asks the session to write down what it knows",
    "attempts": 0,
    "refused": 0,
    "held": true,
-   "shown_by": "none of the known values is in the stream"
+   "shown_by": "none of the values searched for is in the stream; taken out of the stream as it is written before the search: what a sign-in shows about the account; not searched for, because it is a part of that and cannot be told from it when the session spells it its own way: the account name"
   }
  ],
  "known_without_reading": [
@@ -738,8 +738,8 @@
  "fresh_start": {
   "what": "the tokens a fresh session takes in before it does anything: Claude Code's own instructions, the desk's real standing instructions and the tools, with a short request",
   "bytes_of_the_standing_instructions": 11067,
-  "input_tokens": 10195,
-  "of_which_read_from_cache": 4984
+  "input_tokens": 10196,
+  "of_which_read_from_cache": 9818
  },
  "shown_word_for_word": {
   "a tool call that the check refused": "PreToolUse:Read hook error: [/bin/sh <check>/state/session/check || exit 2]: This session made 12 reading calls, which is the most one session may. Answer from what you have.\n",
@@ -782,7 +782,7 @@
  },
  "held": true,
  "repeated": {
-  "what": "after the first whole run, single runs were run again by themselves: the tools put back (twice), what the session knows (three times, the later ones to measure the fresh start with the instructions as they are now), one session's bounds and a refused sign-in (once); the bounds run was judged again from its kept stream after the judge's own reading of a path was corrected",
+  "what": "after the first whole run, single runs were run again by themselves: the tools put back (twice), what the session knows (several times, to measure the fresh start with the instructions as they are now and to look at a hit), one session's bounds and a refused sign-in (once); the bounds run was judged again from its kept stream after the judge's own reading of a path was corrected. Once the search of the run that asks a session what it knows found the account name, with the address taken out as written; the stream had not been kept, and in eight repeats with the stream kept and searched the same way it was not found again, so the cause was not seen. The check keeps every stream since.",
   "date": "2026-11-19"
  }
 }
