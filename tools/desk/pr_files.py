@@ -3,26 +3,32 @@
 
     {
       base=$(gh api repos/BrilliantTiger/dodam/pulls/<n> --jq '.base.sha | select(type == "string" and test("^[0-9a-f]{40}$")) // error("missing base sha")') &&
-      gh api repos/BrilliantTiger/dodam/pulls/<n> --jq '{changed_files, draft}' &&
-      gh api "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=$base" --jq '{task_folders: [.[] | select(.type == "dir") | .name]}' &&
+      gh api repos/BrilliantTiger/dodam/pulls/<n> --jq '{changed_files, draft, base_ref: .base.ref}' &&
+      gh api "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=$base" --jq '{task_folders: (if length >= 1000 then [.[] | .name] else [.[] | select(.type == "dir") | .name] end)}' &&
+      gh api "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=main" --jq '{main_task_folders: (if length >= 1000 then [.[] | .name] else [.[] | select(.type == "dir") | .name] end)}' &&
+      gh api "repos/BrilliantTiger/dodam/contents/bench/tests?ref=main" --jq '{main_test_entries: [.[] | .name]}' &&
       gh api --paginate repos/BrilliantTiger/dodam/pulls/<n>/files
     } | python3 tools/desk/pr_files.py
 
 Standard library only, with no network access. Checks that `changed_files`,
-`draft`, and the base-commit `task_folders` list from GitHub are all present and
-well-formed, that `changed_files` is below GitHub's 3,000-file listing cap, and
-that the number of file entries received equals `changed_files`. Compares folder
-names and benchmark task folder names after Unicode NFC normalisation without
-regard to case, and counts only the exact status word `"added"` (with no earlier
-path) as adding a new file.
+`draft`, and `base_ref` from GitHub's pull request answer (`base_ref` must be
+`"main"`), together with the three directory listings from GitHub (`task_folders`
+at the pull request's base commit, `main_task_folders` at the tip of `main`, and
+`main_test_entries` directly in `bench/tests/` at the tip of `main`), are all
+present, well-formed, and below GitHub's truncation caps (`1,000` entries per
+directory listing and `3,000` files per pull request), and that the number of
+file entries received equals `changed_files`. Compares folder names, task-folder
+names, and test entry names after Unicode NFC normalisation without regard to
+case, and counts only the exact status word `"added"` (with no earlier path) as
+adding a new file.
 
 On valid complete input, prints one JSON object and exits 0:
 
     {"protected_folders": [...], "adds_new_test": bool, "ready_for_review": bool}
 
-On incomplete, missing, capped (>= 3,000), or malformed input, prints one
-refusal JSON object (`"ready_for_review": false`, `"refused": true`, `"reason"`)
-with no file names and exits 2.
+On incomplete, missing, non-main, capped, or malformed input, prints one refusal
+JSON object (`"ready_for_review": false`, `"refused": true`, `"reason"`) with no
+file names and exits 2.
 """
 
 from __future__ import annotations
@@ -39,6 +45,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 
 MAX_GITHUB_LISTED_FILES = 3_000
+MAX_GITHUB_DIRECTORY_ENTRIES = 1_000
+TARGET_BASE_BRANCH = "main"
 EXIT_OK = 0
 EXIT_REFUSED = 2
 
@@ -61,7 +69,7 @@ class PRFilesError(Exception):
 
 
 def _norm_segment(text: str) -> str:
-    """Normalise to Unicode NFC and fold case for case-insensitive folder comparison."""
+    """Normalise to Unicode NFC and fold case for case-insensitive comparison."""
     return unicodedata.normalize("NFC", text).casefold()
 
 
@@ -100,7 +108,7 @@ def existing_task_folders(repo_root: Path | None = None) -> set[str]:
 
 
 def _existing_test_filenames_folded(repo_root: Path | None = None) -> set[str]:
-    """Return NFC+casefolded file names directly inside bench/tests/ in the local checkout."""
+    """Return NFC+casefolded entry names directly inside bench/tests/ in the local checkout."""
     tests_dir = (ROOT if repo_root is None else repo_root) / "bench" / "tests"
     try:
         scanner = os.scandir(tests_dir)
@@ -176,13 +184,18 @@ def _decode_github_file_list(raw: object) -> list[dict[str, object]]:
     return validated
 
 
-def _validate_task_folder_list(task_folders: object) -> set[str]:
-    if task_folders is None:
-        raise PRFilesError("Base-commit task_folders list from GitHub is missing.")
-    if not isinstance(task_folders, list):
-        raise PRFilesError("Base-commit task_folders must be a JSON list of folder names.")
+def _validate_github_name_list(raw_list: object, label: str) -> set[str]:
+    if raw_list is None:
+        raise PRFilesError(f"{label} from GitHub is missing.")
+    if not isinstance(raw_list, list):
+        raise PRFilesError(f"{label} from GitHub must be a JSON list of names.")
+    if len(raw_list) >= MAX_GITHUB_DIRECTORY_ENTRIES:
+        raise PRFilesError(
+            f"{label} from GitHub has 1,000 or more entries; "
+            "GitHub truncates directory listings at 1,000."
+        )
     folded: set[str] = set()
-    for item in task_folders:
+    for item in raw_list:
         if (
             not isinstance(item, str)
             or not item
@@ -190,7 +203,7 @@ def _validate_task_folder_list(task_folders: object) -> set[str]:
             or item in (".", "..")
             or _has_control_or_backslash(item)
         ):
-            raise PRFilesError("Base-commit task_folders contains an invalid folder name.")
+            raise PRFilesError(f"{label} from GitHub contains an invalid entry name.")
         folded.add(_norm_segment(item))
     return folded
 
@@ -232,14 +245,14 @@ def _is_unprotected_new_test(path: str, existing_tests_folded: set[str]) -> bool
     middle = rel[len("test_") : -len(".py")]
     if len(middle) < 1:
         return False
-    # Guard case-insensitive disks against adding TEST_DESK.py over an existing test_desk.py.
+    # Guard against existing entries at the tip of main or in the local copy regardless of case or NFC/NFD.
     if _norm_segment(rel) in existing_tests_folded:
         return False
     return True
 
 
 def _is_unprotected_new_task_file(path: str, known_tasks_folded: set[str]) -> bool:
-    """True only for canonical bench/tasks/<new_folder>/... absent from both base and local copy."""
+    """True only for canonical bench/tasks/<new_folder>/... absent from tip of main, base, and local copy."""
     if not _is_canonical_repo_path(path) or not path.startswith("bench/tasks/"):
         return False
     rel = path[len("bench/tasks/") :]
@@ -257,10 +270,13 @@ def classify_pr_files(
     *,
     changed_files: object = None,
     draft: object = None,
+    base_ref: object = None,
     task_folders: object = None,
+    main_task_folders: object = None,
+    main_test_entries: object = None,
     repo_root: Path | None = None,
 ) -> dict[str, object]:
-    """Classify GitHub pulls/<n>/files JSON, refusing incomplete, capped, or missing inputs."""
+    """Classify GitHub pulls/<n>/files JSON, refusing incomplete, non-main, capped, or missing inputs."""
     if changed_files is None:
         return _refusal("Pull request changed_files count is missing.")
     if isinstance(changed_files, bool) or not isinstance(changed_files, int) or changed_files < 0:
@@ -276,10 +292,19 @@ def classify_pr_files(
     if not isinstance(draft, bool):
         return _refusal("Pull request draft flag is invalid.")
 
+    if base_ref is None:
+        return _refusal("Pull request base_ref branch name is missing.")
+    if not isinstance(base_ref, str) or not base_ref:
+        return _refusal("Pull request base_ref branch name is invalid.")
+    if base_ref != TARGET_BASE_BRANCH:
+        return _refusal("Pull request targets a base branch other than main.")
+
     try:
-        base_tasks_folded = _validate_task_folder_list(task_folders)
+        base_tasks_folded = _validate_github_name_list(task_folders, "Base-commit bench/tasks listing")
+        main_tasks_folded = _validate_github_name_list(main_task_folders, "Tip-of-main bench/tasks listing")
+        main_tests_folded = _validate_github_name_list(main_test_entries, "Tip-of-main bench/tests listing")
         local_tasks_folded = {_norm_segment(name) for name in existing_task_folders(repo_root=repo_root)}
-        existing_tests_folded = _existing_test_filenames_folded(repo_root=repo_root)
+        local_tests_folded = _existing_test_filenames_folded(repo_root=repo_root)
         entries = _decode_github_file_list(files)
     except PRFilesError as exc:
         return _refusal(str(exc))
@@ -290,7 +315,8 @@ def classify_pr_files(
             f"expected changed_files={changed_files}."
         )
 
-    known_tasks_folded = base_tasks_folded | local_tasks_folded
+    known_tasks_folded = main_tasks_folded | base_tasks_folded | local_tasks_folded
+    existing_tests_folded = main_tests_folded | local_tests_folded
     touched: set[str] = set()
     adds_new_test = False
 
@@ -353,36 +379,39 @@ class _Parser(argparse.ArgumentParser):
         raise PRFilesError("Invalid command-line arguments.")
 
 
+_UNSET = object()
+
+
 def _split_streamed_input(
     raw_stdin: bytes,
-    cli_changed_files: int | None,
-    cli_draft: bool | None,
+    cli_changed_files: object,
+    cli_draft: object,
+    cli_base_ref: object,
     cli_task_folders: object,
-) -> tuple[list[dict[str, object]], object, object, object]:
+    cli_main_task_folders: object,
+    cli_main_test_entries: object,
+) -> tuple[list[dict[str, object]], object, object, object, object, object, object]:
     values = _decode_json_values(raw_stdin)
-    changed_files: object = cli_changed_files
-    draft: object = cli_draft
-    task_folders: object = cli_task_folders
+    meta: dict[str, object] = {
+        "changed_files": cli_changed_files,
+        "draft": cli_draft,
+        "base_ref": cli_base_ref,
+        "task_folders": cli_task_folders,
+        "main_task_folders": cli_main_task_folders,
+        "main_test_entries": cli_main_test_entries,
+    }
 
     idx = 0
-    allowed_header_keys = {"changed_files", "draft", "task_folders"}
+    allowed_header_keys = set(meta)
     while idx < len(values) and isinstance(values[idx], dict):
         hdr = values[idx]
         assert isinstance(hdr, dict)
         if not hdr or not set(hdr).issubset(allowed_header_keys):
             raise PRFilesError("Unexpected JSON object in pull request check input.")
-        if "changed_files" in hdr:
-            if changed_files is not None:
-                raise PRFilesError("Duplicate changed_files value in input.")
-            changed_files = hdr["changed_files"]
-        if "draft" in hdr:
-            if draft is not None:
-                raise PRFilesError("Duplicate draft value in input.")
-            draft = hdr["draft"]
-        if "task_folders" in hdr:
-            if task_folders is not None:
-                raise PRFilesError("Duplicate task_folders value in input.")
-            task_folders = hdr["task_folders"]
+        for key, val in hdr.items():
+            if meta[key] is not _UNSET:
+                raise PRFilesError(f"Duplicate {key} value in input.")
+            meta[key] = val
         idx += 1
 
     page_values = values[idx:]
@@ -397,7 +426,15 @@ def _split_streamed_input(
             if not isinstance(item, dict):
                 raise PRFilesError("Each pull request file entry must be a JSON object.")
             entries.append(item)
-    return (entries, changed_files, draft, task_folders)
+    return (
+        entries,
+        None if meta["changed_files"] is _UNSET else meta["changed_files"],
+        None if meta["draft"] is _UNSET else meta["draft"],
+        None if meta["base_ref"] is _UNSET else meta["base_ref"],
+        None if meta["task_folders"] is _UNSET else meta["task_folders"],
+        None if meta["main_task_folders"] is _UNSET else meta["main_task_folders"],
+        None if meta["main_test_entries"] is _UNSET else meta["main_test_entries"],
+    )
 
 
 def _emit_verdict(verdict: dict[str, object]) -> int:
@@ -411,6 +448,15 @@ def _emit_verdict(verdict: dict[str, object]) -> int:
     return EXIT_OK
 
 
+def _parse_json_arg(raw: str | None, flag_name: str) -> object:
+    if raw is None:
+        return _UNSET
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise PRFilesError(f"{flag_name} is not valid JSON.") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(
         prog="pr_files.py",
@@ -418,25 +464,44 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--changed-files", type=int, default=None)
     parser.add_argument("--draft", type=str, default=None)
+    parser.add_argument("--base-ref", type=str, default=None)
     parser.add_argument("--task-folders", type=str, default=None)
+    parser.add_argument("--main-task-folders", type=str, default=None)
+    parser.add_argument("--main-test-entries", type=str, default=None)
     try:
         ns = parser.parse_args(argv)
-        cli_draft = _parse_bool_arg(ns.draft) if ns.draft is not None else None
-        cli_tasks: object = None
-        if ns.task_folders is not None:
-            try:
-                cli_tasks = json.loads(ns.task_folders)
-            except (json.JSONDecodeError, RecursionError) as exc:
-                raise PRFilesError("--task-folders is not valid JSON.") from exc
+        cli_cf: object = _UNSET if ns.changed_files is None else ns.changed_files
+        cli_draft: object = _UNSET if ns.draft is None else _parse_bool_arg(ns.draft)
+        cli_base_ref: object = _UNSET if ns.base_ref is None else ns.base_ref
+        cli_tasks = _parse_json_arg(ns.task_folders, "--task-folders")
+        cli_main_tasks = _parse_json_arg(ns.main_task_folders, "--main-task-folders")
+        cli_main_tests = _parse_json_arg(ns.main_test_entries, "--main-test-entries")
         raw_stdin = sys.stdin.buffer.read()
-        entries, changed_files, draft, task_folders = _split_streamed_input(
-            raw_stdin, ns.changed_files, cli_draft, cli_tasks
+        (
+            entries,
+            changed_files,
+            draft,
+            base_ref,
+            task_folders,
+            main_task_folders,
+            main_test_entries,
+        ) = _split_streamed_input(
+            raw_stdin,
+            cli_cf,
+            cli_draft,
+            cli_base_ref,
+            cli_tasks,
+            cli_main_tasks,
+            cli_main_tests,
         )
         verdict = classify_pr_files(
             entries,
             changed_files=changed_files,
             draft=draft,
+            base_ref=base_ref,
             task_folders=task_folders,
+            main_task_folders=main_task_folders,
+            main_test_entries=main_test_entries,
         )
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_OK
