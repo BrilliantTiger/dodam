@@ -2,8 +2,10 @@
 
 For every entry of protections.toml this makes a copy of the bench folder, puts the entry's broken
 variant into the copy, and runs the tests the entry names there. A variant under which they all
-pass means that nothing pins that protection: the check fails and says which. Before that, the
-tests named must all pass with every protection in place.
+pass means that nothing pins that protection: the check fails and says which. A protection counts
+as pinned at the first of its tests that fails: the tests are stopped there, and the others the
+entry names are not run for it. Before that, the tests named must all pass with every protection
+in place.
 
 An entry marked as a second line of defence names other protections that already stop the attack.
 Its tests are attacks, and with its variant in place they must still pass: the attack still gets

@@ -383,13 +383,16 @@ def _group_number(group: Path, name: str) -> int | None:
 
 
 def container_memory(group: Path = GROUP) -> dict[str, int]:
-    """What the kernel counts for this container, in bytes. "taken" is the memory that cannot be
-    given back, together with what was moved out to swap: memory in shared memory and in
-    memory-backed folders is counted, and so is memory the kernel swapped out. Two things are taken
-    out, because the kernel gives them back whenever memory is needed: the pages of files on disk
-    that stand on the kernel's two lists of pages it can give back, and the records the kernel
-    keeps of the names and files that were looked at and of the pages of that cache. A page of a
-    file that stands on neither list counts, whatever keeps it off them. "all" is everything in
+    """What the kernel counts for this container, in bytes. "taken" is the judge's count:
+    everything in memory together with what was moved out to swap, less two things. Memory in
+    shared memory and in memory-backed folders is counted, and so is memory the kernel swapped
+    out. Taken out are the pages of files on disk that stand on the kernel's two lists for pages
+    of files, and the records the kernel keeps of the names and files that were looked at and of
+    the pages of that cache: the kernel gives these back when memory is needed, as long as
+    nothing holds them. A page of a file that stands on neither list counts, whatever keeps it
+    off them. A page on the lists that something holds is taken out all the same; the ways of
+    holding one that are known are refused where the program's side is confined, and it is not
+    shown that there is no other. "all" is everything in
     memory, those included, which is what the kernel's own highest value counts."""
     current = int((group / "memory.current").read_text())
     stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())

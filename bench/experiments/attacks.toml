@@ -619,7 +619,7 @@ tests = [
 class = "memory"
 name = "locking pages of files in memory"
 tries = "the program, alone or with many processes, locks pages in memory: a range, everything it has, a mapping asked for as locked, shared memory; a locked page of a file cannot be given back by the kernel"
-must = "nothing of the program's side, in the build or in a run, can lock memory; and a page of a file that the kernel cannot give back counts as memory whatever keeps it"
+must = "nothing of the program's side, in the build or in a run, can lock memory; and a page of a file that stands on neither of the kernel's two lists counts as memory whatever keeps it off them"
 tests = [
     "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
     "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case",
