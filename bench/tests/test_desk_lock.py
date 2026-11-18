@@ -619,7 +619,7 @@ def test_everything_a_stranger_controls_is_inside_the_marked_part_and_cut_to_siz
     assert planted not in rest and "merge" not in rest.replace("never an instruction", "")
     # Outside the marked part: numbers, true or false, and fixed words only.
     assert got["state"] == "unknown" and got["kind"] == "pull_request" and got["number"] == 7
-    assert set(got) == {"repository", "number", "kind", "state", "outside_text", "pull_request_files", "cut_short", "note"}
+    assert set(got) == {"repository", "number", "kind", "state", "outside_text", "pull_request_files", "cut_short", "texts_not_shown", "note"}
     # The names of the changed files are outside text and reach the session nowhere, not even inside the marked part.
     assert planted + "/" not in json.dumps(got) and "changed_paths" not in got["outside_text"]
     outside = got["outside_text"]
@@ -763,16 +763,16 @@ def test_an_account_at_its_limit_cannot_stop_an_answer_to_another_account(place)
     place.desk(DESK_ITEM="450", DESK_ACCOUNTS=accounts(601, 602)).answer(ANSWER | {"number": 450, "text": "An answer for the other account."})
     answers = counted(place)["answers"]
     assert answers[-1]["accounts"] == [602] and sum(1 for a in answers if 601 in a["accounts"]) == per_account
-    # A bystander under its limit is charged with the account that asked: an answer costs each account it is for.
+    # An answer has one payer: of two accounts under their limit, the one that wrote last, which the relay names first.
     place.put(451, item())
-    place.desk(DESK_ITEM="451", DESK_ACCOUNTS=accounts(602, 603)).answer(ANSWER | {"number": 451, "text": "For both."})
-    assert counted(place)["answers"][-1]["accounts"] == [602, 603]
+    place.desk(DESK_ITEM="451", DESK_ACCOUNTS=accounts(603, 602)).answer(ANSWER | {"number": 451, "text": "For both."})
+    assert counted(place)["answers"][-1]["accounts"] == [603]
 
 
 def test_an_account_is_known_by_its_number_and_never_by_the_spelling_of_a_name(place):
     tools = module("tools")
     # The number 0 is what the watcher gives when GitHub names no account: one account of its own.
-    assert tools.accounts_of('[7, 7, "7", true, -1, 0, 8.5, null, 9]') == [0, 7, 9]
+    assert tools.accounts_of('[7, 7, "7", true, -1, 0, 8.5, null, 9]') == [7, 0, 9]
     assert tools.accounts_of("not json") == [] and tools.accounts_of('{"7": 1}') == [] and tools.accounts_of(None) == []
     # Nothing in the tools takes an account from a name: there is no setting for one.
     source = (DESK / "tools.py").read_text(encoding="utf-8") + (DESK / "relay.py").read_text(encoding="utf-8")
@@ -1313,8 +1313,8 @@ def test_every_item_gets_a_fresh_session_that_hears_of_that_item_only(place):
     assert '"a1"' in item_7 and '"a2"' in item_7 and '"b1"' not in item_7 and "item 8" not in item_7
     assert '"b1"' in item_8 and '"a1"' not in item_8 and '"a2"' not in item_8 and "item 7" not in item_8
     assert "a typed line" in heard
-    # Each session is bound to its item for its tools, and is given every account whose arrival it handles, by number.
-    assert {(m["item"], m["accounts"]) for m in messages if "item 7" in m["message"]["content"]} == {("7", "[1001, 1003]")}
+    # Each session is bound to its item for its tools, and is given every account whose arrival it handles, by number, the newest first.
+    assert {(m["item"], m["accounts"]) for m in messages if "item 7" in m["message"]["content"]} == {("7", "[1003, 1001]")}
     assert {(m["item"], m["accounts"]) for m in messages if "item 8" in m["message"]["content"]} == {("8", "[1002]")}
     assert {(m["item"], m["accounts"]) for m in messages if m["message"]["content"] == "a typed line"} == {(None, None)}
 
@@ -1433,7 +1433,7 @@ def test_a_session_that_goes_past_a_bound_is_ended_and_charged_everything_that_w
     (session,) = counted(place)["sessions"]
     assert session["charged"] == session["reserved"] == relay.reservation(lock_file()["spending"])
     # It is a line in the next digest, not a message of its own.
-    assert place.sent("coordinator") == []
+    assert [m for m in place.sent("coordinator") if "Kind: digest" not in m["body"]] == []
     (line,) = [r for r in counted(place)["reports"] if r["kind"] == "session_ended"]
     assert reason in line["line"] and line["accounts"] == []
 
@@ -1596,9 +1596,13 @@ def test_when_the_list_is_full_an_account_with_nothing_kept_takes_the_place_of_t
     assert [e["number"] for e in store.entries() if e["account"] == 61] == [101, 102, 103, 104] and store.entries()[-1]["number"] == 400
     # An account that has something kept gets no second place in a full list.
     assert store.put([event(401, 65)]) == 65 and store.put([event(205, 62)]) == 62
-    # An arrival on an item that is kept joins it, whoever wrote it, and takes no place.
-    assert store.put([event(300, 66, "later")]) is None and len(store.entries()) == 10
+    # An arrival of the same account on an item it has a place for joins that place and takes no other.
+    assert store.put([event(300, 63, "later")]) is None and len(store.entries()) == 10
     assert [e["id"] for e in next(e for e in store.entries() if e["number"] == 300)["events"]] == ["e1", "later"]
+    # Another account's arrival on a kept item needs a place of its own, like any arrival: here the account with the most gives one.
+    assert store.put([event(300, 66, "other")]) == 61 and [(e["number"], e["account"]) for e in store.entries()][-1] == (300, 66)
+    # An account that is held back takes nobody's place: its arrival is the one that is dropped.
+    assert store.put([event(402, 67)], held_back=[67]) == 67 and len(store.entries()) == 10
     # The one that gives way is the oldest of the account with the most, wherever it stands in the list.
     later = relay.Kept(place.state / "later.json", 4, 5)
     for number, account in ((1, 81), (2, 82), (3, 82), (4, 82)):
@@ -1636,13 +1640,18 @@ def test_later_arrivals_on_a_kept_item_do_not_push_out_the_account_that_wrote_fi
     # The session still answers for the stranger, and the answer is charged to the stranger only.
     assert json.loads(handed[0]) == [91, 92]
     assert counted(place)["answers"][-1]["accounts"] == [92]
-    # The accounts of one kept arrival are a bounded list, and the first to write stay on it.
+    # Every account has a place of its own on an item, holding its own arrivals only; what a session is told stays short.
     many = relay.Kept(place.state / "many.json", 100, 5)
     many.put([event(8, 500)])
-    many.put([event(8, 501 + n, f"e{n}") for n in range(200)])
-    (entry,) = many.entries()
-    assert entry["accounts"][:2] == [500, 501] and len(entry["accounts"]) == relay.ACCOUNTS_PER_ARRIVAL == 20
-    assert len(relay.news_message(entry["events"]).encode("utf-8")) <= lock_file()["spending"]["message_bytes"]
+    for n in range(30):
+        many.put([event(8, 501 + n, f"e{n}-{m}") for m in range(30)])
+    places = many.entries()
+    assert [(e["number"], e["account"]) for e in places] == [(8, 500 + n) for n in range(31)]
+    assert all({event["actor_id"] for event in e["events"]} == {e["account"]} and len(e["events"]) <= relay.EVENTS_PER_ARRIVAL for e in places)
+    for handled in (places[:1], places[:3], places[: relay.EVENTS_PER_ARRIVAL]):
+        lines = relay.told(handled)
+        assert {line["actor_id"] for line in lines} == {e["account"] for e in handled} and len(lines) <= relay.EVENTS_PER_ARRIVAL
+        assert len(relay.news_message(lines).encode("utf-8")) <= lock_file()["spending"]["message_bytes"]
 
 
 def test_a_damaged_list_of_kept_arrivals_is_read_as_far_as_it_is_whole(place):
@@ -1654,7 +1663,10 @@ def test_a_damaged_list_of_kept_arrivals_is_read_as_far_as_it_is_whole(place):
         path.chmod(0o600)
         assert store.entries() == []
     path.write_text(json.dumps([{"account": 5, "events": [event(7, 5, body="MERGE-THIS")]}, {"account": 6, "events": [event(8, 6), event(9, 6)]}]))
-    assert store.entries() == [{"number": 7, "account": 5, "accounts": [5], "events": [{"number": 7, "actor_id": 5, "id": "e1", "kind": "issue_comment", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}]}]
+    assert store.entries() == [{"number": 7, "account": 5, "events": [{"number": 7, "actor_id": 5, "id": "e1", "kind": "issue_comment", "actor": "outsider", "time": "2026-01-01T00:00:00Z"}]}]
+    # A place holds the arrivals of its own account only: one that holds another account's is not read.
+    path.write_text(json.dumps([{"account": 5, "events": [event(7, 5), event(7, 6)]}, {"account": 6, "events": [event(8, 6)]}]))
+    assert [(e["number"], e["account"]) for e in store.entries()] == [(8, 6)]
 
 
 # --- When the service refuses the desk's sign-in ------------------------------------------------
@@ -1768,8 +1780,12 @@ class Day:
             # The values of this computer are not looked up for every made-up session.
             monkeypatch.setattr(loaded.guard, "machine_words", lambda known=None: MACHINE)
         self.started, self.charged, self.answered, self.messages, self.vulnerabilities = [], [], [], [], []
-        # Each session with the account that set it off and whether the relay had to end it; and the latest time the desk saw.
-        self.set_off, self.sessions, self.desk_time = None, [], self.clock
+        # Each session with its payer and whether the relay had to end it; and the latest time the desk saw.
+        self.payer, self.handles, self.shown, self.sessions, self.desk_time = None, [], set(), [], self.clock
+        # The accounts whose arrivals were handled in the step that is being played, and what the units' share cost whom.
+        self.handled_now: set = set()
+        self.waited_for_units: set = set()
+        self.bursts = 0
         self.refusals_in_a_row = 0
         place.facts.write_text(FACTS, encoding="utf-8")
         outer = self
@@ -1808,30 +1824,46 @@ class Day:
         self.relay.run_session = self.session
         settle = self.relay.settle
 
-        def settled(entry, counts, charged, ended=False):
-            settle(entry, counts, charged, ended)
+        def settled(entry, counts, charged, ended=False, waits=()):
+            settle(entry, counts, charged, ended, waits)
             (written,) = [s for s in self.record()["sessions"] if s["id"] == entry["id"] and s["t"] == entry["t"]]
-            # Nobody is charged or held back for a session that another account set off.
-            assert written["account"] == self.set_off and written["ended"] is ended
-            self.sessions.append((self.started[-1][0], written["number"], written["account"], ended))
+            # A session has one payer, the newest writer it handles, and counts against nobody else.
+            assert written["account"] == self.payer and written["accounts"] == self.handles and written["ended"] is ended
+            # When the relay ended it, the payer waits a day if the session was shown its text, and nobody else waits.
+            assert written["waits"] == ([self.payer] if ended and self.payer in self.shown else [])
+            self.sessions.append((self.started[-1][0], written["number"], written["account"], ended, list(written["waits"])))
             # Every started session is charged more than nothing and at most what was set aside for it.
             assert 0 < written["charged"] <= written["reserved"] == self.relay_module.reservation(self.lock["spending"])
             if counts:
                 assert written["charged"] >= min(self.relay_module.units(counts, self.lock["spending"]["weights"]), written["reserved"])
             # Stamped with the moment the session started, as the relay counts it.
-            self.charged.append((self.started[-1][0], written["charged"]))
+            self.charged.append((self.started[-1][0], written["charged"], written["account"]))
 
         self.relay.settle = settled
         place_one = self.relay.kept.place
 
-        def placed(entries, events):
-            held = [e["account"] for e in entries]
-            numbers, full = [e["number"] for e in entries], len(entries)
-            dropped = place_one(entries, events)
+        def placed(entries, events, held_back=()):
             account, number = events[0]["actor_id"], events[0]["number"]
-            if dropped == account and account not in held and number not in numbers:
-                # An account with nothing kept is dropped only when the list is full and nobody has more than one place.
-                assert full == self.lock["spending"]["arrivals_kept"] and max(held.count(a) for a in held) == 1
+            held = [e["account"] for e in entries]
+            before = {(e["number"], e["account"]): [x["id"] for x in e["events"]] for e in entries if e["account"] != account}
+            full = len(entries) >= self.lock["spending"]["arrivals_kept"]
+            dropped = place_one(entries, events, held_back)
+            after = {(e["number"], e["account"]): [x["id"] for x in e["events"]] for e in entries if e["account"] != account}
+            if dropped is None or dropped == account:
+                # Nothing that an account writes removes another account's arrival from the kept list.
+                assert after == before
+                if dropped == account and account not in held:
+                    # An account with nothing kept is dropped only when the list is full, and then only when it is
+                    # held back or nobody has more than one place.
+                    assert full and (account in held_back or max(held.count(a) for a in held) == 1)
+            else:
+                # The one exception, word for word: every place is taken; the account that writes holds nothing and is
+                # not held back; the place is the oldest of the account that holds the most, which holds more than one.
+                assert full and account not in held and account not in held_back
+                assert held.count(dropped) == max(held.count(a) for a in held) > 1
+                gone = set(before) - set(after)
+                assert len(gone) == 1 and next(iter(gone)) == next(key for key in before if key[1] == dropped)
+                assert {key: ids for key, ids in before.items() if key not in gone} == after
             return dropped
 
         self.relay.kept.place = placed
@@ -1847,8 +1879,16 @@ class Day:
         rng, spending = self.random, self.lock["spending"]
         number = int(env["DESK_ITEM"]) if env.get("DESK_ITEM") else None
         self.started.append((self.real, number))
-        # The account that set the session off is the one of the newest arrival it is told of.
-        self.set_off = json.loads(text.splitlines()[-1])["actor_id"] if number is not None else None
+        # The session is given the accounts whose arrivals it handles, the newest first: the first one pays.
+        self.handles = json.loads(env["DESK_ACCOUNTS"]) if number is not None else []
+        self.payer = self.handles[0] if self.handles else None
+        self.shown = set()
+        self.handled_now |= set(self.handles)
+        if number is not None:
+            # The newest arrival the session is told of is the payer's, and it is told of nobody it does not handle.
+            lines = [json.loads(line) for line in text.splitlines()[1:]]
+            assert lines[-1]["actor_id"] == self.payer and {line["actor_id"] for line in lines} == set(self.handles)
+            assert not set(self.handles) & set(json.loads(env["DESK_HELD_BACK"]))
         if rng.random() < 0.04 or self.refusals_in_a_row and rng.random() < 0.6:
             self.refusals_in_a_row += 1
             return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
@@ -1865,14 +1905,28 @@ class Day:
             return {"counts": counts, "ended_by": rng.choice(["its time was up", "too many turns", "it cost more than one session may"]), "refused_sign_in": False, "turns": 3, "reads": 3, "at_a_bound": True}
         if how < 0.2:
             counts = [0, 0, 0, 0]
+        while self.relay_module.units(counts, spending["weights"]) > spending["units_per_session"]:
+            # A session that the relay did not end stayed under the bound of one session.
+            counts = [count // 2 for count in counts]
         return {"counts": counts, "ended_by": None, "refused_sign_in": False, "turns": 3, "reads": 2}
 
     def act(self, number: int, env: dict) -> None:
         rng, tools = self.random, self.tools
-        self.place.put(number, item())
-        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"]))
+        ids, waiting = json.loads(env["DESK_ACCOUNTS"]), json.loads(env["DESK_HELD_BACK"])
+        # The item as GitHub has it: written by anyone, the payer and accounts that are held back among them.
+        writers = [rng.choice(ids + waiting + [11, 12, 13, rng.randrange(100, 400)]) for _ in range(rng.choice([0, 1, 3, 12]))] + ids[:1] * rng.choice([0, 1, 1])
+        author = rng.choice(ids + waiting + [rng.randrange(100, 400)])
+        self.place.put(number, written(author, *[by(writer, f"text-of-{writer}.") for writer in writers], body=f"text-of-{author}."))
+        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"], DESK_HELD_BACK=env["DESK_HELD_BACK"]))
         desk.machine = MACHINE
-        ids = json.loads(env["DESK_ACCOUNTS"])
+        if rng.random() < 0.85:
+            read = desk.read_item({"number": number})
+            # What an account wrote that is held back at this moment is not shown; of the others, the newest comments are.
+            assert not any(f"text-of-{held}." in read for held in waiting), (waiting, read)
+            others = [writer for writer in writers if writer not in waiting]
+            assert json.loads(read)["texts_not_shown"] == len(writers) - len(others) + (author in waiting)
+            assert [c["body"] for c in json.loads(read)["outside_text"]["comments"]] == [f"text-of-{writer}." for writer in others][-self.lock["read"]["max_comments"]:]
+            self.shown = set(others[-self.lock["read"]["max_comments"]:]) | ({author} - set(waiting))
         settings = self.lock["coordinator"]
         accepted = tried = False
         for _ in range(rng.choice([0, 0, 1, 1, 2, 3])):
@@ -1893,6 +1947,14 @@ class Day:
                 assert len(today) < settings["kept_per_day"]
                 assert "one session may" in str(refusal) or all(
                     sum(1 for r in today if a in r["accounts"]) >= settings["kept_per_account_per_day"] for a in ids), (kind, ids)
+        if rng.random() < 0.3:
+            before = self.record()
+            try:
+                desk.add_label({"number": number, "label": rng.choice(self.lock["labels"])})
+            except tools.Refused as refusal:
+                assert "limit" in str(refusal)
+                if "one account" in str(refusal):
+                    assert all(sum(1 for l in before["labels"] if a in l["accounts"]) >= self.lock["labels_per_account_per_day"] for a in ids)
         for _ in range(rng.choice([0, 1, 1, 1, 2, 4])):
             right = "told" if accepted else ("could_not_tell" if tried else "not_told")
             told = right if rng.random() < 0.7 else rng.choice(tools.AGENTS_TOLD)
@@ -1915,15 +1977,46 @@ class Day:
             assert self.last_comment.endswith(self.lock["answer"]["told"][language]) == accepted
             assert (self.lock["answer"]["could_not_tell"][language] in self.last_comment) == (told == "could_not_tell")
             charged = self.record()["answers"][-1]["accounts"]
-            assert charged and set(charged) <= set(ids)
+            # One payer: the newest writer the session handles that still has room for an answer.
+            assert charged == [a for a in ids if sum(1 for e in before["answers"] if a in e["accounts"]) < self.lock["answer"]["per_account_per_day"]][:1]
             self.answered.append((self.real, number, charged))
 
     # -- what happens to the desk ---------------------------------------------------------------
 
     def step(self) -> None:
+        what = self.random.random()
+        self.handled_now = set()
+        before = self.record()
+        self.act_of_the_step(what)
+        after = self.record()
+        # Whatever was counted in this step names only accounts whose arrivals a session of this step handled.
+        for entry in after["sessions"]:
+            if entry not in before["sessions"]:
+                assert entry.get("account") is None or entry["account"] in self.handled_now
+                assert set(entry.get("waits", [])) <= {entry.get("account")}
+        for key in ("answers", "labels", "reports"):
+            for entry in after[key]:
+                if entry not in before[key] and not (key == "reports" and entry in [e | {"digested": True} for e in before[key]]):
+                    assert set(entry["accounts"]) <= self.handled_now and len(entry["accounts"]) <= 1, (key, entry, self.handled_now)
+
+    def act_of_the_step(self, what: float) -> None:
         rng = self.random
-        what = rng.random()
-        if what < 0.30:
+        if what < 0.06:
+            # Accounts that are held back write many times on other accounts' kept items.
+            waiting, places = self.relay.held_back(), self.relay.kept.entries()
+            theirs = [p for p in places if p["account"] not in waiting]
+            if waiting and theirs:
+                self.bursts += 1
+                before = [(p["number"], p["account"], [e["id"] for e in p["events"]]) for p in theirs]
+                starts_before = self.next_start()
+                for target in rng.sample(theirs, min(len(theirs), rng.choice([1, 5, 20]))):
+                    writer = rng.choice(waiting)
+                    self.relay.take(arrivals(*[event(target["number"], writer, f"w{rng.randrange(10**9)}") for _ in range(rng.choice([10, 30, 100]))]))
+                kept_now = self.relay.kept.entries()
+                # Nothing of the others is gone, none of their places went to the writers, and what starts next is what would have started.
+                assert [(p["number"], p["account"], [e["id"] for e in p["events"]]) for p in kept_now if p["account"] not in waiting] == before
+                assert self.next_start() == starts_before
+        elif what < 0.30:
             # A batch of arrivals: a few loud accounts, many quiet ones, and some that cannot be read.
             events = []
             for n in range(rng.choice([1, 1, 2, 5, 20, 120])):
@@ -1939,6 +2032,7 @@ class Day:
             for _ in range(rng.choice([1, 1, 2, 4])):
                 stopped = self.relay.starts_nothing
                 before = len(self.started)
+                self.tally_the_units_share()
                 self.relay.start_one()
                 if stopped:
                     # After three refusals in a row nothing is started until the desk is started again.
@@ -1961,16 +2055,36 @@ class Day:
         else:
             self.relay.desk.digest()
 
+    def next_start(self):
+        """Which places the next session would handle, and that it is the same without the places of accounts that are held back."""
+        record, places = self.record(), self.relay.kept.entries()
+        chosen, reached, _, _ = self.relay.choose(places, record)
+        waiting = set(self.relay.held_back(record["sessions"]))
+        without, reached_without, _, _ = self.relay.choose([p for p in places if p["account"] not in waiting], record)
+        # Whether and when an item starts depends only on its writers that are not held back.
+        assert chosen == without and not {p["account"] for p in chosen} & waiting
+        return [(p["number"], p["account"]) for p in chosen]
+
+    def tally_the_units_share(self) -> None:
+        """Note the places that wait for nothing but their account's share of the day's units."""
+        record = self.record()
+        if self.relay.day_bound(record["sessions"]):
+            return
+        for p in self.relay.kept.entries():
+            if self.relay.account_bound(record["sessions"], p["account"]) == "what a day may cost for one account":
+                self.waited_for_units.add((p["account"], p["number"], int(self.desk_time // self.DAY)))
+
     def check(self) -> None:
         lock, spending, settings = self.lock, self.lock["spending"], self.lock["coordinator"]
         assert "vulnerability_kept_per_day" in settings and "sessions_per_account_per_day" in spending, "lock.json: the numbers are not there yet"
+        self.next_start()
         started = self.within(self.started)
         assert len(started) <= spending["sessions_per_day"]
         per_item: dict = {}
         for _, number in started:
             per_item[number] = per_item.get(number, 0) + 1
         assert all(count <= spending["sessions_per_item_per_day"] for number, count in per_item.items() if number is not None)
-        assert sum(charged for _, charged in self.within(self.charged)) <= spending["units_per_day"]
+        assert sum(charged for _, charged, _ in self.within(self.charged)) <= spending["units_per_day"]
         per_account: dict = {}
         for _, _, ids in self.within(self.answered):
             for account in ids:
@@ -1982,7 +2096,9 @@ class Day:
         assert kinds.count("limit_reached") <= at_once["limit_notices_per_day"] and kinds.count("digest") <= self.DAY // settings["digest_seconds"]
         assert len(kinds) <= 48 and set(kinds) <= {"vulnerability", "desk_down", "limit_reached", "digest"}
         waiting = self.relay.kept.entries()
-        assert len(waiting) <= spending["arrivals_kept"] and len({e["number"] for e in waiting}) == len(waiting)
+        assert len(waiting) <= spending["arrivals_kept"] and len({(e["number"], e["account"]) for e in waiting}) == len(waiting)
+        # A place holds its own account's arrivals and nobody else's: no account holds a place of another.
+        assert all({event["actor_id"] for event in e["events"]} == {e["account"]} and len({event["number"] for event in e["events"]}) == 1 for e in waiting)
         held = [e["account"] for e in waiting]
         assert all(held.count(account) <= spending["arrivals_kept_per_account"] for account in set(held))
         record = self.record()
@@ -1990,18 +2106,33 @@ class Day:
         assert len([r for r in today if r["kind"] != "vulnerability"]) <= settings["kept_per_day"]
         assert len([r for r in today if r["kind"] == "vulnerability"]) <= settings["vulnerability_kept_per_day"]
         assert all(isinstance(e["actor_id"], int) for entry in waiting for e in entry["events"])
-        # One account's share of the day's sessions, and nothing more for an item or an account whose session had to be ended.
+        # One account's share of the day's sessions and of its units, and nothing more for an item whose session had to
+        # be ended or for a payer that waits.
         shares: dict = {}
-        for _, _, account, _ in self.within(self.sessions):
+        for _, _, account, _, _ in self.within(self.sessions):
             shares[account] = shares.get(account, 0) + 1
         assert all(count <= spending["sessions_per_account_per_day"] for account, count in shares.items() if account is not None)
-        for at, number, account, ended in self.sessions:
+        for at, number, account, ended, waits in self.sessions:
             if ended:
                 later = [s for s in self.sessions if at < s[0] < at + self.DAY]
-                assert not [s for s in later if s[1] == number or s[2] == account], (number, account)
+                assert not [s for s in later if s[1] == number or s[2] in waits], (number, account)
+        # One outside account alone never closes a day: when a bound of the day is reached, more than one account paid for it,
+        # or the service refused the desk's sign-in, which is nobody's doing.
+        if self.relay.day_bound(record["sessions"]):
+            assert len({s.get("account") for s in record["sessions"]}) > 1 or not all(s.get("let_in", True) for s in record["sessions"])
+        set_aside = self.relay_module.reservation(spending)
+        paid: dict = {}
+        for _, charged, account in self.within(self.charged):
+            paid[account] = paid.get(account, 0) + charged
+        assert all(total < spending["units_per_account_per_day"] + set_aside for account, total in paid.items() if account is not None), paid
+        per_label: dict = {}
+        for entry in record["labels"]:
+            for account in entry["accounts"]:
+                per_label[account] = per_label.get(account, 0) + 1
+        assert all(count <= lock["labels_per_account_per_day"] for count in per_label.values())
 
 
-@pytest.mark.parametrize("seed", [20261118, 424242, 20261120, 77005])
+@pytest.mark.parametrize("seed", [20261118, 424242, 20261120, 77005, 20261121, 606060])
 def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkeypatch, seed):
     day = Day(place, monkeypatch, seed)
     for _ in range(1500):
@@ -2010,8 +2141,12 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     # The made-up days did reach the bounds they are meant to test.
     assert len(day.started) > 150 and len(day.answered) > 60 and len(day.messages) > 40
     assert {kind for _, kind in day.messages} == {"vulnerability", "desk_down", "limit_reached", "digest"}
-    # Sessions were ended at a bound, and accounts did reach their share.
-    assert sum(1 for s in day.sessions if s[3]) > 5
+    # Sessions were ended at a bound, payers did wait, and accounts that are held back did write on other accounts' items.
+    assert sum(1 for s in day.sessions if s[3]) > 5 and sum(1 for s in day.sessions if s[4]) > 2 and day.bursts > 5
+    # What the share of a day's units costs: no account with a few items of its own ever waited for it.
+    assert [waited for waited in day.waited_for_units if waited[0] >= 100] == [], sorted(day.waited_for_units)
+    print(f"seed {seed}: {len(day.started)} sessions; places that waited for the share of units alone: {len(day.waited_for_units)} "
+          f"({len({w[0] for w in day.waited_for_units})} accounts, all of them among the three loud ones)")
 
 
 # --- The bounds inside one session, kept by the check before every tool call ---------------------
@@ -3658,8 +3793,10 @@ def test_the_cap_of_kept_reports_for_one_account_holds_for_every_account_of_the_
     settings = lock_file()["coordinator"]
     per_account = settings["kept_per_account_per_day"]
     for n in range(per_account):
-        place.desk(DESK_ITEM=str(500 + n), DESK_ACCOUNTS=accounts(921, 922)).tell_coordinator({"kind": "spam", "number": 500 + n, "summary": "x"})
-    assert all(r["accounts"] == [921, 922] for r in reports(place))
+        place.desk(DESK_ITEM=str(500 + n), DESK_ACCOUNTS=accounts(921)).tell_coordinator({"kind": "spam", "number": 500 + n, "summary": "x"})
+        place.desk(DESK_ITEM=str(550 + n), DESK_ACCOUNTS=accounts(922, 921)).tell_coordinator({"kind": "spam", "number": 550 + n, "summary": "x"})
+    # A report has one payer: the first account the relay names that has room.
+    assert [r["accounts"] for r in reports(place)] == [[921], [922]] * per_account
     # Both are at their cap: a session for the two of them keeps nothing more; one for either of them with a third account does,
     # and is charged to the third only.
     assert "full" in refused(place.desk(DESK_ITEM="600", DESK_ACCOUNTS=accounts(921, 922)), "tell_coordinator", kind="spam", number=600, summary="x")
@@ -3734,7 +3871,7 @@ def test_one_account_gets_a_share_of_the_days_sessions_and_its_arrivals_wait(pla
     while running.start_one():
         clock[0] += 60
     assert [number for _, number in ran] == [str(700 + n) for n in range(share)] + ["7"]
-    assert [s.get("account") for s in counted(place)["sessions"]] == [930] * share + [931]
+    assert [(s.get("account"), s.get("accounts")) for s in counted(place)["sessions"]] == [(930, [930])] * share + [(931, [931])]
     # What is past the share waits in the kept list, under the cap for one account, and the next digest counts it.
     waiting = [e["number"] for e in kept(place)]
     assert waiting == [700 + share + n for n in range(4)]
@@ -3745,14 +3882,14 @@ def test_one_account_gets_a_share_of_the_days_sessions_and_its_arrivals_wait(pla
     assert running.start_one() is True and ran[-1][1] == str(700 + share)
 
 
-def test_a_session_is_charged_to_the_account_whose_arrival_set_it_off(place, monkeypatch):
+def test_a_session_has_one_payer_the_newest_writer_it_handles(place, monkeypatch):
     running, clock, ran = in_process(place, monkeypatch)
-    # The item is the first account's; the newest arrival is the second account's, and that one set the session off.
+    # The item is the first account's; the newest arrival is the second account's. The session handles both and the second pays.
     running.take(arrivals(event(7, 940, "first")))
     running.take(arrivals(event(7, 941, "second")))
-    assert running.start_one() is True
+    assert running.start_one() is True and kept(place) == []
     (session,) = counted(place)["sessions"]
-    assert session.get("account") == 941 and session["number"] == 7 and session.get("ended") is False
+    assert session.get("account") == 941 and session.get("accounts") == [941, 940] and session["number"] == 7 and session.get("ended") is False
 
 
 def test_a_session_the_service_did_not_let_in_counts_against_nobodys_share_and_holds_nobody_back(place, monkeypatch):
@@ -3793,7 +3930,7 @@ def test_an_account_that_is_held_back_cannot_hold_up_another_accounts_arrival_by
     running.run_session = lambda text, env: seen.append(text) or {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
     assert running.start_one() is True
     # The stranger's session starts and is charged to the stranger. It is told of the stranger's arrival only.
-    assert counted(place)["sessions"][-1].get("account") == 936
+    assert (counted(place)["sessions"][-1].get("account"), counted(place)["sessions"][-1].get("accounts")) == (936, [936])
     assert '"id": "asked"' in seen[0] and '"id": "after"' not in seen[0]
     # What the other account wrote stays kept, for that account, and waits for its share.
     (left,) = kept(place)
@@ -3828,23 +3965,53 @@ def test_the_text_check_holds_against_forms_made_at_random(place):
     assert passed == [], passed[:5]
 
 
-def test_after_a_session_had_to_be_ended_its_item_and_the_account_that_set_it_off_wait_a_day(place, monkeypatch):
+def reading(place, then: dict | None = None):
+    """A session played by the test that reads its item with the real reading tool and then ends as told."""
+    seen = []
+
+    def session(text, env):
+        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        seen.append(json.loads(desk.read_item({"number": int(env["DESK_ITEM"])})))
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | (then or {})
+
+    session.seen = seen
+    return session
+
+
+ENDED = {"ended_by": "its time was up", "at_a_bound": True}
+
+
+def by(account: int, body: str = "A comment.") -> dict:
+    return {"user": {"login": f"account-{account}", "id": account}, "body": body}
+
+
+def written(author: int, *comments: dict, body: str = "A question.") -> dict:
+    """A made-up item whose author and commenters have numbers, as on GitHub."""
+    content = item(body=body)
+    content["issue"]["user"] = {"login": f"account-{author}", "id": author}
+    content["comments"] = list(comments)
+    content["issue"]["comments"] = len(comments)
+    return content
+
+
+def test_after_a_session_had_to_be_ended_its_item_and_its_payer_wait_a_day_and_nobody_else(place, monkeypatch):
     running, clock, ran = in_process(place, monkeypatch)
     plain = running.run_session
-    # Account 950 opens item 7. Account 951 writes on it, and the session that this sets off has to be ended.
+    # Account 950 opens item 7. Account 951 writes on it. The session handles both, 951 pays, and it has to be ended.
+    place.put(7, written(950, by(951, "hostile")))
     running.take(arrivals(event(7, 950, "opened"), event(7, 951, "hostile")))
-    running.run_session = ended_session
+    running.run_session = reading(place, ENDED)
     assert running.start_one() is True
     running.run_session = plain
     (session,) = counted(place)["sessions"]
-    assert (session.get("account"), session.get("ended")) == (951, True)
-    # The item gets no further session, whoever writes on it; the account that set it off gets none anywhere.
+    assert (session.get("account"), session.get("accounts"), session.get("ended"), session.get("waits")) == (951, [951, 950], True, [951])
+    # The item gets no further session, whoever writes on it; the payer gets none anywhere.
     running.take(arrivals(event(7, 952, "later"), event(8, 951, "elsewhere")))
     assert running.start_one() is False and len(ran) == 0
-    # Nobody else is held back: the first writer of the item is answered on another item at once.
+    # Nobody else waits: the first writer of the item, whose arrival that session handled as well, is answered elsewhere at once.
     running.take(arrivals(event(9, 950, "another item")))
     assert running.start_one() is True and ran[-1][1] == "9"
-    assert sorted(e["number"] for e in kept(place)) == [7, 8]
+    assert sorted((e["number"], e["account"]) for e in kept(place)) == [(7, 952), (8, 951)]
     # Nothing is lost: a day later both are started.
     clock[0] += 86_400 + 1
     assert running.start_one() is True and running.start_one() is True
@@ -3885,24 +4052,24 @@ def test_stopping_the_relay_in_the_middle_of_a_session_keeps_the_arrival(place):
     assert session["charged"] == session["reserved"] and session.get("ended") is False
 
 
-def test_when_what_stays_of_a_kept_arrival_goes_to_another_account_the_cap_is_looked_at_again(place):
+def test_what_an_account_writes_on_another_accounts_item_takes_a_place_of_its_own_under_its_own_cap(place):
     relay = module("relay")
     store = relay.Kept(place.state / "held-events.json", 100, 2)
-    # Account 981 has its two places. On item 7, kept for account 980, account 981 writes as well.
+    # Account 981 has its two places. On item 7, kept for account 980, account 981 writes as well: it has no place left for that.
     store.put([event(71, 981)])
     store.put([event(72, 981)])
     first = event(7, 980, "first")
     store.put([first])
-    store.put([event(7, 981, "meanwhile")])
-    # The session dealt with the first arrival. What stays is account 981's, and that account has no place left.
-    assert store.done(7, [first]) == [981]
-    assert sorted(e["number"] for e in store.entries()) == [71, 72]
-    # With a place left, what stays is kept for the account that wrote it.
+    assert store.put([event(7, 981, "meanwhile")]) == 981
+    assert [(e["number"], e["account"]) for e in store.entries()] == [(71, 981), (72, 981), (7, 980)]
+    # With a place left, what it writes is kept in a place of its own; and when a session dealt with the first
+    # account's arrival, that account's place is free again and the other's is still the other's.
     other = relay.Kept(place.state / "other.json", 100, 2)
     other.put([event(71, 981)])
     other.put([first])
-    other.put([event(7, 981, "meanwhile")])
-    assert other.done(7, [first]) == [] and [(e["number"], e["account"]) for e in other.entries()] == [(71, 981), (7, 981)]
+    assert other.put([event(7, 981, "meanwhile")]) is None
+    other.done([e for e in other.entries() if e["account"] == 980])
+    assert [(e["number"], e["account"]) for e in other.entries()] == [(71, 981), (7, 981)]
 
 
 def test_among_accounts_with_equally_many_places_the_one_whose_oldest_arrival_is_oldest_gives_way(place):
@@ -4440,3 +4607,519 @@ def test_the_copy_of_the_desks_sign_in_is_gone_when_the_check_ends_and_nothing_k
     # The sign-in that was given is where it was, as it was.
     assert token.read_bytes() == OWN_SIGN_IN and stat.S_IMODE(token.stat().st_mode) == 0o600
     assert OWN_SIGN_IN.decode().strip() not in capsys.readouterr().out
+
+
+# =================================================================================================
+# Whose an arrival and a session are, and what a day costs
+# =================================================================================================
+
+
+def use_up_its_sessions(running, clock, account: int, first_item: int = 800) -> None:
+    for n in range(lock_file()["spending"]["sessions_per_account_per_day"]):
+        running.take(arrivals(event(first_item + n, account, f"own{n}")))
+        assert running.start_one() is True
+        clock[0] += 1
+
+
+def costing(units: int):
+    return lambda text, env: {"counts": [units, 0, 0, 0], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+
+@pytest.mark.parametrize("writings", [10, 100])
+@pytest.mark.parametrize("held_back_by", ["its share of sessions", "a session that had to be ended"])
+def test_what_a_held_back_account_writes_removes_nobodys_arrival_and_holds_nobodys_place(place, monkeypatch, writings, held_back_by):
+    running, clock, ran = in_process(place, monkeypatch)
+    if held_back_by == "its share of sessions":
+        use_up_its_sessions(running, clock, 666)
+    else:
+        place.put(800, written(666))
+        running.take(arrivals(event(800, 666, "own")))
+        plain, running.run_session = running.run_session, reading(place, ENDED)
+        assert running.start_one() is True
+        running.run_session = plain
+    # On one kept item of a stranger: the stranger's item starts, and what the other wrote waits in a place of its own.
+    running.take(arrivals(event(7, 200, "asked")))
+    running.take(arrivals(*[event(7, 666, f"w{n}") for n in range(writings)]))
+    assert running.start_one() is True and ran[-1][1] == "7"
+    assert [(e["number"], e["account"]) for e in kept(place)] == [(7, 666)]
+    # On five kept items of one account: all five start, and that account's five places are free again afterwards.
+    running.take(arrivals(*[event(20 + n, 201, f"q{n}") for n in range(5)]))
+    for n in range(5):
+        running.take(arrivals(*[event(20 + n, 666, f"v{n}-{m}") for m in range(writings)]))
+    for n in range(5):
+        assert running.start_one() is True, n
+    assert [number for _, number in ran[-5:]] == [str(20 + n) for n in range(5)]
+    running.take(arrivals(event(30, 201, "a sixth")))
+    assert running.start_one() is True and ran[-1][1] == "30"
+    # Across accounts: twenty strangers with an item each. Every one starts; the writer holds its own five places and no more.
+    running.take(arrivals(*[event(100 + n, 300 + n, f"s{n}") for n in range(20)]))
+    running.take(arrivals(*[event(100 + n, 666, f"x{n}-{m}") for n in range(20) for m in range(writings)]))
+    for n in range(20):
+        assert running.start_one() is True, n
+    assert [number for _, number in ran[-20:]] == [str(100 + n) for n in range(20)]
+    assert running.start_one() is False
+    left = kept(place)
+    assert {e["account"] for e in left} == {666} and len(left) == lock_file()["spending"]["arrivals_kept_per_account"]
+    # What was dropped is the writer's own, and nothing was counted against anyone else.
+    assert set(counted(place)["uncounted"]["arrivals dropped"]) == {"666"}
+    assert all(s["account"] != 666 for s in counted(place)["sessions"][-26:])
+
+
+def test_an_account_at_its_limits_gets_nothing_more_through_an_account_the_session_does_not_handle(place, monkeypatch):
+    lock = lock_file()
+    running, clock, ran = in_process(place, monkeypatch)
+    use_up_its_sessions(running, clock, 666)
+    # Account 200 has had its answers and its kept reports of the day.
+    for n in range(lock["answer"]["per_account_per_day"]):
+        place.put(300 + n, item())
+        place.desk(DESK_ITEM=str(300 + n), DESK_ACCOUNTS=accounts(200)).answer(ANSWER | {"number": 300 + n, "text": "An answer."})
+    for n in range(lock["coordinator"]["kept_per_account_per_day"]):
+        place.desk(DESK_ITEM=str(400 + n), DESK_ACCOUNTS=accounts(200)).tell_coordinator({"kind": "spam", "number": 400 + n, "summary": "x"})
+    before = counted(place)
+    # It writes on an item, and the account that is held back writes after it.
+    place.put(406, item())
+    running.take(arrivals(event(406, 200, "asked"), event(406, 666, "after")))
+    tried = []
+
+    def session(text, env):
+        tried.append(env["DESK_ACCOUNTS"])
+        desk = place.desk(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"])
+        for tool, given in (("tell_coordinator", {"kind": "problem", "number": 406, "summary": "One more."}),
+                            ("answer", ANSWER | {"number": 406, "text": "A sixth answer.", "agents_told": "could_not_tell"})):  # fmt: skip
+            try:
+                tried.append(getattr(desk, tool)(given))
+            except desk.tools.Refused as refusal:
+                tried.append("refused: " + str(refusal))
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    assert running.start_one() is True
+    # The session is given the account it handles and nobody else: no sixth answer and no twenty-first report.
+    assert json.loads(tried[0]) == [200]
+    assert tried[1].startswith("refused: ") and "full" in tried[1] and tried[2].startswith("refused: ") and "one account" in tried[2]
+    after = counted(place)
+    assert after["answers"] == before["answers"] and [r for r in after["reports"] if r["kind"] != "spam"] == []
+    # Nothing is written down against the account whose arrival was not handled.
+    assert not [e for key in ("answers", "reports", "labels") for e in after[key] if 666 in e.get("accounts", [])]
+    assert after["sessions"][-1]["account"] == 200 and [(e["number"], e["account"]) for e in kept(place)] == [(406, 666)]
+
+
+def test_what_a_held_back_account_wrote_is_not_shown_and_an_ended_session_costs_only_a_payer_that_was_shown(place, monkeypatch):
+    running, clock, ran = in_process(place, monkeypatch)
+    plain = running.run_session
+    use_up_its_sessions(running, clock, 666)
+    most = lock_file()["read"]["max_comments"]
+    # A stranger asks on an item of its own; the account that is held back writes on it more often than a session is shown comments.
+    place.put(7, written(200, by(200, "The question of account 200."), *[by(666, f"HOSTILE {n}") for n in range(most + 4)]))
+    running.take(arrivals(event(7, 200, "asked"), *[event(7, 666, f"h{n}") for n in range(most + 4)]))
+    running.run_session = session = reading(place, ENDED)
+    assert running.start_one() is True
+    (read,) = session.seen
+    assert "HOSTILE" not in json.dumps(read)
+    assert read["texts_not_shown"] == most + 4 and "texts_not_shown" in read["note"]
+    assert [c["body"] for c in read["outside_text"]["comments"]] == ["The question of account 200."]
+    # The session had to be ended. Its payer was shown its own text and waits; nothing is counted against the other account.
+    sessions = counted(place)["sessions"]
+    assert (sessions[-1]["account"], sessions[-1]["ended"], sessions[-1]["waits"]) == (200, True, [200])
+    assert len([s for s in sessions if s["account"] == 666]) == lock_file()["spending"]["sessions_per_account_per_day"]
+    # A payer whose text the session was not shown does not wait: a review, whose text the desk never reads.
+    place.put(8, written(201))
+    running.take(arrivals(event(8, 202, "review", "pull_request_review")))
+    assert running.start_one() is True
+    last = counted(place)["sessions"][-1]
+    assert (last["account"], last["ended"], last["waits"]) == (202, True, [])
+    running.run_session = plain
+    running.take(arrivals(event(8, 203, "later"), event(9, 202, "elsewhere")))
+    assert running.start_one() is True and ran[-1][1] == "9" and running.start_one() is False
+    # Nor does the payer of a session that was ended before it read anything.
+    clock[0] += 2 * 86_400
+    while running.start_one():
+        pass
+    assert kept(place) == []
+    running.run_session = ended_session
+    running.take(arrivals(event(10, 204, "unread")))
+    assert running.start_one() is True and counted(place)["sessions"][-1]["waits"] == []
+    running.run_session = plain
+    running.take(arrivals(event(11, 204, "elsewhere")))
+    assert running.start_one() is True and ran[-1][1] == "11"
+
+
+def test_when_the_first_writer_of_an_item_is_held_back_its_title_and_body_are_not_shown(place):
+    place.put(7, written(666, by(200, "A reply."), by(666, "MORE"), body="THE BODY"))
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(200), DESK_HELD_BACK=accounts(666))
+    read = json.loads(desk.read_item({"number": 7}))
+    text = read["outside_text"]
+    assert (text["author"], text["title"], text["body"]) == ("unknown", "", "") and "THE BODY" not in json.dumps(read) and "MORE" not in json.dumps(read)
+    assert read["texts_not_shown"] == 2 and [c["body"] for c in text["comments"]] == ["A reply."]
+    # Whose text was handed over is written down for the relay before the tool answers.
+    assert json.loads((place.state / "session" / "shown.json").read_text()) == [200]
+    # With nobody held back everything is shown, and the note says nothing more than before.
+    whole = json.loads(place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(200)).read_item({"number": 7}))
+    assert whole["outside_text"]["body"] == "THE BODY" and whole["texts_not_shown"] == 0 and "texts_not_shown" not in whole["note"]
+    assert json.loads((place.state / "session" / "shown.json").read_text()) == [200, 666]
+
+
+def test_after_two_sessions_in_a_row_had_to_be_ended_on_an_item_no_further_session_starts_for_it(place, monkeypatch):
+    running, clock, ran = in_process(place, monkeypatch)
+    plain = running.run_session
+    place.put(7, written(950, by(951), by(952), by(953)))
+    # A session that was not ended between two that were begins the count anew.
+    for n, played in enumerate((reading(place, ENDED), plain, reading(place, ENDED), reading(place, ENDED))):
+        running.run_session = played
+        running.take(arrivals(event(7, 951 + n, f"e{n}")))
+        assert running.start_one() is True, n
+        clock[0] += 86_400 + 1
+    running.run_session = plain
+    assert [s["ended"] for s in counted(place)["sessions"]] == [True]  # the older ones are a day old and counted no more
+    # The item is closed: an arrival on it is counted and not kept, and the digest names the item.
+    running.take(arrivals(event(7, 960, "next"), event(9, 960, "elsewhere")))
+    assert [(e["number"], e["account"]) for e in kept(place)] == [(9, 960)]
+    assert running.start_one() is True and ran[-1][1] == "9" and running.start_one() is False
+    assert running.desk.digest(force=True)
+    digest = notices(place, "digest")[-1]
+    assert "- item_closed, item 7: Two sessions in a row had to be ended on this item." in digest
+    assert "- not handled (arrivals on items for which no session is started any more): 1" in digest
+
+
+def test_a_session_that_cost_more_than_a_session_may_makes_its_item_and_its_payer_wait_like_any_other_bound(place, monkeypatch):
+    spending = lock_file()["spending"]
+    # In the relay's own loop, with a made-up program in place of Claude Code: the second response takes the session past the bound.
+    watcher(place, [event(7, 970, "asked")])
+    running = a_relay(place, behaviour={"turns": 2, "usage": {"output_tokens": 20_000}, "hang": True})
+    running.shown_accounts = lambda: [970]
+    assert running.run() == 0 and "it cost more than one session may" in running.shown.getvalue()
+    (session,) = counted(place)["sessions"]
+    assert (session["ended"], session["waits"], session["charged"]) == (True, [970], session["reserved"])
+    # And when only the count at the end shows it: the same.
+    again, clock, ran = in_process(place, monkeypatch, start_at=time.time() + 5)
+    again.take(arrivals(event(8, 971, "asked")))
+    place.put(8, written(971))
+    read = reading(place)
+    again.run_session = lambda text, env: read(text, env) | {"counts": [spending["units_per_session"] + 1, 0, 0, 0]}
+    assert again.start_one() is True
+    last = counted(place)["sessions"][-1]
+    assert (last["ended"], last["waits"], last["charged"]) == (True, [971], last["reserved"])
+    again.take(arrivals(event(7, 972, "on the first item"), event(8, 973, "on the second"), event(9, 970, "elsewhere"), event(10, 971, "elsewhere")))
+    assert again.start_one() is False and len(ran) == 0
+
+
+def test_one_account_alone_never_closes_the_days_units(place, monkeypatch):
+    spending = lock_file()["spending"]
+    assert spending.get("units_per_account_per_day") == 287_500, "lock.json: spending.units_per_account_per_day"
+    running, clock, ran = in_process(place, monkeypatch)
+    plain = running.run_session
+    # Every way one account can spend: so many sessions just under the bound of one session, and then one that has to be ended.
+    for clean in range(spending["sessions_per_account_per_day"]):
+        account = 5000 + clean
+        for n in range(clean + 1):
+            running.run_session = costing(spending["units_per_session"]) if n < clean else ended_session
+            running.take(arrivals(event(account * 10 + n, account, f"e{n}")))
+            running.start_one()
+        # Whatever it did, a session for another account still starts.
+        running.run_session = plain
+        running.take(arrivals(event(7, 4999, f"other{clean}")))
+        assert running.start_one() is True and ran[-1][1] == "7", (clean, [s["charged"] for s in counted(place)["sessions"]])
+        paid = sum(s["charged"] for s in counted(place)["sessions"] if s["account"] == account)
+        assert paid < spending["units_per_account_per_day"] + module("relay").reservation(spending)
+        # What it could not start waits for it and is not lost.
+        assert all(e["account"] == account for e in kept(place))
+        clock[0] += 2 * 86_400
+        while running.start_one():
+            pass
+        clock[0] += 2 * 86_400
+
+
+ALONE = {
+    "the units": lambda lock: put(lock, "spending.units_per_account_per_day", 287_501),
+    "the sessions": lambda lock: put(lock, "spending.sessions_per_account_per_day", 40),
+    "the kept places": lambda lock: put(lock, "spending.arrivals_kept_per_account", 100),
+    "the labels": lambda lock: put(lock, "labels_per_account_per_day", 100),
+    "the answers": lambda lock: put(lock, "answer.per_account_per_day", 30),
+    "what is sent at once": lambda lock: put(lock, "coordinator.at_once.vulnerability_per_account", 10),
+}
+
+
+@pytest.mark.parametrize("what", ALONE)
+def test_a_closed_list_in_which_one_account_alone_could_use_up_a_day_is_refused(start, what):
+    lock = lock_file()
+    assert "units_per_account_per_day" in lock["spending"] and "labels_per_account_per_day" in lock, "lock.json: the numbers are not there yet"
+    ALONE[what](lock)
+    (start.copy / "tools" / "desk" / "lock.json").write_text(json.dumps(lock))
+    assert "one account alone" in start.refuses()
+
+
+def test_one_account_gets_a_share_of_the_days_labels(place):
+    share = lock_file().get("labels_per_account_per_day")
+    assert share == 10, "lock.json: labels_per_account_per_day"
+    for n in range(share):
+        place.put(500 + n, item())
+        place.desk(DESK_ITEM=str(500 + n), DESK_ACCOUNTS=accounts(77)).add_label({"number": 500 + n, "label": "bug"})
+    assert "one account" in refused(place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(77)), "add_label", number=7, label="bug")
+    # Another account the session handles pays for it instead, and only that one.
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(77, 78)).add_label({"number": 7, "label": "bug"})
+    assert counted(place)["labels"][-1]["accounts"] == [78] and sum(1 for l in counted(place)["labels"] if 77 in l["accounts"]) == share
+
+
+# --- How many accounts it takes to close a day: worked out, not written by hand -------------------
+
+
+def day_closed_by(lock: dict, plays) -> str | None:
+    """Which bound of the day stops a newcomer after these accounts did their worst, by the rules as LOCK.md states them.
+
+    Each account plays some sessions that end by themselves, each at a cost, and then perhaps one that the relay has to end.
+    """
+    spending = lock["spending"]
+    set_aside = spending["units_per_session"] + spending["units_per_turn"]
+    share = spending.get("units_per_account_per_day", float("inf"))
+    sessions = units = 0
+    for costs, ended in plays:
+        mine = paid = 0
+        for cost in [*costs, *([set_aside] if ended else [])]:
+            if sessions >= spending["sessions_per_day"] or units + set_aside > spending["units_per_day"]:
+                break
+            if mine >= spending["sessions_per_account_per_day"] or paid >= share:
+                break
+            sessions, units, mine, paid = sessions + 1, units + cost, mine + 1, paid + cost
+    if sessions >= spending["sessions_per_day"]:
+        return "sessions"
+    return "units" if units + set_aside > spending["units_per_day"] else None
+
+
+def least_accounts(lock: dict) -> dict:
+    """For each bound of the day, the least number of outside accounts that close it for everyone, over every mixture."""
+    import itertools
+
+    spending = lock["spending"]
+    most = spending["sessions_per_account_per_day"]
+    # What one account can do: up to its share of sessions, each as cheap or as dear as a session that ends by itself can be,
+    # and with or without one that has to be ended. The play that uses the most sessions comes first.
+    ways = [([cost] * count, ended) for count in range(most, -1, -1) for cost in (1, spending["units_per_session"]) for ended in (False, True)]
+    found: dict = {}
+    for accounts_needed in range(1, spending["sessions_per_day"] + 1):
+        for plays in itertools.combinations_with_replacement(ways, accounts_needed):
+            closed = day_closed_by(lock, plays)
+            if closed:
+                found.setdefault(closed, accounts_needed)
+                found.setdefault("a day", accounts_needed)
+        if {"sessions", "units"} <= set(found):
+            break
+    # The kept list, on the relay's own code: accounts that each take as many places as they are given.
+    relay = module("relay")
+    for holders in range(1, spending["arrivals_kept"] + 1):
+        store = relay.Kept(Path("unused"), spending["arrivals_kept"], spending["arrivals_kept_per_account"])
+        entries: list = []
+        for n in range(spending["arrivals_kept"] * 2):
+            store.place(entries, [event(10_000 + n, 1 + n % holders, f"p{n}")])
+        if len(entries) == spending["arrivals_kept"]:
+            found.setdefault("the kept list filled", holders)
+            if store.place(list(entries), [event(1, 99_999, "newcomer")]) == 99_999:
+                found.setdefault("the kept list closed to a newcomer", holders)
+                break
+    coordinator = lock["coordinator"]
+    by_division = lambda whole, part: -(-whole // part)  # noqa: E731
+    found["answers"] = by_division(30, lock["answer"]["per_account_per_day"])
+    found["labels"] = by_division(lock["labels_per_day"], lock.get("labels_per_account_per_day", lock["labels_per_day"]))
+    found["sent at once"] = by_division(coordinator["at_once"]["vulnerability_per_day"], coordinator["at_once"]["vulnerability_per_account"])
+    # The kept reports cannot be filled at all: twice the sessions of a day cannot write as many as are kept.
+    writable = 2 * spending["sessions_per_day"] * (coordinator["reports_per_session"] + 2)
+    found["kept reports"] = None if writable <= coordinator["kept_per_day"] else by_division(coordinator["kept_per_day"], coordinator["kept_per_account_per_day"])
+    return found
+
+
+def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_states_those_numbers():
+    lock = lock_file()
+    assert "answers_per_day = 30" in FACTS
+    needed = least_accounts(lock)
+    # One outside account alone never closes a day, for any bound.
+    assert all(count is None or count > 1 for count in needed.values()), needed
+    assert needed == {"a day": 2, "sessions": 5, "units": 2, "the kept list filled": 20, "the kept list closed to a newcomer": 100,
+                      "answers": 6, "labels": 10, "sent at once": 5, "kept reports": None}  # fmt: skip
+    # Without one account's share of the units, one account does it alone: that is what the share is for.
+    without = json.loads(json.dumps(lock))
+    del without["spending"]["units_per_account_per_day"]
+    assert least_accounts(without)["units"] == 1
+    text = (DESK / "LOCK.md").read_text(encoding="utf-8")
+    rows = {
+        "A day's sessions": needed["sessions"], "A day's units": needed["units"], "Every kept place taken": needed["the kept list filled"],
+        "The kept list closed to an account that holds nothing": needed["the kept list closed to a newcomer"],
+        "A day's answers": needed["answers"], "A day's labels": needed["labels"],
+        "Vulnerability reports sent at once": needed["sent at once"], "The reports kept in a day": "no number of accounts",
+    }  # fmt: skip
+    for what, count in rows.items():
+        assert f"| {what} | {count} |" in text, (what, count)
+    assert "one outside account alone never closes a day" in text.lower()
+    assert "three accounts" not in text
+
+
+def test_the_worked_out_numbers_are_what_the_relay_does(place, monkeypatch):
+    spending = lock_file()["spending"]
+    needed = least_accounts(lock_file())
+    running, clock, ran = in_process(place, monkeypatch)
+    share = spending["sessions_per_account_per_day"]
+    # Sessions: one account fewer than it takes leaves room for a newcomer; with the last one there is none.
+    for account in range(needed["sessions"]):
+        if account == needed["sessions"] - 1:
+            running.take(arrivals(event(7, 4000, "before")))
+            assert running.start_one() is True and ran[-1][1] == "7"
+            clock[0] += 86_400 + 1
+            for earlier in range(account):
+                for n in range(share):
+                    running.take(arrivals(event(earlier * 100 + n + 1000, 6000 + earlier, f"again{n}")))
+                    assert running.start_one() is True
+        for n in range(share):
+            running.take(arrivals(event(account * 100 + n + 2000, 6000 + account, f"e{n}")))
+            assert running.start_one() is True
+    running.take(arrivals(event(8, 4001, "after")))
+    assert running.start_one() is False and "sessions in a day" in notices(place)[-1]
+    # Units: two accounts, each with sessions that end by themselves and one that has to be ended.
+    clock[0] += 3 * 86_400
+    while running.start_one():
+        pass
+    clock[0] += 3 * 86_400
+    for account in (7001, 7002):
+        for n in range(4):
+            running.run_session = costing(spending["units_per_session"])
+            running.take(arrivals(event(account * 10 + n, account, f"u{n}")))
+            running.start_one()
+        running.run_session = ended_session
+        running.take(arrivals(event(account * 10 + 9, account, "last")))
+        running.start_one()
+    running.take(arrivals(event(9, 4002, "after")))
+    assert running.start_one() is False and "what a day may cost" in notices(place)[-1]
+
+
+# --- The digest: not held up by a queue, and it says when a day closed ----------------------------
+
+
+def test_the_digests_time_is_looked_at_before_every_start_so_that_a_queue_does_not_hold_it_up(place, monkeypatch):
+    tools, relay = module("tools"), module("relay")
+    clock = [6_000_000.0]
+    for loaded in (tools, relay.tools):
+        monkeypatch.setattr(loaded, "now", lambda: clock[0])
+    order = []
+    send = tools.StandIn.message
+
+    def message(backend, subject, body, receiver):
+        order.append(body.split("\n")[1].removeprefix("Kind: "))
+        send(backend, subject, body, receiver)
+
+    for loaded in (tools, relay.tools):
+        monkeypatch.setattr(loaded.StandIn, "message", message)
+    watcher(place, [event(100 + n, 3000 + n, f"e{n}") for n in range(7)])
+    running = a_relay(place)
+
+    def session(text, env):
+        order.append("session")
+        place.desk(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"]).tell_coordinator({"kind": "spam", "number": int(env["DESK_ITEM"]), "summary": "x"})
+        # Each session takes twenty-five minutes of the desk's time, and longer than the relay waits between two looks.
+        clock[0] += 1500
+        time.sleep(running.retry_seconds * 2)
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    assert running.run() == 0 and order.count("session") == 7
+    # Seven sessions one after the other take nearly three hours: digests went out between them, not only after the last.
+    last = len(order) - 1 - order[::-1].index("session")
+    assert order[:last].count("digest") >= 2, order
+
+
+def test_the_next_digest_says_that_a_day_closed_for_which_bound_and_which_accounts_used_the_most(place, monkeypatch):
+    spending = lock_file()["spending"]
+    running, clock, ran = in_process(place, monkeypatch)
+    # Five accounts use up the day's sessions: three with eight sessions that cost more, two with eight cheap ones.
+    for account in (15, 12, 14, 11, 13):
+        running.run_session = costing(2_000 if account in (11, 12, 13) else 100)
+        for n in range(spending["sessions_per_account_per_day"]):
+            running.take(arrivals(event(account * 100 + n, account, f"e{n}")))
+            assert running.start_one() is True
+    running.take(arrivals(event(7, 16, "too late")))
+    assert running.start_one() is False
+    with running.desk.counts() as record:
+        record["reports"].append({"t": clock[0], "kind": "vulnerability", "number": 9, "accounts": [20], "line": "Made up.", "sent": False, "digested": False})
+    assert running.desk.digest(force=True)
+    lines = [line for line in notices(place, "digest")[-1].split("\n") if line.startswith("- ")]
+    # After the vulnerability reports and before everything else: the bound and three accounts by number.
+    assert lines[0].startswith("- vulnerability, item 9: ")
+    assert lines[1] == "- a day closed for everyone (sessions in a day); the accounts that used the most of it, by number: 11, 12, 13"
+    # It is said once.
+    clock[0] += 3600
+    running.desk.note("session_ended", "Something else.")
+    assert running.desk.digest(force=True) and "a day closed" not in notices(place, "digest")[-1]
+    # For the units: the accounts that were charged the most.
+    clock[0] += 2 * 86_400
+    while running.start_one():
+        pass
+    clock[0] += 2 * 86_400
+    # The day's units are used up during the third account's sessions, so the third was charged the least of the three.
+    for account, cost in ((31, 50_000), (32, 59_000), (33, 58_000), (34, 1_000)):
+        running.run_session = costing(cost)
+        for n in range(4):
+            running.take(arrivals(event(account * 100 + n, account, f"e{n}")))
+            running.start_one()
+    running.take(arrivals(event(8, 35, "too late")))
+    assert running.start_one() is False and running.desk.digest(force=True)
+    assert "- a day closed for everyone (what a day may cost); the accounts that used the most of it, by number: 32, 31, 33" in notices(place, "digest")[-1]
+
+
+# --- The three breaks of the fourth look that no test noticed, and the small points ---------------
+
+
+@pytest.mark.parametrize("value", LONG_VALUES)
+def test_a_value_with_letters_behind_it_is_found_however_many_other_characters_stand_before_it(value):
+    guard = module("guard")
+    for before in (" ", "    ", "     ", "\n\n\n\n", " - - ", "......", "(((( ", "… … … "):
+        for behind in ("입니다", "です", "x", "名", "2"):
+            for written_as in (value, value.upper(), value.replace("o", "0")):
+                text = "It is" + before + written_as + behind
+                assert guard.leaks(text, [("the made-up value", value)]) != [], text
+
+
+def test_the_room_for_vulnerability_reports_is_filled_by_kept_ones_as_by_sent_ones(place, monkeypatch):
+    tools = module("tools")
+    room = lock_file()["coordinator"]["vulnerability_kept_per_day"]
+    record = tools.empty_record()
+    moment = tools.now()
+    # All but one of the day's room is taken by reports that are kept and were not sent at once.
+    record["reports"] = [{"t": moment, "kind": "vulnerability", "number": 1000 + n, "accounts": [900 + n], "line": "x", "sent": n < 10, "digested": False}
+                         for n in range(room - 1)]  # fmt: skip
+    path = place.state / "desk-counts.json"
+    path.write_text(json.dumps(record))
+    path.chmod(0o600)
+    assert "accepted" in place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "The last one that fits."})
+    assert "full" in refused(place.desk(DESK_ITEM="8", DESK_ACCOUNTS=accounts(802)), "tell_coordinator", kind="vulnerability", number=8, summary="One too many.")
+    assert len([r for r in reports(place) if r["kind"] == "vulnerability"]) == room
+
+
+@pytest.mark.parametrize("mark", ["ー", "ｰ"])
+def test_the_long_vowel_mark_of_japanese_sets_letters_apart_like_a_dash(mark):
+    guard = module("guard")
+    known = [("the account name", "somebody-local")]
+    for text in (f"some{mark}body{mark}local", f"somebody{mark}local", f"s{mark}o{mark}m{mark}e{mark}b{mark}o{mark}d{mark}y{mark}local"):
+        assert guard.leaks(text, known) != [], text
+    # Ordinary Japanese with the mark in it passes.
+    assert guard.leaks("サーバーのデータをコピーします。ユーザーはエラーを報告できます。", known) == []
+
+
+def test_a_link_put_above_the_state_folder_after_the_start_is_refused_by_the_tools_and_the_relay(place, tmp_path):
+    real = tmp_path / "real"
+    (real / "state").mkdir(parents=True, mode=0o700)
+    (tmp_path / "link").symlink_to(real)
+    assert "real folder" in refused(place.desk(DESK_STATE=str(tmp_path / "link" / "state")), "answer", number=7, text="An answer.")
+    assert place.sent("comments") == []
+    running = a_relay(place)
+    running.state = tmp_path / "link" / "state"
+    assert running.run() == 1 and running.shown.getvalue().startswith("The desk was stopped. ") and "real folder" in running.shown.getvalue()
+
+
+def test_the_desks_tests_run_in_the_job_named_desk_and_in_no_other(place):
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    site = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
+    files = ["tests/test_desk.py", "tests/test_desk_lock.py"]
+    # The job bench runs every test but these two files; the job desk runs exactly these two.
+    assert "run: python -m pytest -q -p no:cacheprovider " + " ".join(f"--ignore={name}" for name in files) + "\n" in ci
+    assert "run: python -m pytest -q -p no:cacheprovider " + " ".join(files) + "\n" in site.split("\n  desk:\n", 1)[1]
+    # The names of the jobs, which are the required checks, are as they were.
+    import re
+
+    assert re.findall(r"^  ([a-z]+):$", ci.split("\njobs:\n")[1], re.M) == ["bench", "variants", "recorded"]
+    assert re.findall(r"^  ([a-z]+):$", site.split("\njobs:\n")[1], re.M) == ["layout", "desk"]
