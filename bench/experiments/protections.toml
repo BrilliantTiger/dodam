@@ -560,7 +560,7 @@ put = ''' + int(stat_lines["shmem"]),'''
 [[protection]]
 what = "A new high of the container's memory above the limit fails the case"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_still_fails_the_case"]
+tests = ["tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case"]
 [[protection.change]]
 find = '''    return high_now > high_before and high_now - all_before - from_disk > allowed
 '''

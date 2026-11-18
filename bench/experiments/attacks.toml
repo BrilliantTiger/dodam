@@ -401,7 +401,7 @@ name = "memory taken and given back between two measurements"
 tries = "the program takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
 must = "the case fails for memory: the kernel kept the container's highest use, and the judge reads it after the run and takes out of it what the container read from disk meanwhile"
 tests = [
-    "tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_still_fails_the_case",
+    "tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case",
 ]
 
 [[attack]]
@@ -583,7 +583,7 @@ name = "memory taken for a moment by a program that also reads from disk"
 tries = "the program reads 50 MB of a file that is not in the cache, then takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
 must = "the case fails for memory: what was read from disk accounts for 50 MB of the container's new high and no more"
 tests = [
-    "tests/test_cli_isolation.py::test_memory_taken_for_a_moment_fails_the_case_however_little_was_read_from_disk_meanwhile",
+    "tests/test_cli_isolation.py::test_memory_taken_for_a_moment_by_a_program_that_also_reads_from_disk_is_recorded_and_fails_no_case",
 ]
 
 [[attack]]

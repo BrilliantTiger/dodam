@@ -725,15 +725,72 @@ def test_memory_moved_out_to_swap_is_counted_as_memory(tmp_path):
     assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
 
 
-def test_a_new_high_above_the_limit_fails_the_case_even_when_no_measurement_saw_it():
+def test_a_new_high_above_the_limit_is_a_number_in_the_result():
+    """How far a new high of the container's memory lies above what the case may take, counted
+    from the memory that could not be given back when the run began. It is the most the program
+    can have held at once; cache of files is in it, so it is recorded and fails no case."""
     from dodambench import dodam_cli as runner
-    unseen = getattr(runner, "_passed_unseen", None)
-    assert unseen is not None, "the case runner does not read the highest memory use the kernel kept"
+    above = getattr(runner, "_above_in_a_new_high", None)
+    assert above is not None, "the case runner does not say how far a new high lies above the limit"
     mb = 2**20
-    assert attempt(unseen, 100 * mb, 500 * mb, 80 * mb, 288 * mb, 0) is True    # a new high, 420 MB above the start
-    assert attempt(unseen, 100 * mb, 300 * mb, 80 * mb, 288 * mb, 0) is False   # a new high within what the case may take
-    assert attempt(unseen, 600 * mb, 600 * mb, 80 * mb, 288 * mb, 0) is False   # no new high: an earlier one hides this run
-    assert attempt(unseen, 0, 0, 80 * mb, 288 * mb, 0) is False                 # a kernel that keeps no high
+    assert attempt(above, 100 * mb, 500 * mb, 80 * mb, 288 * mb) == 132 * mb   # a new high, 420 MB above the start
+    assert attempt(above, 100 * mb, 300 * mb, 80 * mb, 288 * mb) == 0          # a new high within what the case may take
+    assert attempt(above, 600 * mb, 600 * mb, 80 * mb, 288 * mb) == 0          # no new high: an earlier one hides this run
+    assert attempt(above, 0, 0, 80 * mb, 288 * mb) == 0                        # a kernel that keeps no high
+
+
+def test_a_run_reads_its_starting_values_before_the_program_is_started(tmp_path):
+    """What the kernel had ended, the highest value and what the container held are read before
+    the program exists, so that nothing it does in its first moments is in them."""
+    tests = {"functional/test_start.py": '''
+import dodam_cli
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def test_the_order():
+    tool, log = dodam_cli._judge, []
+
+    def noting(name, value):
+        def read(*args, **kwargs):
+            log.append(name)
+            return value
+        return read
+
+    real = dodam_cli.subprocess.Popen
+
+    def started(*args, **kwargs):
+        log.append("started")
+        return real(*args, **kwargs)
+
+    kept = tool.killed_for_memory, tool.highest_memory, tool.container_memory
+    tool.killed_for_memory = noting("what the kernel ended", 0)
+    tool.highest_memory = noting("the highest value", 0)
+    tool.container_memory = noting("what is held", {"taken": 0, "all": 0, "cap": 0})
+    dodam_cli.subprocess.Popen = started
+    try:
+        with case() as c:
+            c._side = Side()
+            assert c.run([]).exit_code == 0
+    finally:
+        tool.killed_for_memory, tool.highest_memory, tool.container_memory = kept
+        dodam_cli.subprocess.Popen = real
+    before = log[:log.index("started")]
+    assert sorted(set(before)) == ["the highest value", "what is held", "what the kernel ended"], log
+    # the base of the judge's own measuring is read before the start as well
+    assert before.count("what is held") >= 1 and log[log.index("started") + 1:].count("what is held") >= 1, log
+'''}
+    result = judge_program(tmp_path, "print('fine')\n", tests)
+    assert outcomes(result) == {"test_the_order": "passed"}, message(result, "test_the_order")
 
 
 def test_a_new_high_that_the_cache_of_files_on_disk_can_account_for_fails_no_case():

@@ -1,7 +1,10 @@
 """The attack list and the list of protections are files in the repository; these keep them honest."""
+import importlib.util
 import re
 import tomllib
 from pathlib import Path
+
+import pytest
 
 BENCH = Path(__file__).resolve().parents[1]
 DOCS = BENCH.parent / "docs/benchmark"
@@ -77,3 +80,33 @@ def test_the_document_names_exactly_the_protections_that_have_a_variant():
     rows = [line for line in korean[korean.index("## 보호 장치 하나하나와"):].split("\n## ")[0].splitlines()
             if line.startswith("|")]
     assert len(rows) - 2 == len(protections), "the Korean document lists a different number of protections"
+
+
+def test_every_variant_takes_out_one_place():
+    """A protection that sits in two places of the code is two entries. A variant whose text
+    occurs twice would take both out together, and taking out one alone would go unnoticed."""
+    for protection in listed("protections.toml", "protection"):
+        text = (BENCH / protection["file"]).read_text(encoding="utf-8")
+        for change in protection["change"]:
+            assert text.count(change["find"]) == 1, (
+                f"{protection['what']}: the text its variant takes out occurs {text.count(change['find'])} times "
+                f"in {protection['file']}; each place is an entry of its own")
+
+
+def test_the_check_refuses_a_variant_whose_text_does_not_occur_exactly_once(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("check_protections", BENCH / "experiments/check_protections.py")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    bench = tmp_path / "bench"
+    bench.mkdir()
+    (bench / "twice.py").write_text("stop()\nwork()\nstop()\n", encoding="utf-8")
+    monkeypatch.setattr(check, "BENCH", bench)
+    entry = {"what": "made up", "file": "twice.py", "tests": [], "change": [{"find": "stop()\n", "put": ""}]}
+    with pytest.raises(SystemExit, match="exactly once"):
+        check.broken_copy(entry, tmp_path / "twice")
+    entry["change"] = [{"find": "rest()\n", "put": ""}]
+    with pytest.raises(SystemExit, match="exactly once"):
+        check.broken_copy(entry, tmp_path / "never")
+    entry["change"] = [{"find": "work()\n", "put": ""}]
+    copy = check.broken_copy(entry, tmp_path / "once")
+    assert (copy / "twice.py").read_text(encoding="utf-8") == "stop()\nstop()\n"

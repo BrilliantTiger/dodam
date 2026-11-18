@@ -13,7 +13,6 @@ import subprocess
 import sys
 import time
 import uuid
-import warnings
 from pathlib import Path
 
 import pytest
@@ -1179,22 +1178,45 @@ def test_the_one_that_is_ended():
         assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], ends
 
 
-def test_memory_taken_and_given_back_between_two_measurements_still_fails_the_case(tmp_path):
-    """The kernel keeps the highest memory use of the container. The judge reads it after a run, so a
-    program that was above its limit only for a moment that no measurement saw fails all the same."""
+def new_highs(result: dict) -> dict:
+    """What the result says of the runs in which the container's memory made a new high above the
+    case's limit."""
+    said = result["report"]["memory"].get("highs_above_the_limit")
+    assert said is not None, f"the result does not say which runs made a new high above the limit: {result['report']['memory']}"
+    assert said["fails_a_case"] is False, said
+    return said
+
+
+def test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case(tmp_path):
+    """The kernel keeps the highest memory use of the container, but it counts the cache of files
+    into it, and what it kept cannot be told apart afterwards. So a new high fails no case: the
+    result says in which run it was made and how far above the limit it lay. A program that is
+    above its limit while the judge measures fails as before."""
     program = PLAIN + "block = bytearray(b'x') * (400 * MB)\ndel block\nprint('done')\n"
-    result = judge_attack(tmp_path, program, {"functional/test_limits.py": LIMIT_TESTS},
-                          room={"changed": NO_STOPS[1:]})
-    seen = found_by(tmp_path / "out", "attack.json")
+    unseen = tmp_path / "unseen"
+    unseen.mkdir()
+    result = judge_attack(unseen, program, {"functional/test_limits.py": LIMIT_TESTS}, room={"changed": NO_STOPS[1:]})
+    seen = found_by(unseen / "out", "attack.json")
     assert seen["after"]["kernel_kills"] == seen["before"]["kernel_kills"], seen
-    assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, tmp_path / "out")
-    assert seen["limit"] == "memory", seen
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"no measurement saw this run, and the highest value alone fails no case: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_attack": "passed", "test_after": "passed"}, lost(result, unseen / "out")
+    said = new_highs(result)
+    assert said["runs"] == 1 and "test_the_attack" in said["largest"][0]["case"], said
+    assert said["largest"][0]["limit_mb"] == 256 and said["largest"][0]["above_the_limit_mb"] >= 100, said
+    measured = tmp_path / "measured"
+    measured.mkdir()
+    result = judge_attack(measured, program, {"functional/test_limits.py": LIMIT_TESTS})
+    seen = found_by(measured / "out", "attack.json")
+    assert seen["limit"] == "memory", f"with the judge measuring as it does, the case was to fail for memory: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, measured / "out")
 
 
-# A hidden test that puts a file of 400 MB on the container's disk without leaving it in the cache of
-# files, says what the container's cache and highest memory use were before the program ran, and
-# hands back how the run was judged. The file is written and dropped piece by piece, so that the
-# container's highest use stays low and the program's reading must make a new high.
+# A hidden test that makes a file of 400 MB which is not in the cache of files, says what the
+# container's cache and highest memory use were before the program ran, and hands back how the run
+# was judged. The file is one of three kinds: written to disk and dropped from the cache piece by
+# piece; a file with nothing but a hole in it; a file whose room on disk was set aside and never
+# written. Reading the first makes the kernel read from disk. Reading the other two fills the cache
+# with empty pages and reads nothing from disk. In each the program's reading must make a new high.
 COLD_TESTS = '''
 BIG, MB = "/app/big.bin", 2**20
 
@@ -1221,8 +1243,21 @@ def test_before():
         assert c.run(["plain"]).out == "plain\\n"
 
 
+def a_hole(path, mb):
+    with open(path, "wb") as f:
+        f.truncate(mb * MB)
+
+
+def set_aside_and_never_written(path, mb):
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+    os.posix_fallocate(fd, 0, mb * MB)
+    os.fsync(fd)
+    os.close(fd)
+
+
 def test_the_reader():
-    put_on_disk_uncached(BIG, 400)
+    {"written to disk and dropped from the cache": put_on_disk_uncached, "nothing but a hole": a_hole,
+     "room set aside on disk and never written": set_aside_and_never_written}[KIND_OF_FILE](BIG, 400)
     with case() as c:
         before = numbers()
         r = c.run(["read", BIG])
@@ -1255,7 +1290,7 @@ with open(sys.argv[2], "rb") as f:
     mapped.close()
 print("done")
 ''',
-    "reads a file of 400 MB and drops it from the cache again, three times": r'''
+    "reads a file of 400 MB and tells the kernel that it no longer needs it, three times": r'''
 for _ in range(3):
     fd = os.open(sys.argv[2], os.O_RDONLY)
     while os.read(fd, MB):
@@ -1267,12 +1302,16 @@ print("done")
 }
 
 
-def reads_from_disk(tmp_path: Path, body: str, **changes) -> tuple[dict, dict]:
+FILES = ("written to disk and dropped from the cache", "nothing but a hole", "room set aside on disk and never written")
+
+
+def reads_from_disk(tmp_path: Path, body: str, file: str = FILES[0], **changes) -> tuple[dict, dict]:
     """Judge a program whose case first gets an uncached file of 400 MB; the judging and what the
     hidden test saw. Fails when the file was in the cache after all, or when the container's
     highest memory use was not low before the run: then the test would show nothing."""
     # reading 400 MB from disk three times over takes longer than five seconds on a slow disk
-    result = judge_attack(tmp_path, PLAIN + body, {"functional/test_cold.py": COLD_TESTS},
+    result = judge_attack(tmp_path, PLAIN + body,
+                          {"functional/test_cold.py": COLD_TESTS.replace("KIND_OF_FILE", repr(file))},
                           **{"CASE_TIMEOUT_SEC": "60", **changes})
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
@@ -1283,22 +1322,25 @@ def reads_from_disk(tmp_path: Path, body: str, **changes) -> tuple[dict, dict]:
 
 @pytest.mark.parametrize("memory_mb", ["256", "64"])
 @pytest.mark.parametrize("reader", list(READERS))
-def test_a_program_inside_its_limits_that_reads_uncached_files_never_fails_for_memory(tmp_path, reader, memory_mb):
-    """What a program reads from disk lands in the cache of files, which the kernel counts into the
+@pytest.mark.parametrize("file", FILES)
+def test_a_program_inside_its_limits_that_reads_uncached_files_never_fails_for_memory(tmp_path, file, reader, memory_mb):
+    """What a program reads of a file lands in the cache of files, which the kernel counts into the
     container's highest memory use and gives back whenever memory is needed. It is no memory of
-    the program's, whether the file was in the cache before or not."""
-    result, seen = reads_from_disk(tmp_path, READERS[reader], CASE_MEMORY_MB=memory_mb)
+    the program's: whether the file was in the cache before or not, whether the kernel had to read
+    the disk for it or not, and whether the cache is still there when the run is over or not."""
+    result, seen = reads_from_disk(tmp_path, READERS[reader], file, CASE_MEMORY_MB=memory_mb)
     assert seen["after"]["high_mb"] >= seen["before"]["high_mb"] + 200, f"the reading was to make a new high: {seen}"
     assert seen["limit"] is None and seen["exit_code"] == 0, f"a program inside its limits failed for {seen['limit']}: {seen}"
     assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
-    check = result["report"]["memory"].get("new_high_check")
-    assert check and check["available"] is True, f"the check on the container's highest memory use: {check}"
-    assert seen["measured"]["from_disk"] >= 380 * 2**20, f"the kernel's count of what the container read from disk: {seen}"
+    # the new high is in the result, as a number and as no judgement
+    said = new_highs(result)
+    assert said["runs"] == 1 and "test_the_reader" in said["largest"][0]["case"], said
+    assert said["largest"][0]["limit_mb"] == int(memory_mb) and said["largest"][0]["above_the_limit_mb"] >= 50, said
 
 
-def test_memory_taken_for_a_moment_fails_the_case_however_little_was_read_from_disk_meanwhile(tmp_path):
-    """Reading from disk buys no room: 400 MB taken and given back at once under a limit of 256 MB,
-    by a program that reads 50 MB of an uncached file before."""
+def test_memory_taken_for_a_moment_by_a_program_that_also_reads_from_disk_is_recorded_and_fails_no_case(tmp_path):
+    """The same for a program that reads 50 MB of an uncached file and then takes 400 MB and gives
+    it back at once under a limit of 256 MB, while the judge does not get to measure."""
     program = r"""
 with open(sys.argv[2], "rb", buffering=0) as f:
     for _ in range(50):
@@ -1308,8 +1350,40 @@ del block
 print("done")
 """
     result, seen = reads_from_disk(tmp_path, program, room={"changed": NO_STOPS[1:]})
-    assert seen["limit"] == "memory", f"the case was to fail for memory: {seen}"
-    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "failed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"the highest value alone fails no case: {seen}"
+    assert outcomes(result) == {"test_before": "passed", "test_the_reader": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    said = new_highs(result)
+    assert said["runs"] == 1 and said["largest"][0]["above_the_limit_mb"] >= 100, said
+
+
+# What the kernel ends first when the container's memory runs out is the judge's decision, not a
+# matter of which process happens to hold more: the program's side, then the case runner, and the
+# judge last.
+ORDER_TESTS = '''
+def of(pid):
+    return {"mark": int(open(f"/proc/{pid}/oom_score_adj").read()), "score": int(open(f"/proc/{pid}/oom_score").read())}
+
+
+def test_the_order():
+    with case() as c:
+        r = c.run(["order"])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"program": json.loads(r.out), "case_runner": of("self"), "judge": of(os.getppid())}, f)
+'''
+
+
+def test_when_memory_runs_out_the_kernel_ends_the_program_first_then_the_case_runner_and_the_judge_last(tmp_path):
+    program = PLAIN + '''
+import json
+held = bytearray(b"x") * (8 * MB)
+print(json.dumps({"mark": int(open("/proc/self/oom_score_adj").read()), "score": int(open("/proc/self/oom_score").read())}))
+'''
+    result = judge_attack(tmp_path, program, {"functional/test_order.py": ORDER_TESTS}, room={"memory_mb": 640})
+    assert outcomes(result) == {"test_the_order": "passed"}, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    marks = [seen[who]["mark"] for who in ("program", "case_runner", "judge")]
+    assert marks == [1000, 500, 0], f"the marks by which the kernel chooses what it ends: {seen}"
+    assert seen["program"]["score"] > seen["case_runner"]["score"] > seen["judge"]["score"], seen
 
 
 def test_where_the_kernel_keeps_no_count_of_what_was_read_the_check_fails_no_case_and_the_result_says_so(tmp_path):
@@ -1531,11 +1605,14 @@ def test_the_memory_experiment_gives_every_row_the_document_cites():
     assert code is not None, "the memory experiment did not end in 300 seconds"
     assert report.get("rows_that_did_not_come_out") == [], (report.get("rows_that_did_not_come_out"), said)
     assert code == 0 and len(report["rows"]) == 16, said
-    # without the judge's stop the kernel chooses what it ends; what it chose here is said, not asserted
-    unstopped = [row for row in report["rows"] if not row["stop_128_mb_below_the_cap"]]
-    if any(row["judged_as_meant"] != row["runs"] or row["measured_runs"] != row["runs"] for row in unstopped):
-        warnings.warn("without the stop: " + json.dumps([[row["program"], row["measured_runs"], row["judged_as_meant"],
-                                                          row["outcomes_and_exit_codes"]] for row in unstopped]))
+    for row in report["rows"]:
+        # every run gave a judgement, with or without the judge's stop 128 MB below the cap
+        assert row["judged_as_meant"] == row["runs"] == 1, row
+        assert "kernel_ended_the_case_runner" in row, f"the row does not say whether the kernel ended the case runner: {row}"
+        if row["stop_128_mb_below_the_cap"]:
+            assert row["measured_runs"] == 1, row
+        else:
+            assert row["measured_runs"] + row["kernel_ended_the_case_runner"] == 1, row
 
 
 # ---------------------------------------------------------------------------------------------
