@@ -755,6 +755,11 @@ def test_the_kernels_records_are_left_out_only_up_to_a_bound():
     assert counted(16 * mb, 16 * mb) == 0
     assert counted(200 * mb, 16 * mb) == 184 * mb
     assert counted(10 * mb, 2 * mb) == 8 * mb
+    # the records rise by 10 MB, fall by 10 MB and rise by 10 MB again: 20 MB have been made
+    grown, last = 0, None
+    for now in (50 * mb, 60 * mb, 50 * mb, 60 * mb):
+        grown, last = runner._records_grown(grown, last, now), now
+    assert grown == 20 * mb
 
 
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():

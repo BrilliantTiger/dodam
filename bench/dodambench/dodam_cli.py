@@ -94,6 +94,33 @@ def _above_in_a_new_high(high_before: int, high_now: int, taken_before: int, all
     return max(high_now - taken_before - allowed, 0)
 
 
+def _records_left_out_at_most(memory_mb: int) -> int:
+    """How much of the kernel's records of names and files is left out of a case's memory at most:
+    a quarter of the case's memory limit, and never more than 16 MB.
+
+    The kernel keeps a record of every name and file that was looked at and of every page of the
+    cache of files, and gives those records back when memory is needed, as it does the cache. But
+    it cannot give back a record while something holds on to what it describes: an open file, a
+    mapping, a file in the case's folder. From the kernel's figures the two cannot be told apart.
+    So a bounded amount is left out, which a program that looks at files in the ordinary way
+    stays within, and the rest counts."""
+    return min(memory_mb * 2**20 // 4, _judge.RECORDS_LEFT_OUT_MB * 2**20)
+
+
+def _records_grown(grown: int, last: int | None, now: int) -> int:
+    """The sum of every rise of the kernel's records since the case began, with the figure read
+    now. A fall takes nothing off it: when the kernel gives back older records, that must not make
+    room for newer ones that are held."""
+    if last is None:
+        return grown
+    return grown + max(now - last, 0)
+
+
+def _records_counted(grown: int, left_out_at_most: int) -> int:
+    """What of the growth of the kernel's records during a case counts as the case's memory."""
+    return max(grown - left_out_at_most, 0)
+
+
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
@@ -196,6 +223,10 @@ class Case:
         self._broken: list[str] = []
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
+        # the kernel's records: the last figure read, and the sum of every rise since the case began
+        self._records_last: int | None = None
+        self._records_grown = 0
+        self._left_out_at_most = _records_left_out_at_most(self._limits["memory_mb"])
         self._side = _judge.Side(self._uid, self._gid) if self._uid is not None else None
         try:
             # cases run one after another, so whatever is in the cases' folder now is not this case's
@@ -350,6 +381,8 @@ class Case:
         high_before = _judge.highest_memory() if separated else 0
         held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
         memory_before = held_before["taken"] - _files_held(self._cfg["work_root"]) if separated else 0
+        if separated:
+            self._records(held_before)
         started = time.monotonic()
         try:
             proc = subprocess.Popen(argv, cwd=self.work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -372,6 +405,9 @@ class Case:
         high_now = _judge.highest_memory() if separated else 0
         above = _above_in_a_new_high(high_before, high_now, held_before["taken"],
                                      (limits["memory_mb"] + limits["disk_mb"]) * 2**20)
+        self.measured.update(records_grown=self._records_grown,
+                             records_left_out=min(self._records_grown, self._left_out_at_most),
+                             records_counted=_records_counted(self._records_grown, self._left_out_at_most))
         self.measured.update(high_before=high_before, high_now=high_now, taken_before=held_before["taken"],
                              held_before=held_before["all"], above_the_limit=above)
         if above:
@@ -403,6 +439,14 @@ class Case:
             self._broken.append(result.limit)
         return result
 
+    def _records(self, now: dict) -> int:
+        """Take note of the kernel's records as they are now; what of their growth since the case
+        began counts as memory."""
+        records = now.get("records", 0)
+        self._records_grown = _records_grown(self._records_grown, self._records_last, records)
+        self._records_last = records
+        return _records_counted(self._records_grown, self._left_out_at_most)
+
     def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float,
                memory_before: int) -> Result:
         limits = self._limits
@@ -410,15 +454,19 @@ class Case:
         max_memory = limits["memory_mb"] * 1024 * 1024
         work_root = self._cfg["work_root"]
 
-        def memory_taken() -> int:
-            """Everything the kernel counts for the container but the cases' files."""
-            return _judge.container_memory()["taken"] - _files_held(work_root)
-
-        def memory_runs_out() -> bool:
-            """The container is about to run out of memory, whatever the case's limit says. Ending the
-            program here keeps the kernel from having to choose what to end."""
+        def above_a_line() -> bool:
+            """One measurement. The case's memory is everything the kernel counts for the container
+            that cannot be given back, less the cases' files and what was there before the run,
+            and of the kernel's records what grew beyond the amount that is left out. Above the
+            limit the program is ended. It is ended as well when the container is about to run out
+            of memory, whatever the case's limit says: that keeps the kernel from having to choose
+            what to end."""
             now = _judge.container_memory()
-            return bool(now["cap"]) and now["taken"] > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+            records = self._records(now)
+            taken = now["taken"] - _files_held(work_root) - memory_before + records
+            self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
+            runs_out = bool(now["cap"]) and now["taken"] + records > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+            return taken > max_memory or runs_out
 
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
@@ -490,7 +538,7 @@ class Case:
                     self.measured["longest_gap"] = max(self.measured["longest_gap"], now - last_watch)
                 last_watch = now
                 self.measured["measurements"] += 1
-                if self._side is not None and (memory_taken() - memory_before > max_memory or memory_runs_out()):
+                if self._side is not None and above_a_line():
                     limit = "memory"
         if limit is not None:
             self._end(proc)
@@ -539,6 +587,20 @@ class Case:
         if self._uid is not None:
             _collect()
 
+    def _note_records(self) -> None:
+        """Hand the judge what this case did to the kernel's records: how much they grew, how much
+        of that was left out of the case's memory and how much was counted."""
+        path = self._cfg.get("records_file")
+        if not path or self._side is None:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"case": self._key, "grown": self._records_grown,
+                                    "left_out": min(self._records_grown, self._left_out_at_most),
+                                    "counted": _records_counted(self._records_grown, self._left_out_at_most)}) + "\n")
+        except OSError:
+            pass
+
     def broken(self) -> LimitBroken:
         limits = self._limits
         return LimitBroken(f"the program broke a limit of the case: {', '.join(sorted(set(self._broken)))} "
@@ -550,6 +612,7 @@ class Case:
         """Give back what the case took. What cannot be removed fails the case: the program made it."""
         if self._side is not None and not self._side.end():
             raise fault("processes of the program could not be ended when its case closed")
+        self._note_records()
         try:
             _judge.remove_tree(self.root)
         except OSError as exc:

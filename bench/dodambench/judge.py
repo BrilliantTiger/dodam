@@ -183,6 +183,7 @@ OUTLIVING_CALLS = {
 }
 CASES_DIR = Path("/dodam-cases")   # the memory-backed, size-capped folder the verifier's container gives the cases
 JUDGE_ROOM_MB = 256
+RECORDS_LEFT_OUT_MB = 16           # the most of the kernel's records that is left out of a case's memory
 HIGHS_KEPT = 10                    # how many runs with a new high above the limit the result names
 RUNNER_MARK = 500                  # the kernel's mark of the case runner; the program's side has 1000, the judge 0
 MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the container less than this
@@ -354,7 +355,7 @@ def container_memory(group: Path = GROUP) -> dict[str, int]:
     swapped = _group_number(group, "memory.swap.current") or 0
     gives_back = int(stat_lines.get("slab_reclaimable", 0))
     return {"taken": current - int(stat_lines["file"]) + int(stat_lines["shmem"]) + swapped - gives_back,
-            "all": current, "cap": _group_number(group, "memory.max") or 0}
+            "all": current, "cap": _group_number(group, "memory.max") or 0, "records": gives_back}
 
 
 def highest_memory(group: Path = GROUP) -> int:
@@ -712,11 +713,13 @@ class CliRun:
             self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
         self.fault_file = self.private / "faults.jsonl"
         self.highs_file = self.private / "highs.jsonl"
+        self.records_file = self.private / "records.jsonl"
+        self.records_highest = 0       # the most the kernel's records grew by in one case of this judging
         env = {k: v for k, v in {**os.environ, **extra_env}.items()
                if not k.startswith(("DODAM_", "PYTEST_")) and k not in ("PYTHONPATH", "HOME", "TMPDIR", "PWD", "OLDPWD")}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
                     "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env,
-                    "highs_file": str(self.highs_file)}
+                    "highs_file": str(self.highs_file), "records_file": str(self.records_file)}
         self.settings_file = self.private / "settings.json"
         self.settings_file.write_text(json.dumps(settings), encoding="utf-8")
         # the tests get nothing that differs from one language to the next but the settings file itself
@@ -728,6 +731,7 @@ class CliRun:
         tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
         timeout = FILE_SECONDS + tests * (self.limits["timeout_sec"] + CASE_SECONDS)
         cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
+        self.note_records(cases)
         if self.fault_file.exists():
             raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
         self.sweep()
@@ -736,6 +740,22 @@ class CliRun:
             # a program cannot make a file of tests run out of time or be impossible to list: its cases are limited
             raise JudgeFault(f"{path.name}: {whole[0]['message']}")
         return cases
+
+    def note_records(self, cases: list[dict]) -> None:
+        """Write into each case's outcome how much of the kernel's records was left out of its
+        memory and how much was counted, as the case runner noted it, so that a case that failed
+        for memory shows why."""
+        try:
+            noted = [json.loads(line) for line in self.records_file.read_text(encoding="utf-8").splitlines() if line]
+            self.records_file.unlink()
+        except (OSError, ValueError):
+            noted = []
+        for case in cases:
+            mine = [n for n in noted if n["case"].split("::")[-1] == case["name"]]
+            if mine:
+                case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
+                case["records_counted_bytes"] = max(n["counted"] for n in mine)
+                self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,
@@ -1071,6 +1091,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         side = Side.named(run_as)
         if not side.end():
             raise JudgeFault("processes the working user left running could not be ended")
+        # the kernel's records of names and files, before anything of the program's side has run here
+        records = {"at_start": container_memory()["records"]}
     deps_dir, links = lang_env.get("DEPS_DIR", ""), [n for n in lang_env.get("DEPS_LINKS", "").split(",") if n]
     try:
         if run_as:
@@ -1091,6 +1113,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     else:
         report["build_ok"] = True
     report["build_sec"] = round(time.monotonic() - started, 2)
+    if run_as:
+        records["after_build"] = container_memory()["records"]
 
     cli = None
     if is_cli and report["build_ok"]:
@@ -1142,6 +1166,9 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
                                     "weakness": t.get("weakness")})
     app.stop()
     highs = cli.highs() if cli is not None else None
+    if cli is not None and run_as:
+        records["highest_in_a_case"] = cli.records_highest
+        records["left_out_of_a_case_at_most"] = min(cli.limits["memory_mb"] * 2**20 // 4, RECORDS_LEFT_OUT_MB * 2**20)
     if cli is not None:
         cli.close()
     if run_as:
@@ -1149,6 +1176,8 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         # and how many processes the kernel ended there
         report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
                             "ended_by_the_kernel": killed_for_memory()}
+        records["at_end"] = container_memory()["records"]
+        report["memory"]["records_mb"] = {name: round(value / 2**20, 1) for name, value in records.items()}
         if highs is not None:
             # the runs that made a new high of the container's memory above the case's limit
             report["memory"]["highs_above_the_limit"] = highs

@@ -218,8 +218,8 @@ what = "The judge measures all memory of the container and ends the program abov
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory]"]
 [[protection.change]]
-find = '''(memory_taken() - memory_before > max_memory or memory_runs_out())'''
-put = '''(memory_runs_out())'''
+find = '''            return taken > max_memory or runs_out'''
+put = '''            return runs_out'''
 
 [[protection]]
 what = "A program the kernel ended for memory fails its case"
@@ -235,8 +235,8 @@ file = "dodambench/dodam_cli.py"
 second_line = "a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose. What the kernel chooses is settled by the marks the judge sets: in a container of 640 MB the kernel's score was 1,339 for the program (mark 1,000), 1,016 for the case runner (mark 500; 683 before it had a mark) and 676 for the judge (mark 0, about 32 MB held, against about 51 MB held by the case runner). So without this stop the kernel ends the program, and when that is not enough the case runner, in which case the hidden test hands nothing back, the case fails for memory and a new runner judges the rest. The entry's test accepts both and is run twice: with the judge measuring every 0.002 seconds, as it does, and with the measuring switched off, so that the case runner sleeps while the kernel ends the program and wakes at no moment of its own choosing. The measuring cannot end the program in either: the case's limit is set above the container's cap"
 tests = ["tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged"]
 [[protection.change]]
-find = '''(memory_taken() - memory_before > max_memory or memory_runs_out())'''
-put = '''(memory_taken() - memory_before > max_memory)'''
+find = '''            return taken > max_memory or runs_out'''
+put = '''            return taken > max_memory'''
 
 [[protection]]
 what = "The program is ended at the case's time limit"
@@ -573,7 +573,7 @@ find = ''' + int(stat_lines["shmem"]) + swapped - gives_back,'''
 put = ''' + int(stat_lines["shmem"]) - gives_back,'''
 
 [[protection]]
-what = "The records the kernel keeps of files that were only looked at are not counted as the program's memory"
+what = "The kernel's records of files that were looked at are left out of a case's memory"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it"]
 [[protection.change]]
@@ -581,6 +581,31 @@ find = '''    gives_back = int(stat_lines.get("slab_reclaimable", 0))
 '''
 put = '''    gives_back = 0
 '''
+
+[[protection]]
+what = "The kernel's records are left out of a case's memory only up to a quarter of its limit and 16 MB"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it", "tests/test_cli_isolation.py::test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out"]
+[[protection.change]]
+find = '''    return max(grown - left_out_at_most, 0)'''
+put = '''    return 0'''
+
+[[protection]]
+what = "A fall of the kernel's records takes nothing off what a case made them grow by"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_kernels_records_are_left_out_only_up_to_a_bound"]
+[[protection.change]]
+find = '''    return grown + max(now - last, 0)'''
+put = '''    return grown + now - last'''
+
+[[protection]]
+what = "The result says for each case how much of the kernel's records was left out and how much was counted"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it"]
+[[protection.change]]
+find = '''        self.note_records(cases)
+'''
+put = ''''''
 
 [[protection]]
 what = "A run that made a new high of the container's memory above the limit is named in the result"
@@ -611,6 +636,8 @@ find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
         held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
         memory_before = held_before["taken"] - _files_held(self._cfg["work_root"]) if separated else 0
+        if separated:
+            self._records(held_before)
         started = time.monotonic()
 '''
 put = '''        started = time.monotonic()

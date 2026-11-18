@@ -604,3 +604,13 @@ must = "the judge ends them all, and the step's result says the build failed"
 tests = [
     "tests/test_cli_isolation.py::test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same",
 ]
+
+[[attack]]
+class = "memory"
+name = "holding on to the kernel's records of names and files"
+tries = "the program makes the kernel keep records that it cannot give back while the program holds on to what they describe: open files, memory files that are mapped and closed, shared mappings without a file, the image's files mapped, far-apart pages in the case folder; or it asks for 400,000 names that are not there"
+must = "at most a quarter of the case's memory limit and never more than 16 MB of such records are left out of the case's memory; what goes beyond counts, and a program that holds more than its limit and that amount fails for memory"
+tests = [
+    "tests/test_cli_isolation.py::test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out",
+    "tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it",
+]
