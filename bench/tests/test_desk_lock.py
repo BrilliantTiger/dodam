@@ -1121,6 +1121,30 @@ def test_a_label_and_a_read_go_to_this_repository_only(place, monkeypatch):
     assert argv[:3] == ["api", "--method", "GET"] and "repos/BrilliantTiger/dodam/issues/7" in argv
 
 
+@pytest.mark.parametrize("count", [1, 99, 100, 101, 119, 120, 199, 200, 201, 250, 1001])
+def test_the_newest_comments_are_read_when_they_spill_onto_another_page(place, monkeypatch, count):
+    tools = module("tools")
+    everything = [{"user": {"login": "outsider"}, "body": f"comment {n}"} for n in range(1, count + 1)]
+    asked = []
+
+    def api(self, method, path, body=None):
+        asked.append(path)
+        if "/comments?" in path:
+            page = int(path.rsplit("page=", 1)[1])
+            assert "per_page=100" in path
+            return everything[(page - 1) * 100 : page * 100]
+        return {"state": "open", "title": "t", "body": "b", "user": {"login": "outsider"}, "labels": [], "comments": count}
+
+    monkeypatch.setattr(tools.GitHub, "_api", api)
+    desk = place.desk()
+    desk.backend = tools.GitHub("BrilliantTiger/dodam", "/usr/bin/false", place.state, "/usr/bin:/bin")
+    got = json.loads(desk.read_item({"number": 7}))["outside_text"]["comments"]
+    most = lock_file()["read"]["max_comments"]
+    assert [c["body"] for c in got] == [f"comment {n}" for n in range(max(1, count - most + 1), count + 1)]
+    # At most two pages are asked for, however many comments there are.
+    assert len([path for path in asked if "/comments?" in path]) <= 2
+
+
 def test_the_desks_own_token_is_used_when_there_is_one(place, monkeypatch):
     desk, binaries = real_desk(place, monkeypatch, token=MADE_UP_TOKEN)
     desk.answer({"number": 7, "text": "Hello."})
