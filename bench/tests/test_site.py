@@ -6,6 +6,10 @@ They live with the benchmark tests because that is the test run the branch check
 """
 
 import copy
+import datetime as dt
+import json
+import struct
+import xml.etree.ElementTree as ET
 import importlib.util
 import re
 from html.parser import HTMLParser
@@ -17,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "site"
 LANGS = ["en", "ko", "ja", "es"]
 NAMES = {"en": "English", "ko": "한국어", "ja": "日本語", "es": "Español"}
-SECTIONS = ["what", "why", "guarantees", "how", "now", "join", "rules", "license"]
+SECTIONS = ["what", "why", "guarantees", "how", "now", "join", "rules", "faq", "license"]
 PAGE_WEIGHT_LIMIT = 150 * 1024
 
 
@@ -47,12 +51,18 @@ class Page(HTMLParser):
         self.tags: list[tuple[str, dict[str, str | None]]] = []
         self.title = ""
         self.inline_script = ""
+        self.data_blocks: list[str] = []
+        self._data = False
         self.text = ""
         self._inside: list[str] = []
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
         self.tags.append((tag, dict(attrs)))
+        if tag == "script":   # a block of structured data is data: the browser never runs it
+            self._data = dict(attrs).get("type") == "application/ld+json"
+            if self._data:
+                self.data_blocks.append("")
         if tag not in {"meta", "link", "br", "img", "rect", "circle", "path", "use"}:
             self._inside.append(tag)
 
@@ -65,6 +75,8 @@ class Page(HTMLParser):
         here = self._inside[-1] if self._inside else ""
         if here == "title":
             self.title += data
+        elif here == "script" and self._data:
+            self.data_blocks[-1] += data
         elif here == "script":
             self.inline_script += data
         elif here != "style":
@@ -113,7 +125,7 @@ def test_titles_and_descriptions_differ_between_languages():
 def test_page_names_itself_and_the_other_languages_for_search_engines(lang):
     links = page(lang).all("link")
     assert [a.get("href") for a in links if a.get("rel") == "canonical"] == [page_url(lang)]
-    alternates = {a.get("hreflang"): a.get("href") for a in links if a.get("rel") == "alternate"}
+    alternates = {a.get("hreflang"): a.get("href") for a in links if a.get("rel") == "alternate" and a.get("hreflang")}
     assert alternates == {**{other: page_url(other) for other in LANGS}, "x-default": SITE_URL}
 
 
@@ -156,7 +168,7 @@ def test_page_links_to_the_places_people_join_from(lang):
 def test_page_loads_nothing_from_another_host_and_stays_light(lang):
     p = page(lang)
     loaded = [a.get("src") for t, a in p.tags if a.get("src")]
-    loaded += [a.get("href") for a in p.all("link") if a.get("rel") not in {"canonical", "alternate"}]
+    loaded += [a.get("href") for a in p.all("link") if a.get("rel") not in {"canonical", "alternate", "sitemap"}]
     assert [u for u in loaded if u and not is_local(u)] == []
     assert p.inline_script.strip() == ""
     weight = page_path(lang).stat().st_size
@@ -303,11 +315,13 @@ def page_figures(c: dict) -> dict:
         "t1_p": ([], [c["tasks_first"], c["languages"]]),
         "t3_p": ([], [c["tasks_public"]]),
         "t4_p": ([], [c["service_months"]]),
+        "a3": ([], [c["languages"]]),
+        "a5": ([d(c["milestones"][4]), m(c["today_median"][0]), m(c["today_median"][1]), d(c["milestones"][2])], [c["companies"]]),
     }
 
 
 NAMES_NOT_FIGURES = r"(?<![\d.])(?:1\.0|0\.1|2\.0|5\.5)(?![\d.])"   # releases, the license, a model's name
-FROM_RESEARCH = {"stat1", "stat2", "stat3", "src1", "src2", "src3", "why_note"}   # sources kept as they are
+FROM_RESEARCH = {"stat1", "stat2", "stat3", "src1", "src2", "src3", "why_note", "a6"}   # sources kept as they are
 
 
 def figure_faults(charter_text: str, strings: dict) -> list[str]:
@@ -390,6 +404,25 @@ def test_the_page_names_the_version_of_the_charter_it_takes_its_figures_from():
     later = text.replace(f"- 판: v{version} ({issued})", "- 판: v9.9 (2031-01-01)", 1)
     assert figure_faults(later, all_strings()) != []
     assert f"version {version}," in all_strings()["en"]["now_note"]
+
+
+def test_the_english_charter_carries_the_same_version_and_date_as_the_korean_one():
+    version, issued = re.search(r"^- 판: v(\d+\.\d+) \((\d{4}-\d\d-\d\d)\)$", charter(), re.M).groups()
+    english = (ROOT / "docs" / "charter.en.md").read_text(encoding="utf-8")
+    assert re.findall(r"^- Version: .*$", english, re.M) == [f"- Version: v{version} ({issued})"]
+    for text, marker in ((charter(), f"| v{version} | {issued} |"), (english, f"| v{version} | {issued} |")):
+        assert text.rstrip().splitlines()[-1].startswith(marker), "the last row of the history is not this version"
+
+
+def test_the_tools_of_the_page_use_no_withdrawn_date_even_as_an_example():
+    build = builder()
+    for path in sorted((ROOT / "tools" / "site").rglob("*")):
+        if path.suffix not in {".py", ".html", ".json", ".txt"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for day in WITHDRAWN_DATES:
+            assert day not in text and day[:7] not in text, f"{path.name} still writes {day[:7]}"
+            assert build.spell("en", "m", day[:7]) not in text, path.name
 
 
 @pytest.mark.parametrize("old,new", CHARTER_VARIANTS)
@@ -478,7 +511,7 @@ def test_styles_and_script_reach_no_other_host():
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"@import|url\(\s*['\"]?(?:https?:)?//", text), path.name
         if path.suffix == ".js":
-            assert not re.search(r"https?://|fetch\(|XMLHttpRequest|sendBeacon|WebSocket|import\(", text), path.name
+            assert not re.search(r"https?://|XMLHttpRequest|sendBeacon|WebSocket|import\(", text), path.name
 
 
 def test_script_is_one_small_file_of_our_own():
@@ -510,7 +543,7 @@ def test_site_has_no_contact_details_or_internal_codes():
 
 def test_committed_pages_are_exactly_what_the_template_builds():
     built = builder().pages()
-    assert sorted(built) == sorted(str(page_path(lang).relative_to(SITE)) for lang in LANGS)
+    assert sorted(built) == sorted([str(page_path(lang).relative_to(SITE)) for lang in LANGS] + ["sitemap.xml"])
     for name, text in built.items():
         assert (SITE / name).read_text(encoding="utf-8") == text, f"site/{name} is stale: run tools/site/build.py"
 
@@ -611,13 +644,35 @@ def test_workflow_pins_actions_and_keeps_permissions_narrow():
     assert [u for u in uses if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", u)] == []
     head, _, jobs = text.partition("\njobs:")
     assert "write" not in head
-    assert re.search(r"paths:\s*\n\s*-\s*['\"]?site/\*\*", head)
-    assert re.search(r"branches:\s*(?:\[\s*main\s*\]|\n\s*-\s*main)", head)
     blocks = re.split(r"\n  (?=[\w-]+:\n)", jobs)
     writers = [b for b in blocks if "pages: write" in b or "id-token: write" in b]
     assert len(writers) == 1
     assert "pages: write" in writers[0] and "id-token: write" in writers[0]
     assert "deploy-pages@" in writers[0]
+    assert sorted(set(re.findall(r"^\s+([\w-]+): (?:read|write)$", text, re.M))) == ["contents", "id-token", "issues", "pages"]
+    assert not re.search(r"secrets\.", text), "the workflow uses a stored secret"
+
+
+def workflow_triggers(name: str) -> str:
+    text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+    return re.sub(r"(?m)^\s*#.*\n", "", text).split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+
+
+def test_every_merge_to_main_and_a_fixed_interval_build_the_page_and_nothing_else_does():
+    triggers = workflow_triggers("pages.yml")
+    assert re.search(r"push:\s*\n\s+branches:\s*\[\s*main\s*\]", triggers)
+    assert "paths" not in triggers, "a merge that does not touch site/ would not build the page"
+    assert re.search(r"schedule:\s*\n\s+- cron: \"\d+ \* \* \* \*\"", triggers), "the page is not built again every hour"
+    assert not re.search(r"pull_request|workflow_dispatch|workflow_run|issue", triggers), "something else can deploy the page"
+    text = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
+    jobs = re.split(r"\n  (?=[\w-]+:\n)", text.partition("\njobs:")[2])[1:]
+    assert len(jobs) == 2
+    for job in jobs:
+        assert "if: github.ref == 'refs/heads/main'" in job, "a job could run for something other than main"
+    assert "build.py --live" in jobs[0] and "--compare" in jobs[0]
+    assert "github.event_name == 'push' || needs.build.outputs.changed == 'true'" in jobs[1], \
+        "the scheduled build deploys although nothing it shows has changed"
+    assert "fetch-depth: 0" in jobs[0], "the merged changes cannot be read from a shallow checkout"
 
 
 def test_site_check_workflow_pins_actions_and_only_reads():
@@ -678,3 +733,386 @@ def test_site_check_runs_on_every_push_and_pull_request():
 
 def test_only_two_readmes_exist():
     assert sorted(p.name for p in ROOT.glob("README*")) == ["README.ko.md", "README.md"]
+
+
+# --- the page follows the project by itself --------------------------------------------------
+#
+# The section about now holds no value of its own. The build computes a status from the charter, the
+# tasks, the history of main and GitHub's count of open issues, writes it into the pages, into the
+# status file an open page reads again, and into the guide for AI agents.
+
+NOW = dt.datetime(2026, 12, 1, 8, 30, tzinfo=dt.timezone.utc)
+SAMPLE = ROOT / "tools" / "site" / "sample_status.json"
+MARKUP = '<img src=x onerror=alert(1)> & "quoted" </a><script>alert(2)</script>'
+STATUS_FIELDS = {"version", "built", "charter", "step", "tasks", "open_issues", "changes", "digest"}
+
+
+def need(name: str):
+    build = builder()
+    assert hasattr(build, name), f"the build script has no {name}"
+    return getattr(build, name)
+
+
+def rendered(lang: str, status: dict | None = None) -> str:
+    """The page of one language, built with a status."""
+    render = need("render")
+    assert "status" in render.__code__.co_varnames[:render.__code__.co_argcount], "the pages cannot be built with a status"
+    return render(lang, status=status)
+
+
+def made_status(text: str | None = None, now: dt.datetime = NOW, issues: int = 2, ready: int = 1, changes=()) -> dict:
+    return need("status")(now=now, issues=issues, charter=charter() if text is None else text, changes=list(changes), ready=ready)
+
+
+def sample() -> dict:
+    assert SAMPLE.is_file()
+    return json.loads(SAMPLE.read_text(encoding="utf-8"))
+
+
+def published(tmp_path, status: dict | None = None) -> Path:
+    need("publish")(tmp_path / "out", status or sample())
+    return tmp_path / "out"
+
+
+def live_section(html_text: str) -> str:
+    assert 'id="live"' in html_text, "the page has no section about now"
+    return html_text.split('id="live"', 1)[1].split('<div class="marquee', 1)[0]
+
+
+def test_the_status_is_what_the_charter_says_about_now():
+    c, status = charter_figures(charter()), made_status()
+    assert set(status) == STATUS_FIELDS and status["version"] == 1
+    assert status["built"] == "2026-12-01T08:30:00Z"
+    assert status["charter"] == {"version": c["version"], "date": c["issued"]}
+    gate = re.search(r"방향 고정 관문은 시범에서 잰 값을 넣으면 지금 조건에서 가운데 (\d{4}-\d\d-\d\d), .*?닿을 확률 (\d+)%", charter())
+    assert status["step"] == {"index": 1, "of": 5, "gate_plan": c["milestones"][0], "gate_today": gate.group(1),
+                              "gate_today_chance": int(gate.group(2))}
+    assert status["tasks"] == {"ready": 1, "first": int(c["tasks_first"])}
+    assert status["open_issues"] == 2 and status["changes"] == []
+
+
+STATUS_VARIANTS = [
+    ("- 판: v0.10 (2026-11-18)", "- 판: v0.11 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.11", "2026-12-24")),
+    ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
+    ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
+    ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
+    ("벤치마크 과제 30개(웹", "벤치마크 과제 40개(웹", lambda s: s["tasks"]["first"], 40),
+]
+
+
+@pytest.mark.parametrize("old,new,read,want", STATUS_VARIANTS)
+def test_a_value_changed_in_the_charter_changes_the_status(old, new, read, want):
+    text = charter()
+    assert text.count(old) == 1, old
+    assert read(made_status(text.replace(old, new))) == want
+    assert read(made_status()) != want
+
+
+def test_the_step_is_the_one_the_day_of_the_build_falls_in():
+    c = charter_figures(charter())
+    later = made_status(now=dt.datetime(2027, 3, 1, tzinfo=dt.timezone.utc))
+    assert later["step"] == {"index": 2, "of": 5, "gate_plan": c["milestones"][1], "gate_today": None, "gate_today_chance": None}
+    last_day = made_status(now=dt.datetime.fromisoformat(c["milestones"][0] + "T23:59:00+00:00"))
+    assert last_day["step"]["index"] == 1
+    assert made_status(now=dt.datetime(2040, 1, 1, tzinfo=dt.timezone.utc))["step"]["index"] == 5
+
+
+def test_benchmark_tasks_ready_are_counted_in_the_repository(tmp_path):
+    count = need("tasks_ready")
+    for name in ("a", "b", "notes"):
+        (tmp_path / name).mkdir()
+    (tmp_path / "a" / "task.toml").write_text("")
+    (tmp_path / "b" / "task.toml").write_text("")
+    (tmp_path / "README.md").write_text("")
+    assert count(tmp_path) == 2
+    real = sum(1 for path in (ROOT / "bench" / "tasks").iterdir() if (path / "task.toml").is_file())
+    assert count() == real and real >= 1
+
+
+LOG = "\x1e".join([
+    "2026-11-18T03:33:45+09:00\x1fMerge pull request #12 from someone/branch-name\x1fRecord the pilot measurement\n\nlonger text",
+    "2026-11-17T10:00:00+00:00\x1fBench: a squashed change (#11)\x1fbody",
+    "2026-11-17T09:00:00+00:00\x1fA commit pushed without a pull request\x1f",
+    "2026-11-16T09:00:00+00:00\x1fMerge pull request #9 from outside/fork\x1f" + MARKUP + "\n",
+    "2026-11-15T09:00:00+00:00\x1fMerge pull request #8 from a/b\x1f  spaced \t and\x07 controlled  ",
+    "2026-11-14T09:00:00+00:00\x1fMerge pull request #7 from a/b\x1fseven",
+    "2026-11-13T09:00:00+00:00\x1fMerge pull request #6 from a/b\x1fsix",
+    "2026-11-12T09:00:00+00:00\x1fMerge pull request #5 from a/b\x1ffive",
+]) + "\x1e"
+
+
+def test_changes_are_the_pull_requests_merged_to_main_without_their_authors():
+    changes = need("changes_from_log")(LOG)
+    assert len(changes) == 5, "more or fewer than the latest 5 changes"
+    assert [set(change) for change in changes] == [{"date", "title", "url"}] * 5
+    assert changes[0] == {"date": "2026-11-17", "title": "Record the pilot measurement", "url": f"{REPO_URL}/pull/12"}   # the day in UTC
+    assert changes[1] == {"date": "2026-11-17", "title": "Bench: a squashed change", "url": f"{REPO_URL}/pull/11"}
+    assert changes[2]["title"] == MARKUP and changes[2]["url"] == f"{REPO_URL}/pull/9"
+    assert changes[3]["title"] == "spaced and controlled"
+    text = json.dumps(changes)
+    assert "someone" not in text and "outside/fork" not in text and "without a pull request" not in text
+
+
+LIVE_KEYS = ["live_h", "live_p", "live_charter", "live_step", "live_gate_plan", "live_gate_today", "live_tasks", "live_issues",
+             "live_built", "changes_h", "changes_note"]
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_no_figure_in_the_section_about_now_is_typed_by_hand(lang):
+    build = builder()
+    strings = build.load_strings(lang)
+    template = (ROOT / "tools" / "site" / "template.html").read_text(encoding="utf-8")
+    block = live_section(template)
+    assert sorted(re.findall(r"\{\{([a-z0-9_]+)\}\}", block)) == sorted(LIVE_KEYS + ["root", "repo", "live_hidden", "gate_today_hidden", "changes"])
+    assert not re.search(r"\d", re.sub(r"<h[34]>|</h[34]>", "", block)), "a figure is typed into the template"
+    for key in LIVE_KEYS:
+        assert key in strings, f"{lang}: the sentence {key} is missing"
+        assert not re.search(r"\d", strings[key]), f"{lang} {key}: a figure is typed by hand"
+
+    def change(s):
+        s[lang]["live_tasks"] = s[lang]["live_tasks"].replace("[tasks.first]", "30")
+
+    assert edited(change), "a figure typed in place of a value of the status is not caught"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_section_about_now_shows_the_status_in_each_language(lang):
+    build, status = builder(), sample()
+    html_text = rendered(lang, status=status)
+    block = live_section(html_text)
+    assert " hidden" not in block.split(">", 1)[0]
+    text = Page("<main><div " + block).text
+    for day in (status["charter"]["date"], status["step"]["gate_plan"], status["step"]["gate_today"]):
+        assert build.spell(lang, "d", day) in text, day
+    assert build.spell(lang, "d", status["built"][:10]) + " 09:07 UTC" in text
+    names = {name: value for name, value in re.findall(r'<span data-live="([a-z_.]+)">([^<]*)</span>', block)}
+    assert names == {"charter.version": "0.10", "step.gate_today_chance": "4", "tasks.ready": "12", "tasks.first": "30", "open_issues": "3"}
+    assert build.load_strings(lang)["t1_h"] in text
+    for change in status["changes"]:
+        assert build.spell(lang, "d", change["date"]) in text and change["url"] in block
+    without = live_section(rendered(lang))
+    assert without.split(">", 1)[0].endswith(" hidden"), "a page built without a status shows an empty section"
+    assert re.findall(r'<span data-live="[a-z_.]+">([^<]*)</span>', without) == [""] * 5 and "<li><time" not in without
+    later = dict(status, step=dict(status["step"], index=2, gate_today=None, gate_today_chance=None))
+    assert '<li data-live-show="step.gate_today" hidden>' in rendered(lang, status=later)
+    assert build.load_strings(lang)["t2_h"] in Page("<main><div " + live_section(rendered(lang, status=later))).text
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_a_title_that_carries_markup_reaches_the_page_as_text(lang):
+    status = sample()
+    assert status["changes"][0]["title"].endswith(MARKUP)
+    html_text = rendered(lang, status=status)
+    block = live_section(html_text)
+    assert "<img" not in block and "<script" not in block and "onerror=alert(1)>" not in block
+    assert "&lt;img src=x onerror=alert(1)&gt; &amp; &quot;quoted&quot; &lt;/a&gt;&lt;script&gt;" in block
+    shown = Page("<main><div " + block)
+    assert MARKUP in shown.text and "img" not in [tag for tag, _ in shown.tags]
+    bad = dict(status, changes=[{"date": "2027-01-04", "title": "x", "url": 'https://example.com/"><b>'}])
+    assert '"><b>' not in live_section(rendered(lang, status=bad))
+
+
+@pytest.mark.parametrize("lang", [lang for lang in LANGS if lang != "en"])
+def test_other_languages_say_that_titles_are_shown_in_english(lang):
+    word = {"ko": "영어", "ja": "英語", "es": "inglés"}[lang]
+    assert word in builder().load_strings(lang).get("changes_note", "")
+    links = re.findall(r"<a [^>]*>", live_section(rendered(lang, status=sample())).split('class="changes"', 1)[1])
+    assert links and all('lang="en"' in link for link in links)
+
+
+def test_an_open_page_reads_the_status_file_from_its_own_address_and_sets_text_only():
+    script = (SITE / "motion.js").read_text(encoding="utf-8")
+    assert len(re.findall(r"\bfetch\(", script)) == 1, "the script must read one thing: the status file"
+    assert re.search(r"\.fetch\(\s*box\.getAttribute\(\"data-status\"\)", script)
+    assert "setInterval(load" in script, "an open page does not read the status again"
+    assert not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function", script), "the script sets markup"
+    assert "textContent" in script and 'credentials: "omit"' in script
+    for lang in LANGS:
+        address = re.search(r'id="live" data-status="([^"]+)"', page_path(lang).read_text(encoding="utf-8"))
+        assert address and is_local(address.group(1)) and address.group(1).endswith("status.json")
+        assert (page_path(lang).parent / address.group(1)).resolve() == (SITE / "status.json").resolve()
+
+
+def test_the_published_build_writes_the_pages_the_status_file_and_the_guide(tmp_path):
+    out, status = published(tmp_path), sample()
+    assert json.loads((out / "status.json").read_text(encoding="utf-8")) == status
+    assert (out / "status.json").stat().st_size < 4096, "the status file is not small"
+    for lang in LANGS:
+        name = "index.html" if lang == "en" else f"{lang}/index.html"
+        assert (out / name).read_text(encoding="utf-8") == rendered(lang, status=status)
+    for name in ("style.css", "motion.js", "favicon.svg", "sitemap.xml", "llms.txt") + tuple(f"card-{lang}.png" for lang in LANGS):
+        assert (out / name).is_file(), name
+    assert not list(out.rglob("__pycache__"))
+
+
+def test_the_scheduled_build_deploys_only_when_what_the_page_shows_has_changed():
+    digest = need("inputs_digest")
+    first = made_status()
+    assert first["digest"] == made_status(now=NOW + dt.timedelta(hours=5))["digest"], "the time of the build alone changes the digest"
+    assert first["digest"] != made_status(issues=3)["digest"]
+    assert first["digest"] != made_status(ready=2)["digest"]
+    assert first["digest"] != made_status(changes=[{"date": "2026-11-30", "title": "t", "url": f"{REPO_URL}/pull/1"}])["digest"]
+    assert first["digest"] != made_status(now=dt.datetime(2027, 3, 1, tzinfo=dt.timezone.utc))["digest"]
+    assert digest(first) == first["digest"] and re.fullmatch(r"[0-9a-f]{64}", first["digest"])
+
+
+def test_working_rules_say_the_page_changes_with_what_it_says():
+    rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    line = next((l for l in rules.splitlines() if "introduction page" in l), "")
+    assert "same pull request" in line and "four languages" in line
+
+
+# --- search engines -----------------------------------------------------------------------------
+
+
+def test_sitemap_lists_the_four_pages_with_their_language_alternates():
+    path = SITE / "sitemap.xml"
+    assert path.is_file(), "there is no sitemap"
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9", "x": "http://www.w3.org/1999/xhtml"}
+    urls = ET.fromstring(path.read_text(encoding="utf-8")).findall("s:url", ns)
+    assert [u.find("s:loc", ns).text for u in urls] == [page_url(lang) for lang in LANGS]
+    for u in urls:
+        found = {a.get("hreflang"): a.get("href") for a in u.findall("x:link", ns)}
+        assert found == {lang: page_url(lang) for lang in LANGS} | {"x-default": SITE_URL}
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    head = path.read_bytes()[:24]
+    assert head[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} is not a PNG image"
+    return struct.unpack(">II", head[16:24])
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_shared_page_shows_a_title_a_description_and_an_image_of_the_usual_size(lang):
+    metas = {m.get("name") or m.get("property"): m.get("content") or "" for m in page(lang).all("meta")}
+    assert metas.get("og:image") == f"{SITE_URL}card-{lang}.png"
+    image = SITE / f"card-{lang}.png"
+    assert image.is_file(), "the image shown when the page is shared is missing"
+    assert png_size(image) == (1200, 630) and image.stat().st_size < 300 * 1024
+    assert (metas.get("og:image:width"), metas.get("og:image:height")) == ("1200", "630")
+    assert metas.get("twitter:card") == "summary_large_image" and metas.get("og:image:alt") == metas["og:title"]
+    assert metas["og:title"] and metas["og:description"] and metas["og:url"] == page_url(lang)
+
+
+def visible_questions(lang: str) -> list[tuple[str, str]]:
+    html_text = page_path(lang).read_text(encoding="utf-8")
+    assert 'id="faq"' in html_text, "the page has no questions and answers"
+    section = html_text.split('id="faq"', 1)[1].split("</section>", 1)[0]
+    pairs = re.findall(r"<div><h3>(.*?)</h3><p>(.*?)</p></div>", section, re.S)
+    return [(Page("<main>" + q).text.strip(), Page("<main>" + a).text.strip()) for q, a in pairs]
+
+
+def structured(lang: str) -> dict:
+    blocks = page(lang).data_blocks
+    assert len(blocks) == 1, "the page has no structured data"
+    assert "</" not in blocks[0]
+    return {node["@type"]: node for node in json.loads(blocks[0])["@graph"]}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_structured_data_says_what_the_visible_page_says(lang):
+    p, data = page(lang), structured(lang)
+    metas = {m.get("name") or m.get("property"): m.get("content") or "" for m in p.all("meta")}
+    assert data["WebPage"]["name"] == p.title and data["WebPage"]["description"] == metas["description"]
+    assert data["WebPage"]["url"] == page_url(lang) and data["WebPage"]["inLanguage"] == lang
+    assert data["WebPage"]["primaryImageOfPage"] == metas["og:image"]
+    assert data["WebSite"]["url"] == SITE_URL and data["WebSite"]["name"] == "Dodam"
+    project = data["SoftwareSourceCode"]
+    assert project["name"] == "Dodam" and project["codeRepository"] == REPO_URL
+    words = lambda text: " ".join(text.split())
+    assert words(project["description"]) in words(p.text), "the project's description is not on the page"
+    assert words(project["creativeWorkStatus"]) in words(p.text)
+    asked = [(q["name"], q["acceptedAnswer"]["text"]) for q in data["FAQPage"]["mainEntity"]]
+    assert [(words(q), words(a)) for q, a in asked] == [(words(q), words(a)) for q, a in visible_questions(lang)]
+    assert not re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", json.dumps(data).replace("@type", "").replace("@id", "").replace("@context", "").replace("@graph", ""))
+
+
+# --- answer engines -----------------------------------------------------------------------------
+
+SENTENCE_END = r"[.!?](?=\s|$)|[。？]"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_questions_have_short_answers_that_can_be_quoted_alone(lang):
+    pairs = visible_questions(lang)
+    assert len(pairs) == 6
+    for question, answer in pairs:
+        assert "Dodam" in question and "Dodam" in answer, question
+        sentences = len(re.findall(SENTENCE_END, re.sub(r"\b(?:AGENTS\.md|\d\.\d)", "x", answer)))
+        assert 2 <= sentences <= 3, (question, sentences)
+    strings = builder().load_strings(lang)
+    ready = strings["a5"].lower()
+    assert "{d:" in strings["a5"] and "{m:" in strings["a5"]
+    if lang == "en":
+        assert "plan’s capacity" in ready and "today’s conditions" in ready and "not a promise" in ready
+        assert ready.count("plan’s capacity") == 2, "a date in the answer does not name the capacity it assumes"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_first_sentence_of_the_page_says_what_dodam_is(lang):
+    strings = builder().load_strings(lang)
+    first = re.split(SENTENCE_END, strings["lede"], maxsplit=1)[0]
+    assert first.startswith("Dodam") and len(first) > 30, "the first sentence does not stand alone"
+    body = page_path(lang).read_text(encoding="utf-8").split("<main>", 1)[1]
+    paragraph = re.search(r"<p[^>]*>(?!<)([^<]+)", body.split("</h1>", 1)[1]).group(1)
+    assert paragraph.startswith(first), "the first sentence after the headline is not the one that says what Dodam is"
+
+
+# --- language models and AI agents ------------------------------------------------------------
+
+
+def test_the_guide_for_agents_says_what_the_page_and_the_status_say(tmp_path):
+    build, status = builder(), sample()
+    out = published(tmp_path)
+    guide = (out / "llms.txt").read_text(encoding="utf-8")
+    en = build.load_strings("en")
+    assert guide.startswith("# Dodam\n\n> ")
+    assert Page("<main>" + build.expand("en", en["description"])).text.strip() in guide
+    for day in (status["charter"]["date"], status["step"]["gate_plan"], status["step"]["gate_today"]):
+        assert build.spell("en", "d", day) in guide, day
+    for fact in (f"version {status['charter']['version']}", f"{status['tasks']['ready']} of the first {status['tasks']['first']}",
+                 f"outside contributors: {status['open_issues']}.", f"{status['step']['gate_today_chance']}%", en["t1_h"],
+                 "January 5, 2027 09:07 UTC", f"step {status['step']['index']} of {status['step']['of']}"):
+        assert fact in guide, fact
+    for change in status["changes"]:
+        assert change["title"] in guide and change["url"] in guide
+    for i in range(1, 8):   # the rules are stated in the guide itself, in the page's own words
+        assert en[f"rule{i}_h"] in guide and en[f"rule{i}_p"] in guide, i
+    for question, answer in visible_questions("en"):
+        assert question in guide and answer in guide
+    for address in (f"{REPO_URL}/blob/main/docs/charter.ko.md", f"{REPO_URL}/blob/main/docs/charter.en.md", f"{REPO_URL}/blob/main/AGENTS.md",
+                    f"{REPO_URL}/issues?q=is%3Aopen+label%3Aai-welcome", f"{SITE_URL}status.json"):
+        assert address in guide, address
+    later = dict(status, tasks={"ready": 13, "first": 30}, open_issues=7)
+    assert "13 of the first 30" in build.guide(later) and "outside contributors: 7." in build.guide(later)
+
+
+def test_the_guide_describes_every_field_of_the_status_file():
+    status, guide = sample(), need("guide")(sample())
+    assert set(status) == STATUS_FIELDS
+    for name in ("version", "built", "charter.version", "charter.date", "step.index", "step.of", "step.gate_plan", "step.gate_today",
+                 "step.gate_today_chance", "tasks.ready", "tasks.first", "open_issues", "changes", "digest"):
+        assert re.search(rf"(?m)^- (?:[\w., ]*, )?{re.escape(name)}[,:]", guide), f"the guide does not describe {name}"
+    assert f"version {status['version']} of the file" in guide
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_pages_point_to_the_guide_for_agents(lang):
+    links = [a for a in page(lang).all("link") if a.get("rel") == "alternate" and a.get("type") == "text/plain"]
+    assert len(links) == 1 and links[0].get("title")
+    target = (page_path(lang).parent / links[0]["href"]).resolve()
+    assert target == (SITE / "llms.txt").resolve()
+
+
+def test_what_is_published_holds_no_personal_details_and_no_internal_codes(tmp_path):
+    out = published(tmp_path, made_status(changes=need("changes_from_log")(LOG)))
+    for path in sorted(out.rglob("*")):
+        if path.suffix not in {".html", ".txt", ".json", ".xml"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        text = re.sub(r'"@(?:type|id|context|graph)"', "", text)
+        assert re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text) == [], path.name
+        assert re.findall(r"\bDOD-\d+", text) == [] and "linear.app" not in text, path.name
+        assert not re.search(r"/(?:Users|home)/[\w.-]+/", text), path.name
+    status = json.loads((out / "status.json").read_text(encoding="utf-8"))
+    assert all(set(change) == {"date", "title", "url"} for change in status["changes"]), "the status file names an author"

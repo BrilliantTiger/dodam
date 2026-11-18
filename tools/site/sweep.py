@@ -173,6 +173,23 @@ STATE = """
 """
 
 
+# The section about now: what the script sets after reading the status file must be what the build
+# wrote into the page, and a title from outside must stay text.
+LIVE = """async () => {
+  const text = (node) => node.textContent.replace(/\\s+/g, ' ').trim();
+  const box = document.querySelector('#live');
+  if (!box) return ['the page has no section about now'];
+  const served = new DOMParser().parseFromString(await (await fetch(location.href)).text(), 'text/html').querySelector('#live');
+  const found = [];
+  if (box.hidden) found.push('the section about now is hidden although a status is published');
+  if (text(box) !== text(served)) found.push('the script shows other values than the build wrote: ' + text(box).slice(0, 200));
+  if (box.querySelectorAll('.changes li').length !== served.querySelectorAll('.changes li').length) found.push('the script lists other changes than the build');
+  if (box.querySelector('.changes img, .changes script, .changes li li')) found.push('a title was put into the page as markup');
+  if (window.__marked) found.push('markup in a title ran as script');
+  return found;
+}"""
+
+
 def serve() -> str:
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def log_message(self, *args):
@@ -212,7 +229,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--shots")
+    parser.add_argument("--site", help="the built site to check (default: the committed site/)")
     args = parser.parse_args()
+    global SITE
+    SITE = Path(args.site).resolve() if args.site else SITE
     base, faults, notes = serve(), [], []
 
     def report(where: str, found: list[str]) -> None:
@@ -222,8 +242,18 @@ def main() -> int:
         browser = launch(p)
         for lang, path in LANGS.items():
             still = browser.new_context(reduced_motion="reduce", viewport={"width": 390, "height": 844})
+            asked: list[str] = []
+            still.on("request", lambda request: asked.append(request.url))
             page = still.new_page()
             page.goto(base + path)
+            if (SITE / "status.json").is_file():
+                page.wait_for_timeout(600)  # the script reads the status file once the page is there
+                report(f"{lang} section about now", page.evaluate(LIVE))
+                if not any(url.endswith("/status.json") for url in asked):
+                    report(f"{lang} section about now", ["the script did not read the status file"])
+            elsewhere = sorted({url for url in asked if not url.startswith(base)})
+            if elsewhere:
+                report(f"{lang}", [f"the page asked another host for {url}" for url in elsewhere])
 
             for width in range(320, 1101, 32 if args.quick else 8):
                 for height in (round(width * 21 / 9), round(width / 1.12)):

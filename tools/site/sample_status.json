@@ -1,0 +1,14 @@
+{
+ "version": 1,
+ "built": "2027-01-05T09:07:00Z",
+ "charter": {"version": "0.10", "date": "2026-11-18"},
+ "step": {"index": 1, "of": 5, "gate_plan": "2027-02-24", "gate_today": "2027-06-23", "gate_today_chance": 4},
+ "tasks": {"ready": 12, "first": 30},
+ "open_issues": 3,
+ "changes": [
+  {"date": "2027-01-04", "title": "Bench: <img src=x onerror=alert(1)> & \"quoted\" </a><script>alert(2)</script>", "url": "https://github.com/BrilliantTiger/dodam/pull/41"},
+  {"date": "2027-01-03", "title": "A title long enough to wrap on a narrow phone: benchmark task for a rate-limited upload service with its hidden security tests", "url": "https://github.com/BrilliantTiger/dodam/pull/40"},
+  {"date": "2026-12-30", "title": "Charter: the capacity measured from the session records", "url": "https://github.com/BrilliantTiger/dodam/pull/39"}
+ ],
+ "digest": "sample"
+}
