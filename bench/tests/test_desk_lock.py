@@ -1667,6 +1667,15 @@ def test_it_refuses_a_token_that_other_accounts_can_read(start):
     assert MADE_UP_TOKEN not in Path(option(planned["argv"], "--mcp-config")).read_text()
 
 
+def closed_link(link: Path, target: Path) -> None:
+    """A link that is itself closed to other accounts, so that only the look at "is it a link" can refuse it."""
+    old = os.umask(0o077)
+    try:
+        link.symlink_to(target)
+    finally:
+        os.umask(old)
+
+
 def git(copy: Path, *arguments: str) -> None:
     subprocess.run(["git", "-C", str(copy), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *arguments],
                    check=True, capture_output=True)  # fmt: skip
@@ -1741,7 +1750,7 @@ def test_a_token_reached_through_a_link_is_not_used(start, tmp_path):
     elsewhere = tmp_path / "elsewhere-token"
     elsewhere.write_text(MADE_UP_TOKEN)
     elsewhere.chmod(0o600)
-    (start.state / "github-token").symlink_to(elsewhere)
+    closed_link(start.state / "github-token", elsewhere)
     start.refuses()
     with pytest.raises(module("tools").Refused):
         module("tools").read_token(start.state)
@@ -1809,7 +1818,7 @@ def test_the_file_with_the_desks_sign_in_is_closed_to_others_and_not_a_link(star
     elsewhere = tmp_path / "elsewhere-sign-in"
     elsewhere.write_text(MADE_UP_SIGN_IN)
     elsewhere.chmod(0o600)
-    token.symlink_to(elsewhere)
+    closed_link(token, elsewhere)
     assert "claude-token" in start.refuses()
     token.unlink()
     token.write_text("two words\n")
