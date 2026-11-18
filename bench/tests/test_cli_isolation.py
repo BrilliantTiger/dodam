@@ -73,6 +73,9 @@ def judge_attack(tmp_path: Path, program: str, tests: dict[str, str], room: dict
 # it can give back, and reads what is then still charged to it, memory and swap together. Whatever
 # keeps a page shows in that figure, known to the judge or not. Two such readings, one when a case
 # begins and one while the program holds what it holds, differ by what the case really holds.
+# Before it reads, the helper stops the judged container, has the machine write the pages that
+# wait to be written to disk (such a page cannot be given back before it is written), has the
+# kernel let go, and reads once the figure stands still; then it lets the container run on.
 READER = r"""
 import json, os, time
 asked, held = "/reading", "/group"
@@ -99,8 +102,36 @@ def give_back(first):
         pass                          # the kernel says so when it could not give back all that was asked
 
 
+def waiting_to_be_written():
+    with open(f"{held}/memory.stat") as f:
+        stat = dict(line.split()[:2] for line in f.read().splitlines())
+    return int(stat.get("file_dirty", 0)) + int(stat.get("file_writeback", 0))
+
+
 def reading():
+    # The judged container stands still while it is read. A program that reads a file again and
+    # again would otherwise bring back, during the reading, the pages the kernel has just given
+    # back, and they would read as held although nothing keeps them.
+    with open(f"{held}/cgroup.freeze", "w") as f:
+        f.write("1")
+    try:
+        for _ in range(2000):
+            with open(f"{held}/cgroup.events") as f:
+                if "frozen 1" in f.read():
+                    break
+            time.sleep(0.001)
+        return standing_still()
+    finally:
+        with open(f"{held}/cgroup.freeze", "w") as f:
+            f.write("0")
+
+
+def standing_still():
     started, first, passes, dropped = time.monotonic(), charged(), 0, True
+    # a page of a file that is still to be written to disk cannot be given back before it is
+    # written: the machine is told to write what waits, and the figure is read after that
+    while waiting_to_be_written() > 65536 and time.monotonic() - started < 20:
+        os.sync()
     last = first
     while passes < 12:
         give_back(first)
@@ -1640,6 +1671,19 @@ elif sys.argv[1] == "only reads":
     with open("/app/large.bin", "rb") as f:
         while f.read(MB):
             pass
+elif sys.argv[1] == "reads again and again":
+    import mmap, threading
+    large = os.open("/app/large.bin", os.O_RDONLY)
+    view = memoryview(mmap.mmap(large, 0, mmap.MAP_SHARED, mmap.PROT_READ))
+
+    def again():
+        while True:
+            for at in range(0, len(view), 65536):       # small pieces: the copy is no memory to speak of
+                bytes(view[at:at + 65536])
+
+    for _ in range(2):
+        threading.Thread(target=again, daemon=True).start()
+    time.sleep(0.5)
 held_until_read()
 print("done")
 """
@@ -1657,9 +1701,13 @@ def test_only_reads():
     assert attempt("only reads", ["only reads"]).out == "done\\n"
 
 
+def test_reads_again_and_again():
+    assert attempt("reads again", ["reads again and again"]).out == "done\\n"
+
+
 def test_the_judged_container_cannot_ask_the_kernel_itself():
     refused = {}
-    for path in ("/sys/fs/cgroup/memory.reclaim", "/proc/sys/vm/drop_caches"):
+    for path in ("/sys/fs/cgroup/memory.reclaim", "/sys/fs/cgroup/cgroup.freeze", "/proc/sys/vm/drop_caches"):
         try:
             with open(path, "w") as f:
                 f.write("1")
@@ -1673,30 +1721,45 @@ def test_the_judged_container_cannot_ask_the_kernel_itself():
 """
 
 
-def test_the_reading_from_outside_shows_what_a_program_holds_and_nothing_the_kernel_can_give_back(tmp_path):
+REPEATS: dict[str, list[float]] = {"holds_100": [], "only_reads_200": [], "reads_again": [], "nothing": []}
+
+
+@pytest.mark.parametrize("turn", range(1, 11))
+def test_the_reading_from_outside_shows_what_a_program_holds_and_nothing_the_kernel_can_give_back(tmp_path, turn):
     """The figure the bound tests take for what a container really holds. A program that holds
     100 MB of ordinary memory reads as 100 MB more than one that holds nothing. A program that has
     read a file of 200 MB from disk and holds nothing reads as that one does, although the kernel
     keeps the file in memory until it is asked: what can be given back is given back before the
-    figure is read. The judged container itself cannot ask the kernel for this: only the helper
-    outside it can."""
+    figure is read. A program that maps that file and reads it again and again, in two threads,
+    while the figure is taken reads as holding nothing either: the container stands still while
+    it is read. The judged container itself cannot ask the kernel for this: only the helper
+    outside it can. Ten times over, each in a fresh container; every figure is printed, and after
+    the tenth how far the ten lie apart, which is what the tolerance of the bound tests rests on."""
     result = judge_attack(tmp_path, PLAIN + HELD + READS, {"functional/test_read.py": READ_TESTS},
                           {"reading": True, "before": "dd if=/dev/zero of=/app/large.bin bs=1M count=200 status=none"},
                           CASE_MEMORY_MB="256", CASE_TIMEOUT_SEC="60")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     assert outcomes(result) == {"test_nothing": "passed", "test_holds": "passed", "test_only_reads": "passed",
+                                "test_reads_again_and_again": "passed",
                                 "test_the_judged_container_cannot_ask_the_kernel_itself": "passed"}, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
     # what the helper may write, the judged container may not, not even as root
     assert all(said.startswith("refused") for said in seen["asked by the judge's own user"].values()), seen["asked by the judge's own user"]
     nothing = really_mb(seen["nothing"])
     holds, reads = really_mb(seen["holds"]) - nothing, really_mb(seen["only reads"]) - nothing
+    again = really_mb(seen["reads again"]) - nothing
     kept = (seen["only reads"]["held"]["charged_before"] - seen["only reads"]["start"]["charged"]) / 2**20
-    note_figures("the reading itself", nothing=nothing, holds_100=holds, only_reads_200=reads, kept_before_asking=kept,
+    note_figures(f"the reading itself, turn {turn}", nothing=nothing, holds_100=holds, only_reads_200=reads, reads_again=again, kept_before_asking=kept,
                  seconds_while_held=seen["holds"]["held"]["seconds"], seconds_at_start=seen["holds"]["start"]["seconds"])
     assert abs(holds - 100) <= TOLERANCE_MB, f"100 MB of ordinary memory read as {holds:.1f} MB: {seen['holds']}"
     assert kept >= 150, f"the file was to be in memory before the kernel was asked; {kept:.1f} MB were: {seen['only reads']}"
     assert abs(reads) <= TOLERANCE_MB, f"a program that only read a file read as holding {reads:.1f} MB: {seen['only reads']}"
+    assert abs(again) <= TOLERANCE_MB, f"a program that reads a file again and again read as holding {again:.1f} MB: {seen['reads again']}"
+    for name, figure in (("holds_100", holds), ("only_reads_200", reads), ("reads_again", again), ("nothing", nothing)):
+        REPEATS[name].append(figure)
+    if turn == 10:
+        note_figures("the reading itself, how far its repeats lie apart",
+                     **{name: max(figures) - min(figures) for name, figures in REPEATS.items()})
 
 
 # The kernel's records of names and files are left out of a case's memory only up to a bound: a
@@ -1901,7 +1964,7 @@ def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:
 
 # Memory that is locked cannot be given back by the kernel, and neither can a page that a pipe, a
 # socket or a registration holds for a program. Nothing of the agent's can do either: no memory can
-# be locked, and the calls that hand pages over without copying them do not exist for it. The
+# be locked, and the calls that hand pages over without copying them answer "invalid argument" for it. The
 # program below tries every one of them, and so does the build.
 TRIES = r"""
 import mmap, platform, socket
@@ -2184,7 +2247,7 @@ HANDED = ("a file spliced into pipes", "a mapped file given to pipes", "a file s
 def test_pages_of_a_file_handed_to_pipes_or_sockets_are_within_the_bound_or_fail_the_case(tmp_path, way, limit_mb):
     """A program hands up to 120 MB of a file's pages to pipes or sockets without copying them
     and holds ordinary memory up to near its limit. The kernel cannot give such pages back, and
-    none of its figures says how many there are. The calls do not exist for a judged program, so
+    none of its figures says how many there are. For a judged program the calls answer "invalid argument", so
     it holds none, and what the container really holds stays within the bound."""
     tests = HAND_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb)))
     result = judge_attack(tmp_path, PLAIN + HELD + HANDS, {"functional/test_hands.py": tests},

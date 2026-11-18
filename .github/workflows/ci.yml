@@ -138,7 +138,7 @@ jobs:
         run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
       - name: Run the tests that judge inside the image
         working-directory: bench
-        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py
+        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py
 
   # Every protection of the judging is broken in turn, in a copy; a test must then fail. A
   # protection that can be removed without a test noticing fails this job.
