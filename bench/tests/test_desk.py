@@ -2637,33 +2637,18 @@ def test_desk_files_and_tests_carry_no_private_task_section_labels():
             assert not re.search(r"\b[ABCD]\.\d{1,2}\b", text), f"{path.name} carries private section labels"
 
 
-def test_brief_states_loop_watcher_switches_files_measured_round_and_every_exit_code():
+def test_brief_states_that_the_relay_waits_and_the_session_handles_one_item():
+    # The loop, the watcher's switches and its exit codes are no longer sentences for a session to obey: the relay
+    # (tools/desk/relay.py) runs the watcher, and the session has no shell. bench/tests/test_desk_lock.py shows it.
     text = read_brief()
     low = text.lower()
-    assert "tools/desk/watch.py --wait" in low
-    assert "background" in low and "end the turn" in low
-    assert "one watcher at a time" in low
-    assert "keep nothing in mind between events" in low or "keeps nothing in mind between events" in low
+    assert "a relay" in low and "runs the watcher" in low and "one fresh session for one item" in low
+    assert "you start no watcher and have no shell" in low
+    assert "handle no other item" in low
+    assert "keep nothing in mind between items" in low
     assert "the desk creates no work items; the coordinator does" in low
-
-    # Watcher switches explained, and desk passes none except --wait and --state.
-    for switch in ("--wait", "--state", "--include-own", "--settle", "--max-events", "--max-wait", "--repo", "--help"):
-        assert switch in text, f"brief.md omits switch {switch}"
-    assert "none" in low and "--state" in text and "given" in low
-
-    # Every file the watcher writes (state file, lock file, trial file at start) + .dodam identity without opening.
-    assert "lock file" in low and "trial file" in low
-    assert "identity of the `.dodam` folder without opening anything in it" in low
-
-    # Measured round stated as it is (seven requests, about 19 seconds).
-    assert "seven" in low and "19 seconds" in low
-
-    # Every exit code listed, code 7 handles printed events without restarting, code 130 checks before answering.
-    for exit_code in ("`0`", "`1`", "`2`", "`3`", "`4`", "`5`", "`6`", "`7`", "`8`", "`130`"):
-        assert exit_code in text, f"brief.md omits exit code {exit_code}"
-    assert "printed" in low and "real" in low and "do not start the watcher again" in low
-    assert "until the coordinator says so" in low
-    assert "possibly seen before" in low and "checks on github before answering" in low
+    for gone in ("watch.py", "--wait", "--state", "exit code", "background"):
+        assert gone not in low, f"brief.md still tells the session about {gone}"
 
 
 def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rule():
@@ -2675,14 +2660,9 @@ def test_brief_states_what_desk_sees_and_does_not_see_and_new_commits_author_rul
     assert "author" in low and "pushed" in low, (
         "brief.md must state that for pull_request_commits the login is the PR author, not the pusher"
     )
-    # Comments of a review sent late reach the desk through the review's event when the desk reads the item.
-    assert "comments of a review reach the desk through the review's" in low
-    assert "reads the review and its inline comments when it reads the item" in low
-    # Multi-page review restart relies on GitHub marking a pull request as updated when a review is sent,
-    # and the review window bound states that a review first appearing late among forgotten ones is not reported.
-    assert "marking a pull request as updated when a review is sent" in low
-    assert "a review that first appears late among the forgotten ones is not reported" in low
-    # What the desk does not see, stated in place: edits after answering, discussions, comments on commits.
+    # What the reading tool gives, and what it never gives.
+    assert "no changed lines and no file names" in low
+    # What the desk does not see, stated in place: edits after handling, discussions, comments on commits.
     assert "edits" in low and "discussions" in low and "commits" in low
 
 
@@ -2693,7 +2673,7 @@ def test_brief_treats_outside_input_logins_urls_and_paths_as_data_and_settles_ge
     assert "agents in general" in low and "never builds, runs, or merges" in low
     assert "a live session is a direct session-to-session conversation over ai coworker" in low
     assert "not open yet" in low
-    # Login (up to 39 chars, can spell a short phrase), url, and file paths are outside text too.
+    # Login (up to 39 chars, can spell a short phrase) and everything the reading tool marks are outside text too.
     assert "39" in text and "phrase" in low and "outside text too" in low
     for required in (
         "no command",
@@ -2780,7 +2760,7 @@ def test_pr_files_module_is_stdlib_only_without_network_and_pipes_github_json(mo
             assert top in sys.stdlib_module_names, f"non-stdlib import in pr_files.py: {top}"
             assert top not in forbidden_imports, f"forbidden network/subprocess import in pr_files.py: {top}"
 
-    # Multi-page concatenated stream (as emitted by the piped gh api request in brief.md):
+    # Multi-page concatenated stream (as the paginated request for a pull request's files gives it):
     pages = [
         [{"status": "modified", "filename": "docs/guide.md", "patch": POISON_DIFF}],
         [{"status": "added", "filename": "bench/tests/test_guide.py", "patch": POISON_DIFF}],
@@ -3601,33 +3581,23 @@ def test_pr_files_checks_tip_of_main_tasks_and_tests_and_behind_main_pull_reques
     }
 
 
-def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlisted_arrivals():
+def test_brief_states_what_the_desk_does_with_the_verdict_on_files_no_claims_and_unlisted_arrivals():
     text = read_brief()
     low = text.lower()
     # Question
     assert "public documents" in low and "language" in low and "quoting" in low and "do not answer" in low
     # Proposal / problem report
-    assert "existing issue" in low and "label" in low and "what happens next" in low
-    # Outside PR: passes changed_files, draft, base_ref, base-commit task_folders, tip-of-main task_folders
-    # and test entries, and paginated files JSON into pr_files.py; states refusal / no-object handling.
-    assert "pulls/<number>" in text and "changed_files" in text and "draft" in text and "base_ref: .base.ref" in text
-    assert "contents/bench/tasks?ref=$base" in text and "task_folders" in text
-    assert "contents/bench/tasks?ref=main" in text and "main_task_folders" in text
-    assert "contents/bench/tests?ref=main" in text and "main_test_entries" in text
-    assert "when `base_ref` is not `main`" in low
-    assert "has `1,000` entries or more" in low
-    assert "gh api --paginate repos/BrilliantTiger/dodam/pulls/<number>/files; } | python3 tools/desk/pr_files.py" in text
-    assert "never work out protected folders, new tests, or readiness from file names yourself" in low
-    assert "prints no object or prints a refusal" in low
-    assert "does not work it out by hand" in low and "tells the coordinator once (kind `trouble`)" in low
-    assert "3,000" in text and "unicode normalisation (`nfc`)" in low and "without regard to case" in low
+    assert "label" in low and "what happens next" in low
+    # Outside PR: the reading tool classifies the files itself (tools/desk/tools.py calls tools/desk/pr_files.py) and
+    # the session gets the verdict only. The procedure and the rule's details are no longer in the instructions.
+    assert "`read_item` classifies the changed files itself" in text and "pull_request_files" in text
+    assert "never work out protected folders, new tests, or readiness yourself" in low
+    assert "when the verdict is only `refused`" in low
+    assert "writes no claim about protected paths in public" in low and "tells the coordinator once (kind `trouble`)" in low
     assert "protected_folders" in text and "adds_new_test" in text and "ready_for_review" in text
-    assert "previous_filename" in text and "test_<something>.py" in text
-    for path_prefix in ("bench/dodambench/", "bench/images/", "bench/tests/", "bench/tasks/", ".github/"):
-        assert path_prefix in text, f"brief.md must name {path_prefix} in the fixed folder list"
-    assert "only the folder from the fixed list" in low
-    assert low.count("never the file's own path") >= 3
-    assert "mention or markup" in low
+    for gone in ("gh api", "pr_files.py", "--paginate", "previous_filename", "changed_files"):
+        assert gone not in text, f"brief.md still carries the procedure ({gone})"
+    assert "names the folders in `protected_folders` and nothing else of the change" in low
     assert "never** called ready for review" in low or "never called ready for review" in low
     assert "does not judge" in low
     assert (
@@ -3641,7 +3611,7 @@ def test_brief_states_what_the_desk_does_with_pr_files_pipe_no_claims_and_unlist
     assert "spam" in low and "abuse" in low and "orders" in low and "no answer to the content" in low
     # Claims taken out: desk does not mark, read, or judge claims.
     assert "does not mark, read, or judge" in low and "mark it as taken" not in low
-    # Unlisted arrivals: write nothing in public and send a message to the coordinator at once (never create work items).
+    # Unlisted arrivals: write nothing in public and pass it on to the coordinator (never create work items).
     for unlisted in ("thanks", "progress note", "reply inside a review", "reopened", "write nothing in public"):
         assert unlisted in low, f"brief.md is missing default rule item: {unlisted}"
     assert "as a work item" not in low and "creates a work item" not in low
@@ -3672,30 +3642,29 @@ def test_brief_states_everything_the_desk_never_does():
 
 
 def test_brief_states_desk_identification_and_daily_limit_rules_for_labels_and_public_vulnerabilities():
+    # The first line of an answer and the limits are kept by the answering tool; the instructions say what is left
+    # for the session to do when a limit refuses an answer.
     low = read_brief().lower()
-    assert "project's ai desk" in low
+    assert "project's ai desk" in low and "do not write that line" in low
     assert "3 answers on one item in an hour" in low
-    assert "30 answers" in low and "in a day" in low
-    assert "says so once on that item" in low
-    assert "no comment" in low and "a label is not an answer and may still be added" in low
-    assert "no answer was written because of the daily limit" in low
+    assert "30 answers" in low and "in a day" in low and "5 answers a day for one account" in low
+    assert "write nothing more in public" in low and "a label is not an answer and may still be added" in low
+    assert "no answer was written because of the limit" in low
     assert "it is public and that no request to go private was posted" in low
     assert "first guesses" in low
 
 
-def test_brief_states_passing_on_always_means_an_immediate_message_to_the_coordinator_and_no_work_items():
+def test_brief_states_passing_on_always_means_the_fixed_report_to_the_coordinator_and_no_work_items():
     text = read_brief()
     low = text.lower()
-    assert "always** means sending a message to the coordinator at once" in low or (
-        "always means sending a message to the coordinator at once" in low
-    )
+    assert "always** means calling `tell_coordinator`" in low
     assert "the desk creates no work items; the coordinator does" in low
-    assert "title in plain words" in low
-    assert "address of the item on github" in low
-    assert "marked as a summary of outside text" in low
-    assert "given to the desk when the desk session is started" in low
+    assert "in the desk's own plain words" in low
+    assert "marks what is quoted from outside text" in low
+    assert "the tool sets the receiver and the form" in low
     assert '"the coordinator"' in text and "name no session" in low
     assert "term_" not in text and "ctx_" not in text
+    assert "tell first, answer second" in low
 
 
 def outside_input_rules(markdown_text: str, stop_at_blank: bool = False) -> list[str]:
