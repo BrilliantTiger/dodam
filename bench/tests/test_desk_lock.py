@@ -3197,6 +3197,15 @@ def test_the_recorded_check_of_the_real_session_held_on_the_pinned_version():
     # After every run, everything the session was shown was searched for every known value, and none was found.
     shown = [row for row in record["rows"] if row["thing"].startswith("be shown a value that names this computer or its owner")]
     assert {row["run"] for row in shown} == set(record["runs"]) and all(row["held"] for row in shown)
+    # The run that asks a session what it knows was made on the owner's sign-in. Its row says what was taken out of
+    # the stream before the search and what was not searched for, and why; so does the document.
+    (knows,) = [row for row in shown if row["run"] == "what the session knows"]
+    assert "owner's sign-in" in knows["thing"] and "taken out" in knows["shown_by"] and "not searched for" in knows["shown_by"]
+    assert all("taken out" not in row["shown_by"] for row in shown if row["run"] != "what the session knows")
+    told = (DESK / "LOCK.md").read_text(encoding="utf-8")
+    assert "taken out as it is written" in told and "is not searched for" in told and "On a sign-in of the desk's own nothing is taken out" in told
+    # Once that search found the account name and the stream had not been kept. Eight repeats did not find it again.
+    assert "was not seen" in record["repeated"]["what"]
     # What Claude Code shows of a check that refused and of a tool that failed is recorded word for word, and holds no path of a home folder.
     words = record["shown_word_for_word"]
     assert words["a tool call that the check refused"] and words["a desk tool that refused"]
@@ -4313,3 +4322,59 @@ def test_githubs_real_answers_have_the_shape_the_reading_tool_counts_on():
             if "/files?" in path:
                 # A file that was not renamed has no earlier path at all, and the status is one small word.
                 assert all({"filename", "status"} <= set(entry) and entry["status"] in ("added", "modified", "removed", "renamed") for entry in answer["body"])
+
+
+# =================================================================================================
+# The search of everything a session was shown, on the owner's sign-in and on a sign-in of the desk's own
+# =================================================================================================
+
+SHOWN_BY_A_SIGN_IN = "what a sign-in shows about the account"
+SEARCHED = [("the account name", "somebody"), (SHOWN_BY_A_SIGN_IN, "somebody@example.invalid"), ("the computer's name", "Somebodys-MacBook")]
+SPELLED_ITS_OWN_WAY = 'The address is somebody@example.invalid. Its first part is "somebody", at example dot invalid.'
+
+
+def test_on_the_owners_sign_in_the_run_that_asks_what_a_session_knows_leaves_out_only_what_that_sign_in_shows():
+    check = module("check_lock")
+    needs(check, "search_of_the_stream")
+    got = check.search_of_the_stream(SPELLED_ITS_OWN_WAY, SEARCHED, asks_what_it_knows=True, own_sign_in=False)
+    # The address is in every session on the owner's sign-in. It is taken out as written, and the account name, which
+    # is a part of it, is not searched for. Both are said.
+    assert got == {"found": [], "taken_out": [SHOWN_BY_A_SIGN_IN], "not_searched": ["the account name"]}
+    # Everything else is searched for as in every run.
+    got = check.search_of_the_stream(SPELLED_ITS_OWN_WAY + " The computer is S0mebodys MacBook.", SEARCHED, asks_what_it_knows=True, own_sign_in=False)
+    assert got["found"] == ["the computer's name"]
+    row = check.shown_row("what the session knows", got, own_sign_in=False)
+    assert row["held"] is False and "owner's sign-in" in row["thing"] and "taken out" in row["shown_by"] and "not searched for" in row["shown_by"]
+    # In every other run nothing is taken out and nothing is left unsearched, on either sign-in.
+    for own in (False, True):
+        got = check.search_of_the_stream(SPELLED_ITS_OWN_WAY, SEARCHED, asks_what_it_knows=False, own_sign_in=own)
+        assert set(got["found"]) == {"the account name", SHOWN_BY_A_SIGN_IN} and got["taken_out"] == [] == got["not_searched"]
+
+
+def test_on_a_sign_in_of_the_desks_own_that_run_takes_nothing_out_and_can_fail():
+    check = module("check_lock")
+    needs(check, "search_of_the_stream")
+    got = check.search_of_the_stream(SPELLED_ITS_OWN_WAY, SEARCHED, asks_what_it_knows=True, own_sign_in=True)
+    assert set(got["found"]) == {"the account name", SHOWN_BY_A_SIGN_IN} and got["taken_out"] == [] == got["not_searched"]
+    row = check.shown_row("what the session knows", got, own_sign_in=True)
+    assert row["held"] is False and "taken out" not in row["shown_by"] and "owner's sign-in" not in row["thing"]
+    # The account name alone, spelled the session's own way, fails it too.
+    assert check.search_of_the_stream("It is s o m e b o d y.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)["found"] == ["the account name"]
+    # And a session that was shown none of it passes.
+    got = check.search_of_the_stream("Account email: not in my context.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)
+    assert got["found"] == [] and check.shown_row("what the session knows", got, own_sign_in=True)["held"] is True
+
+
+def test_the_check_keeps_the_stream_of_every_run_outside_the_repository(tmp_path):
+    check = module("check_lock")
+    needs(check, "keep_streams")
+    folder = check.keep_streams(tmp_path / "kept", {"what the session knows": "one\n", "asked plainly": "two\n"})
+    assert folder.parent == tmp_path / "kept" and stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert sorted(path.name for path in folder.iterdir()) == ["asked-plainly.jsonl", "what-the-session-knows.jsonl"]
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in folder.iterdir())
+    assert (folder / "asked-plainly.jsonl").read_text() == "two\n"
+    # A second run of the check keeps its streams beside the first, not over them.
+    assert check.keep_streams(tmp_path / "kept", {"asked plainly": "three\n"}) != folder
+    # Without a folder given, they are kept in a folder of the check's own: not in the repository, not in the home folder.
+    default = check.streams_folder()
+    assert not default.is_relative_to(ROOT) and not default.is_relative_to(Path.home())
