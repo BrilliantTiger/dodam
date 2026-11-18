@@ -43,6 +43,7 @@ def api():
     assert "as_of" in real, "the source does not say on which day its facts were last checked"
     assert "released" in real["coworker"], "the source does not say whether the version of AI coworker it needs is released"
     assert "always" in build.DESK_TEXT, "the section is not shown in every state"
+    assert "checked_against" in real["coworker"], "the source does not say against which version of AI coworker the page's sentences were checked"
     for function in ("render", "guide", "publish", "status"):
         assert "desk" in inspect.signature(getattr(build, function)).parameters, f"{function} cannot be given the facts of the desk"
     return build
@@ -189,6 +190,10 @@ def open_without(what: str):
             desk["coworker"]["released"] = False
         elif what == "no word on whether the version is released":
             del desk["coworker"]["released"]
+        elif what == "sentences about AI coworker checked against no version":
+            desk["coworker"]["checked_against"] = ""
+        elif what == "sentences about AI coworker checked against another version":
+            desk["coworker"]["checked_against"] = "0.12.1"
         elif what == "no day on which the facts were checked":
             desk["as_of"] = ""
         elif what == "opened after the day the facts were checked":
@@ -201,6 +206,8 @@ def open_without(what: str):
                                   "a closed way with an opening date", "a code that works twice", "a limit of zero", "a limit left out",
                                   "no lowest version", "live while the version it needs is not released",
                                   "no word on whether the version is released", "no day on which the facts were checked",
+                                  "sentences about AI coworker checked against no version",
+                                  "sentences about AI coworker checked against another version",
                                   "opened after the day the facts were checked"])
 def test_a_way_switched_to_open_without_what_it_needs_is_caught(what, tmp_path):
     build = api()
@@ -229,6 +236,39 @@ def test_the_live_way_needs_the_request_form_carrying_the_label_the_source_names
     assert build.FORMS == ROOT / ".github" / "ISSUE_TEMPLATE"
     if real["ways"]["live"]["open"]:
         assert label in build.form_labels((build.FORMS / name).read_text(encoding="utf-8"))
+
+
+def test_the_live_way_opens_only_when_the_sentences_about_ai_coworker_were_checked_against_the_lowest_version(tmp_path):
+    build = api()
+    real = build.load_desk()
+    (tmp_path / real["form"]["file"]).write_text(f"name: Live session\nlabels: [{real['form']['label']}]\n", encoding="utf-8")
+    desk = in_state("both")
+    assert desk["coworker"]["checked_against"] == desk["coworker"]["min_version"] and build.desk_problems(desk, tmp_path) == []
+    for other in ("", "0.12.1", "0.13.1"):
+        desk["coworker"]["checked_against"] = other
+        faults = build.desk_problems(desk, tmp_path)
+        assert any("checked against" in fault for fault in faults), f"the live way opens with its sentences checked against {other or 'nothing'}"
+    desk["coworker"]["min_version"], desk["coworker"]["checked_against"] = "0.14.0", "0.13.0"
+    assert any("checked against" in fault for fault in build.desk_problems(desk, tmp_path)), "raising the lowest version does not ask for a new check"
+    closed = in_state("closed")
+    closed["coworker"]["checked_against"] = ""
+    assert build.desk_problems(closed) == [], "a closed live way needs no check yet"
+    if real["ways"]["live"]["open"]:
+        assert real["coworker"]["checked_against"] == real["coworker"]["min_version"]
+
+
+def test_building_as_if_a_way_were_open_is_refused_unless_it_goes_to_a_folder_of_its_own(tmp_path, monkeypatch, capsys):
+    build = api()
+    monkeypatch.setattr(build, "OUT", tmp_path / "site")
+    (tmp_path / "site").mkdir()
+    for argv in (["--open", "github"], ["--open", "github,live"], ["--check", "--open", "github"]):
+        assert build.main(argv) == 2, f"build.py {' '.join(argv)} is not refused"
+        assert list((tmp_path / "site").iterdir()) == [], "made-up dates and times were written over the committed pages"
+    assert "--live" in capsys.readouterr().err
+    before = {path: path.read_bytes() for path in SITE.rglob("index.html")}
+    monkeypatch.undo()
+    assert build.main(["--open", "github"]) == 2
+    assert {path: path.read_bytes() for path in SITE.rglob("index.html")} == before
 
 
 def test_the_build_refuses_facts_that_cannot_be_stated(tmp_path, monkeypatch):
