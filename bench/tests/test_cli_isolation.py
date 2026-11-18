@@ -213,7 +213,7 @@ def held_until_read():
 """
 
 
-TOLERANCE_MB = 6      # how far the kernel's own figures, read at two moments, may lie apart
+TOLERANCE_MB = 2      # how far two readings of the same thing may lie apart
 
 
 def really_mb(seen: dict) -> float:
@@ -233,7 +233,7 @@ def left_out_mb(limit_mb: int) -> float:
 def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32", memory_mb: int | None = None,
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
                  changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
-                 processes: int | None = None) -> dict:
+                 processes: int | None = None, own_filter_only: bool = False) -> dict:
     """What the verifier does: a fresh container without network, capped in memory, processors and
     processes, with the capped memory-backed folder for the cases; the judge as root with its own
     Python, started by the verifier's own script, the program's build user named agent. Returns the
@@ -245,7 +245,9 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     names texts to replace in the judge's files (file, text, replacement): a judge with one of its
     own stops taken out, to see what the kernel then does. A judging that does not end in `seconds`
     is ended and fails the test. With `reading` a helper runs outside the container and the hidden
-    tests can ask it what the container really holds; the folder they ask through is root's alone."""
+    tests can ask it what the container really holds; the folder they ask through is root's alone.
+    With `own_filter_only` the container gets no call filter from Docker, so that a call that is
+    refused is refused by the judge's own."""
     name = f"dodam-attack-{uuid.uuid4().hex[:12]}"
     (tests_dir / "test.sh").write_text(TEST_SH, encoding="utf-8")
     for file, text, replacement in changed:
@@ -265,6 +267,8 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     loose = {"processes": ["--pids-limit", "100000"]}
     flags = [flag for key, value in caps.items() for flag in (loose.get(key, []) if key in without else value)]
     hung = False
+    if own_filter_only:
+        flags += ["--security-opt", "seccomp=unconfined"]
     if reading:
         flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
@@ -1878,6 +1882,552 @@ def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_
     cases = {c["name"]: c for c in result["report"]["tests"]}
     assert cases["test_within"].get("records_left_out_bytes") == within["measured"]["records_left_out"], cases["test_within"]
     assert cases["test_beyond"].get("records_counted_bytes", 0) >= 0 and "records_left_out_bytes" in cases["test_beyond"], cases["test_beyond"]
+
+
+def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:
+    """The line every attempt on a case's memory is held to: the case fails for memory, or what
+    the container really held beyond the judge's count, read from outside, is no more than the
+    amount left out and the tolerance."""
+    if seen["limit"] == "memory":
+        note_figures(what, counted=seen["measured"].get("memory_highest", 0) / 2**20)
+        return
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"{what}: the attempt did not run as written: {seen}"
+    really, counted = really_mb(seen), seen["measured"]["memory_highest"] / 2**20
+    note_figures(what, really=really, counted=counted, beyond=really - counted)
+    assert really - counted <= left_out_mb(limit_mb) + TOLERANCE_MB, (
+        f"{what}: the case passed while the container really held {really:.1f} MB more than when the case began "
+        f"and the judge counted {counted:.1f} MB: {seen}")
+
+
+# Memory that is locked cannot be given back by the kernel, and neither can a page that a pipe, a
+# socket or a registration holds for a program. Nothing of the agent's can do either: no memory can
+# be locked, and the calls that hand pages over without copying them do not exist for it. The
+# program below tries every one of them, and so does the build.
+TRIES = r"""
+import mmap, platform, socket
+ARM = platform.machine() == "aarch64"
+libc.syscall.restype = ctypes.c_long
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+NOWHERE = ctypes.c_void_p(-1).value
+
+
+class Part(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("size", ctypes.c_size_t)]
+
+
+def why():
+    return "refused: " + errno.errorcode.get(ctypes.get_errno(), str(ctypes.get_errno()))
+
+
+def call(number, *args):
+    return "done" if libc.syscall(number, *args) >= 0 else why()
+
+
+def tries():
+    said = {}
+    fd = os.open(sys.executable, os.O_RDONLY)
+    at = ctypes.c_void_p(libc.mmap(None, 4096, 1, 2, fd, 0))
+    said["locking a range"] = call(228 if ARM else 149, at, 4096)
+    said["locking a range, the newer call"] = call(284 if ARM else 325, at, 4096, 0)
+    said["locking everything"] = call(230 if ARM else 151, 3)
+    said["a mapping asked for as locked"] = "done" if libc.mmap(None, 4096, 1, 2 | 0x2000, fd, 0) not in (None, NOWHERE) else why()
+    shared = libc.syscall(194 if ARM else 29, 0, 4096, 0o1600)
+    said["locking shared memory of the old family"] = why() if shared < 0 else call(195 if ARM else 31, shared, 11, None)
+    first, second = os.pipe(), os.pipe()
+    a, b = socket.socketpair()
+    os.write(first[1], b"x" * 4096)
+    said["sending a file into a socket"] = call(71 if ARM else 40, a.fileno(), fd, None, 4096)
+    said["splicing a file into a pipe"] = call(76 if ARM else 275, fd, None, second[1], None, 4096, 0)
+    said["duplicating what a pipe holds"] = call(77 if ARM else 276, first[0], second[1], 4096, 0)
+    own = ctypes.create_string_buffer(4096)
+    part = Part(ctypes.addressof(own), 4096)
+    said["giving pages to a pipe"] = call(75 if ARM else 278, second[1], ctypes.byref(part), 1, 0)
+    said["setting up asynchronous work"] = call(425, 8, ctypes.create_string_buffer(120))
+    said["entering asynchronous work"] = call(426, -1, 0, 0, 0, None, 0)
+    said["registering for asynchronous work"] = call(427, -1, 0, None, 0)
+    for name, family in (("a cryptography socket", 38), ("a local socket", socket.AF_UNIX), ("a network socket", socket.AF_INET)):
+        try:
+            socket.socket(family, socket.SOCK_SEQPACKET if family == 38 else socket.SOCK_STREAM).close()
+            said[name] = "done"
+        except OSError as error:
+            said[name] = "refused: " + errno.errorcode.get(error.errno, str(error.errno))
+    if platform.machine() == "x86_64":
+        # sending a file as a 32-bit program asks for it: the same kernel, other numbers
+        code = bytes.fromhex("53" "b8bb000000" "bbffffffff" "b9ffffffff" "31d2" "31f6" "cd80" "5b" "c3")
+        room = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
+        room.write(code)
+        answer = ctypes.CFUNCTYPE(ctypes.c_int)(ctypes.addressof(ctypes.c_char.from_buffer(room)))()
+        said["sending a file, asked the 32-bit way"] = "refused: " + errno.errorcode.get(-answer, str(answer))
+    return said
+"""
+
+NOT_PERMITTED, CANNOT_MOVE = "refused: EPERM", "refused: EINVAL"
+TRIED = {"locking a range": NOT_PERMITTED, "locking a range, the newer call": NOT_PERMITTED,
+         "locking everything": NOT_PERMITTED, "a mapping asked for as locked": NOT_PERMITTED,
+         "locking shared memory of the old family": NOT_PERMITTED,
+         "sending a file into a socket": CANNOT_MOVE, "splicing a file into a pipe": CANNOT_MOVE,
+         "duplicating what a pipe holds": CANNOT_MOVE, "giving pages to a pipe": CANNOT_MOVE,
+         "setting up asynchronous work": NOT_PERMITTED, "entering asynchronous work": NOT_PERMITTED,
+         "registering for asynchronous work": NOT_PERMITTED, "a cryptography socket": NOT_PERMITTED,
+         "a local socket": "done", "a network socket": "done"}
+THE_32_BIT_WAY = "sending a file, asked the 32-bit way"     # only a machine of the check's kind has it
+
+
+def test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run(tmp_path):
+    """Every call that locks memory is refused, and so are the calls for asynchronous work and
+    the kernel's cryptography sockets. The four calls that move pages into a pipe or a socket
+    without copying are answered as the kernel answers when it cannot do that for a kind of file,
+    which is what makes a program copy instead. This holds for the build and for a run, and it
+    is the judge's own doing: the container here has no call filter but the judge's. Ordinary
+    sockets still work. On a machine that knows a 32-bit way of calling, a call made that way is
+    refused whatever it is."""
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/tries.py").write_text(
+        "import ctypes, errno, json, os, sys\nlibc = ctypes.CDLL(None, use_errno=True)\n" + TRIES
+        + "json.dump(tries(), open('/app/tried-by-the-build.json', 'w'))\n", encoding="utf-8")
+    program = PLAIN + TRIES + "print(json.dumps({'run': tries(), 'build': json.load(open('/app/tried-by-the-build.json'))}))\n"
+    result = judge_attack(tmp_path, program, {"functional/test_tries.py": REPORT}, {"own_filter_only": True},
+                          BUILD_CMD="python3 tries.py")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["exit_code"] == 0, seen
+    tried = json.loads(seen["out"])
+    for who in ("build", "run"):
+        wrong = {name: said for name, said in tried[who].items() if said != {**TRIED, THE_32_BIT_WAY: NOT_PERMITTED}.get(name)}
+        assert not wrong and set(tried[who]) - {THE_32_BIT_WAY} == set(TRIED), f"in the {who}: {wrong}"
+
+
+# One process may lock a few MB, and the limit is for each process. Many processes each lock a part
+# of a file that is on disk. With no memory to lock they hold nothing the kernel cannot give back.
+LOCKS = r"""
+limit_mb = int(sys.argv[2])
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+fd, each = os.open("/app/large.bin", os.O_RDONLY), 8 * MB
+for number in range(14):
+    if os.fork() == 0:
+        at = libc.mmap(None, each, 1, 1, fd, number * each)
+        libc.mlock(ctypes.c_void_p(at), ctypes.c_size_t(each))
+        for page in range(0, each, 4096):
+            ctypes.c_char.from_address(at + page).value
+        while os.path.exists("not-read-yet"):
+            time.sleep(0.02)
+        os._exit(0)
+time.sleep(1.5)
+block = bytearray(b"x") * (max(limit_mb - 60, 1) * MB)
+held_until_read()
+for number in range(14):
+    os.wait()
+print("done")
+"""
+
+LOCK_TESTS = READING + """
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_locks():
+    attempt("locks", ["locks", LIMIT_MB])
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+@pytest.mark.parametrize("limit_mb", [64, 256, 512])
+@pytest.mark.parametrize("judge", ["as the judge is", "without the limit on locked memory"])
+def test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case(tmp_path, judge, limit_mb):
+    """Fourteen processes each lock 8 MB of a file, and the program holds ordinary memory up to
+    near its limit. As the judge is, nothing can be locked and the pages stay pages the kernel can
+    give back. With the limit on locked memory taken out of the judge, the pages are locked, stand
+    on neither of the kernel's lists, and count: the second line. Either way the case fails for
+    memory or what the container really holds stays within the bound."""
+    changed = () if judge == "as the judge is" else (("dodam_judge.py", '{"RLIMIT_MEMLOCK": 0, **limits}', "{**limits}"),)
+    result = judge_attack(tmp_path, PLAIN + HELD + LOCKS, {"functional/test_locks.py": LOCK_TESTS.replace("LIMIT_MB", repr(str(limit_mb)))},
+                          {"reading": True, "changed": changed,
+                           "before": "dd if=/dev/urandom of=/app/large.bin bs=1M count=120 status=none"},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")["locks"]
+    within_the_bound(seen, limit_mb, f"pages of a file locked by 14 processes, {judge}, limit {limit_mb} MB")
+    if judge != "as the judge is":
+        assert seen["limit"] == "memory", f"112 MB of locked pages of a file were to count: {seen}"
+    assert outcomes(result)["test_before"] == "passed" and outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+
+
+# Pages of a file handed to a pipe or a socket without copying. The program takes as many as it can
+# while its own count stays under the limit, then holds ordinary memory up to near the limit.
+HANDS = r"""
+import fcntl, resource, socket
+way, limit_mb = sys.argv[2], int(sys.argv[3])
+most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+
+
+class Part(ctypes.Structure):
+    _fields_ = [("base", ctypes.c_void_p), ("size", ctypes.c_size_t)]
+
+
+libc.vmsplice.argtypes = [ctypes.c_int, ctypes.POINTER(Part), ctypes.c_ulong, ctypes.c_uint]
+libc.vmsplice.restype = ctypes.c_ssize_t
+STAT, NOW = open("/sys/fs/cgroup/memory.stat"), open("/sys/fs/cgroup/memory.current")
+large = os.open("/app/large.bin", os.O_RDONLY)
+want, got, kept, piece = os.fstat(large).st_size, 0, [], MB
+
+
+def count():
+    STAT.seek(0)
+    NOW.seek(0)
+    stat = dict(line.split()[:2] for line in STAT.read().splitlines())
+    return int(NOW.read()) - int(stat["file"]) + int(stat["shmem"]) - int(stat["slab_reclaimable"])
+
+
+first = count()
+
+
+def room():
+    return got < want and count() - first < (limit_mb - 36) * MB
+
+
+def pipe():
+    r, w = os.pipe()
+    kept.extend((r, w))
+    try:
+        fcntl.fcntl(w, 1031, piece)
+    except OSError:
+        pass
+    os.set_blocking(w, False)
+    return w
+
+
+def pair(kind):
+    if kind == "local":
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    else:
+        if not kept:
+            kept.append(socket.socket())
+            kept[0].bind(("127.0.0.1", 0))
+            kept[0].listen(1024)
+        a = socket.socket()
+        a.connect(kept[0].getsockname())
+        b, _ = kept[0].accept()
+    kept.extend((a, b))
+    a.setblocking(False)
+    return a
+
+
+try:
+    if way == "a file spliced into pipes":
+        while room():
+            w = pipe()
+            while room():
+                try:
+                    sent = os.splice(large, w, piece, offset_src=got)
+                except BlockingIOError:
+                    break
+                got += sent
+    elif way == "a mapped file given to pipes":
+        at = libc.mmap(None, want, 1, 2, large, 0)
+        while room():
+            w = pipe()
+            while room():
+                part = Part(at + got, min(piece, want - got))
+                sent = libc.vmsplice(w, ctypes.byref(part), 1, 2)
+                if sent <= 0:
+                    if ctypes.get_errno() != errno.EAGAIN:
+                        raise OSError(ctypes.get_errno(), "giving pages to a pipe")
+                    break
+                got += sent
+    else:
+        while room():
+            a = pair("local" if "local" in way else "network")
+            while room():
+                try:
+                    sent = os.sendfile(a.fileno(), large, got, piece)
+                except BlockingIOError:
+                    break
+                got += sent
+except OSError as error:
+    refused = error.strerror
+block = bytearray(b"x") * max((limit_mb - 30) * MB - (count() - first), 0)
+held_until_read()
+print(json.dumps({"handed_over_mb": got / MB}))
+"""
+
+HAND_TESTS = READING + """
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_hands():
+    attempt("hands", ["hands", WAY, LIMIT_MB])
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+HANDED = ("a file spliced into pipes", "a mapped file given to pipes", "a file sent into local sockets",
+          "a file sent into network sockets")
+
+
+@pytest.mark.parametrize("limit_mb", [64, 256, 512])
+@pytest.mark.parametrize("way", HANDED)
+def test_pages_of_a_file_handed_to_pipes_or_sockets_are_within_the_bound_or_fail_the_case(tmp_path, way, limit_mb):
+    """A program hands up to 120 MB of a file's pages to pipes or sockets without copying them
+    and holds ordinary memory up to near its limit. The kernel cannot give such pages back, and
+    none of its figures says how many there are. The calls do not exist for a judged program, so
+    it holds none, and what the container really holds stays within the bound."""
+    tests = HAND_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb)))
+    result = judge_attack(tmp_path, PLAIN + HELD + HANDS, {"functional/test_hands.py": tests},
+                          {"reading": True, "before": "dd if=/dev/urandom of=/app/large.bin bs=1M count=120 status=none"},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")["hands"]
+    within_the_bound(seen, limit_mb, f"{way}, limit {limit_mb} MB")
+    assert outcomes(result)["test_before"] == "passed" and outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+
+
+# A case has one starting figure. A hidden test often runs the program more than once in a case,
+# and the test's own files are in the case's folder before the first run.
+RUNS = r"""
+import resource
+what, limit_mb = sys.argv[2], int(sys.argv[3])
+home = os.environ["HOME"]
+STAT, NOW = open("/sys/fs/cgroup/memory.stat"), open("/sys/fs/cgroup/memory.current")
+
+
+def count():
+    STAT.seek(0)
+    NOW.seek(0)
+    stat = dict(line.split()[:2] for line in STAT.read().splitlines())
+    return int(NOW.read()) - int(stat["file"]) + int(stat["shmem"]), int(stat["slab_reclaimable"])
+
+
+if what == "leaves what is no file":
+    # attributes on a folder and empty folders: memory of the kernel's, and no block of a file
+    attributes = made = 0
+    try:
+        while True:
+            os.setxattr(home, f"user.a{attributes}", b"v" * 65000)
+            attributes += 1
+    except OSError:
+        pass
+    try:
+        while True:
+            os.mkdir(f"{home}/d{made}")
+            made += 1
+    except OSError:
+        pass
+    print(json.dumps({"attributes": attributes, "folders": made}))
+    sys.exit(0)
+first, records_first = count()
+kept = []
+if what == "keeps it and holds":
+    # as many of the kernel's records as are left out, held through open files, and then ordinary
+    # memory up to just below the limit, counted from where this run began
+    most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+    left_out = min(limit_mb // 4, 16) * MB
+    while count()[1] - records_first < left_out - MB // 2:
+        kept.extend(os.memfd_create("m" * 249) for _ in range(200))
+    now, records = count()
+    block = bytearray(b"x") * max((limit_mb - 20) * MB - (now - first - (records - records_first)), 0)
+elif what == "removes it and holds":
+    for name in os.listxattr(home):
+        os.removexattr(home, name)
+    for name in os.listdir(home):
+        if name.startswith("d"):
+            os.rmdir(f"{home}/{name}")
+    block = bytearray(b"x") * ((limit_mb + 20) * MB)
+elif what.startswith("deletes the test's files"):
+    for name in os.listdir("."):
+        if name.startswith("given-"):
+            os.unlink(name)
+    if "waits" in what:
+        time.sleep(1.0)
+    block = bytearray(b"x") * ((limit_mb + 2) * MB)
+touch(block)
+held_until_read()
+print("done")
+"""
+
+RUN_TESTS = READING + """
+def two_runs(name, second):
+    with case() as c:
+        start, while_held = reading(name + "-start"), {}
+        after_the_run = read_while_held(c, name + "-held", while_held)
+        left = c.run(["runs", "leaves what is no file", LIMIT_MB])
+        r = c.run(["runs", second, LIMIT_MB])
+        after_the_run()
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[name] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-600:], "left": left.out.strip(),
+                      "start": start, "held": while_held, "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+
+
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_kept():
+    two_runs("kept", "keeps it and holds")
+
+
+def test_removed():
+    two_runs("removed", "removes it and holds")
+
+
+def test_the_tests_own_files():
+    attempt("given", ["runs", "deletes the test's files, waits and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)})
+
+
+def test_the_tests_own_files_at_once():
+    attempt("given at once", ["runs", "deletes the test's files and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)})
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+@pytest.mark.parametrize("limit_mb", [64, 256, 512])
+def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it(tmp_path, limit_mb):
+    """A first run of a case leaves attributes on a folder and empty folders, some 40 MB of the
+    kernel's memory and no block of a file. A second run that keeps them and holds ordinary memory
+    up to near its limit besides fails for memory or stays within the bound: what the first run
+    left is counted, as the case has one starting figure. A second run that removes them and
+    holds 20 MB more than its limit fails for memory: the count does not begin below the case's
+    start. And a run that deletes 19,000 files the test itself put there, waits, and holds more
+    than its limit, fails for memory too: what was there when the case began and goes away during
+    it makes no room. When it does not wait, the kernel lets go of the files' records while the
+    program takes its memory, and no measurement sees the figure fall; then the case may pass,
+    and what the container really holds more than when the case began stays within the bound."""
+    result = judge_attack(tmp_path, PLAIN + HELD + RUNS, {"functional/test_runs.py": RUN_TESTS.replace("LIMIT_MB", repr(str(limit_mb)))},
+                          {"reading": True}, CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    for name in ("kept", "removed"):
+        assert json.loads(seen[name]["left"])["attributes"] > 250, f"the first run was to leave its attributes: {seen[name]['left']}"
+    within_the_bound(seen["kept"], limit_mb, f"folders kept from an earlier run, limit {limit_mb} MB")
+    within_the_bound(seen["given at once"], limit_mb, f"the test's own files deleted while memory is taken, limit {limit_mb} MB")
+    for name, what in (("removed", "that removed what an earlier run left"), ("given", "that deleted the test's own files")):
+        assert seen[name]["limit"] == "memory", f"a run {what} held more than its limit and was to fail for memory: {seen[name]}"
+        note_figures(f"a run {what}, limit {limit_mb} MB", counted=seen[name]["measured"].get("memory_highest", 0) / 2**20)
+    assert outcomes(result)["test_before"] == "passed" and outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+
+
+# What is still charged to the container when the next case begins, or when the first one begins
+# after the build. The build can write into one memory-backed folder; a case can leave folders,
+# open files and processes.
+CARRIES = r"""
+import resource
+what = sys.argv[2]
+if what == "folders":
+    made = 0
+    try:
+        while True:
+            os.mkdir(f"{os.environ['HOME']}/d{made}")
+            made += 1
+    except OSError:
+        pass
+elif what == "open files":
+    most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+    kept = [os.memfd_create("m") for _ in range(120000)]
+elif what == "processes":
+    for number in range(14):
+        if os.fork() == 0:
+            block = bytearray(b"x") * (14 * MB)
+            time.sleep(30)
+            os._exit(0)
+    time.sleep(0.5)
+print("done")
+"""
+
+CARRY_TESTS = READING + """
+def note(name, value):
+    seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+    seen[name] = value
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump(seen, f)
+
+
+def begins(name):
+    with case() as c:
+        note(name, reading(name))
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def leaves(what):
+    with case() as c:
+        c.run(["carries", what])
+
+
+def test_0_the_first_case():
+    stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat"))
+    note("after the build", {"in the memory folder": sorted(os.listdir("/dev/shm")), "shared_mb": int(stat["shmem"]) / 2**20})
+    begins("the first case")
+
+
+def test_1_leaves_folders():
+    leaves("folders")
+
+
+def test_2_after_folders():
+    begins("after folders")
+
+
+def test_3_leaves_open_files():
+    leaves("open files")
+
+
+def test_4_after_open_files():
+    begins("after open files")
+
+
+def test_5_leaves_processes():
+    leaves("processes")
+
+
+def test_6_after_processes():
+    begins("after processes")
+"""
+
+
+def test_nothing_is_carried_into_the_starting_figure_of_the_next_case(tmp_path):
+    """The build writes 60 MB into the container's memory-backed folder: the judge empties that
+    folder before the first case, so nothing of it stays charged. Then three cases leave what a
+    case can leave, some 20,000 folders, 120,000 open files, fourteen processes holding 14 MB
+    each. What the container really holds when the case after each of them begins is what it held
+    when the first case began."""
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/leaves.py").write_text(
+        "with open('/dev/shm/left', 'wb') as f:\n    f.write(b'x' * (60 << 20))\n", encoding="utf-8")
+    result = judge_attack(tmp_path, PLAIN + CARRIES, {"functional/test_carries.py": CARRY_TESTS}, {"reading": True},
+                          BUILD_CMD="python3 leaves.py", CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["after the build"]["in the memory folder"] == [] and seen["after the build"]["shared_mb"] < 1, (
+        f"what the build left in the memory-backed folder is still there when the first case begins: {seen['after the build']}")
+    first = seen["the first case"]["charged"]
+    carried = {name: (seen[name]["charged"] - first) / 2**20 for name in ("after folders", "after open files", "after processes")}
+    note_figures("carried into the next case's start", **{name.replace(" ", "_"): value for name, value in carried.items()})
+    for name, value in carried.items():
+        assert value <= TOLERANCE_MB, f"{value:.1f} MB more are charged to the container {name} than when the first case began: {seen}"
+    said = outcomes(result)
+    assert all(said[name] == "passed" for name in said if "after" in name or "first" in name), lost(result, tmp_path / "out")
 
 
 # What the kernel ends first when the container's memory runs out is the judge's decision, not a

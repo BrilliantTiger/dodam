@@ -715,7 +715,8 @@ def test_memory_moved_out_to_swap_is_counted_as_memory(tmp_path):
     group = tmp_path / "group"
     group.mkdir()
     (group / "memory.current").write_text(f"{300 * 2**20}\n")
-    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n")
+    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n"
+                                       f"inactive_file {60 * 2**20}\nactive_file {30 * 2**20}\n")
     (group / "memory.max").write_text(f"{1024 * 2**20}\n")
     (group / "memory.swap.current").write_text(f"{50 * 2**20}\n")
     counted = attempt(judge_module.container_memory, group=group)
@@ -734,13 +735,106 @@ def test_memory_the_kernel_gives_back_like_the_cache_is_not_counted_as_memory(tm
     (group / "memory.current").write_text(f"{300 * 2**20}\n")
     (group / "memory.max").write_text(f"{1024 * 2**20}\n")
     (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n"
+                                       f"inactive_file {60 * 2**20}\nactive_file {30 * 2**20}\n"
                                        f"slab_reclaimable {30 * 2**20}\nslab_unreclaimable {5 * 2**20}\n")
     counted = judge_module.container_memory(group=group)
     assert counted["taken"] == (300 - 100 + 10 - 30) * 2**20, f"{counted['taken'] // 2**20} MB counted as taken"
     assert counted["all"] == 300 * 2**20
-    # a kernel that does not say how much it can give back: everything it holds is counted
-    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n")
+    # a kernel that does not say how much of its records it can give back: all of them are counted
+    (group / "memory.stat").write_text(f"anon {150 * 2**20}\nfile {100 * 2**20}\nshmem {10 * 2**20}\n"
+                                       f"inactive_file {60 * 2**20}\nactive_file {30 * 2**20}\n")
     assert judge_module.container_memory(group=group)["taken"] == (300 - 100 + 10) * 2**20
+
+
+def test_a_page_of_a_file_the_kernel_cannot_give_back_is_counted_as_memory(tmp_path):
+    """Pages of files are left out because the kernel gives them back when memory is needed. It
+    keeps those on two lists. A page of a file that stands on neither, because it is locked or for
+    any other reason, cannot be given back, and counts. Ordinary and shared memory that is locked
+    is counted as it always was, once."""
+    group = tmp_path / "group"
+    group.mkdir()
+    mb = 2**20
+    (group / "memory.current").write_text(f"{400 * mb}\n")
+    (group / "memory.max").write_text(f"{1024 * mb}\n")
+
+    def taken(**stat: int) -> int:
+        (group / "memory.stat").write_text("".join(f"{name} {value * mb}\n" for name, value in stat.items()))
+        return judge_module.container_memory(group=group)["taken"] // mb
+
+    # 200 MB of pages of files, all on the lists: none of them counts
+    assert taken(anon=200, file=200, shmem=0, inactive_file=150, active_file=50, unevictable=0) == 200
+    # 128 MB of them locked: they stand on neither list, and count
+    assert taken(anon=200, file=200, shmem=0, inactive_file=50, active_file=22, unevictable=128) == 328, \
+        "pages of files that cannot be given back were left out of the count"
+    # locked ordinary memory and locked shared memory were counted before and are not counted twice
+    assert taken(anon=200, file=200, shmem=40, inactive_file=120, active_file=40, unevictable=90) == 240
+    # a kernel that does not say which pages stand on its lists: every page of a file is counted
+    assert taken(anon=200, file=200, shmem=0) == 400
+
+
+def test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached(tmp_path):
+    """A case has one starting figure, read before its first run. What an earlier run of the case
+    left in the container is not part of a later run's start. And when what was there at the start
+    goes away during the case, the case is counted from the lower figure: its going makes no room.
+    The case runner's own memory is in none of these figures."""
+    from dodambench import dodam_cli as runner
+    lowest, own = getattr(runner, "_lowest", None), getattr(runner, "_own_memory", None)
+    assert lowest is not None and own is not None, "the case runner reads a new starting figure for every run"
+    assert lowest(None, 100) == 100 and lowest(100, 130) == 100 and lowest(100, 60) == 60
+    status = tmp_path / "status"
+    status.write_text("Name:\tpython\nVmRSS:\t   90000 kB\nRssAnon:\t   40000 kB\nRssFile:\t   50000 kB\nVmSwap:\t    2000 kB\n")
+    assert own(str(status)) == 42000 * 1024, "the runner's own memory is its ordinary memory, in memory and in swap"
+    assert own(str(tmp_path / "none")) == 0
+    tests = {"functional/test_start.py": '''
+import dodam_cli
+
+MB = 2**20
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def test_the_figures():
+    tool = dodam_cli._judge
+    held = {"figures": [100]}
+
+    def container_memory(*args, **kwargs):
+        # the figures of one run in turn; the last one stays
+        figure = held["figures"].pop(0) if len(held["figures"]) > 1 else held["figures"][0]
+        return {"taken": figure * MB, "all": figure * MB, "cap": 0, "records": 0}
+
+    kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
+    tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = container_memory, lambda folder: 0, lambda: 0
+    try:
+        with case() as c:
+            c._side = Side()
+            # the first run: the container holds 100 MB before it and while it runs
+            assert c.run([]).exit_code == 0
+            first = c.measured.get("memory_highest")
+            # the second run: the first one left 30 MB behind, and the container holds 130 MB
+            held["figures"] = [130]
+            assert c.run([]).exit_code == 0
+            second = c.measured.get("memory_highest")
+            # the third run: what was there falls to 60 MB while it runs, and rises to 100 MB again
+            held["figures"] = [130, 60, 100]
+            assert c.run([]).exit_code == 0
+            third = c.measured.get("memory_highest")
+    finally:
+        tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
+    assert first == 0, first
+    assert second == 30 * MB, f"what the first run left was taken for the second run's start: {second}"
+    assert third == 40 * MB, f"a fall below the start made room: {third}"
+'''}
+    result = judge_program(tmp_path, "import time\ntime.sleep(0.3)\nprint('fine')\n", tests)
+    assert outcomes(result) == {"test_the_figures": "passed"}, message(result, "test_the_figures")
 
 
 def test_the_kernels_records_are_left_out_only_up_to_a_bound():
@@ -891,6 +985,59 @@ def test_the_filter_refuses_the_calls_that_make_what_outlives_a_process():
             # the other way of calling this kernel knows, whose numbers mean something else: refused too
             other = [i for i, line in enumerate(lines) if line[0] == 0x35 and line[3] == 0x40000000]
             assert other and other[0] + 1 + lines[other[0]][1] == len(lines) - 1
+
+
+def answer_of(raw: bytes, machine_name: int, call: int, first_argument: int = 0) -> str:
+    """What the filter says to one call: run its program as the kernel does, on the kind of
+    machine, the number of the call and the low half of its first argument."""
+    lines = [struct.unpack("HBBI", raw[i:i + 8]) for i in range(0, len(raw), 8)]
+    data = {0: call, 4: machine_name, 16: first_argument}
+    at, held = 0, 0
+    for _ in range(len(lines) + 1):
+        code, yes, no, value = lines[at]
+        if code == 0x20:                                   # load a word of what describes the call
+            held, at = data[value], at + 1
+        elif code == 0x15:                                 # equal?
+            at += 1 + (yes if held == value else no)
+        elif code == 0x35:                                 # at least?
+            at += 1 + (yes if held >= value else no)
+        elif code == 0x05:                                 # go on further down
+            at += 1 + value
+        elif code == 0x06:                                 # the answer
+            return {0x7FFF0000: "goes on", 0x00050001: "not permitted", 0x00050016: "invalid argument"}.get(value, hex(value))
+        else:
+            raise AssertionError(f"the filter holds a step this test does not know: {lines[at]}")
+    raise AssertionError("the filter gives no answer")
+
+
+def test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages():
+    """The four calls that move pages into a pipe or a socket without copying answer "invalid
+    argument"; the calls for asynchronous work and the making of a cryptography socket are not
+    permitted; every other socket and every ordinary call goes on. A call made the way another
+    kind of machine makes it is not permitted whatever it is, one of the four included."""
+    build = judge_module.refusing_filter
+    numbers = {"x86_64": {"name": 0xC000003E, "moving": (40, 275, 276, 278), "socket": 41, "read": 0, "outliving": 29},
+               "aarch64": {"name": 0xC00000B7, "moving": (71, 76, 77, 75), "socket": 198, "read": 63, "outliving": 194}}
+    for machine, known in numbers.items():
+        raw = build(machine)
+        for call in known["moving"]:
+            assert answer_of(raw, known["name"], call) == "invalid argument", (machine, call)
+        for call in (425, 426, 427, known["outliving"]):
+            assert answer_of(raw, known["name"], call) == "not permitted", (machine, call)
+        assert answer_of(raw, known["name"], known["socket"], 38) == "not permitted", "a cryptography socket"
+        for family in (1, 2, 10):
+            assert answer_of(raw, known["name"], known["socket"], family) == "goes on", (machine, family)
+        assert answer_of(raw, known["name"], known["read"]) == "goes on"
+        # the same numbers on another kind of machine mean other calls: all of it is refused
+        other = next(n["name"] for m, n in numbers.items() if m != machine)
+        for call in (*known["moving"], known["read"], known["socket"]):
+            assert answer_of(raw, other, call) == "not permitted", (machine, call)
+        for call in (187, 239):                             # sendfile as a 32-bit program calls it
+            assert answer_of(raw, 0x40000003, call) == "not permitted"
+    # the second way of calling a 64-bit kernel of this kind, whose numbers lie higher
+    raw = build("x86_64")
+    for call in numbers["x86_64"]["moving"]:
+        assert answer_of(raw, 0xC000003E, 0x40000000 + call) == "not permitted"
 
 
 def test_the_judge_refuses_a_machine_it_has_no_call_filter_for(tmp_path, monkeypatch):
