@@ -710,13 +710,16 @@ def test_a_coding_agent_among_the_parent_processes_stops_the_job(world: World, p
     assert world.agy_runs() == [] and world.gh_calls() == []
 
 
-def test_a_coding_agent_named_only_in_its_command_line_stops_the_job(world: World):
+@pytest.mark.parametrize("package", ["@anthropic-ai/claude-code", "claude-code", "@openai/codex", "opencode-ai"])
+def test_a_coding_agent_named_only_in_its_command_line_stops_the_job(world: World, package: str):
     item = world.pull(7)
     world.label(item, "verify")
-    run = world.run_job("verify", 7, parent="node", words="/opt/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+    words = f"/opt/lib/node_modules/{package}/cli.js"
+    run = world.run_job("verify", 7, parent="node", words=words)
     result = result_of(run)
     assert result.get("status") == "refused", run
-    assert any(str(r).startswith("parent:") and "claude-code" in str(r) for r in result.get("reasons", [])), result
+    assert any(str(r).startswith("parent:") and package.strip("@").split("/")[-1] in str(r)
+               for r in result.get("reasons", [])), result
     assert world.agy_runs() == [] and world.gh_calls() == []
 
 
@@ -1471,6 +1474,19 @@ def test_the_watcher_remembers_at_most_five_thousand_marks_of_each_kind(world: W
     saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
     assert len(saved["handled"]) == 5000 and "0" not in saved["handled"] and "5000" in saved["handled"]
     assert len(saved["ignored"]) == 5000 and "10000" not in saved["ignored"] and "15000" in saved["ignored"]
+
+
+def test_a_job_whose_commit_could_not_be_fetched_is_tried_again_by_the_watcher(world: World):
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.write_settings(fetch_url=(world.root / "no-such-repository.git").as_uri())
+    first = world.run_watch()
+    assert [(r.get("status"), r.get("reasons")) for r in results_of(first)] == [("error", ["checkout"])], first
+    assert world.github_state().get("removed") is None and world.agy_runs() == [], "the mark was handled"
+    world.items = world.github_state()["items"]  # type: ignore[assignment]
+    world.write_settings()
+    second = world.run_watch()
+    assert [r.get("status") for r in results_of(second)] == ["posted"], second
 
 
 def test_a_job_whose_head_moved_is_tried_again_by_the_watcher(world: World):
