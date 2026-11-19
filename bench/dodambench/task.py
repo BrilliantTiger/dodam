@@ -351,8 +351,10 @@ def cases_mount(task: "Task") -> str:
 
 
 def judging_seconds(task: Task) -> int:
-    """The longest the judge can take over one step of a command-line task, whatever the program does:
-    the build, and for every file of tests its own allowance plus every test's full time limit."""
+    """What the format checker adds up for one step of a command-line task: the build, and for every
+    file of tests its own allowance plus every test's full time limit. Beyond that sum the judge can
+    spend up to SEARCH_SECONDS on the search for places any user may write, and a case runner that
+    is started again gets the whole time of its file of tests once more."""
     timeout = task.cli.get("case_timeout_sec")
     if not _whole(timeout) or task.manifest_problem:
         return 0
