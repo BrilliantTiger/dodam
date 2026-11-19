@@ -1275,6 +1275,9 @@ def test_the_watcher_stops_when_the_signed_in_account_is_not_the_projects(world:
     world.label(world.pull(7, author={"login": "x", "id": 999, "type": "User"}), "verify")
     run = world.run_watch()
     assert run["code"] not in (0, None) and world.agy_runs() == [], run
+    asked = [" ".join(map(str, call["args"])) for call in world.gh_calls()]
+    assert asked == ["api --method GET user"], f"the watcher did not ask only who is signed in: {asked}"
+    assert "not the project's account" in str(run["stderr"]), run
 
 
 def _alive(pid: int) -> bool:
