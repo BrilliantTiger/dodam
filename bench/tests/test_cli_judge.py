@@ -1243,18 +1243,21 @@ def test_nothing_that_judges_names_the_tests_helper_or_the_files_it_writes(cli_t
 
 
 def test_the_tests_helper_is_given_the_judged_containers_folder_and_nothing_else_of_the_machine():
-    """The command that starts the helper, word for word. Every word of it is compared, so that
-    nothing can be added to it under any spelling: it has a name, no network, a memory cap and a
-    process cap, and three folders, which are the judged container's folder of the kernel's, the
-    machine's file for letting go of unused records, and the folder it is asked through."""
-    from test_cli_isolation import IMAGE, READER, reader_command
+    """The command that starts the helper, word for word, with the image's name written out; what
+    the program it is given does is pinned by
+    test_the_tests_helper_changes_nothing_outside_the_three_folders_it_is_given, which runs that
+    program and watches it. Every word of the command is compared, so that nothing can be added to it under any spelling:
+    it has a name, no network, a memory cap and a process cap, and three folders, which are the
+    judged container's folder of the kernel's, the machine's file for letting go of unused
+    records, and the folder it is asked through."""
+    from test_cli_isolation import READER, reader_command
     assert reader_command("judged", "docker/0123abcd") == [
         "docker", "run", "--detach", "--name", "judged-reader", "--network", "none", "--user", "0",
         "--memory", "256m", "--pids-limit", "64",
         "--volume", "/sys/fs/cgroup/docker/0123abcd:/group",
         "--volume", "/proc/sys/vm/drop" + "_caches:/drop",
         "--volume", "judged-asked:/reading",
-        IMAGE, "python3", "-c", READER], "the helper is started with other words than its caps and its three folders"
+        "dodam-bench/python:dev", "python3", "-c", READER], "the helper is started with other words than its caps and its three folders"
 
 
 WATCHED = r'''
