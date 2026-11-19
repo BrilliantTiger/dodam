@@ -29,8 +29,9 @@ from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = "watch-state.json"
+NOTES_FILE = "watch-notes.log"
 WATCH_LOCK = "watch.lock"
-STATE_VERSION = 1
+STATE_VERSION = 2
 # Faults before agy started that a later round can get past: the mark stays and is tried again.
 TRY_AGAIN = frozenset({"github", "github_timeout", "too_many_pages", "checkout", "head_moved"})
 MAX_REMEMBERED = 5000
@@ -49,8 +50,17 @@ def _load_job():
 job = _load_job()
 
 
-def note(text: str) -> None:
+NOTES: list[Path] = []
+
+
+def note(text: str, keep: bool = False) -> None:
+    """A note in fixed words on standard error; with keep, also in the private folder's notes."""
     print(f"watch: {text}", file=sys.stderr, flush=True)
+    if keep and NOTES:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        fd = os.open(NOTES[0], os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {text}\n")
 
 
 class StateError(Exception):
@@ -58,7 +68,7 @@ class StateError(Exception):
 
 
 def empty_state() -> dict[str, object]:
-    return {"version": STATE_VERSION, "handled": {}, "ignored": {}, "days": {}, "hold_until": 0}
+    return {"version": STATE_VERSION, "handled": {}, "ignored": {}}
 
 
 def load_state(path: Path) -> dict[str, object]:
@@ -70,11 +80,9 @@ def load_state(path: Path) -> dict[str, object]:
         raise StateError() from exc
     if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
         raise StateError()
-    for key in ("handled", "ignored", "days"):
+    for key in ("handled", "ignored"):
         if not isinstance(data.get(key), dict):
             raise StateError()
-    if not isinstance(data.get("hold_until"), (int, float)):
-        raise StateError()
     return data
 
 
@@ -89,10 +97,6 @@ def save_state(path: Path, state: dict[str, object]) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(state, handle)
     os.replace(part, path)
-
-
-def today() -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime())
 
 
 def newest_mark(settings, number: int, label: str) -> tuple[int, int] | None:
@@ -125,18 +129,25 @@ def find_marks(settings, state: dict[str, object]) -> list[tuple[int, str, int, 
             labels = entry.get("labels") if isinstance(entry.get("labels"), list) else []
             if label not in [lab.get("name") for lab in labels if isinstance(lab, dict)]:
                 continue
-            mark = newest_mark(settings, number, label)
-            if mark is None:
+            try:
+                mark = newest_mark(settings, number, label)
+                if mark is None:
+                    continue
+                event_id, actor = mark
+                key = str(event_id)
+                if key in handled or key in ignored:
+                    continue
+                if actor != settings.project_account_id:
+                    ignored[key] = "account"
+                    note(f"ignored kind={kind} number={number} reason=account")
+                    continue
+                reason = job.eligibility(settings, job.read_item(settings, number))
+            except job.SignedOut:
+                raise
+            except job.GitHubError as exc:
+                # One item that cannot be read (for example past the bound of pages) keeps no other item waiting.
+                note(f"left out this round kind={kind} number={number} reason={exc.reason}", keep=True)
                 continue
-            event_id, actor = mark
-            key = str(event_id)
-            if key in handled or key in ignored:
-                continue
-            if actor != settings.project_account_id:
-                ignored[key] = "account"
-                note(f"ignored kind={kind} number={number} reason=account")
-                continue
-            reason = job.eligibility(settings, job.read_item(settings, number))
             if reason is not None:
                 ignored[key] = reason
                 note(f"ignored kind={kind} number={number} reason={reason}")
@@ -147,10 +158,16 @@ def find_marks(settings, state: dict[str, object]) -> list[tuple[int, str, int, 
 
 def one_round(settings, private: Path, state_path: Path, state: dict[str, object], tell: str | None) -> int | None:
     """Look once and run the jobs that are due, one after another. Returns an exit code when it must stop."""
-    hold_until = state["hold_until"]
-    assert isinstance(hold_until, (int, float))
-    if hold_until > time.time():
+    try:
+        held_back = job.gate(settings, job.load_job_state(private))
+    except job.JobError:
+        note("the job's state file is damaged; it is left as it is")
+        return job.EXIT_CODES["settings"]
+    if held_back == "quota_wait":
         note("waiting for Google's quota window to pass")
+        return None
+    if held_back == "day_bound":
+        note(f"the day's bound of {settings.max_jobs_per_day} jobs is reached")
         return None
     try:
         marks = find_marks(settings, state)
@@ -162,14 +179,17 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
         return None
     finally:
         save_state(state_path, state)
-    days = state["days"]
     handled = state["handled"]
-    assert isinstance(days, dict) and isinstance(handled, dict)
+    assert isinstance(handled, dict)
     for event_id, kind, number, label in marks:
-        day = today()
-        count = int(days.get(day, 0))
-        if count >= settings.max_jobs_per_day:
-            note(f"the day's bound of {settings.max_jobs_per_day} jobs is reached")
+        try:
+            held_back = job.gate(settings, job.load_job_state(private))
+        except job.JobError:
+            note("the job's state file is damaged; it is left as it is")
+            return job.EXIT_CODES["settings"]
+        if held_back is not None:
+            note("waiting for Google's quota window to pass" if held_back == "quota_wait" else
+                 f"the day's bound of {settings.max_jobs_per_day} jobs is reached")
             break
         if not job.job_lock_is_free(private):
             note("another job is running; trying again next round")
@@ -179,11 +199,14 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
         if status == "busy":
             note("another job is running; trying again next round")
             break
+        if not result.get("ran") and status in ("quota", "day_bound"):
+            note("the job was held back by its own bounds; trying again later")
+            break
         print(json.dumps(result), flush=True)
-        if status == "quota":
-            state["hold_until"] = time.time() + settings.quota_retry_seconds
-            save_state(state_path, state)
-            note("Google's quota is used up; the job is put back")
+        if status in ("quota", "day_bound"):
+            # The job keeps the day's count and the quota's wait itself; the mark stays for later.
+            note("Google's quota is used up; the job is put back" if status == "quota" else
+                 f"the day's bound of {settings.max_jobs_per_day} jobs is reached")
             break
         if status in ("refused", "signed_out"):
             save_state(state_path, state)
@@ -191,11 +214,9 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
             return job.EXIT_CODES[status]
         reasons = result.get("reasons") or []
         if status == "error" and not result.get("ran") and set(reasons) <= TRY_AGAIN:  # type: ignore[arg-type]
-            note(f"will try again next round kind={kind} number={number}")
+            note(f"left out this round kind={kind} number={number} reason={','.join(map(str, reasons))}", keep=True)
             continue
         handled[str(event_id)] = status
-        if result.get("ran"):
-            state["days"] = days = {day: count + 1}
         save_state(state_path, state)
         try:
             job.gh("DELETE", f"repos/{settings.repo}/issues/{number}/labels/{quote(label, safe='')}")
@@ -230,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     except job.SettingsError as exc:
         note(f"settings: {exc.reason}")
         return job.EXIT_CODES["settings"]
+    NOTES.append(private / NOTES_FILE)
     lock = job._acquire(private / WATCH_LOCK)
     if lock is None:
         note("another watcher is using this private folder")
