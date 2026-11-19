@@ -227,7 +227,7 @@ The room a container gets beyond the limits of a case is at least 256 MB, and th
 
 **How far memory can really be passed.** Memory alone can be passed between two measurements. The line that cannot be passed is the container's memory cap; the most a program can be above its limit is that cap less the limit and less what the judge uses. How far programs that try got, and how long the judge went without measuring while they kept both processors busy, is in "The numbers": the judge does not measure every 0.002 seconds under such a load.
 
-**The highest value the kernel kept.** The kernel keeps the highest memory use of the container, whatever happens between two measurements. The judge reads it before and after every run, and it fails no case by itself. A case fails for memory when the judge measured the program above its limit, or when the kernel ended a process during the run.
+**The highest value the kernel kept.** The kernel keeps the highest memory use of the container, whatever happens between two measurements. The judge reads it before and after every run, and it fails no case by itself. A case fails for memory when the judge measured the program above its limit or the container with less than 128 MB left, or when the kernel ended a process during the run.
 
 The reason is what that value counts. It counts the cache of files, which is no memory of the program's, and the kernel keeps no count from which the judge could tell afterwards how much of a new high was cache. Reading a file that is on disk fills the cache, and that much the kernel counts for the container as bytes read from disk. But the cache grows in other ways that the kernel counts nowhere:
 
