@@ -322,6 +322,15 @@ def session(places: dict, prompt: str | None, timeout: int, news: bool = False) 
     return seen
 
 
+def marked_as_typed(env: dict) -> dict:
+    """These two sessions are started without the relay. They get the mark of a session the way the relay gives it,
+    through the relay's own function: without the mark the desk's tools would refuse whatever the check before a call does."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import relay
+
+    return relay.marked(env)
+
+
 def session_with_tools_put_back(places: dict, prompt: str, timeout: int) -> dict:
     """Only for the check: the same session, with the tools that the lock removes put back among its tools."""
     planned = subprocess.run(start_command(places) + ["--print"], capture_output=True, text=True)
@@ -342,7 +351,7 @@ def session_with_tools_put_back(places: dict, prompt: str, timeout: int) -> dict
     settings["permissions"]["deny"] = [name for name in settings["permissions"]["deny"] if name not in PUT_BACK]
     settings_path.write_text(json.dumps(settings))
     message = json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
-    done = subprocess.run(argv, input=message, capture_output=True, text=True, env=plan["env"], cwd=plan["cwd"], timeout=timeout)
+    done = subprocess.run(argv, input=message, capture_output=True, text=True, env=marked_as_typed(plan["env"]), cwd=plan["cwd"], timeout=timeout)
     return parse(done.stdout)
 
 
@@ -361,7 +370,7 @@ def session_with_a_broken_check(places: dict, prompt: str, timeout: int) -> dict
         raise SystemExit("The check before each tool call is not started the way this check expects.")
     script.write_text(script.read_text().replace(interpreter, str(places["outside"] / "no-such-interpreter")))
     message = json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
-    done = subprocess.run(list(plan["argv"]), input=message, capture_output=True, text=True, env=plan["env"], cwd=plan["cwd"], timeout=timeout)
+    done = subprocess.run(list(plan["argv"]), input=message, capture_output=True, text=True, env=marked_as_typed(plan["env"]), cwd=plan["cwd"], timeout=timeout)
     return parse(done.stdout)
 
 

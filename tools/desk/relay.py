@@ -149,6 +149,28 @@ def reservation(spending: dict) -> int:
     return spending["units_per_session"] + spending["units_per_turn"]
 
 
+# The points between two of the relay's own steps at the start and at the end of a session, in their order. Between the
+# first and the last point of each the relay holds its one lock: nothing else of the relay happens there.
+POINTS_AT_START = ("start: before the first step", "start: the kept list is read", "start: the session is counted and its places are in hand",
+                   "start: the step is over")  # fmt: skip
+POINTS_AT_END = ("end: before the first step", "end: the handled places are out of the list", "end: the cost is written",
+                 "end: the places of a closed item are out of the list", "end: nothing is in hand and no session runs", "end: the step is over")  # fmt: skip
+
+
+def marked(env: dict[str, str], number: int | None = None, accounts=(), held_back=()) -> dict[str, str]:
+    """The environment of one session, with the mark that says what kind it is: without the mark its tools do nothing.
+
+    A session for an item is given the item, the accounts whose arrivals it handles, the newest first, and the accounts
+    that are held back now, whose text its tools leave out. A session for what was typed to the desk is given none of these.
+    """
+    env = dict(env)
+    if number is None:
+        env["DESK_SESSION"] = "typed"
+    else:
+        env |= {"DESK_SESSION": "item", "DESK_ITEM": str(number), "DESK_ACCOUNTS": json.dumps(list(accounts)), "DESK_HELD_BACK": json.dumps(list(held_back))}
+    return env
+
+
 class Kept:
     """The arrivals that wait for a session, in a file of the state folder.
 
@@ -156,8 +178,9 @@ class Kept:
     at most a few places for one account, and a fixed number in all. What another account writes therefore
     touches no place but its own, with two exceptions. When every place is taken and a writer that is not held
     back needs one, a place of an account that is held back goes first, even its last; only when no held-back
-    account holds a place does an account that holds nothing take the oldest place of the account that holds
-    the most, and only while that account holds more than one. And when an item is closed, every arrival kept
+    account holds a place it can give does an account that holds nothing take the oldest place that can go of the
+    account that can give the most, and only while that account can give more than one. An account can give the
+    places it holds that are not in hand. And when an item is closed, every arrival kept
     on it goes with it. A place whose arrivals the running session is handling is in hand: it counts as a place,
     it does not go, and it is not among the places its account can give.
     """
@@ -196,8 +219,9 @@ class Kept:
         number, account = events[0]["number"], events[0]["actor_id"]
         gone = [] if gone is None else gone
 
-        def went(whose: int, item: int, arrivals: int, why: str) -> int:
-            gone.append({"account": whose, "number": item, "arrivals": arrivals, "why": why, "writer_held_back": account in held_back})
+        def went(whose: int, item: int, arrivals: int, why: str, closed_to_all: bool = False) -> int:
+            gone.append({"account": whose, "number": item, "arrivals": arrivals, "why": why, "writer_held_back": account in held_back,
+                         "closed_to_all": closed_to_all})  # fmt: skip
             return whose
 
         seq = max((e.get("seq", 0) for entry in entries for e in entry["events"]), default=0)
@@ -222,12 +246,13 @@ class Kept:
             for entry in can_go:
                 gives[entry["account"]] = gives.get(entry["account"], 0) + 1
             # The places of accounts that are held back never stand in the way of one that is not: one of them goes
-            # first. Otherwise the account with the most places gives one, while it holds more than one, to an account
-            # that holds none. Among equals it is the one whose oldest arrival is the oldest.
+            # first. Otherwise the account that can give the most places gives one, while it can give more than one, to
+            # an account that holds none. Among equals it is the one whose oldest arrival that can go is the oldest.
             waiting = [a for a in gives if a in held_back]
             most = max(waiting or gives, key=lambda a: (gives[a], -min(i for i, e in enumerate(can_go) if e["account"] == a)), default=None)
             if most is None or not waiting and (account in held or gives[most] <= 1):
-                return went(account, number, len(events), "full")
+                # The list is closed to everyone, an account that holds nothing too, when no account can give a place.
+                return went(account, number, len(events), "full", most is None or not waiting and gives[most] <= 1)
             leaves = next(e for e in can_go if e["account"] == most)
             entries.remove(leaves)
             dropped = went(most, leaves["number"], len(leaves["events"]), "gave way")
@@ -289,6 +314,10 @@ class Relay:
         self.session: subprocess.Popen | None = None
         self.watcher: subprocess.Popen | None = None
         self.guard = threading.Lock()
+        # The one lock for what the watcher's arrivals and the relay's sessions share: the kept list, the record of
+        # sessions, which session is running and which places are in hand. Placing an arrival, choosing what starts,
+        # starting a session and ending one each take it. It is held for the steps around a session, never for its length.
+        self.turn = threading.Lock()
         self.handled = 0
         self.seen = 0
         self.failures = 0
@@ -341,6 +370,9 @@ class Relay:
             timer.cancel()
         flush()
         self.typing_ended.set()
+
+    def at(self, point: str) -> None:
+        """A point between two of the relay's own steps at a session's start or end. Nothing happens here."""
 
     # -- what a day may cost ------------------------------------------------
 
@@ -435,6 +467,11 @@ class Relay:
         try:
             with self.desk.counts() as record:
                 sessions = record["sessions"]
+                for session in sessions:
+                    if session.get("charged", 0) is None:
+                        # No session is running now. One whose cost was never written, because the desk was stopped
+                        # while it ran, ended then: it is charged everything that was set aside for it.
+                        session["charged"] = session["reserved"]
                 if kept is None:
                     places, reached, waiting, met = [], self.day_bound(sessions), {}, []
                 else:
@@ -501,16 +538,21 @@ class Relay:
         if malformed:
             self.show(f"relay: {malformed} arrival(s) without an account's numeric id or in the wrong shape were not handled")
             self.desk.count("arrivals that could not be read", by=malformed)
-        closed = self.closed_items()
-        # What goes is counted arrival by arrival, for the account that wrote it and with its item.
-        gone: list[dict] = []
-        for event in events:
-            if event["number"] in closed:
-                # No session is started for such an item now, so nothing waits for one: counted for its account like any dropped arrival.
-                gone.append({"account": event["actor_id"], "number": event["number"], "arrivals": 1, "why": "closed"})
-        self.kept.put_all(by_place([event for event in events if event["number"] not in closed]), self.held_back(), list(self.in_hand), gone)
-        for went in gone:
-            self.desk.count(tools.DROPPED, account=went["account"], by=went["arrivals"], item=went["number"])
+        with self.turn:
+            closed = self.closed_items()
+            # What goes is counted arrival by arrival, for the account that wrote it and with its item.
+            gone: list[dict] = []
+            for event in events:
+                if event["number"] in closed:
+                    # No session is started for such an item now, so nothing waits for one: counted for its account like any dropped arrival.
+                    gone.append({"account": event["actor_id"], "number": event["number"], "arrivals": 1, "why": "closed"})
+            self.kept.put_all(by_place([event for event in events if event["number"] not in closed]), self.held_back(), list(self.in_hand), gone)
+            for went in gone:
+                self.desk.count(tools.DROPPED, account=went["account"], by=went["arrivals"], item=went["number"])
+            holders: dict[int, int] = {}
+            if [went for went in gone if went["why"] == "full" and went["closed_to_all"]]:
+                for place in self.kept.entries():
+                    holders[place["account"]] = holders.get(place["account"], 0) + 1
         if gone:
             self.show(f"relay: {sum(went['arrivals'] for went in gone)} arrival(s) were dropped: the list of kept arrivals has no room for them, or their item is closed")
         # An arrival of an account that is held back, dropped for want of a place, is counted for that account and is
@@ -519,11 +561,9 @@ class Relay:
             try:
                 with self.desk.counts() as record:
                     self.desk.limit_reached(record, "arrivals kept for later; more were dropped")
-                    if [went for went in gone if went["why"] == "full"]:
-                        # Every place was taken and nothing could give way to a writer that is not held back: the list is closed to it.
-                        holders: dict[int, int] = {}
-                        for place in self.kept.entries():
-                            holders[place["account"]] = holders.get(place["account"], 0) + 1
+                    if holders:
+                        # Every place was taken and no account could give one, so an account that holds nothing would
+                        # get none either: only then is the list closed for everyone.
                         self.desk.day_closed(record, PLACES, sorted(holders, key=lambda a: (-holders[a], a))[:3])
             except tools.Refused:
                 pass
@@ -551,47 +591,73 @@ class Relay:
             text = None
         if text is not None:
             self.show("typed: " + tools.cut(text, 200))
-            entry, reached, _, _ = self.admit()
+            entry, reached, _, _ = self.begin(typed=True)
             if entry is None:
                 self.show(f"relay: not started ({reached})")
                 self.damaged(reached)
                 return True
-            try:
-                self.handle("typed", text, None, [], entry)
-            finally:
-                self.running, self.in_hand = None, []
+            self.handle("typed", text, None, [], entry, [])
             return True
-        entry, reached, places, waiting = self.admit(kept=self.kept.entries())
-        if waiting != self.waiting_written:
-            # Arrivals that wait for an account's share are counted for the next digest.
-            self.desk.count_as(WAITING, waiting)
-            self.waiting_written = waiting
+        entry, reached, places, _ = self.begin()
         if entry is None:
             self.damaged(reached)
             return False
         number = entry["number"]
-        try:
-            # The arrival stays in the kept list, in hand, until the session has dealt with it.
-            dealt_with = self.handle(f"item {number}", news_message(told(places)), number, entry["accounts"], entry)
-            if dealt_with:
-                self.kept.done(places)
-        finally:
-            self.running, self.in_hand = None, []
-        closed = self.closed_since()
-        if dealt_with and number in closed:
-            # Every arrival kept on the item goes with it, whoever wrote it: each is counted for its account, and the digest names them.
-            gone = self.kept.forget(number)
-            for account, arrivals in gone:
-                self.desk.count(tools.DROPPED, account=account, by=arrivals, item=number)
-            opens = time.strftime("%Y-%m-%d UTC", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
-            line = (f"Closed until {opens}: two sessions in a row that were shown it had to be ended. "
-                    f"{sum(arrivals for _, arrivals in gone)} arrival(s) kept on it went")  # fmt: skip
-            if gone:
-                # The accounts by number, up to eight of them and as many as the line holds, each number whole.
-                room = self.desk.lock["coordinator"]["digest_line_chars"] - len(line) - len(", of accounts .")
-                line += ", of accounts " + tools.named([account for account, _ in gone], room, 8)
-            self.desk.note("item_closed", line + ".", number)
+        # The arrival stays in the kept list, in hand, until the session has dealt with it.
+        self.handle(f"item {number}", news_message(told(places)), number, entry["accounts"], entry, places)
         return True
+
+    def begin(self, typed: bool = False) -> tuple[dict | None, str | None, list[dict], dict[int, int]]:
+        """The one step at a session's start: the kept list is read, the session is chosen and counted, its places are in hand."""
+        self.at(POINTS_AT_START[0])
+        with self.turn:
+            kept = None if typed else self.kept.entries()
+            self.at(POINTS_AT_START[1])
+            entry, reached, places, waiting = self.admit(kept=kept)
+            if not typed and waiting != self.waiting_written:
+                # Arrivals that wait for an account's share are counted for the next digest.
+                self.desk.count_as(WAITING, waiting)
+                self.waiting_written = waiting
+            self.at(POINTS_AT_START[2])
+        self.at(POINTS_AT_START[3])
+        return entry, reached, places, waiting
+
+    def end(self, entry: dict, places: list[dict], dealt_with: bool, counts: list[int] | None, charged: float | None, **how) -> None:
+        """The one step at a session's end, for everything else the relay does.
+
+        The places the session dealt with go out of the kept list, then its cost is written, then what is kept on its
+        item goes if the item closed, and then nothing is in hand and no session is running. On disk the handled
+        places go before the cost: a stop between the two leaves a session without a cost, which counts as ended and
+        charged everything set aside, and never an arrival that was handled and is handled again.
+        """
+        self.at(POINTS_AT_END[0])
+        with self.turn:
+            try:
+                if dealt_with:
+                    self.kept.done(places)
+                self.at(POINTS_AT_END[1])
+                self.settle(entry, counts, charged, **how)
+                self.at(POINTS_AT_END[2])
+                number = entry["number"]
+                closed = self.closed_since() if dealt_with and number is not None else {}
+                if number in closed:
+                    # Every arrival kept on the item goes with it, whoever wrote it: each is counted for its account, and the digest names them.
+                    gone = self.kept.forget(number)
+                    for account, arrivals in gone:
+                        self.desk.count(tools.DROPPED, account=account, by=arrivals, item=number)
+                    opens = time.strftime("%Y-%m-%d UTC", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
+                    line = (f"Closed until {opens}: two sessions in a row that were shown it had to be ended. "
+                            f"{sum(arrivals for _, arrivals in gone)} arrival(s) kept on it went")  # fmt: skip
+                    if gone:
+                        # The accounts by number, up to eight of them and as many as the line holds, each number whole.
+                        room = self.desk.lock["coordinator"]["digest_line_chars"] - len(line) - len(", of accounts .")
+                        line += ", of accounts " + tools.named([account for account, _ in gone], room, 8)
+                    self.desk.note("item_closed", line + ".", number)
+                self.at(POINTS_AT_END[3])
+            finally:
+                self.running, self.in_hand = None, []
+            self.at(POINTS_AT_END[4])
+        self.at(POINTS_AT_END[5])
 
     # -- one session for one message ----------------------------------------
 
@@ -710,31 +776,28 @@ class Relay:
             self.show(f"relay: session {self.handled} ended early ({seen['ended_by']})")
         return seen
 
-    def handle(self, about: str, text: str, number: int | None, accounts: list[int], entry: dict) -> bool:
+    def handle(self, about: str, text: str, number: int | None, accounts: list[int], entry: dict, places: list[dict]) -> bool:
         """One fresh session for one message. Returns False when the arrival has to be kept for another try."""
-        env = dict(self.plan["env"])
+        # The tools of a session for an item refuse every other item; a session for what was typed says so.
+        env = marked(self.plan["env"], number, accounts, entry.get("held_back", []))
         if number is not None:
-            # The tools of this session refuse every other item. They are given the accounts whose arrivals it handles,
-            # the newest first, and nobody else; and the accounts that are held back now, whose text they leave out.
-            env["DESK_SESSION"] = "item"
-            env["DESK_ITEM"] = str(number)
-            env["DESK_ACCOUNTS"] = json.dumps(accounts)
-            env["DESK_HELD_BACK"] = json.dumps(entry.get("held_back", []))
             self.forget_shown()
-        else:
-            # A session for what was typed to the desk says so: without the mark, the tools of a session do nothing.
-            env["DESK_SESSION"] = "typed"
         self.handled += 1
         if self.log is not None:
             self.log.write(json.dumps({"type": "relay", "session": self.handled, "about": about}) + "\n")
             self.log.flush()
         self.show(f"relay: session {self.handled} ({about})")
-        seen = self.run_session(text, env)
+        try:
+            seen = self.run_session(text, env)
+        except BaseException:
+            with self.turn:
+                self.running, self.in_hand = None, []
+            raise
         spending = self.spending
         if seen["refused_sign_in"]:
             # Nothing was spent: the service did not let the session in.
             entry["let_in"] = False
-            self.settle(entry, seen["counts"], 1)
+            self.end(entry, places, False, seen["counts"], 1)
             self.failures += 1
             self.show("relay: the service refused the desk's sign-in")
             if self.failures == 1:
@@ -748,7 +811,7 @@ class Relay:
         counts = seen["counts"]
         cost = units(counts, spending["weights"]) if counts else 0
         if seen.get("over_the_base"):
-            self.settle(entry, counts, max(cost, entry["reserved"]))
+            self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             self.starts_nothing = "a session took in more than the bounds count on"
             self.show("relay: no more sessions are started until the desk is started again (" + self.starts_nothing + ")")
             self.desk_down("The first response of a session took in more than Claude Code's own instructions, the standing instructions and the first "
@@ -756,8 +819,8 @@ class Relay:
             self.stop_watching()
             return False
         if self.stopping.is_set() and not seen.get("at_a_bound"):
-            # The desk is being stopped in the middle of a session: the arrival stays kept, and nobody is held back for it.
-            self.settle(entry, counts, max(cost, entry["reserved"]))
+            # The desk is being stopped in the middle of a session: the arrival stays kept, and nobody waits for it.
+            self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             return False
         if seen["ended_by"] is None and cost > spending["units_per_session"]:
             # The count at the end says more than the responses did: past the bound of one session all the same.
@@ -767,10 +830,10 @@ class Relay:
             # when the session was shown the payer's text, and nobody else does.
             ended = bool(seen.get("at_a_bound"))
             shown = self.shown_accounts() if ended and number is not None else []
-            self.settle(entry, counts, max(cost, entry["reserved"]), ended=ended, waits=[a for a in accounts[:1] if a in shown], read=bool(shown))
             self.desk.note("session_ended", f"The relay ended a session early ({seen['ended_by']}). It was about: {about}.", number)
+            self.end(entry, places, True, counts, max(cost, entry["reserved"]), ended=ended, waits=[a for a in accounts[:1] if a in shown], read=bool(shown))
         else:
-            self.settle(entry, counts, cost)
+            self.end(entry, places, True, counts, cost)
         if cost > entry["reserved"]:
             self.desk_down("One session cost more than what is set aside for a session. The bound on one turn does not hold; look at the desk's record.")
         return True

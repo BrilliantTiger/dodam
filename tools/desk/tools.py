@@ -473,8 +473,11 @@ class Desk:
                 # The desk's time never goes back: it is the latest time the desk has seen. While the computer's clock
                 # is behind that, the desk's time stands still, so that nothing that was counted ends early.
                 record["clock"] = moment = max(record["clock"], now())
-                for key in ("answers", "labels", "sent", "sessions"):
+                for key in ("answers", "labels", "sent"):
                     record[key] = [entry for entry in record[key] if moment - entry["t"] < DAY]
+                # The entry of a session whose cost is not written yet stays, however far the clock was set ahead: it is
+                # the session that is running, and it is written at its end.
+                record["sessions"] = [entry for entry in record["sessions"] if moment - entry["t"] < DAY or entry.get("charged", 0) is None]
                 # An item that was closed opens again by itself, so many days after the session that closed it.
                 closed_for = self.lock["spending"]["item_closed_days"] * DAY
                 record["closed_items"] = {number: at for number, at in record["closed_items"].items() if moment - at < closed_for}
