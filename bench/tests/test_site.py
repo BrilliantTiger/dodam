@@ -421,6 +421,10 @@ def test_the_english_charter_carries_the_same_version_and_date_as_the_korean_one
 GOOGLE_PAGES = (("Headless mode", "https://antigravity.google/docs/cli/headless/"),
                 ("FAQ", "https://antigravity.google/docs/faq/"),
                 ("Google Antigravity Additional Terms of Service", "https://antigravity.google/terms/"))
+# The other pages the row cites for how versions and the data setting are handled, each under the title it has
+OTHER_PAGES = (("CLI troubleshooting", "https://antigravity.google/docs/cli/troubleshooting/"),
+               ("Advanced setup", "https://code.claude.com/docs/en/setup"),
+               ("Settings", "https://antigravity.google/docs/settings/"))
 
 
 def english_charter() -> str:
@@ -439,12 +443,47 @@ def test_the_charter_names_the_three_official_tools_and_the_basis_for_using_goog
         assert "AGY_CLI_DISABLE_AUTO_UPDATE=true" in row, "the row does not name the official switch that holds the version"
         for title, address in GOOGLE_PAGES:
             assert f'"{title}", {address}' in row, f"a page of Google's is not cited with its title and address: {address}"
-        for address in ("https://github.com/google-gemini/gemini-cli/blob/main/README.md",
-                        "https://antigravity.google/docs/cli/troubleshooting", "https://antigravity.google/docs/settings"):
-            assert address in row, f"the basis is not written in the row: {address}"
+        assert "https://github.com/google-gemini/gemini-cli/blob/main/README.md" in row, "the basis is not written in the row"
+        # every page of Google's is cited in one form, its canonical address, which ends with a slash
+        for address in re.findall(r"https://antigravity\.google/[^\s,;)]*", row):
+            assert address.endswith("/"), f"a page of Google's is not cited at its canonical address: {address}"
+        assert "Set up Claude Code" not in row, "the page on setting up Claude Code is cited under a title it does not have"
+    # each page the row cites says on which day it was read
+    for row, read in ((rows[0], "2026-11-19에 읽음)"), (rows[1], "read on 2026-11-19)")):
+        for title, address in OTHER_PAGES:
+            assert f'"{title}", {address}, {read}' in row, f"the row does not cite {address} with its title and the day it was read"
     assert "(셋 다 2026-11-19에 읽음)" in rows[0] and "(all three read on 2026-11-19)" in rows[1], "the row does not say when Google's pages were read"
     assert "다른 프로그램으로 감싸 쓰는 것을 지원하지 않는다 |" not in rows[0], "the sentence about wrapping is the old one"
     assert "wrapped and used by another program |" not in rows[1], "the sentence about wrapping is the old one"
+    # the self-updater's page describes a 15-minute debounce: at most one check in 15 minutes, not a check every 15 minutes
+    assert "확인은 15분에 한 번을 넘지 않는다" in rows[0] and "15분마다 확인" not in rows[0]
+    assert "it checks at most once every 15 minutes" in rows[1] and "checks every 15 minutes" not in rows[1]
+
+
+def test_the_charter_renders_google_s_third_party_as_third_party():
+    """Google's FAQ and terms speak of third-party software, tools and services: anyone's but Google's and the user's
+    own, whoever made them. "Another company's" is narrower, and would make what Google forbids look smaller."""
+    rows = model_use_rows()
+    versions = [next(line for line in text.splitlines() if line.startswith("| v0.12 |")) for text in (charter(), english_charter())]
+    for row, version, in_row, in_version, gone in (
+            (rows[0], versions[0],
+             ("`agy`를 제3자의 코딩 에이전트나 응용 프로그램 안에 넣어 쓰는 것을 지원하지 않는다",
+              "제3자의 소프트웨어 · 도구 · 서비스를 거쳐 Antigravity에 닿는 것은 약관 위반이고"),
+             ("`agy`를 제3자의 코딩 에이전트나 응용 프로그램 안에 넣어 쓰는 것을 지원하지 않는다고",
+              "제3자의 소프트웨어를 거쳐 Antigravity에 닿는 것을 약관 위반으로"),
+             ("다른 회사의 코딩 에이전트", "다른 회사의 소프트웨어")),
+            (rows[1], versions[1],
+             ("putting `agy` inside a third-party coding agent or application is not supported",
+              "Reaching Antigravity through third-party software, tools or services breaks the terms"),
+             ("putting `agy` inside a third-party coding agent or application is not supported",
+              "reaching Antigravity through third-party software breaks the terms"),
+             ("another company's coding agent", "another company's software"))):
+        for words in in_row:
+            assert words in row, words
+        for words in in_version:
+            assert words in version, f"the history row of version 0.12 renders Google's words otherwise: {words}"
+        for words in gone:
+            assert words not in row and words not in version, words
 
 
 def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_is_not_known():
@@ -458,7 +497,8 @@ def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_i
                   "Google 구독에 딸려 오는 다른 회사 모델", "원격 에이전트", "브라우저 기능", "여러 에이전트를 묶어 돌리는 기능",
                   "유료 크레딧", "둘 이상의 계정",
                   "Google이 글로 확인해 준 적은 없다", "Google이 그렇지 않다고 하면 이 방식도 멈춘다",
-                  "이전 규칙은 \"Google은 자동 실행을 서면으로 허락받은 뒤에만 쓴다\"였다")),
+                  "이전 규칙은 \"Google은 자동 실행을 서면으로 허락받은 뒤에만 쓴다\"였다",
+                  "이 방식은 Google이 공개한 문서가 스크립트와 CI에 쓰라고 적는 헤드리스 모드를 쓴다")),
             (en, ("Google's models only through the Antigravity CLI's headless mode (`agy -p`)",
                   "on November 18, 2026 the owner decided that Gemini works in the project beside Claude, and said so again on November 19",
                   "How it is used, the coordinating AI decided on November 19, 2026",
@@ -467,16 +507,19 @@ def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_i
                   "models of other companies that come with the Google subscription", "remote agents", "the browser feature",
                   "groups of agents", "paid credits", "more than one account",
                   "Google has not confirmed in writing", "If Google says otherwise, this way stops too",
-                  "The earlier rule was \"Google only after it allows unattended runs in writing\"")),
+                  "The earlier rule was \"Google only after it allows unattended runs in writing\"",
+                  "this way uses the headless mode that Google's published pages describe for scripts and CI")),
     ):
         for words in said:
             assert words in row, words
+    # the reason claims no more than that the way uses the mode Google describes: Google has not confirmed the rest
+    assert "쓰라고 적는 방식이" not in charter() and "is the one Google's published pages describe" not in english_charter()
     # Google's pages are said in the charter's own words; one short phrase of theirs at most is quoted
     for row in (ko, en):
         quoted = [q for q in re.findall(r'"([^"]+)"', row) if q not in {t for t, _ in GOOGLE_PAGES}]
         theirs = [q for q in quoted if re.fullmatch(r"[A-Za-z ]+", q) and q not in
-                  {"README", "An important update: Transitioning Gemini CLI to Antigravity CLI", "CLI troubleshooting",
-                   "Set up Claude Code", "Settings", "Google only after it allows unattended runs in writing"}]
+                  {"README", "An important update: Transitioning Gemini CLI to Antigravity CLI",
+                   *(t for t, _ in OTHER_PAGES), "Google only after it allows unattended runs in writing"}]
         assert theirs == ["direct scripting"], theirs
 
 
@@ -487,12 +530,44 @@ def test_the_charter_no_longer_says_google_s_condition_was_met_or_that_nothing_w
              "느슨해지지 않았다"),
             (english_charter(), ("judged to be met", "judged met", "for working sessions", "Google models are used only after Google allows",
                                  "We read running the unmodified official CLI as not being that"),
-             "loosened")):
+             "rule was loosened")):
         current = [line for line in text.splitlines() if not line.startswith("| v")]
         for words in gone:
             assert not any(words in line for line in current), words
         version = next(line for line in text.splitlines() if line.startswith("| v0.12 |"))
         assert row_gone not in version and "judged" not in version, "the history row of version 0.12 still says nothing was loosened"
+
+
+def test_the_history_row_says_the_rule_on_google_was_loosened_by_the_owner_s_decision_and_not_permitted_by_google():
+    for text, said in (
+            (charter(), ("이 결정으로 소유자가 Google에 관한 규칙을 느슨하게 했다", "Google이 글로 허락한 것은 아니다",
+                         "새 방식이 Google이 공개한 문서가 스크립트와 CI에 쓰라고 적는 헤드리스 모드를 쓰기 때문이다",
+                         "병합할 때마다 받게 한 것은 AI 에이전트가 정했다")),
+            (english_charter(), ("With this decision the owner loosened the rule on Google", "Google has not given permission in writing",
+                                 "the new way uses the headless mode that Google's published pages describe for scripts and CI",
+                                 "The AI agents decided that the results come at each merge"))):
+        version = next(line for line in text.splitlines() if line.startswith("| v0.12 |"))
+        for words in said:
+            assert words in version, words
+
+
+def test_the_part_on_working_together_keeps_the_dates_of_the_owner_s_decisions_and_who_chose_the_timing():
+    for text, start, said in (
+            (charter(), "- 2026년 11월 17일부터는 Claude끼리 했다.",
+             ("2026년 11월 18일에 소유자가 Google의 Gemini도 Claude 곁에서 일하게 정했고, 11월 19일에 다시 그렇게 말했다",)),
+            (english_charter(), "- From November 17, 2026 the work used Claude only.",
+             ("On November 18, 2026 the owner decided that Google's Gemini works beside Claude as well, and said so again on November 19",))):
+        bullet = next((line for line in text.splitlines() if line.startswith(start)), "")
+        for words in said:
+            assert words in bullet, words
+    # which reports the owner receives is the owner's decision; that they come at each merge, the agents chose
+    for text, start, said in (
+            (charter(), "- 설계 · 보안 · 개발 · 테스트에 관한 결정은",
+             "어떤 결과를 받는지는 소유자가 정했고, 병합할 때마다 받게 한 것은 AI 에이전트가 정했다."),
+            (english_charter(), "- Decisions about design, security, development and testing",
+             "The owner decided which results these are; the AI agents decided that they come at each merge.")):
+        bullet = next((line for line in text.splitlines() if line.startswith(start)), "")
+        assert said in bullet, said
 
 
 def test_the_charter_says_who_decides_and_what_the_owner_receives():
@@ -565,6 +640,13 @@ def test_wherever_the_page_describes_today_s_conditions_it_names_the_second_subs
     assert building not in strings["now_note"], f"{lang} now_note says Gemini does some of the building"
     guide = (ROOT / "tools" / "site" / "guide.txt").read_text(encoding="utf-8")
     assert "A Gemini subscription is in use as well" in guide, "the guide describes today's conditions without the Gemini subscription"
+
+
+@pytest.mark.parametrize("name", ["README.md", "README.ko.md"])
+def test_the_readme_status_line_names_the_google_subscription_where_it_names_the_subscriptions(name):
+    status = next(line for line in (ROOT / name).read_text(encoding="utf-8").splitlines() if line.startswith("> **"))
+    assert "Claude" in status, "the status line no longer names the subscriptions"
+    assert "Google" in status and "Gemini" in status, f"{name} describes today's conditions without the Google subscription"
 
 
 def test_the_tools_of_the_page_use_no_withdrawn_date_even_as_an_example():
