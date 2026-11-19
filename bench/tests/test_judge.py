@@ -251,3 +251,53 @@ def test_a_program_is_not_up_while_another_process_holds_its_port(tmp_path: Path
         app = App(tmp_path, f"{sys.executable} -c pass", port, "", {})
         assert not app.start(timeout=3)
         app.stop()
+
+
+# A served program that writes more files into its data folder than the judge removes, and notes
+# each of its starts. The judge's bound on removing is set to 10 entries in the test below.
+FILLS_ITS_DATA_FOLDER = """
+import http.server, os, sys
+
+with open(sys.argv[1], "a") as f:
+    f.write("started\\n")
+for n in range(20):
+    open(os.path.join(os.path.dirname(os.environ["DB_PATH"]), f"{n}.txt"), "w").close()
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), http.server.SimpleHTTPRequestHandler).serve_forever()
+"""
+WHERE_IT_IS_GIVEN_BACK = {
+    "at the last stop of the step": ["functional/test_one.py"],
+    "before the next start": ["functional/test_one.py", "security/test_two.py"],
+    "after a file with a program of its own": ["security/test_one.py", "functional/test_two.py"],
+}
+
+
+@pytest.mark.parametrize("where", WHERE_IT_IS_GIVEN_BACK)
+def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result(tmp_path, monkeypatch, where):
+    """What a start of the served program wrote is given back when that start is stopped: after a
+    file of tests that had a program of its own, before the next start, and at the last stop of the
+    step. Where the data folder holds more than the judge removes, the step fails with that reason
+    and a result is written, whatever the tests said before; the program is not started again on
+    what it left, and the files of tests after it are judged as for a program that does not start."""
+    monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
+    tests, app, out, starts = tmp_path / "tests", tmp_path / "app", tmp_path / "out", tmp_path / "starts.txt"
+    manifest = ""
+    for file in WHERE_IT_IS_GIVEN_BACK[where]:
+        kind = file.split("/")[0]
+        manifest += (f'[[test]]\nfile = "{file}"\nkind = "{kind}"\nstep = "build"\n'
+                     + ('weakness = "path-traversal"\n' if kind == "security" else "") + "\n")
+        write(tests, file, f"def {Path(file).stem}():\n    assert True\n")
+    write(tests, "manifest.toml", manifest)
+    write(app, "main.py", FILLS_ITS_DATA_FOLDER)
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py {starts}", "PORT": str(free_port())}
+    try:
+        judge(tests, app, "build", out, lang_env=env, **unseparated(judge))
+        ended = None
+    except Exception as error:
+        ended = error
+    assert ended is None, f"a data folder the judge could not remove ended the judging without a result: {ended!r}"
+    assert not (out / "judge-fault.json").exists(), (out / "judge-fault.json").read_text()
+    reward = json.loads((out / "reward.json").read_text())
+    told = json.loads((out / "details.json").read_text())["tests"]
+    assert reward["reward"] == 0.0, f"the step came out as passed: {reward}"
+    assert any("data folder" in t["message"] for t in told), f"the result does not say why the step failed: {told}"
+    assert starts.read_text().count("started") == 1, "the program was started again on what an earlier start left"

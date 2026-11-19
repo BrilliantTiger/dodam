@@ -530,12 +530,14 @@ tests = [
 
 [[attack]]
 class = "the judge's own clean-up"
-name = "a build leaves more than the judge handles"
-tries = "a build leaves more than 10,000 places any user may write; a program's folder holds more entries than the judge walks"
+name = "the program's side leaves more than the judge handles"
+tries = "a build leaves more than 10,000 places any user may write; a program's folder holds more entries than the judge walks; a served program writes more entries into its data folder than the judge removes"
 must = "the step fails with that reason, and a result is written"
 tests = [
     "tests/test_cli_isolation.py::test_a_build_that_leaves_too_many_places_any_user_may_write_fails_the_step",
     "tests/test_cli_judge.py::test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result",
+    "tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result",
+    "tests/test_web_isolation.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result_in_the_image",
 ]
 
 [[attack]]

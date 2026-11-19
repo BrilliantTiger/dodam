@@ -282,6 +282,37 @@ def test_a_web_judge_that_is_ended_leaves_nothing_that_reads_as_a_judgement(tmp_
     assert said["severity"] == "error" and said["key"] == "ended", said
 
 
+FILLS_ITS_DATA_FOLDER = """
+data = os.path.dirname(os.environ["DB_PATH"])
+for n in range(2000):
+    open(os.path.join(data, str(n)), "w").close()
+
+
+def answer(path):
+    return "ok"
+
+
+serve()
+"""
+
+
+def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result_in_the_image(tmp_path):
+    """Each start of the served program writes 2,000 files into its data folder, and the judge's
+    bound on removing is set to 1,000 entries here. The first file of tests has a program of its
+    own and passes; that program's data folder cannot be removed after it. The step fails with
+    that reason and a result is written: the program is not started again, and the file of tests
+    after it is judged as for a program that does not start."""
+    result = judge_web(tmp_path, FILLS_ITS_DATA_FOLDER,
+                       {"security/test_first.py": "def test_first():\n    assert ask(\"/\") == \"ok\"\n",
+                        "functional/test_second.py": "def test_second():\n    assert ask(\"/\") == \"ok\"\n"},
+                       changed=(("dodam_judge.py", "TREE_ENTRIES = 500_000", "TREE_ENTRIES = 1_000"),))
+    out = tmp_path / "out"
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, out)
+    assert result["reward"]["reward"] == 0.0, f"the step came out as passed: {result['reward']}"
+    assert outcomes(result) == {"test_first": "passed", "test_second.py": "failed"}, lost(result, out)
+    assert "data folder" in message(result, "test_second.py"), lost(result, out)
+
+
 LEAVES = r"""
 note, data = "/app/last-data-folder", os.path.dirname(os.environ["DB_PATH"])
 earlier = open(note).read() if os.path.exists(note) else ""
