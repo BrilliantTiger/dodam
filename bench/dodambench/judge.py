@@ -1195,7 +1195,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     report["runner_ended"] = []
     app = App(app_dir, lang_env.get("START_CMD", ""), port, run_as, extra_env or {})
     shared_up = False
-    served: dict | None = None   # the last file of tests a started program served
+    served: dict | None = None   # the last file of tests a program was started for or served
     for t in selected:
         path = tests_dir / t["file"]
         # a program that does not build or start fails its features but shows no weakness
@@ -1216,10 +1216,10 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
                 shared_up = up and not fresh
             else:
                 up = True
+            served = t
             if not up:
                 cases = [{"name": path.name, "outcome": not_run, "message": app.left or "program did not start"}]
             else:
-                served = t
                 def again() -> tuple[str, str] | None:
                     """A runner or the program was ended: the cases that are left get a program started afresh."""
                     nonlocal shared_up
