@@ -166,6 +166,8 @@ def serve(state, args, stdin_text):
         if method == "GET" and tail[0] == "pulls" and len(tail) == 2:
             return (0, item["pull"], "") if item.get("pull") is not None else (1, None, NOT_FOUND)
         if tail[0] == "issues" and tail[2:] == ["comments"] and method == "GET":
+            if state.get("fail_comments"):
+                return 1, None, "gh: Server Error (HTTP 500)"
             return 0, page(item.get("comments", []), query), ""
         if tail[0] == "issues" and tail[2:] == ["comments"] and method == "POST":
             body = json.loads(stdin_text)["body"]
@@ -224,7 +226,7 @@ DATA = os.path.join(BASE, "agy")
 def run(cmd):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
-        return {"code": proc.returncode, "out": proc.stdout[-4000:], "err": proc.stderr[-4000:]}
+        return {"code": proc.returncode, "out": proc.stdout.strip()[-4000:], "err": proc.stderr[-4000:]}
     except Exception as exc:
         return {"code": -1, "out": "", "err": type(exc).__name__}
 
@@ -771,6 +773,20 @@ def test_a_handled_mark_never_starts_a_second_job_and_a_new_mark_does(world: Wor
     assert len(world.agy_runs()) == 2
 
 
+def test_a_job_that_could_not_read_github_before_agy_started_is_tried_again(world: World):
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.state_extra["fail_comments"] = True
+    first = world.run_watch()
+    assert [r.get("status") for r in results_of(first)] == ["error"], first
+    assert world.agy_runs() == [] and world.github_state().get("removed") is None
+    world.items = world.github_state()["items"]  # type: ignore[assignment]
+    world.state_extra["fail_comments"] = False
+    second = world.run_watch()
+    assert [r.get("status") for r in results_of(second)] == ["posted"], second
+    assert len(world.agy_runs()) == 1
+
+
 def test_the_jobs_own_comments_and_unlabeling_start_nothing(world: World):
     item = world.pull(7)
     world.label(item, "verify")
@@ -886,6 +902,9 @@ ALLOWED_AGY_ENV = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ",
     "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT",
     "GIT_SSH_COMMAND", "AGY_CLI_DISABLE_AUTO_UPDATE",
+    # macOS adds this one to every program's own environment as the program starts: the user's number and
+    # text encoding, not something the job passes on.
+    "__CF_USER_TEXT_ENCODING",
 }
 
 
@@ -1023,8 +1042,8 @@ SCAN_CASES = [
     ("name", "홍길동 씨가 정했습니다."),
     ("name", "김철수님이 정했습니다."),
     ("name", "Ask @someone-else about it."),
-    ("local_path", "The file is at /Users/someone/work/x.py now."),
-    ("local_path", "It is under /home/someone/work/x."),
+    ("local_path", "The file is at /Users/somebody-local/work/x.py now."),
+    ("local_path", "It is under /home/user/work/x."),
     ("local_path", "Look in ~/.config/thing for it."),
     ("private_address", "The server at 192.168.0.12 answered."),
     ("private_address", "It listens on 10.1.2.3 only."),
@@ -1352,7 +1371,7 @@ def test_each_template_states_the_look_the_two_parts_the_verdict_and_the_rules(k
 
 def test_the_document_states_each_property_with_a_test_that_exists():
     text = DOCUMENT.read_text(encoding="utf-8") if DOCUMENT.is_file() else ""
-    named = set(re.findall(r"\btest_[a-z0-9_]+", text))
+    named = set(re.findall(r"`(test_[a-z0-9_]+)`", text))
     defined = {name for name in globals() if name.startswith("test_") and callable(globals()[name])}
     assert named, "the document names no test"
     assert named <= defined, f"the document names tests that do not exist: {sorted(named - defined)}"

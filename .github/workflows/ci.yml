@@ -55,10 +55,12 @@ jobs:
         run: python -m dodambench.harbor_patch apply
       - name: Run the tests
         working-directory: bench
-        run: python -m pytest -q -p no:cacheprovider
+        run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_gemini.py
 
   # For every test about the pilot, one broken variant of the files; each test must fail on its variant.
   # It needs only the test runner, and it runs beside the job above so that neither comes near its time limit.
+  # The checks on the Gemini job (tools/gemini) run here as well: they need only the test runner and git, and
+  # about two minutes, which would bring the job above close to half of its limit.
   variants:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -84,6 +86,9 @@ jobs:
             echo "A part of the variants check was skipped in the job that is there to run it."
             exit 1
           fi
+      - name: Run the checks on the Gemini job
+        working-directory: bench
+        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py
 
   # The estimates' recorded outputs, worked out again in full: every seed and every case, not only the first
   # seed that the tests recompute. The scripts use the standard library only.
