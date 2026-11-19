@@ -254,7 +254,8 @@ def test_a_program_is_not_up_while_another_process_holds_its_port(tmp_path: Path
 
 
 # A served program that writes more files into its data folder than the judge removes, and notes
-# each of its starts. The judge's bound on removing is set to 10 entries in the test below.
+# each of its starts; told to, it ends before it opens its port. The judge's bound on removing is
+# set to 10 entries in the test below.
 FILLS_ITS_DATA_FOLDER = """
 import http.server, os, sys
 
@@ -262,10 +263,13 @@ with open(sys.argv[1], "a") as f:
     f.write("started\\n")
 for n in range(20):
     open(os.path.join(os.path.dirname(os.environ["DB_PATH"]), f"{n}.txt"), "w").close()
+if sys.argv[2:] == ["ends"]:
+    raise SystemExit(1)
 http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), http.server.SimpleHTTPRequestHandler).serve_forever()
 """
 WHERE_IT_IS_GIVEN_BACK = {
     "at the last stop of the step": ["functional/test_one.py"],
+    "at the last stop, of a program that ends before it opens its port": ["functional/test_one.py"],
     "before the next start": ["functional/test_one.py", "security/test_two.py"],
     "after a file with a program of its own": ["security/test_one.py", "functional/test_two.py"],
 }
@@ -275,7 +279,7 @@ WHERE_IT_IS_GIVEN_BACK = {
 def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result(tmp_path, monkeypatch, where):
     """What a start of the served program wrote is given back when that start is stopped: after a
     file of tests that had a program of its own, before the next start, and at the last stop of the
-    step. Where the data folder holds more than the judge removes, the step fails with that reason
+    step, also when the program ended before it opened its port. Where the data folder holds more than the judge removes, the step fails with that reason
     and a result is written, whatever the tests said before; the program is not started again on
     what it left, and the files of tests after it are judged as for a program that does not start."""
     monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
@@ -288,7 +292,8 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
         write(tests, file, f"def {Path(file).stem}():\n    assert True\n")
     write(tests, "manifest.toml", manifest)
     write(app, "main.py", FILLS_ITS_DATA_FOLDER)
-    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py {starts}", "PORT": str(free_port())}
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py {starts}" + (" ends" if "ends before" in where else ""),
+           "PORT": str(free_port())}
     try:
         judge(tests, app, "build", out, lang_env=env, **unseparated(judge))
         ended = None
