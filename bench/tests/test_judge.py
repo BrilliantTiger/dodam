@@ -272,14 +272,18 @@ WHERE_IT_IS_GIVEN_BACK = {
     "at the last stop, of a program that ends before it opens its port": ["functional/test_one.py"],
     "before the next start": ["functional/test_one.py", "security/test_two.py"],
     "after a file with a program of its own": ["security/test_one.py", "functional/test_two.py"],
+    "when a case runner that was ended is started again": ["functional/test_ended.py"],
 }
+# the first case ends its own case runner; the case after it meets the program's restart
+ENDS_ITS_RUNNER = "import os\n\n\ndef test_ended():\n    os.kill(os.getpid(), 9)\n\n\ndef test_after():\n    assert True\n"
 
 
 @pytest.mark.parametrize("where", WHERE_IT_IS_GIVEN_BACK)
 def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result(tmp_path, monkeypatch, where):
     """What a start of the served program wrote is given back when that start is stopped: after a
     file of tests that had a program of its own, before the next start, and at the last stop of the
-    step, also when the program ended before it opened its port. Where the data folder holds more than the judge removes, the step fails with that reason
+    step, also when the program ended before it opened its port, and when a case runner that was
+    ended is started again. Where the data folder holds more than the judge removes, the step fails with that reason
     and a result is written, whatever the tests said before; the program is not started again on
     what it left, and the files of tests after it are judged as for a program that does not start."""
     monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
@@ -289,7 +293,7 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
         kind = file.split("/")[0]
         manifest += (f'[[test]]\nfile = "{file}"\nkind = "{kind}"\nstep = "build"\n'
                      + ('weakness = "path-traversal"\n' if kind == "security" else "") + "\n")
-        write(tests, file, f"def {Path(file).stem}():\n    assert True\n")
+        write(tests, file, ENDS_ITS_RUNNER if file.endswith("test_ended.py") else f"def {Path(file).stem}():\n    assert True\n")
     write(tests, "manifest.toml", manifest)
     write(app, "main.py", FILLS_ITS_DATA_FOLDER)
     env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py {starts}" + (" ends" if "ends before" in where else ""),
@@ -306,3 +310,7 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
     assert reward["reward"] == 0.0, f"the step came out as passed: {reward}"
     assert any("data folder" in t["message"] for t in told), f"the result does not say why the step failed: {told}"
     assert starts.read_text().count("started") == 1, "the program was started again on what an earlier start left"
+    if where == "when a case runner that was ended is started again":
+        said = {t["name"]: (t["outcome"], t["message"]) for t in told}
+        assert said["test_ended"][0] == "failed" and "signal 9" in said["test_ended"][1], said
+        assert said["test_after"][0] == "failed" and "data folder" in said["test_after"][1], said
