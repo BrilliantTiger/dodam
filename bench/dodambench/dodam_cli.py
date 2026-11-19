@@ -16,7 +16,7 @@ started and where the case's input files are; `outside`, a neighbour the program
 its working folder; and a home and temporary folder of its own. The test sees the program only from
 outside: its standard output and error, its exit code and the files it left.
 
-Every case has limits. In the verifier each is a bound that holds whatever the program does:
+Every case has limits. In the verifier each has a line that holds whatever the program does:
 
 - time, added up over the runs of the case: the judge ends the program when it is up;
 - output, standard output plus standard error: the judge stops reading and ends the program;
@@ -28,9 +28,10 @@ Every case has limits. In the verifier each is a bound that holds whatever the p
   second, everything the kernel counts for the container, memory moved out to swap included,
   less three things, and ends the program above the limit. Left out are the pages of files that
   stand on the kernel's two lists for pages of files, so a program that only reads files never
-  fails this way; a page of a file on neither list counts. Left out are the kernel's records of
-  names and files, up to a quarter of the limit and at most 16 MB; they count beyond that. Left
-  out are the cases' files, which have a limit of their own, and this runner's own memory. A
+  fails this way by how much it reads; a page of a file on neither list counts. Left out are the kernel's records of
+  names and files, up to a quarter of the limit and at most 16 MB; they count beyond that, those
+  of the different files a program reads too. Left out are the cases' files, which have a limit
+  of their own, and this runner's own memory. A
   page on the two lists that something holds is left out although the kernel cannot give it
   back. The ways of holding one that are known are closed (see the end of this entry); it is
   not shown that there is no other, and for one the container's memory cap is the only bound.
