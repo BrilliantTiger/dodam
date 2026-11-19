@@ -1,0 +1,119 @@
+# Variants of the Java secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''
+        if (!place.startsWith(folder)) {
+            throw new Refused(3, name + " is outside the working folder");
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''
+        try {
+            return Path.of(name).toRealPath();
+        } catch (IOException | RuntimeException e) {
+            throw new Refused(2, name + " does not exist");
+        }
+'''
+new = '''
+        return Path.of(name).toAbsolutePath().normalize();
+'''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE'''
+new = '''StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''        return in.readNBytes(MAX_INPUT + 1);'''
+new = '''        return in.readAllBytes();'''
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''
+        if (data.length > MAX_INPUT) {
+            throw new Refused(2, "the input is larger than 1048576 bytes");
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''
+        if (!record.isEmpty() || !atStart) {
+            record.add(field.toString());
+            records.add(record);
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''
+            if (!row.get(column).matches("[A-Za-z0-9_-]{1,64}")) {
+                throw new Refused(2, "a value of the column cannot be a file name");
+            }
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''            Files.createDirectory(place);'''
+new = '''            Files.createDirectories(place);'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main/java/app/App.java"
+old = '''            int lineEnd = c == '\n' ? 1 : c == '\r' && i + 1 < n && text.charAt(i + 1) == '\n' ? 2 : 0;'''
+new = '''            int lineEnd = c == '\n' ? 1 : 0;'''

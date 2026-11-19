@@ -1,0 +1,130 @@
+# Variants of the C++ secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''
+    if (!inside(folder, place)) {
+        throw Refused{3, name.string() + " is outside the working folder"};
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''    fs::path place = fs::canonical(name, error);'''
+new = '''    fs::path place = (fs::absolute(name, error) / "").lexically_normal().parent_path();'''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''O_WRONLY | O_CREAT | O_EXCL'''
+new = '''O_WRONLY | O_CREAT | O_TRUNC'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''
+    std::string data(MAX_INPUT + 1, '\0');
+    size_t size = 0;
+    while (size < data.size()) {
+        ssize_t got = ::read(fd, data.data() + size, data.size() - size);
+        if (got < 0) throw Refused{2, "the input cannot be read"};
+        if (got == 0) break;
+        size += static_cast<size_t>(got);
+    }
+    data.resize(size);
+    return data;
+'''
+new = '''
+    std::string data;
+    std::string chunk(65536, '\0');
+    for (;;) {
+        ssize_t got = ::read(fd, chunk.data(), chunk.size());
+        if (got < 0) throw Refused{2, "the input cannot be read"};
+        if (got == 0) break;
+        data.append(chunk, 0, static_cast<size_t>(got));
+    }
+    return data;
+'''
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''
+    if (data.size() > MAX_INPUT) {
+        throw Refused{2, "the input is larger than 1048576 bytes"};
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''
+    if (!record.empty() || !at_start) {
+        record.push_back(field);
+        records.push_back(record);
+    }
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''
+        if (!file_name(value)) throw Refused{2, "a value of the column cannot be a file name"};
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''    if (::mkdir(place.c_str(), 0755) != 0) {'''
+new = '''    if (::mkdir(place.c_str(), 0755) != 0 && errno != EEXIST) {'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "src/main.cc"
+old = '''        const size_t line_end = c == '\n' ? 1 : (c == '\r' && i + 1 < n && text[i + 1] == '\n') ? 2 : 0;'''
+new = '''        const size_t line_end = c == '\n' ? 1 : 0;'''
