@@ -7,7 +7,7 @@ The tasks of the Dodam benchmark are not web services only. A program that runs 
 - The judge gives the program **arguments, standard input and input files**, and looks only from outside at its **standard output, its exit code and the files it leaves**. It never looks inside the program.
 - One set of tests judges all seven languages (Python, TypeScript, Java, C#, Go, Rust, C++).
 - Hidden tests are functional, boundary or security tests and are reported separately. A task has a build step and change steps, and a change step runs the earlier steps' tests again and counts what broke. This is the same as for web tasks.
-- The program starts in a fresh working folder for every test (every case). Time, memory, output size, number of processes and file size are limited. A limit is a line that cannot be passed whatever the program does; a case that tried either fails, alone, or could not take the thing in the first place.
+- The program starts in a fresh working folder for every test (every case). Time, memory, output size, number of processes and file size are limited. Whatever the program does, it cannot make more processes than the limit or write more than the limit into files. A program that runs past its time or its output limit is ended, and that case alone fails. Memory is measured, and a program measured above its limit is ended and its case fails; but a program can be above its limit between two measurements, and a page of a file that something holds in a way the judge does not refuse is left out of the count, so the line memory cannot pass is the container's memory cap.
 - The build is treated exactly as the program is. The tests are closed before the build starts.
 - The sample task is a converter from CSV to JSON. Its 70 prepared solutions (for each language 2 right ones, 6 vulnerable ones and 2 broken ones) all got the judgement they were written for, in all seven languages.
 
@@ -166,7 +166,7 @@ Each rule has a test that fails when the rule is broken.
 | No network while judging | The judging container is made without network. A program that tries to connect outside or to look up a name fails |
 | The program runs as an ordinary user who cannot become root | A user for this judging alone, in no group, with the kernel's mark that it can gain no rights. `setuid(0)`, `su` and a rights-lending file that the build prepared all fail |
 | The program cannot write, replace or remove the result file | Only root can enter the results folder, and nobody else can rename it from the folder above. Whatever lay where a result goes is removed before anything runs. The judge writes the result to a new file and renames it into place, so it never follows a planted link |
-| A limit is a bound that holds whatever the program does | The section "The limits" says for each resource what enforces it and how far it can really be passed |
+| For every limit there is a line that holds whatever the program does | The section "The limits" says for each resource what enforces it and how far it can really be passed |
 | What one case or one step takes is given back before the next starts | Every process is ended and the case's folder removed. Shared memory and message queues that would stay after their processes cannot be made in the first place. What the working user left running is ended before the build, what the build left running before the first case, and what a served program left running and wrote before its next start |
 | The judge survives whatever the program's side leaves behind | Every place where the judge removes, hands over, opens or searches what the program's side wrote is bounded in time, memory and open files for any tree of folders, and follows no link. If a case's folder cannot be removed, that case fails; it is no fault of the judge, and the other cases are judged as usual. A tree with more entries than the judge handles fails the step, with a result |
 | A kill ends in a judgement | The section "When something is ended while a case runs" |
@@ -179,7 +179,7 @@ Each rule has a test that fails when the rule is broken.
 
 ## The limits
 
-A limit is a bound, not a measurement. For each resource there is a line that cannot be passed whatever the program does, and the kernel or the container holds it.
+A limit is a bound, not a measurement. For each resource there is a line that cannot be passed whatever the program does, and the judge, the kernel or the container holds it.
 
 | Resource | The line that cannot be passed | What holds it | A case that broke the limit |
 |---|---|---|---|
