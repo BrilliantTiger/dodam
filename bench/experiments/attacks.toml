@@ -1,0 +1,679 @@
+# The attacks the judging of command-line programs is measured against.
+#
+# This list is written before candidates are compared: a design is chosen by what it stops on this
+# list, how long a case takes and whether repeated judging agrees. Every attack is also a test, and
+# a test checks that each entry names one. "The program's side" is everything the agent's work can
+# make run: the build and what the build starts, as well as the program.
+
+[[attack]]
+class = "learning the judging"
+name = "the build reads the tests"
+tries = "the build copies the tests folder into the program's folder and looks for the marker every hidden test carries"
+must = "the build sees no file of the tests, the results or the judge"
+tests = [
+    "tests/test_cli_isolation.py::test_the_build_is_held_as_the_program_is",
+    "tests/test_web_isolation.py::test_neither_the_build_nor_the_served_program_can_read_the_tests",
+]
+
+[[attack]]
+class = "learning the judging"
+name = "the program reads the tests"
+tries = "the program walks the tests folder and reads every file"
+must = "nothing is listed and nothing is read"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_cannot_read_the_tests_or_the_judges_settings",
+    "tests/test_web_isolation.py::test_neither_the_build_nor_the_served_program_can_read_the_tests",
+]
+
+[[attack]]
+class = "learning the judging"
+name = "the program reads the process list"
+tries = "the program reads the command line of every process in the container"
+must = "no command line names a test, a report, a step or a folder of the judge"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging",
+    "tests/test_web_isolation.py::test_the_served_program_learns_nothing_about_the_test_being_run",
+    "tests/test_cli_isolation.py::test_the_build_is_held_as_the_program_is",
+]
+
+[[attack]]
+class = "learning the judging"
+name = "the program reads the judge's processes"
+tries = "the program reads the environment, the working folder and the open files of every other process"
+must = "none is readable"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_cannot_read_the_tests_or_the_judges_settings",
+]
+
+[[attack]]
+class = "learning the judging"
+name = "the program reads its own environment"
+tries = "the program looks for anything of the judge's in its environment"
+must = "nothing of the judge's is there"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging",
+]
+
+[[attack]]
+class = "changing the result"
+name = "the program writes the result"
+tries = "the program writes, replaces, removes the result file, renames its folder and plants a link where it goes"
+must = "every attempt is refused and the judge's result stands"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_cannot_write_replace_or_remove_the_result",
+]
+
+[[attack]]
+class = "gaining rights"
+name = "the program becomes root or the build's user"
+tries = "setuid(0), su, su to the build's user, and a rights-lending file the build prepared"
+must = "every attempt is refused"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_runs_as_an_ordinary_user_who_cannot_become_root",
+    "tests/test_cli_isolation.py::test_a_build_cannot_prepare_the_ground_for_the_program",
+]
+
+[[attack]]
+class = "gaining rights"
+name = "the judge runs the program as root"
+tries = "the judge is started as root without a user to run the program as, with and without asking for no separation"
+must = "the judge refuses and runs nothing"
+tests = [
+    "tests/test_cli_isolation.py::test_root_never_judges_without_separation",
+]
+
+[[attack]]
+class = "reaching out"
+name = "the program uses the network"
+tries = "the program connects to an address outside and looks a name up"
+must = "both fail"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_has_no_network",
+]
+
+[[attack]]
+class = "ending or outlasting the judge"
+name = "the program kills what it can"
+tries = "the program signals process 1, its parent and every process"
+must = "it reaches none of them and the judge goes on"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[kills everything it can]",
+]
+
+[[attack]]
+class = "ending or outlasting the judge"
+name = "the program hangs"
+tries = "the program ignores every signal and sleeps"
+must = "it is ended at the time limit and its case fails"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[ignores every signal and hangs]",
+]
+
+[[attack]]
+class = "ending or outlasting the judge"
+name = "the program leaves a process behind"
+tries = "the program leaves a daemon in a session of its own and ends"
+must = "the case fails and the daemon is gone before the next case"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[leaves a daemon in a session of its own]",
+]
+
+[[attack]]
+class = "ending or outlasting the judge"
+name = "the build leaves a process behind"
+tries = "the build starts a process in a session of its own"
+must = "it is gone before the first case"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_cannot_prepare_the_ground_for_the_program",
+]
+
+[[attack]]
+class = "memory"
+name = "memory in one process"
+tries = "one process takes memory as fast as it can"
+must = "it is ended above the limit by the judge's measuring, before the kernel has to, and its case fails"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory]",
+]
+
+[[attack]]
+class = "memory"
+name = "memory spread over processes"
+tries = "eight processes take 64 MB each"
+must = "as above"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory in many processes]",
+]
+
+[[attack]]
+class = "memory"
+name = "memory in a memory file"
+tries = "a memory file is filled and never mapped, so no process holds it"
+must = "as above: the memory is counted although it is in no process"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[memory in memory files that are never mapped]",
+]
+
+[[attack]]
+class = "memory"
+name = "memory that outlives its processes"
+tries = "System V shared memory of 320 MB, a System V message queue and semaphores, a POSIX message queue, a file in the shared memory folder"
+must = "none can be made"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[memory that would outlive its processes]",
+    "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next",
+]
+
+[[attack]]
+class = "memory"
+name = "more memory than the container has"
+tries = "the case's limit is set above the container's cap and the program takes memory until the kernel steps in"
+must = "the kernel ends the program and not the judge, the case fails for memory, the next case passes"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[more memory than the whole container has]",
+    "tests/test_cli_isolation.py::test_the_kernel_holds_the_program_to_its_limits",
+]
+
+[[attack]]
+class = "memory"
+name = "the build eats memory"
+tries = "the build takes more memory than the container has"
+must = "the kernel ends the build and not the judge; the build has failed"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_that_misbehaves_never_takes_the_judge_down",
+]
+
+[[attack]]
+class = "memory"
+name = "the build prints without end"
+tries = "the build prints 400 MB"
+must = "the judge keeps only the end of it"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_that_misbehaves_never_takes_the_judge_down",
+]
+
+[[attack]]
+class = "files"
+name = "one file past the size a file may have"
+tries = "a file is made larger than the limit"
+must = "the kernel refuses it and the case fails"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[one file past the size a file may have]",
+]
+
+[[attack]]
+class = "files"
+name = "a sparse file"
+tries = "a file of 10 GB that takes no space"
+must = "no file can be made larger than the limit, sparse or not"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[a sparse file larger than a file may be]",
+]
+
+[[attack]]
+class = "files"
+name = "many files"
+tries = "files of 1 MB without end"
+must = "no more than the limit can be written"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[many files]",
+]
+
+[[attack]]
+class = "files"
+name = "files in the home and temporary folders"
+tries = "files of 1 MB without end in the case's home and temporary folder"
+must = "no more than the limit can be written in all of them together"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[files in its home and temporary folder]",
+]
+
+[[attack]]
+class = "files"
+name = "files deleted while open"
+tries = "240 MB in eight files that are deleted while they are open, so no folder lists them"
+must = "no more than the limit can be written"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[files deleted while they are open]",
+]
+
+[[attack]]
+class = "files"
+name = "files below a deep chain of folders"
+tries = "1,100 folders inside each other and 240 MB below them"
+must = "no more than the limit can be written, and the folders are removed"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[1,100 folders inside each other with files below]",
+]
+
+[[attack]]
+class = "files"
+name = "countless empty files"
+tries = "empty files without end"
+must = "no more entries than the cap can be made"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[countless empty files]",
+]
+
+[[attack]]
+class = "files"
+name = "files outside the case's folder"
+tries = "the program tries every place a user may usually write"
+must = "only the case's own folders are writable"
+tests = [
+    "tests/test_cli_isolation.py::test_the_program_can_write_nowhere_but_in_its_own_case",
+    "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next",
+]
+
+[[attack]]
+class = "processes"
+name = "fork without end"
+tries = "every process forks without end"
+must = "no more than the limit exist; the case ends at its time limit and fails"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[fork without end]",
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[processes until no more can be made]",
+]
+
+[[attack]]
+class = "processes"
+name = "threads without end"
+tries = "threads without end"
+must = "no more than the limit exist"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[threads without end]",
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[threads until no more can be made]",
+]
+
+[[attack]]
+class = "processes"
+name = "the build forks without end"
+tries = "the build forks without end"
+must = "the container's cap holds; the judge ends the build at its time limit and delivers a result"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_that_misbehaves_never_takes_the_judge_down",
+]
+
+[[attack]]
+class = "output"
+name = "flood of output"
+tries = "the program writes without end"
+must = "the judge stops reading at the limit, ends the program, and the case fails"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[flood of output]",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "what resists removal"
+tries = "a deep chain of folders, closed folders, a named pipe, links to the tests and to everything, names with a line break and bytes that are no text"
+must = "everything is removed, no link is followed, and the next case starts empty"
+tests = [
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[folders and names that resist removal]",
+    "tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[1,100 folders inside each other with files below]",
+    "tests/test_cli_judge.py::test_removing_what_a_case_left_follows_no_link_and_needs_no_depth",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "what cannot be removed"
+tries = "removing the case's folder fails"
+must = "that case fails; it is no fault of the judge and the other cases are judged"
+tests = [
+    "tests/test_cli_judge.py::test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge",
+]
+
+[[attack]]
+class = "leaving things for a later case"
+name = "files, kernel objects and processes"
+tries = "a marker file in every place it can write, shared memory, a message queue, a process"
+must = "the next case finds none"
+tests = [
+    "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next",
+]
+
+[[attack]]
+class = "leaving things for a later case"
+name = "the build prepares the ground"
+tries = "the build leaves writable folders and a rights-lending file"
+must = "none is usable by the program"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_cannot_prepare_the_ground_for_the_program",
+]
+
+[[attack]]
+class = "passing as unjudged"
+name = "a limit broken before a skip"
+tries = "the program hangs in the feature a security test needs first"
+must = "the case fails; it is not left unjudged"
+tests = [
+    "tests/test_cli_isolation.py::test_a_limit_broken_before_a_security_test_is_left_unjudged_fails_the_case",
+]
+
+[[attack]]
+class = "passing as unjudged"
+name = "an unjudged check read as a pass"
+tries = "a security test is left unjudged"
+must = "the security pass rate counts it as not passed"
+tests = [
+    "tests/test_cli_judge.py::test_a_check_that_was_not_judged_never_reads_as_passed",
+]
+
+[[attack]]
+class = "a container without bounds"
+name = "a missing cap"
+tries = "the judge is started in a container with no process cap, with no capped folder for the cases, or with a memory cap above the machine's memory"
+must = "the judge refuses with a diagnostic that is JSON first and runs nothing"
+tests = [
+    "tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold",
+]
+
+[[attack]]
+class = "a fault of the judge"
+name = "the judge cannot do its work"
+tries = "the judge's own tool breaks during a test"
+must = "no result is written and the judge ends with its own exit code"
+tests = [
+    "tests/test_cli_isolation.py::test_a_fault_of_the_judge_in_the_container_leaves_no_result",
+]
+
+[[attack]]
+class = "memory"
+name = "two threads take memory the kernel fills at once"
+tries = "one process with two threads asks the kernel, as fast as it can, for memory that is filled before the call returns"
+must = "the case fails for memory, the cases before and after it pass, and the kernel does not have to end anything"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[two threads asking for memory the kernel fills at once]",
+]
+
+[[attack]]
+class = "memory"
+name = "fifteen processes take memory at the same moment"
+tries = "fifteen processes wait for one signal and then each fills its memory at once"
+must = "the case fails for memory and the cases before and after it pass"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge[fifteen processes that take memory at the same moment]",
+]
+
+[[attack]]
+class = "memory"
+name = "memory taken and given back between two measurements"
+tries = "the program takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
+must = "not stopped by the design when no measurement falls into that moment: the case passes. The kernel's highest value for the container counts the cache of files, so it fails no case; the result names the run and says how far above the limit the new high lay. With the judge measuring every 0.002 seconds as it does, the program of this test fails for memory"
+tests = [
+    "tests/test_cli_isolation.py::test_memory_taken_and_given_back_between_two_measurements_is_recorded_and_fails_no_case",
+]
+
+[[attack]]
+class = "memory"
+name = "the container is run out of memory again and again"
+tries = "a limit the container cannot give, and memory taken to the end, fifteen judgings in a row"
+must = "every one of the fifteen judgings has all three cases judged: the attack fails, the cases around it pass"
+tests = [
+    "tests/test_cli_isolation.py::test_running_the_container_out_of_memory_never_loses_a_judgement",
+]
+
+[[attack]]
+class = "a container without bounds"
+name = "a container that may swap"
+tries = "the container is allowed swap beyond its memory cap, on a machine that has swap"
+must = "the judge's result says how much it may swap, and memory moved out to swap counts against the case's limit"
+tests = [
+    "tests/test_cli_judge.py::test_the_judge_says_how_much_its_container_may_swap",
+    "tests/test_cli_judge.py::test_memory_moved_out_to_swap_is_counted_as_memory",
+    "tests/test_cli_convert.py::test_a_web_task_carries_its_caps_onto_the_path_the_measurement_uses",
+]
+
+[[attack]]
+class = "a container without bounds"
+name = "a web task in a container without caps that hold"
+tries = "the judge of a web task is started without a cap on processes, and with a memory cap above the machine's memory"
+must = "nothing of the program's side is run, and the refusal is JSON first"
+tests = [
+    "tests/test_web_isolation.py::test_the_web_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold",
+]
+
+[[attack]]
+class = "a container without bounds"
+name = "a cases' folder without a cap on entries"
+tries = "the folder the cases live in is capped in size but may hold any number of entries"
+must = "nothing of the program's side is run, and the refusal is JSON first"
+tests = [
+    "tests/test_cli_isolation.py::test_the_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the kernel ends the program"
+tries = "with the judge's own stops taken out, the program fills the container until the kernel ends a process, five judgings in a row"
+must = "the case fails for memory, the cases before and after it pass, and the judge ends with a result"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the kernel ends the case runner"
+tries = "a hidden test takes the container's memory itself, so that the kernel ends the process that runs the cases, five judgings in a row"
+must = "that case fails with the reason, the cases before it keep their outcome, the cases after it and the other files are judged"
+tests = [
+    "tests/test_cli_isolation.py::test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the case runner is ended while its program runs"
+tries = "the process that runs the cases is ended by a signal in the middle of a case, with the program of that case still running"
+must = "that case fails with the reason; the next case finds no process and no file of it; every other case is judged"
+tests = [
+    "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running",
+    "tests/test_web_isolation.py::test_a_web_case_runner_that_is_ended_costs_only_the_case_that_was_running",
+    "tests/test_cli_judge.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the program is ended from outside"
+tries = "a signal ends the program in the middle of its run"
+must = "that case fails and no other"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_is_ended_from_outside_fails_its_case_and_no_other",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the kernel ends a served program"
+tries = "a served web program takes memory until the kernel ends it, in a test that would pass by itself"
+must = "that case fails because the kernel ended a process while it ran, and the cases after it meet a program started afresh"
+tests = [
+    "tests/test_web_isolation.py::test_a_served_program_the_kernel_ends_fails_that_case_and_the_rest_meet_a_fresh_program",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the build is ended"
+tries = "the build runs the container out of memory and goes on as if nothing happened; a build ends itself with a signal; a build runs out of time"
+must = "the step's result says the build failed and by what it was ended"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_that_is_ended_fails_the_step_and_the_result_says_by_what",
+]
+
+[[attack]]
+class = "a kill while a case runs"
+name = "the judge itself is ended"
+tries = "the judging process is ended by a signal in the middle of a case"
+must = "no file reads as a result, the exit code is not zero, and the script that started the judge says, JSON first, that the judging ended without a result"
+tests = [
+    "tests/test_cli_isolation.py::test_a_judge_that_is_ended_leaves_nothing_that_reads_as_a_judgement",
+    "tests/test_web_isolation.py::test_a_web_judge_that_is_ended_leaves_nothing_that_reads_as_a_judgement",
+    "tests/test_cli_convert.py::test_the_verifiers_script_says_so_when_the_judge_ends_without_a_result",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "folders of any depth where the program's folder and its dependencies are"
+tries = "3,000 folders inside each other in the program's folder and where the pinned dependencies go, and a named pipe there"
+must = "the judge hands the folder over, drops what was brought and judges the step"
+tests = [
+    "tests/test_cli_isolation.py::test_folders_of_any_depth_in_the_programs_folder_never_take_the_judge_down",
+    "tests/test_judge.py::test_dependencies_the_app_brought_are_dropped_whatever_shape_they_have",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "a build leaves things too deep for a path to name"
+tries = "3,000 folders down, the build leaves a folder any user may write and a file that lends its owner's rights, in the program's folder and in the temporary folder"
+must = "the program can write into neither and gains no rights; the judge ends with a result"
+tests = [
+    "tests/test_cli_isolation.py::test_what_a_build_leaves_too_deep_for_a_path_is_closed_all_the_same",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "the program's side leaves more than the judge handles"
+tries = "a build leaves more than 10,000 places any user may write; a program's folder holds more entries than the judge walks; a served program writes more entries into its data folder than the judge removes"
+must = "the step fails with that reason, and a result is written"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_that_leaves_too_many_places_any_user_may_write_fails_the_step",
+    "tests/test_cli_judge.py::test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result",
+    "tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result",
+    "tests/test_web_isolation.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result_in_the_image",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "a served program fills its data folder and leaves its process group"
+tries = "each start of a served program fills its data folder 3,000 folders deep and moves its server out of the group of processes the judge started"
+must = "the next start finds the port free and nothing of the earlier data folder"
+tests = [
+    "tests/test_web_isolation.py::test_a_served_program_that_left_its_process_group_is_ended_before_the_next_start",
+    "tests/test_web_isolation.py::test_what_one_start_of_a_served_program_wrote_is_gone_before_the_next",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "something sits where the result goes"
+tries = "a folder lies where the reward file goes, a link where the text reward goes, and a fault of an earlier judging beside them"
+must = "all three are removed before anything runs, and the result is written"
+tests = [
+    "tests/test_judge.py::test_whatever_sits_where_the_results_go_is_replaced_before_anything_runs",
+]
+
+[[attack]]
+class = "processes"
+name = "processes left before the build, and a build at the container's cap"
+tries = "the working user leaves a process running; a build fills every process the container may hold, each in a session of its own"
+must = "the build finds none of the first; the second is ended without a new process, and the step's result says the build failed"
+tests = [
+    "tests/test_cli_isolation.py::test_what_the_working_user_left_running_is_ended_before_the_build",
+    "tests/test_cli_isolation.py::test_a_build_that_fills_the_containers_process_cap_is_ended_all_the_same",
+    "tests/test_cli_judge.py::test_processes_are_ended_even_when_no_new_process_can_be_made",
+]
+
+[[attack]]
+class = "learning the judging"
+name = "the build moves the results folder aside"
+tries = "the folder above the results is one any user may write, and the build renames the results folder and puts its own in its place"
+must = "the rename is refused"
+tests = [
+    "tests/test_cli_isolation.py::test_no_user_can_rename_or_replace_the_results_folder_from_the_folder_above",
+]
+
+[[attack]]
+class = "memory"
+name = "memory taken for a moment by a program that also reads from disk"
+tries = "the program reads 50 MB of a file that is not in the cache, then takes 400 MB under a limit of 256 MB and gives it back at once, while the judge does not get to measure"
+must = "not stopped by the design when no measurement falls into that moment: the case passes, and the result names the run and says how far above the limit the new high lay"
+tests = [
+    "tests/test_cli_isolation.py::test_memory_taken_for_a_moment_by_a_program_that_also_reads_from_disk_is_recorded_and_fails_no_case",
+]
+
+[[attack]]
+class = "the judge's own clean-up"
+name = "folders and names a test cannot list"
+tries = "the program leaves a chain of folders as deep as it can make, or folders with names of 250 letters 32 deep, in a case whose test lists the files the program left"
+must = "that case fails by its own assertion, the cases before and after it are judged, and the judge ends normally with a result"
+tests = [
+    "tests/test_cli_isolation.py::test_listing_what_a_program_left_fails_that_case_by_its_assertion_and_never_the_judge[a chain of folders as deep as a program can make]",
+    "tests/test_cli_isolation.py::test_listing_what_a_program_left_fails_that_case_by_its_assertion_and_never_the_judge[names of 250 letters, 32 folders deep]",
+]
+
+[[attack]]
+class = "processes"
+name = "a build whose processes keep making new ones at the container's cap"
+tries = "a build fills every process the container may hold, and each of its processes keeps trying to make another, so that a place that comes free is taken again at once"
+must = "the judge ends them all, and the step's result says the build failed"
+tests = [
+    "tests/test_cli_isolation.py::test_a_build_whose_processes_keep_making_new_ones_at_the_cap_is_ended_all_the_same",
+]
+
+[[attack]]
+class = "memory"
+name = "holding on to the kernel's records of names and files"
+tries = "the program makes the kernel keep records that it cannot give back while the program holds on to what they describe: open files, memory files that are mapped and closed, shared mappings without a file, the image's files mapped, far-apart pages in the case folder; or it asks for 400,000 names that are not there"
+must = "at most a quarter of the case's memory limit and never more than 16 MB of such records are left out of the case's memory; what goes beyond counts, and a program that holds more than its limit and that amount fails for memory"
+tests = [
+    "tests/test_cli_isolation.py::test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_left_out",
+    "tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it",
+]
+
+[[attack]]
+class = "memory"
+name = "locking pages of files in memory"
+tries = "the program, alone or with many processes, locks pages in memory: a range, everything it has, a mapping asked for as locked, shared memory; a locked page of a file cannot be given back by the kernel"
+must = "nothing of the program's side, in the build or in a run, can lock memory; and a page of a file that stands on neither of the kernel's two lists counts as memory whatever keeps it off them"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case",
+    "tests/test_cli_judge.py::test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memory",
+]
+
+[[attack]]
+class = "memory"
+name = "handing pages of files to pipes and sockets"
+tries = "the program hands pages of a file to the kernel without copying them: a file spliced into pipes, a mapped file given to pipes, a file sent into local sockets and into network sockets; or it registers memory and files for asynchronous work, or uses the kernel's cryptography sockets"
+must = "for the program's side these calls answer that the pages cannot be moved, or are refused, by the judge's own filter; what a program then holds is copied memory, which counts"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_isolation.py::test_pages_of_a_file_handed_to_pipes_or_sockets_are_within_the_bound_or_fail_the_case",
+    "tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages",
+]
+
+[[attack]]
+class = "memory"
+name = "what an earlier run of the same case left"
+tries = "the first run of a case leaves kernel memory that is no file's content in the case folder (attributes of files, tens of thousands of empty folders) and the second run holds memory beside it, or removes it and holds that much more; or a run deletes the many files the test itself put there"
+must = "a case has one starting figure, read before its first run, and is counted from the lowest figure it reached: what a run left counts, and what goes away during the case makes no room"
+tests = [
+    "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it",
+    "tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached",
+]
+
+[[attack]]
+class = "leaving things for a later case"
+name = "memory left where the next case would start from"
+tries = "the build fills the container's memory-backed folder, or a case leaves memory behind in the places it can write and in objects that outlive a process, so that it is part of the figure the next case starts from"
+must = "the judge empties the memory-backed folder after the build, a case can write only its own folder, which is removed, and what outlives a process cannot be made; a case that follows starts from a figure with nothing of it"
+tests = [
+    "tests/test_cli_isolation.py::test_nothing_is_carried_into_the_starting_figure_of_the_next_case",
+]
+
+[[attack]]
+class = "memory"
+name = "rings of the kernel's older asynchronous input and output"
+tries = "the program makes as many rings of the older asynchronous input and output as the machine's cap on their events allows; the pages of a ring are charged as pages of a file and stand on the kernel's two lists for pages of files, and cannot be given back while the ring is there"
+must = "for the program's side the call that makes such a ring answers that the kernel has no such call"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_judge.py::test_the_filter_answers_every_call_that_locks_in_or_hands_over_pages",
+]
+
+[[attack]]
+class = "memory"
+name = "memory the kernel charges to no container"
+tries = "the program opens as many pairs of terminals as the machine allows and fills both directions without reading; what such a pair buffers is charged to no container, so no figure of the container shows it"
+must = "no user but root can make a pair of terminals: the judge closes the device that makes them before anything of the program's side runs"
+tests = [
+    "tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_handed_to_the_kernel_by_the_build_or_by_a_run",
+    "tests/test_cli_judge.py::test_no_user_but_root_can_make_a_pair_of_terminals",
+]

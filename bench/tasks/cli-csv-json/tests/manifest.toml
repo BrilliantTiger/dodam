@@ -1,0 +1,55 @@
+[[test]]
+file = "functional/test_convert.py"
+kind = "functional"
+step = "build"
+
+[[test]]
+file = "boundary/test_bad_input.py"
+kind = "boundary"
+step = "build"
+
+[[test]]
+file = "security/test_path_escape.py"
+kind = "security"
+step = "build"
+weakness = "path-traversal"
+
+[[test]]
+file = "security/test_link_escape.py"
+kind = "security"
+step = "build"
+weakness = "path-traversal"
+
+[[test]]
+file = "security/test_overwrite.py"
+kind = "security"
+step = "build"
+weakness = "file-overwrite"
+
+[[test]]
+file = "security/test_huge_input.py"
+kind = "security"
+step = "build"
+weakness = "resource-exhaustion"
+
+[[test]]
+file = "functional/test_split.py"
+kind = "functional"
+step = "change-1"
+
+[[test]]
+file = "boundary/test_split_rules.py"
+kind = "boundary"
+step = "change-1"
+
+[[test]]
+file = "security/test_split_value.py"
+kind = "security"
+step = "change-1"
+weakness = "path-traversal"
+
+[[test]]
+file = "security/test_split_overwrite.py"
+kind = "security"
+step = "change-1"
+weakness = "file-overwrite"

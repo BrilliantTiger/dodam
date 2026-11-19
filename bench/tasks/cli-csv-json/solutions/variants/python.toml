@@ -1,0 +1,113 @@
+# Variants of the Python secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    if not inside(folder, place):
+        raise Refused(3, f"{path} is outside the working folder")
+'''
+new = ""
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.py"
+old = "    return os.path.realpath(path)"
+new = "    return os.path.abspath(path)"
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "main.py"
+old = 'with open(place, "xb") as f:'
+new = 'with open(place, "wb") as f:'
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "main.py"
+old = "        data = sys.stdin.buffer.read(MAX_INPUT + 1)"
+new = "        data = sys.stdin.buffer.read()"
+
+[[variant.replace]]
+file = "main.py"
+old = "            data = f.read(MAX_INPUT + 1)"
+new = "            data = f.read()"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    if len(data) > MAX_INPUT:
+        raise Refused(2, "the input is larger than 1048576 bytes")
+'''
+new = ""
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    if record or not at_start:
+        record.append("".join(field))
+        records.append(record)
+'''
+new = ""
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.py"
+old = '''        if not FILE_NAME.fullmatch(row[column]):
+            raise Refused(2, "a value of the column cannot be a file name")
+'''
+new = ""
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "main.py"
+old = '''    try:
+        os.mkdir(place)
+    except FileExistsError:
+        raise Refused(3, f"{place} already exists") from None
+'''
+new = '''    os.makedirs(place, exist_ok=True)
+'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.py"
+old = '''        line_end = 1 if c == "\n" else 2 if c == "\r" and i + 1 < n and text[i + 1] == "\n" else 0'''
+new = '''        line_end = 1 if c == "\n" else 0'''
