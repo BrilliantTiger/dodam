@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import html
 import ipaddress
 import json
 import os
@@ -35,6 +36,7 @@ import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
+from typing import Callable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -54,6 +56,7 @@ FIRST_LINE_PREFIX = "This comment was written automatically by the project's Gem
 PUBLIC_MARK = "=== PUBLIC ==="
 PRIVATE_MARK = "=== PRIVATE ==="
 NAMES_FILE = "names.txt"
+JOB_STATE_FILE = "job-state.json"
 FINISHED_FILE = "finished.log"
 JOB_LOCK = "job.lock"
 ORCA_APP_CLI = Path("/Applications/Orca.app/Contents/Resources/bin/orca")
@@ -73,6 +76,7 @@ EXIT_CODES = {
     "no_question": 4,
     "busy": 5,
     "quota": 6,
+    "day_bound": 6,
     "signed_out": 7,
     "timeout": 8,
 }
@@ -453,13 +457,29 @@ def eligibility(settings: Settings, item: Item) -> str | None:
 # --- The prompt -----------------------------------------------------------------------------------------
 
 BLOCKQUOTE_RE = re.compile(r"(?is)<blockquote\b.*?(?:</blockquote\s*>|\Z)")
+INLINE_QUOTE_RE = re.compile(r"(?is)<q\b.*?(?:</q\s*>|\Z)")
+# A quote line: `>` at the start, also after the marks of list items (`- >`, `1. >`).
+QUOTE_LINE_RE = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+)*>")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 
 
 def strip_quotes(text: str) -> str:
-    """Leave out quoted text: Markdown quote lines and HTML block quotes, which is how text of others is quoted."""
-    text = BLOCKQUOTE_RE.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
-    return "\n".join(line for line in text.split("\n") if not line.lstrip().startswith(">")).strip()
+    """Leave out quoted text, which is how text of others is quoted: HTML block and inline quotes, Markdown
+    quote lines (also inside list items), and the lines that continue a quote up to the next blank line."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = INLINE_QUOTE_RE.sub("", BLOCKQUOTE_RE.sub("", text))
+    kept: list[str] = []
+    in_quote = False
+    for line in text.split("\n"):
+        if QUOTE_LINE_RE.match(line):
+            in_quote = True
+            continue
+        if in_quote:
+            if line.strip():
+                continue
+            in_quote = False
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def done_criteria(text: str) -> str:
@@ -569,9 +589,10 @@ PASSED_THROUGH = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", 
 
 
 class JobError(Exception):
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, reasons: list[str] | None = None):
         super().__init__(reason)
         self.reason = reason
+        self.reasons = reasons or [reason]
 
 
 def signed_out_environment(work: Path) -> dict[str, str]:
@@ -636,6 +657,47 @@ def make_checkout(settings: Settings, item: Item, work: Path, env: dict[str, str
     return repo, head
 
 
+# --- The day's count and the quota's wait, kept by the job under its lock -------------------------------
+
+
+def today() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def load_job_state(private: Path) -> dict[str, object]:
+    path = private / JOB_STATE_FILE
+    if not path.exists():
+        return {"version": 1, "days": {}, "hold_until": 0}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise JobError("job_state") from exc
+    if (
+        not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("days"), dict)
+        or not isinstance(data.get("hold_until"), (int, float)) or isinstance(data.get("hold_until"), bool)
+    ):
+        raise JobError("job_state")
+    return data
+
+
+def save_job_state(private: Path, state: dict[str, object]) -> None:
+    part = private / (JOB_STATE_FILE + ".part")
+    _write_private(part, json.dumps(state) + "\n")
+    os.replace(part, private / JOB_STATE_FILE)
+
+
+def gate(settings: Settings, state: dict[str, object]) -> str | None:
+    """Why no run of agy may start now: the wait after a used-up quota, or the day's bound; None when one may."""
+    hold = state.get("hold_until")
+    if isinstance(hold, (int, float)) and hold > time.time():
+        return "quota_wait"
+    days = state.get("days")
+    count = days.get(today(), 0) if isinstance(days, dict) else 0
+    if isinstance(count, int) and count >= settings.max_jobs_per_day:
+        return "day_bound"
+    return None
+
+
 # --- Running agy ----------------------------------------------------------------------------------------
 
 _RUNNING: dict[int, subprocess.Popen[bytes]] = {}
@@ -695,7 +757,10 @@ class AgyRun:
     stderr_tail: str
 
 
-def run_agy(settings: Settings, kind: str, prompt: str, repo: Path, env: dict[str, str], answer: Path) -> AgyRun:
+def run_agy(
+    settings: Settings, kind: str, prompt: str, repo: Path, env: dict[str, str], answer: Path,
+    lock: int, on_start: "Callable[[], None]",
+) -> AgyRun:
     program = shutil.which("agy", path=os.environ.get("PATH"))
     if program is None:
         raise JobError("agy_missing")
@@ -708,15 +773,18 @@ def run_agy(settings: Settings, kind: str, prompt: str, repo: Path, env: dict[st
     record["arguments"] = ["<the prompt, kept in prompt.txt>" if a == prompt else a for a in argv[1:]]
     record["environment_names"] = sorted(env)
     _write_private(answer / "agy.json", json.dumps(record, indent=2) + "\n")
-    if inside_agent_reasons():
-        raise JobError("inside_agent")
+    refusal = inside_agent_reasons()
+    if refusal:
+        raise JobError("inside_agent", refusal)
     grace = max(1, min(30, settings.job_seconds // 20))
     stdout_path = answer / "agy-stdout.json"
     stderr_path = answer / "agy-stderr.txt"
     with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
+        on_start()
+        # agy gets the job's lock as well: a job killed outright leaves the lock held until agy ends.
         proc = subprocess.Popen(
             argv, cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-            start_new_session=True, close_fds=True,
+            start_new_session=True, close_fds=True, pass_fds=(lock,),
         )
         _RUNNING[proc.pid] = proc
         timed_out = False
@@ -809,9 +877,10 @@ def normalize(text: str) -> str:
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 PATH_RES = (
-    re.compile(r"(?<![\w.])(?:/Users|/home|/private/var|/private/tmp|/var/folders|/Volumes|/root)/[^\s/]+"),
+    re.compile(r"(?<![\w.])(?:/Users|/home|/private/var|/private/tmp|/var/folders|/var/tmp|/tmp|/Volumes|/root)/[^\s/]+"),
     re.compile(r"(?<![\w/~])~/[\w.-]"),
-    re.compile(r"(?i)\b[a-z]:\\(?:users|documents and settings)\\"),
+    re.compile(r"\$\{?HOME\}?(?![A-Za-z0-9_])"),
+    re.compile(r"(?i)(?<![a-z])[a-z]:(?:\\{1,2}|/)(?:users|documents and settings)(?:\\{1,2}|/)"),
 )
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?!\.?\d)")
 IPV6_RE = re.compile(r"(?<![\w:.])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![\w:])")
@@ -836,16 +905,31 @@ TOKEN_RES = (
     re.compile(r"\bglpat-[0-9A-Za-z_-]{20,}"),
     re.compile(r"\bdop_v1_[0-9a-f]{32,}"),
     re.compile(r"\bnpm_[A-Za-z0-9]{30,}"),
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
 )
 LONG_RUN_RE = re.compile(r"(?<![A-Za-z0-9_+=-])[A-Za-z0-9_+=-]{32,}(?![A-Za-z0-9_+=-])")
+# A secret access key: 40 characters of base 64 that hold a slash or a plus.
+SECRET40_RE = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
+TAG_RE = re.compile(r"<[^<>\n]*>")
 
 
 def _word_pattern(value: str) -> re.Pattern[str]:
-    words = value.split()
-    body = r"\s+".join(re.escape(word) for word in words)
-    return re.compile(r"(?i)(?<![\w-])" + body + r"(?![\w-])")
+    """A listed value, bounded by letters only: joined to digits, hyphens or underscores it still counts,
+    and its words may be joined by any characters that are not letters or digits."""
+    body = r"[\W_]*".join(re.escape(word) for word in value.split())
+    return re.compile(r"(?i)(?<![^\W\d_])" + body + r"(?![^\W\d_])")
+
+
+def unmarked(text: str) -> str:
+    """A copy as GitHub shows it: character references resolved, code, tags and emphasis marks taken out."""
+    for _ in range(3):
+        resolved = html.unescape(text)
+        if resolved == text:
+            break
+        text = resolved
+    text = TAG_RE.sub("", CODE_RE.sub(" ", text))
+    return normalize(re.sub(r"[*~]", "", text))
 
 
 def known_values() -> dict[str, list[str]]:
@@ -866,7 +950,12 @@ def known_values() -> dict[str, list[str]]:
 
 
 def scan(text: str, names: list[str], settings: Settings, known: dict[str, list[str]]) -> list[str]:
-    """The kinds of things in `text` that must not be public; empty when it may be posted."""
+    """The kinds of things in `text` that must not be public; empty when it may be posted. The text is scanned
+    as it is, and a second time as GitHub would show it."""
+    return sorted(set(_scan_once(text, names, settings, known)) | set(_scan_once(unmarked(text), names, settings, known)))
+
+
+def _scan_once(text: str, names: list[str], settings: Settings, known: dict[str, list[str]]) -> list[str]:
     found: set[str] = set()
     flat = " ".join(text.split())
     if EMAIL_RE.search(text):
@@ -907,9 +996,10 @@ def scan(text: str, names: list[str], settings: Settings, known: dict[str, list[
         found.add("work_item")
     if any(pattern.search(text) for pattern in TOKEN_RES):
         found.add("token")
-    for match in LONG_RUN_RE.finditer(text):
+    for match in [*LONG_RUN_RE.finditer(text), *SECRET40_RE.finditer(text)]:
         run = match.group(0)
-        if re.search(r"[A-Z]", run) and re.search(r"[a-z]", run) and re.search(r"\d", run):
+        mixed = re.search(r"[A-Z]", run) and re.search(r"[a-z]", run) and re.search(r"\d", run)
+        if mixed and (match.re is LONG_RUN_RE or re.search(r"[/+]", run)):
             found.add("token")
     return sorted(found)
 
@@ -1006,7 +1096,14 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
         result["status"] = "busy"
         return result
     try:
-        _job(kind, number, settings, private, result)
+        state = load_job_state(private)
+        held_back = gate(settings, state)
+        if held_back == "quota_wait":
+            result.update(status="quota", reasons=["quota_wait"])
+        elif held_back == "day_bound":
+            result.update(status="day_bound", reasons=["day_bound"])
+        else:
+            _job(kind, number, settings, private, result, lock, state)
     except SystemExit:
         raise
     except SignedOut as exc:
@@ -1014,7 +1111,7 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
     except GitHubError as exc:
         result.update(status="error", reasons=[exc.reason])
     except JobError as exc:
-        result.update(status="refused" if exc.reason == "inside_agent" else "error", reasons=[exc.reason])
+        result.update(status="refused" if exc.reason == "inside_agent" else "error", reasons=exc.reasons)
     except Exception as exc:  # noqa: BLE001 - the result names the kind of fault, never a trace
         result.update(status="error", reasons=[f"internal_{type(exc).__name__}"])
     finally:
@@ -1025,7 +1122,10 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
     return result
 
 
-def _job(kind: str, number: int, settings: Settings, private: Path, result: dict[str, object]) -> None:
+def _job(
+    kind: str, number: int, settings: Settings, private: Path, result: dict[str, object], lock: int,
+    state: dict[str, object],
+) -> None:
     item = read_item(settings, number)
     reason = eligibility(settings, item)
     if reason is not None:
@@ -1048,11 +1148,27 @@ def _job(kind: str, number: int, settings: Settings, private: Path, result: dict
         answer = answer_folder(private, kind, number)
         result["private"] = str(answer)
         _write_private(answer / "prompt.txt", prompt.text)
-        result["ran"] = True
-        run = run_agy(settings, kind, prompt.text, repo, env, answer)
+        day = today()
+
+        def count_the_run() -> None:
+            # Counted in the day right before agy starts, under the job's lock, however the job was started.
+            days = state.get("days") if isinstance(state.get("days"), dict) else {}
+            count = days.get(day, 0) if isinstance(days, dict) else 0
+            state["days"] = {day: (count if isinstance(count, int) else 0) + 1}
+            save_job_state(private, state)
+            result["ran"] = True
+
+        run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     status, reasons, response = interpret(run, settings.max_answer_bytes)
+    if status == "quota":
+        # A used-up quota: the run is not counted in the day, and no run starts until the wait has passed.
+        days = state.get("days") if isinstance(state.get("days"), dict) else {}
+        count = days.get(day, 0) if isinstance(days, dict) else 0
+        state["days"] = {day: max(0, (count if isinstance(count, int) else 1) - 1)}
+        state["hold_until"] = time.time() + settings.quota_retry_seconds
+        save_job_state(private, state)
     if response is None:
         result.update(status=status, reasons=reasons)
         return
