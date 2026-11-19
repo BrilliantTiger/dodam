@@ -249,7 +249,7 @@ What this record cannot show. A run is in it only when it made a new high for th
 
 **The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that fills every process the container may hold, one that eats more memory than the container has and one that prints 400 MB are tests, and in all of them the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
 
-How long the judge can take over one step is known beforehand: 900 seconds for the build, 30 seconds for every test file, and for every test its case's time limit plus 2 seconds. The format checker refuses a task whose time limit for judging is below that sum. For the sample task the sum is 1,550 seconds and the time limit for judging is 1,800 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
+The format checker adds up, for each step, 900 seconds for the build, 30 seconds for every test file, and for every test its case's time limit plus 2 seconds, and refuses a task whose time limit for judging is below the largest such sum. For the sample task the sum is 1,550 seconds and the time limit for judging is 1,800 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
 
 ## The container's caps, and the path the real measurement uses
 
