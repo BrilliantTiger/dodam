@@ -87,7 +87,7 @@ def _ended_by_the_kernel(killed_before: int, killed_now: int) -> bool:
 
 def _above_in_a_new_high(high_before: int, high_now: int, taken_before: int, allowed: int) -> int:
     """How far a new high of the container's memory lies above what the case may take in memory
-    and files together, counted from the judge's count for the container when the run began;
+    and files together, counted from the container's count when the run began;
     0 when the run made no new high, or one within that.
 
     The kernel keeps the high whatever happens between two measurements. But it counts the cache
@@ -487,7 +487,7 @@ class Case:
         return _records_counted(self._records_grown, self._left_out_at_most)
 
     def _figure(self, now: dict) -> int:
-        """The judge's count for the container, less the cases' files, which have a limit of
+        """The container's count, less the cases' files, which have a limit of
         their own, and less the case runner's own memory."""
         return now["taken"] - _files_held(self._cfg["work_root"]) - _own_memory()
 
@@ -497,7 +497,7 @@ class Case:
         max_memory = limits["memory_mb"] * 1024 * 1024
 
         def above_a_line() -> bool:
-            """One measurement. The case's memory is the judge's count for the container (what
+            """One measurement. The case's memory is the container's count (what
             the kernel counts for it, less the pages of files on the kernel's two lists and the
             records it keeps), less the cases' files and the runner's own memory, counted
             from the lowest such figure since the case's first run began, and of the kernel's

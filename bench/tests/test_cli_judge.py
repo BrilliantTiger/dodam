@@ -859,7 +859,7 @@ def test_the_kernels_records_are_left_out_only_up_to_a_bound():
 
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():
     """How far a new high of the container's memory lies above what the case may take, counted
-    from the judge's count for the container when the run began. It is the most the program
+    from the container's count when the run began. It is the most the program
     can have held at once; cache of files is in it, so it is recorded and fails no case."""
     from dodambench import dodam_cli as runner
     above = getattr(runner, "_above_in_a_new_high", None)

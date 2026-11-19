@@ -383,7 +383,7 @@ def _group_number(group: Path, name: str) -> int | None:
 
 
 def container_memory(group: Path = GROUP) -> dict[str, int]:
-    """What the kernel counts for this container, in bytes. "taken" is the judge's count:
+    """What the kernel counts for this container, in bytes. "taken" is the container's count:
     everything in memory together with what was moved out to swap, less two things. Memory in
     shared memory and in memory-backed folders is counted, and so is memory the kernel swapped
     out. Taken out are the pages of files on disk that stand on the kernel's two lists for pages
