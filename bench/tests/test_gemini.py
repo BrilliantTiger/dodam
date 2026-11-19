@@ -901,7 +901,7 @@ SECRETS = {
 ALLOWED_AGY_ENV = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ",
     "GH_CONFIG_DIR", "GH_PROMPT_DISABLED", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT",
-    "GIT_SSH_COMMAND", "AGY_CLI_DISABLE_AUTO_UPDATE",
+    "GIT_SSH_COMMAND",
     # macOS adds this one to every program's own environment as the program starts: the user's number and
     # text encoding, not something the job passes on.
     "__CF_USER_TEXT_ENCODING",
@@ -922,7 +922,8 @@ def test_agy_gets_an_environment_without_tokens_or_keys_and_signed_out_settings(
     flat = json.dumps(env)
     for name, value in SECRETS.items():
         assert value not in flat, f"the value of {name} reached agy"
-    assert env.get("AGY_CLI_DISABLE_AUTO_UPDATE") == "true"
+    # No setting that Google's pages do not document: a changed program shows in the record of its hash instead.
+    assert not any(name.startswith(("AGY_", "ANTIGRAVITY_", "GEMINI_")) for name in env), sorted(env)
     assert env.get("GIT_CONFIG_NOSYSTEM") == "1" and env.get("GIT_TERMINAL_PROMPT") == "0"
     assert record["gh_config_entries"] == [], "GH_CONFIG_DIR is not an empty folder"
     assert record["git_global_size"] == 0, "GIT_CONFIG_GLOBAL is not an empty file"
@@ -1052,8 +1053,9 @@ SCAN_CASES = [
     ("private_address", "Open studio.tail1234.ts.net in a browser."),
     ("computer_name", "It was built on Someones-Mac-mini yesterday."),
     ("computer_name", "HOSTNAME-OF-THIS-COMPUTER"),
-    ("work_item", "As DOD-42 says, it is done."),
-    ("work_item", "See https://linear.app/dodam/issue/DOD-42/x for it."),
+    # Made-up numbers: a work item number starts at 1, so the number 0 is never a real one.
+    ("work_item", "As DOD-0 says, it is done."),
+    ("work_item", "See https://linear.app/example/issue/DOD-0/x for it."),
     ("token", "ghp_" + "Ab1" * 12),
     ("token", "github_pat_11ABCDEFG0" + "a1B2" * 10),
     ("token", "sk-ant-oat01-" + "Zx9_" * 10),
@@ -1115,12 +1117,12 @@ LINE_RE = re.compile(
 def test_the_coordinator_hears_a_fixed_line_that_carries_no_text_of_the_model(world: World):
     item = world.pull(7)
     world.label(item, "verify")
-    run = world.run_job("verify", 7, tell="run_2aa0b595bfb7")
+    run = world.run_job("verify", 7, tell="run_madeup000000")
     result = result_of(run)
     assert result.get("status") == "posted", run
     [call] = world.orca_calls()
     assert call[:2] == ["orchestration", "send"]
-    assert call[call.index("--to") + 1] == "run:run_2aa0b595bfb7"
+    assert call[call.index("--to") + 1] == "run:run_madeup000000"
     line = call[call.index("--body") + 1]
     assert LINE_RE.match(line), line
     assert f"private={answer_folder(result)}" in line
