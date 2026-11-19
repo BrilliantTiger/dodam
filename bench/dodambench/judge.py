@@ -878,9 +878,13 @@ class App:
         self.proc: subprocess.Popen | None = None
         self.data_dir: Path | None = None
         self.env: dict[str, str] = {}
+        self.left = ""   # why the program is not started again: an earlier start left what cannot be removed
 
     def start(self, timeout: float = 60) -> bool:
         self.stop()
+        if self.left:
+            # the program is not started again on what an earlier start left
+            return False
         # whatever still answers on the port is not this start's program
         deadline = time.monotonic() + 5
         while port_in_use(self.port):
@@ -927,7 +931,8 @@ class App:
             try:
                 remove_tree(self.data_dir)
             except TooMuchLeft as exc:
-                raise JudgeFault(f"the served program's data folder cannot be removed: {exc}") from None
+                # what the program wrote is the program's doing: the step fails with that reason
+                self.left = f"the served program's data folder cannot be removed: {exc}"
             except FileNotFoundError:
                 pass
             self.data_dir = None
@@ -1190,6 +1195,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     report["runner_ended"] = []
     app = App(app_dir, lang_env.get("START_CMD", ""), port, run_as, extra_env or {})
     shared_up = False
+    served: dict | None = None   # the last file of tests a started program served
     for t in selected:
         path = tests_dir / t["file"]
         # a program that does not build or start fails its features but shows no weakness
@@ -1211,8 +1217,9 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             else:
                 up = True
             if not up:
-                cases = [{"name": path.name, "outcome": not_run, "message": "program did not start"}]
+                cases = [{"name": path.name, "outcome": not_run, "message": app.left or "program did not start"}]
             else:
+                served = t
                 def again() -> tuple[str, str] | None:
                     """A runner or the program was ended: the cases that are left get a program started afresh."""
                     nonlocal shared_up
@@ -1220,7 +1227,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
                     shared_up = up and not fresh
                     if up:
                         env.update(app.env)
-                    return None if up else (not_run, "program did not start")
+                    return None if up else (not_run, app.left or "program did not start")
 
                 env = {**app.env, "BASE_URL": f"http://127.0.0.1:{port}", "DODAM_APP_DIR": str(app_dir)}
                 cases = run_cases(path, env, 300, again, report["runner_ended"])
@@ -1230,6 +1237,12 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             report["tests"].append({**c, "file": t["file"], "kind": t.get("kind"), "step": t.get("step"),
                                     "weakness": t.get("weakness")})
     app.stop()
+    if app.left and served is not None and all(c["message"] != app.left for c in report["tests"]):
+        # the last stop of the step could not give back what the program wrote, and no file of tests
+        # came after it: the step fails with that reason all the same
+        report["tests"].append({"name": Path(served["file"]).name, "message": app.left, "file": served["file"],
+                               "outcome": "skipped" if served.get("kind") == "security" else "failed",
+                               "kind": served.get("kind"), "step": served.get("step"), "weakness": served.get("weakness")})
     highs = cli.highs() if cli is not None else None
     if cli is not None and run_as:
         records["highest_in_a_case"] = cli.records_highest

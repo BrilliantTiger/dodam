@@ -847,6 +847,37 @@ put = '''                pass
             except TooMuchLeft as exc:'''
 
 [[protection]]
+what = "A served program's data folder that the judge cannot remove fails the step, with a result"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result",
+         "tests/test_web_isolation.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result_in_the_image"]
+[[protection.change]]
+find = '''                # what the program wrote is the program's doing: the step fails with that reason
+                self.left = f"the served program's data folder cannot be removed: {exc}"
+'''
+put = '''                raise JudgeFault(f"the served program's data folder cannot be removed: {exc}") from None
+'''
+
+[[protection]]
+what = "A served program is not started again on what an earlier start left"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
+[[protection.change]]
+find = '''        if self.left:
+            # the program is not started again on what an earlier start left
+            return False
+'''
+put = ''''''
+
+[[protection]]
+what = "The last stop of a step that cannot remove the data folder fails the step"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
+[[protection.change]]
+find = '''    if app.left and served is not None and all(c["message"] != app.left for c in report["tests"]):'''
+put = '''    if False:'''
+
+[[protection]]
 what = "A case during which the kernel ended a process fails, whatever its test says"
 file = "dodambench/judge.py"
 tests = ["tests/test_web_isolation.py::test_a_served_program_the_kernel_ends_fails_that_case_and_the_rest_meet_a_fresh_program"]

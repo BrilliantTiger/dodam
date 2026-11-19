@@ -635,6 +635,9 @@ For every protection there is one variant of the code without it (`bench/experim
 | When the judge takes back what cases left, it empties the cases' folder | a case leaves files, and a case runner is ended in the middle of a case. **Second line of defence:** the attack gets nothing without it either, because before every case anything left in the cases' folder is removed |
 | A served program that left its process group is ended before the next start | a served program moves its server out of the group of processes the judge started |
 | What one start of a served program wrote is removed before the next | a served program fills its data folder 3,000 folders deep; the next start looks for it |
+| A served program's data folder that the judge cannot remove fails the step, with a result | a served program writes more into its data folder than the judge removes: after a file of tests with a program of its own, before the next start, and at the last stop of the step |
+| A served program is not started again on what an earlier start left | the same; the program notes each of its starts |
+| The last stop of a step that cannot remove the data folder fails the step | the same at the last stop of the step, after a file of tests that passed |
 | A case during which the kernel ended a process fails, whatever its test says | a served program takes memory until the kernel ends it, in a test that would pass by itself |
 | The case that was running when its runner was ended fails with that reason | a case runner is ended in the middle of the second of three cases |
 | Before a new runner starts, what the last one left is taken back and a served program is started afresh | a case runner is ended while its program runs; a served program is ended by the kernel |
