@@ -1,0 +1,62 @@
+# Settings of the project's Gemini job and of the watcher that starts it.
+#
+# Every bound below is pinned by a check in the automatic tests, at the value written here. A change to one
+# of them is a decision: record its reason with the change.
+
+# The project's repository and the numeric id of the project's own account on GitHub. Only a mark that this
+# account puts on one of its own pull requests or issues starts a job, and the watcher stops when the
+# signed-in account of the GitHub command-line tool is another one.
+repo = "BrilliantTiger/dodam"
+project_account_id = 54790606
+
+# Where the job fetches the commit it checks out. The repository is public: fetching needs no sign-in.
+fetch_url = "https://github.com/BrilliantTiger/dodam.git"
+
+# How often the watcher looks at the repository, in seconds.
+poll_seconds = 60
+
+# At most this many runs of the model in one day (counted by the day in UTC).
+max_jobs_per_day = 8
+
+# The longest one run of the model may take, in seconds; past it the job stops the run and all it started.
+job_seconds = 1800
+
+# When Google's quota is used up, the job is put back and the watcher starts nothing for this long, in
+# seconds. Google's pages that were read do not state the quota's window; this value is a first guess, to
+# be corrected from the first time a quota runs out.
+quota_retry_seconds = 18000
+
+# The largest prompt, in bytes. Past it, the oldest comments are left out; the template, the done criteria
+# and the question never are. It stays under the size one program argument may have on Linux.
+max_prompt_bytes = 100000
+
+# The longest public part that is posted, in characters (GitHub takes at most 65,536 in one comment).
+max_public_chars = 30000
+
+# The largest answer of the command-line tool that is read, in bytes.
+max_answer_bytes = 2000000
+
+# At most this many pages of 100 comments or events are read for one item.
+max_comment_pages = 10
+
+# A comment of the project's account that begins with this line is a question for a discussion.
+discussion_first_line = "Question for the Gemini job:"
+
+# The model the command-line tool is asked for. Empty: the tool's own default. A name the tool does not
+# know makes the run fail at once, by the tool's own rule.
+model = ""
+
+# Prefixes of work item numbers that never appear in a public part.
+work_item_prefixes = ["DOD"]
+
+# The three marks: one label for each kind of look.
+[labels]
+verify = "gemini-verify"
+attack = "gemini-attack"
+discuss = "gemini-discuss"
+
+# The kinds that only read and reason run in the command-line tool's terminal sandbox.
+[sandbox]
+verify = true
+attack = false
+discuss = true
