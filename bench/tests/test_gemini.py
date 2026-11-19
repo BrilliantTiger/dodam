@@ -98,7 +98,7 @@ def envelope(response: str, status: str = "SUCCESS", error: str | None = None) -
 # --- The stand-ins -----------------------------------------------------------------------------------
 
 GH_STANDIN = r'''
-import fcntl, json, os, sys
+import fcntl, json, os, sys, time
 from urllib.parse import parse_qs, unquote, urlsplit
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -168,6 +168,12 @@ def serve(state, args, stdin_text):
         if tail[0] == "issues" and tail[2:] == ["comments"] and method == "GET":
             if state.get("fail_comments"):
                 return 1, None, "gh: Server Error (HTTP 500)"
+            pause = state.get("pause_comments")
+            if pause:
+                open(pause["marker"], "w").close()
+                deadline = time.time() + 30
+                while not os.path.exists(pause["release"]) and time.time() < deadline:
+                    time.sleep(0.02)
             return 0, page(item.get("comments", []), query), ""
         if tail[0] == "issues" and tail[2:] == ["comments"] and method == "POST":
             body = json.loads(stdin_text)["body"]
@@ -231,7 +237,14 @@ def run(cmd):
         return {"code": -1, "out": "", "err": type(exc).__name__}
 
 
+with open(os.path.join(DATA, "answer.json"), encoding="utf-8") as handle:
+    answer = json.load(handle)
 record = {"argv": sys.argv[1:], "env": dict(os.environ), "cwd": os.getcwd(), "pid": os.getpid()}
+if answer.get("child"):
+    # A process that stays in agy's process group, as a command the model starts would.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    record["child_pid"] = child.pid
 gh_dir = os.environ.get("GH_CONFIG_DIR")
 record["gh_config_entries"] = sorted(os.listdir(gh_dir)) if gh_dir and os.path.isdir(gh_dir) else None
 git_global = os.environ.get("GIT_CONFIG_GLOBAL")
@@ -244,8 +257,6 @@ record["git_base"] = run(["git", "rev-parse", "--verify", "--quiet", "base"])
 record["git_common_dir"] = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
 with open(os.path.join(DATA, "runs.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
-with open(os.path.join(DATA, "answer.json"), encoding="utf-8") as handle:
-    answer = json.load(handle)
 if answer.get("sleep"):
     time.sleep(answer["sleep"])
 sys.stdout.write(answer.get("stdout", ""))
@@ -267,7 +278,7 @@ sys.stdout.write('{"ok": true}\n')
 # second half waits until it has been handed to the system before it starts the program. It writes the
 # program's process number to a file at once, and the exit code and output to another when it ends.
 RUNNER = r'''
-import json, os, subprocess, sys, time
+import json, os, resource, subprocess, sys, time
 
 spec = json.load(open(sys.argv[1], encoding="utf-8"))
 first = os.getpid()
@@ -278,9 +289,10 @@ while os.getppid() == first and time.monotonic() < deadline:
     time.sleep(0.002)
 result = {"code": None, "stdout": "", "stderr": "", "timed_out": False}
 try:
+    limit = (lambda: resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))) if spec.get("no_new_processes") else None
     proc = subprocess.Popen(
         spec["argv"], env=spec["env"], cwd=spec["cwd"], stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, preexec_fn=limit,
     )
     with open(spec["pid_file"] + ".part", "w") as handle:
         handle.write(str(proc.pid))
@@ -415,17 +427,26 @@ class World:
         self.write_settings()
         self.answer(envelope(answer_text()))
         self.private.mkdir(mode=0o700)
-        (self.private / "names.txt").write_text("Hong Gildong\n홍길동\n", encoding="utf-8")
+        (self.private / "names.txt").write_text("Hong Gildong\n홍길동\nhgdlogin\n", encoding="utf-8")
         self.next_event = 5000
 
     # settings and stand-in answers
     def write_settings(self, **overrides: object) -> None:
         self.settings.write_text(settings_text(self.source, **overrides), encoding="utf-8")
 
-    def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0) -> None:
+    def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False) -> None:
         (self.agy_dir / "answer.json").write_text(
-            json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep}), encoding="utf-8"
+            json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep, "child": child}),
+            encoding="utf-8",
         )
+
+    def job_state(self) -> dict[str, object]:
+        path = self.private / "job-state.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    def write_job_state(self, days: dict[str, int], hold_until: float) -> None:
+        state = {"version": 1, "days": days, "hold_until": hold_until}
+        (self.private / "job-state.json").write_text(json.dumps(state), encoding="utf-8")
 
     # made-up items
     def pull(
@@ -526,10 +547,12 @@ class World:
             env.update(extra)
         return env
 
-    def start(self, argv: list[str], env: dict[str, str], timeout: float = 90) -> tuple[Path, Path]:
+    def start(self, argv: list[str], env: dict[str, str], timeout: float = 90,
+              no_new_processes: bool = False) -> tuple[Path, Path]:
         self.save_github()
         stamp = f"{time.monotonic_ns()}"
         spec = {
+            "no_new_processes": no_new_processes,
             "argv": argv,
             "env": env,
             "cwd": str(self.root),
@@ -736,7 +759,8 @@ def test_no_other_mark_or_item_starts_a_job(world: World, case: str):
     assert len(world.agy_runs()) == 1
 
 
-@pytest.mark.parametrize("case", ["issue by another account", "pull request from a fork", "pull request by another account"])
+@pytest.mark.parametrize("case", ["issue by another account", "pull request from a fork", "pull request by another account",
+                                  "closed item"])
 def test_a_job_started_by_hand_refuses_an_item_that_is_not_the_projects_own(world: World, case: str):
     if case == "issue by another account":
         world.issue(9, author=OUTSIDER_A)
@@ -744,6 +768,9 @@ def test_a_job_started_by_hand_refuses_an_item_that_is_not_the_projects_own(worl
         world.comment(world.items["9"], PROJECT, f"{QUESTION_LINE}\nWhat now?")
     elif case == "pull request from a fork":
         world.pull(7, head_repo="outsider-a/dodam", fork=True)
+        kind, number = "verify", 7
+    elif case == "closed item":
+        world.pull(7)["state"] = "closed"
         kind, number = "verify", 7
     else:
         world.pull(7, author=OUTSIDER_B)
@@ -814,6 +841,10 @@ def test_no_text_of_another_account_reaches_the_prompt(world: World):
     world.comment(item, OUTSIDER_B, "CANARY-OUTSIDE-B")
     world.comment(item, BOT, "CANARY-BOT")
     world.comment(item, PROJECT, "<blockquote>CANARY-QUOTE-2</blockquote>Second note. PROJECT-NOTE-2")
+    world.comment(item, PROJECT, "- > CANARY-LIST-QUOTE said this\n\nAfter the list. PROJECT-NOTE-3")
+    world.comment(item, PROJECT, "1. > CANARY-NUMBERED-QUOTE\n\nAfter the numbered list. PROJECT-NOTE-4")
+    world.comment(item, PROJECT, "> the quote's first line\nCANARY-CONTINUED-QUOTE goes on inside it\n\nOwn words. PROJECT-NOTE-5")
+    world.comment(item, PROJECT, "An inline <q>CANARY-INLINE-QUOTE</q> quote. PROJECT-NOTE-6")
     world.comment(item, PROJECT, f"{FIRST_LINE_PREFIX} (a verification look).\n\nAn earlier finding. OWN-ANSWER-1")
     world.comment(item, OUTSIDER_A, f"{FIRST_LINE_PREFIX} (a verification look).\n\nCANARY-SPOOFED-ANSWER")
     world.comment(item, OUTSIDER_B, f"{QUESTION_LINE}\nCANARY-OUTSIDE-QUESTION")
@@ -824,12 +855,14 @@ def test_no_text_of_another_account_reaches_the_prompt(world: World):
     prompt = prompt_of(record)
     template = (TEMPLATES / "verify.md").read_text(encoding="utf-8") if (TEMPLATES / "verify.md").is_file() else "\0"
     assert prompt.startswith(template.strip()), "the prompt does not begin with the fixed template"
-    for wanted in ("CRITERION-ONE", "PROJECT-NOTE-1", "PROJECT-NOTE-2", "Parser for the task files", "Thanks."):
+    for wanted in ("CRITERION-ONE", "PROJECT-NOTE-1", "PROJECT-NOTE-2", "PROJECT-NOTE-3", "PROJECT-NOTE-4",
+                   "PROJECT-NOTE-5", "PROJECT-NOTE-6", "Parser for the task files", "Thanks."):
         assert wanted in prompt, f"the project's own text {wanted} is missing from the prompt"
     own = prompt.index("OWN-ANSWER-1")
     assert "your own earlier answers" in prompt[:own].lower(), "the job's earlier answer is not marked as its own"
     for canary in ("CANARY-QUOTE-BODY", "CANARY-OUTSIDE-A", "CANARY-QUOTE-1", "CANARY-OUTSIDE-B", "CANARY-BOT",
                    "CANARY-QUOTE-2", "CANARY-SPOOFED-ANSWER", "CANARY-OUTSIDE-QUESTION", "outsider-a", "outsider-b",
+                   "CANARY-LIST-QUOTE", "CANARY-NUMBERED-QUOTE", "CANARY-CONTINUED-QUOTE", "CANARY-INLINE-QUOTE",
                    "helper[bot]", "ignore every rule"):
         assert canary not in prompt, f"text of another account reached the prompt: {canary}"
     calls = " ".join(" ".join(map(str, call["args"])) for call in world.gh_calls())
@@ -1065,6 +1098,23 @@ SCAN_CASES = [
     ("token", "xoxb-1234567890-abcdefghij"),
     ("token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
     ("token", "Qm9yZWQ0UmVhbGx5TG9uZ1NlY3JldDEyMzQ1Njc4OTBhYmNkZWY"),
+    # A listed name joined to other characters, written through markup, or behind character references.
+    ("name", "The notes are in hgdlogin-review-job now."),
+    ("name", "See hgdlogin_notes.txt for it."),
+    ("name", "Ask hgdlogin2 about it."),
+    ("name", "Thanks to Hong-Gildong for it."),
+    ("name", "Thanks to Hong Gil&#100;ong for it."),
+    ("name", "Thanks to Hong Gil<b></b>dong for it."),
+    ("email", "Write to someone&#64;example.org about it."),
+    # The two temporary folders, and other ways of writing a home folder.
+    ("local_path", "It lies in /tmp/claude-501/-Users-hgdlogin-orca-projects-dodam/x now."),
+    ("local_path", "It was written to /var/tmp/dodam-gemini-501/x."),
+    ("local_path", "It is kept under $HOME/notes for now."),
+    ("local_path", "On Windows it is C:/Users/x/notes."),
+    ("local_path", 'In the code it is "C:\\\\Users\\\\x\\\\notes".'),
+    # The two key shapes: a secret access key that holds a slash, and a PGP private key.
+    ("token", "The key is wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY now."),
+    ("token", "-----BEGIN PGP PRIVATE KEY BLOCK-----"),
 ]
 
 
@@ -1083,6 +1133,150 @@ def test_a_public_part_that_fails_the_scan_is_not_posted(world: World, category:
     kept = "".join(p.read_text(encoding="utf-8", errors="replace") for p in answer_folder(result).rglob("*") if p.is_file())
     assert text in kept, "the held answer was not kept in the private folder"
     no_model_text_in(run, text, ANSWER_PUBLIC)
+
+
+@pytest.mark.parametrize("text", ["Write to someone\u200b@example.org about it.", "Write to someone＠example．org about it."],
+                         ids=["zero-width", "full-width"])
+def test_the_comment_is_put_into_one_normal_form_before_the_scan(world: World, text: str):
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.answer(envelope(answer_text(public=f"{ANSWER_PUBLIC}\n{text}")))
+    result = result_of(world.run_job("verify", 7))
+    assert result.get("status") == "held" and "email" in result.get("reasons", []), result
+    assert posted(world) == []
+
+
+def test_an_answer_past_its_bound_in_bytes_is_not_read(world: World):
+    world.write_settings(max_answer_bytes=1000)
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.answer(envelope(answer_text(public=ANSWER_PUBLIC + " word" * 400)))
+    result = result_of(world.run_job("verify", 7))
+    assert result.get("status") == "error" and "answer_too_long" in result.get("reasons", []), result
+    assert posted(world) == []
+
+
+def test_comments_past_the_bound_of_pages_stop_a_job_before_agy(world: World):
+    world.write_settings(max_comment_pages=1)
+    item = world.pull(7)
+    for n in range(101):
+        world.comment(item, PROJECT, f"Note {n}.")
+    world.label(item, "verify")
+    result = result_of(world.run_job("verify", 7))
+    assert result.get("status") == "error" and "too_many_pages" in result.get("reasons", []), result
+    assert world.agy_runs() == []
+
+
+def test_the_job_looks_again_for_a_coding_agent_right_before_agy(world: World):
+    item = world.pull(7)
+    world.label(item, "verify")
+    marker, release = world.root / "reading-comments", world.root / "go-on"
+    world.state_extra["pause_comments"] = {"marker": str(marker), "release": str(release)}
+    links = world.root / "parents"
+    links.mkdir(exist_ok=True)
+    plain, agent = links / "plainsh", links / "claude"
+    plain.symlink_to("/bin/sh")
+    agent.symlink_to("/bin/sh")
+    # The parent is a plain shell while the job starts; while the job reads the comments, the parent turns
+    # into a program named claude (the same process, a new program), and then lets the job go on.
+    script = (
+        'm=$1; r=$2; d=$3; a=$4; shift 4; "$@" & i=0; '
+        'while [ ! -f "$m" ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done; '
+        'exec "$a" -c \'touch "$1"; i=0; while [ ! -f "$2" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\' '
+        'claude "$r" "$d"'
+    )
+    argv = [str(plain), "-c", script, "plainsh", str(marker), str(release), str(world.private / "finished.log"),
+            str(agent), *world.job_argv("verify", 7)]
+    out, _ = world.start(argv, world.env())
+    run = World.wait(out)
+    result = result_of(run)
+    asked = " ".join(" ".join(map(str, call["args"])) for call in world.gh_calls())
+    assert "issues/7/comments" in asked, f"the job stopped before the parent changed: {run}"
+    assert result.get("status") == "refused" and "parent:claude" in result.get("reasons", []), run
+    assert world.agy_runs() == []
+
+
+def test_when_the_process_list_cannot_be_read_the_job_refuses(world: World):
+    item = world.pull(7)
+    world.label(item, "verify")
+    out, _ = world.start(world.job_argv("verify", 7), world.env(), no_new_processes=True)
+    result = result_of(World.wait(out))
+    assert result.get("status") == "refused" and "parent:unknown" in result.get("reasons", []), result
+    assert world.gh_calls() == [] and world.agy_runs() == []
+
+
+def test_a_job_started_by_hand_keeps_the_day_bound_and_the_quota_wait_and_counts_in_the_day(world: World):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.write_job_state({today: 8}, 0)
+    full = result_of(world.run_job("verify", 7))
+    assert full.get("status") == "day_bound", full
+    world.write_job_state({}, time.time() + 3000)
+    waiting = result_of(world.run_job("verify", 7))
+    assert waiting.get("status") == "quota" and "quota_wait" in waiting.get("reasons", []), waiting
+    assert world.agy_runs() == []
+    world.write_job_state({}, time.time() - 1)
+    ran = result_of(world.run_job("verify", 7))
+    assert ran.get("status") == "posted", ran
+    assert world.job_state().get("days") == {today: 1}, "a job started by hand was not counted in the day"
+
+
+def test_a_job_killed_outright_leaves_the_lock_with_agy_until_agy_ends(world: World):
+    world.write_settings(job_seconds=5)
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.answer(envelope(answer_text()), sleep=60)
+    out, pid_file = world.start(world.job_argv("verify", 7), world.env())
+    deadline = time.monotonic() + 30
+    while not world.agy_runs():
+        assert time.monotonic() < deadline, "agy was never started"
+        time.sleep(0.05)
+    first_agy = int(world.agy_runs()[0]["pid"])  # type: ignore[arg-type]
+    try:
+        os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+        World.wait(out, timeout=15)
+        second = result_of(world.run_job("verify", 7))
+        assert second.get("status") == "busy", f"a second job started while the first agy ran on: {second}"
+        assert len(world.agy_runs()) == 1
+    finally:
+        try:
+            os.kill(first_agy, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_what_agy_left_in_its_group_stops_when_agy_ends(world: World):
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.answer(envelope(answer_text()), child=True)
+    result = result_of(world.run_job("verify", 7))
+    assert result.get("status") == "posted", result
+    child = int(world.agy_runs()[0]["child_pid"])  # type: ignore[arg-type]
+    assert not _alive(child), "a process agy left in its group kept running after agy ended"
+
+
+def test_an_item_past_the_bound_of_pages_is_left_out_and_keeps_no_other_item_from_its_job(world: World):
+    world.write_settings(max_comment_pages=1)
+    many_events = world.pull(12)
+    events = many_events["events"]
+    assert isinstance(events, list)
+    events.extend({"id": 100 + n, "event": "mentioned", "actor": OUTSIDER_A} for n in range(100))
+    world.label(many_events, "verify")
+    many_comments = world.pull(13)
+    for n in range(101):
+        world.comment(many_comments, OUTSIDER_A, f"note {n}")
+    world.label(many_comments, "verify")
+    world.label(world.pull(14), "verify")
+    run = world.run_watch()
+    assert [r.get("number") for r in results_of(run) if r.get("status") == "posted"] == [14], run
+    assert len(world.agy_runs()) == 1
+    items = world.github_state()["items"]
+    assert isinstance(items, dict)
+    for number in ("12", "13"):
+        assert LABELS["verify"] in items[number]["labels"], f"the mark on {number} was taken off"
+    notes = (world.private / "watch-notes.log").read_text(encoding="utf-8")
+    assert "number=12" in notes and "number=13" in notes, notes
 
 
 def test_without_the_private_list_of_names_nothing_is_posted(world: World):
@@ -1197,13 +1391,10 @@ def test_the_day_bound_stops_jobs_and_keeps_the_marks_for_the_next_day(world: Wo
     assert len(world.agy_runs()) == 2
     state = world.github_state()
     assert LABELS["verify"] in state["items"]["14"]["labels"], "the mark that waits for the next day was taken off"  # type: ignore[index]
-    # The count belongs to the day: with yesterday's count at the bound, the waiting job runs.
-    state_file = world.private / "watch-state.json"
-    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    # The count belongs to the day and to the job: with yesterday's count at the bound, the waiting job runs.
     today = time.strftime("%Y-%m-%d", time.gmtime())
-    assert saved["days"] == {today: 2}
-    saved["days"] = {"2000-01-01": 2}
-    state_file.write_text(json.dumps(saved), encoding="utf-8")
+    assert world.job_state().get("days") == {today: 2}
+    world.write_job_state({"2000-01-01": 2}, 0)
     world.items = state["items"]  # type: ignore[assignment]
     later = world.run_watch()
     assert [r.get("number") for r in results_of(later)] == [14], later
@@ -1223,11 +1414,11 @@ def test_one_job_runs_at_a_time(world: World):
     assert LABELS["verify"] in world.github_state()["items"]["7"]["labels"]  # type: ignore[index]
 
 
-def test_a_job_past_its_time_is_stopped_with_agy_and_everything_it_started(world: World):
+def test_a_job_past_its_time_is_stopped_with_the_whole_process_group_of_agy(world: World):
     world.write_settings(job_seconds=2)
     item = world.pull(7)
     world.label(item, "verify")
-    world.answer(envelope(answer_text()), sleep=60)
+    world.answer(envelope(answer_text()), sleep=60, child=True)
     began = time.monotonic()
     run = world.run_job("verify", 7)
     elapsed = time.monotonic() - began
@@ -1236,6 +1427,7 @@ def test_a_job_past_its_time_is_stopped_with_agy_and_everything_it_started(world
     assert elapsed < 20, f"the job took {elapsed:.1f} seconds with a bound of 2"
     [record] = world.agy_runs()
     assert not _alive(int(record["pid"])), "agy is still running after its time"  # type: ignore[arg-type]
+    assert not _alive(int(record["child_pid"])), "a process in agy's group is still running after its time"  # type: ignore[arg-type]
     assert posted(world) == []
 
 
@@ -1249,14 +1441,15 @@ def test_used_up_quota_puts_the_job_back_until_the_window_has_passed(world: Worl
     assert state.get("removed") is None, "the mark was taken off although the job did not run"
     saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
     assert saved["handled"] == {}, "a job that met a used-up quota was counted as handled"
-    assert sum(saved["days"].values()) == 0, "a job that met a used-up quota was counted in the day"
-    assert 3500 <= saved["hold_until"] - time.time() <= 3700, "the job is not held for the quota's window"
+    job_state = world.job_state()
+    assert sum(job_state.get("days", {}).values()) == 0, "a job that met a used-up quota was counted in the day"  # type: ignore[union-attr]
+    hold = job_state.get("hold_until")
+    assert isinstance(hold, (int, float)) and 3500 <= hold - time.time() <= 3700, "the job is not held for the quota's window"
     world.items = state["items"]  # type: ignore[assignment]
     world.answer(envelope(answer_text()))
     held = world.run_watch(polls=2)
     assert results_of(held) == [] and len(world.agy_runs()) == 1, "a job ran inside the quota's window"
-    saved["hold_until"] = time.time() - 1
-    (world.private / "watch-state.json").write_text(json.dumps(saved), encoding="utf-8")
+    world.write_job_state({}, time.time() - 1)
     after = world.run_watch()
     assert [r.get("status") for r in results_of(after)] == ["posted"], after
     assert len(world.agy_runs()) == 2
@@ -1302,7 +1495,7 @@ def _alive(pid: int) -> bool:
 def test_closing_the_terminal_stops_the_program_and_agy(world: World, program: str):
     item = world.pull(7)
     world.label(item, "verify")
-    world.answer(envelope(answer_text()), sleep=60)
+    world.answer(envelope(answer_text()), sleep=60, child=True)
     if program == "job":
         argv = world.job_argv("verify", 7)
     else:
@@ -1317,6 +1510,7 @@ def test_closing_the_terminal_stops_the_program_and_agy(world: World, program: s
     run = World.wait(out, timeout=15)
     assert not run["timed_out"], "the program did not end when its terminal closed"
     assert not _alive(int(world.agy_runs()[0]["pid"])), "agy kept running after the terminal closed"  # type: ignore[arg-type]
+    assert not _alive(int(world.agy_runs()[0]["child_pid"])), "a process in agy's group kept running"  # type: ignore[arg-type]
     assert posted(world) == []
 
 
