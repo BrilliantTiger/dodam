@@ -255,9 +255,10 @@ def held_until_read():
 # How far a reading may lie from what it should be. The rule: take the largest use of tolerance
 # over every turn of the reading's own test and of the bound tests on the machine of the
 # automatic check; the tolerance is twice that, rounded up to a whole MB, and not under 2. Above 6
-# it is not set: the reading is then not good enough. In the five runs since the helper stops the
-# container while it reads, the largest uses were 1.96, 1.46, 1.32, 1.59 and 1.71 MB, so the
-# tolerance is 4. Held to one processor, ten readings of one program lie 0.03 MB apart; on two
+# it is not set: the reading is then not good enough. In the first six runs after the helper came
+# to stop the container while it reads (two on each of the commits 1dee54b, c270aaf and 917115f),
+# the largest uses were 1.96, 1.39, 1.32, 1.46, 1.59 and 1.71 MB, so the tolerance is 4. It is not
+# worked out again from later runs: they are held to it. Held to one processor, ten readings of one program lie 0.03 MB apart; on two
 # processors 0.63 MB, around the same mean: how far readings scatter grows with the processors.
 TOLERANCE_MB = 4
 
