@@ -28,7 +28,7 @@ languages = ["python", "typescript", "java", "csharp", "go", "rust", "cpp"]
 
 [cli]                    # the limits of one case (one hidden test)
 case_timeout_sec = 5     # the time of every run of the program in that case, added up
-case_memory_mb = 512     # the memory all processes of the program really use, added up
+case_memory_mb = 512     # memory, by the judge's count for the container the case runs in
 case_output_kb = 4096    # standard output and standard error together
 case_processes = 64      # processes; a thread counts as one
 case_disk_mb = 64        # what can be written in the case's whole folder, and the size of one file

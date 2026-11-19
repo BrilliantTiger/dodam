@@ -28,7 +28,7 @@ languages = ["python", "typescript", "java", "csharp", "go", "rust", "cpp"]
 
 [cli]                    # 사례 하나(숨긴 테스트 하나)의 한도
 case_timeout_sec = 5     # 그 사례에서 프로그램을 돌린 시간을 모두 더한 값
-case_memory_mb = 512     # 프로그램의 모든 프로세스가 실제로 쓰는 메모리의 합
+case_memory_mb = 512     # 사례가 도는 컨테이너의 메모리를 판정기가 세는 방식으로 잰 양
 case_output_kb = 4096    # 표준 출력과 표준 오류를 더한 크기
 case_processes = 64      # 프로세스 수. 스레드도 하나로 센다
 case_disk_mb = 64        # 사례 폴더 전체에 쓸 수 있는 양, 그리고 파일 하나의 크기
