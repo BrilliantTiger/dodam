@@ -5496,9 +5496,29 @@ def least_accounts(lock: dict) -> dict:
             store.place(entries, [event(10_000 + n, 1 + n % holders, f"p{n}")])
         if len(entries) == spending["arrivals_kept"]:
             found.setdefault("the kept list filled", holders)
-            if store.place(list(entries), [event(1, 99_999, "newcomer")]) == 99_999:
-                found.setdefault("the kept list closed to a newcomer", holders)
+            break
+    # The list closed to an account that holds nothing: no account can give a place. A place in hand is not among the
+    # places its account can give, so the number is worked out for everything one session can have in hand, from no
+    # place to one place of each of the accounts it handles, and the least is taken.
+    closed: dict = {}
+    for handled in range(relay.EVENTS_PER_ARRIVAL + 1):
+        for holders in range(max(1, handled), spending["arrivals_kept"] + 1):
+            store = relay.Kept(Path("unused"), spending["arrivals_kept"], spending["arrivals_kept_per_account"])
+            entries = []
+            # The session's item, with one place of each account it handles; then every account takes as many places as it is given.
+            in_hand = [(1, 1 + n) for n in range(handled)]
+            for item, account in in_hand:
+                store.place(entries, [event(item, account, "in hand")])
+            for n in range(spending["arrivals_kept"] * 2):
+                if len(entries) == spending["arrivals_kept"]:
+                    break
+                store.place(entries, [event(10_000 + n, 1 + n % holders, f"p{n}")])
+            if len(entries) == spending["arrivals_kept"] and store.place(list(entries), [event(2, 99_999, "newcomer")], (), in_hand) == 99_999:
+                closed[handled] = holders
                 break
+    found["the kept list closed to a newcomer while no session runs"] = closed[0]
+    found["the kept list closed to a newcomer"] = min(closed.values())
+    found["accounts handled by the session that runs then"] = min(closed, key=lambda handled: (closed[handled], handled))
     coordinator = lock["coordinator"]
     by_division = lambda whole, part: -(-whole // part)  # noqa: E731
     # The answers of a day for everyone are a number of the file of facts that the desk uses.
@@ -5521,7 +5541,8 @@ def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_sta
     needed = least_accounts(lock)
     # One outside account alone never closes a day, for any bound.
     assert all(count is None or count > 1 for count in needed.values()), needed
-    assert needed == {"a day": 2, "sessions": 5, "units": 2, "the kept list filled": 20, "the kept list closed to a newcomer": 100,
+    assert needed == {"a day": 2, "sessions": 5, "units": 2, "the kept list filled": 20, "the kept list closed to a newcomer": 90,
+                      "the kept list closed to a newcomer while no session runs": 100, "accounts handled by the session that runs then": 10,
                       "answers": 6, "labels": 10, "sent at once": 5, "kept reports": None, "vulnerability reports kept": None}  # fmt: skip
     # With a smaller room, or more sessions in a day, accounts could fill it, and the search says how many.
     smaller = json.loads(json.dumps(lock))
@@ -5534,7 +5555,8 @@ def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_sta
     text = (DESK / "LOCK.md").read_text(encoding="utf-8")
     rows = {
         "A day's sessions": needed["sessions"], "A day's units": needed["units"], "Every kept place taken": needed["the kept list filled"],
-        "The kept list closed to an account that holds nothing": needed["the kept list closed to a newcomer"],
+        "The kept list closed to an account that holds nothing": f"{needed['the kept list closed to a newcomer while no session runs']} while no session runs, "
+        f"{needed['the kept list closed to a newcomer']} while a session runs that handles the arrivals of {needed['accounts handled by the session that runs then']} accounts",
         "A day's answers": needed["answers"], "A day's labels": needed["labels"],
         "Vulnerability reports sent at once": needed["sent at once"], "The reports kept in a day": "no number of accounts",
         "The room for vulnerability reports kept in a day": "no number of accounts",
@@ -5545,6 +5567,10 @@ def test_how_many_accounts_it_takes_to_close_a_day_is_worked_out_and_lock_md_sta
         assert f"| {what} | {count} |" in text, (what, count)
     assert "one outside account alone never closes a day" in text.lower()
     assert "three accounts" not in text
+    # What a place in hand costs is said in plain words, with the same numbers.
+    assert (f"while no session runs it takes {needed['the kept list closed to a newcomer while no session runs']} accounts to close the list to an account "
+            f"that holds nothing, and while a session runs that handles the arrivals of {needed['accounts handled by the session that runs then']} accounts "
+            f"it takes {needed['the kept list closed to a newcomer']}") in " ".join(text.split())
 
 
 def test_the_worked_out_numbers_are_what_the_relay_does(place, monkeypatch):
@@ -5582,6 +5608,42 @@ def test_the_worked_out_numbers_are_what_the_relay_does(place, monkeypatch):
         running.start_one()
     running.take(arrivals(event(9, 4002, "after")))
     assert running.start_one() is False and "what a day may cost" in notices(place)[-1]
+
+
+def test_the_number_of_accounts_that_close_the_list_while_a_session_runs_is_what_the_relay_does(place, monkeypatch):
+    B = 1_100_000_000
+    spending = lock_file()["spending"]
+    needed = least_accounts(lock_file())
+    least, handled = needed["the kept list closed to a newcomer"], needed["accounts handled by the session that runs then"]
+    running, clock, ran = in_process(place, monkeypatch)
+    # The accounts the session will handle write on one item, and each holds one more place. One account fewer than
+    # it takes holds the rest, one place each, and the last of them two: every place is taken.
+    running.take(arrivals(*[event(7, B + n, f"on the item {n}") for n in range(handled)]))
+    running.take(arrivals(*[event(1000 + n, B + n, f"its other place {n}") for n in range(handled)]))
+    others = least - 1 - handled
+    running.take(arrivals(*[event(2000 + n, B + 100 + n, "one place") for n in range(others)], event(2999, B + 100, "a second place")))
+    assert len(kept(place)) == spending["arrivals_kept"] and len({e["account"] for e in kept(place)}) == least - 1
+    seen = {}
+
+    def session(text, env):
+        ran.append((clock[0], env["DESK_ITEM"]))
+        if env["DESK_ITEM"] == "7" and not seen:
+            seen["handles"] = len(json.loads(env["DESK_ACCOUNTS"]))
+            # With one account fewer than it takes, a newcomer gets a place: the one account that can give one gives it.
+            running.take(arrivals(event(5000, B + 900, "a newcomer")))
+            seen["first"] = sorted((e["number"], e["account"] - B) for e in kept(place) if e["account"] - B in (100, 900))
+            seen["accounts"] = len({e["account"] for e in kept(place)})
+            # Now as many accounts as it takes hold the hundred places, and none can give one: the next newcomer gets none.
+            running.take(arrivals(event(5001, B + 901, "another newcomer")))
+            seen["second"] = [e for e in kept(place) if e["account"] == B + 901]
+            seen["closed"] = dict(counted(place)["closed"])
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    assert running.start_one() is True
+    assert seen["handles"] == handled and seen["first"] == [(2999, 100), (5000, 900)] and seen["accounts"] == least
+    assert seen["second"] == [] and list(seen["closed"]) == ["arrivals kept for later; more were dropped"]
+    assert counted(place)["uncounted"]["arrivals dropped"] == {str(B + 100): 1, str(B + 901): 1}
 
 
 # --- The digest: not held up by a queue, and it says when a day closed ----------------------------
