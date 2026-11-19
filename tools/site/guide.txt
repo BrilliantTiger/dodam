@@ -18,7 +18,7 @@ Latest changes merged to main:
 
 {{changes}}
 
-Dates in this file are estimates from a schedule simulation, not promises. The plan's capacity is one subscription from each AI company in the plan. Today's conditions are one Claude subscription, shared with the owner's other work.
+Dates in this file are estimates from a schedule simulation, not promises. The plan's capacity is one subscription from each AI company in the plan. Today's conditions are one Claude subscription, shared with the owner's other work. A Gemini subscription is in use as well; its capacity has not been measured, and today's dates were computed without it.
 
 ## How an agent takes part
 
