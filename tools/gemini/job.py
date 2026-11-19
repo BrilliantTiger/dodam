@@ -590,7 +590,6 @@ def signed_out_environment(work: Path) -> dict[str, str]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_SSH_COMMAND": "false",
-            "AGY_CLI_DISABLE_AUTO_UPDATE": "true",
         }
     )
     return env
@@ -746,6 +745,7 @@ def run_agy(settings: Settings, kind: str, prompt: str, repo: Path, env: dict[st
     return AgyRun(proc.returncode, timed_out, stdout, tail)
 
 
+# The pages that were read do not say how a used-up quota shows; these words are a guess.
 QUOTA_RE = re.compile(
     r"(?i)quota|rate.?limit|resource.?exhausted|too many requests|\b429\b|usage limit|limit reached|out of credits"
 )
