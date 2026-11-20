@@ -68,7 +68,7 @@ class StateError(Exception):
 
 
 def empty_state() -> dict[str, object]:
-    return {"version": STATE_VERSION, "handled": {}, "ignored": {}}
+    return {"version": STATE_VERSION, "handled": {}, "ignored": {}, "quota_returns": {}}
 
 
 def load_state(path: Path) -> dict[str, object]:
@@ -83,12 +83,14 @@ def load_state(path: Path) -> dict[str, object]:
     for key in ("handled", "ignored"):
         if not isinstance(data.get(key), dict):
             raise StateError()
+    if not isinstance(data.setdefault("quota_returns", {}), dict):
+        raise StateError()
     return data
 
 
 def save_state(path: Path, state: dict[str, object]) -> None:
-    for key in ("handled", "ignored"):
-        entries = state[key]
+    for key in ("handled", "ignored", "quota_returns"):
+        entries = state.setdefault(key, {})
         assert isinstance(entries, dict)
         while len(entries) > MAX_REMEMBERED:
             del entries[next(iter(entries))]
@@ -194,7 +196,11 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
         if not job.job_lock_is_free(private):
             note("another job is running; trying again next round")
             break
-        result = job.run_job(kind, number, settings, private, tell)
+        returns = state["quota_returns"]
+        assert isinstance(returns, dict)
+        put_back = int(returns.get(str(event_id), 0))
+        result = job.run_job(kind, number, settings, private, tell,
+                             last_quota_try=put_back >= settings.max_quota_returns)
         status = str(result["status"])
         if status == "busy":
             note("another job is running; trying again next round")
@@ -203,8 +209,11 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
             note("the job was held back by its own bounds; trying again later")
             break
         print(json.dumps(result), flush=True)
+        if status == "quota" and result.get("ran"):
+            returns[str(event_id)] = put_back + 1
         if status in ("quota", "day_bound"):
             # The job keeps the day's count and the quota's wait itself; the mark stays for later.
+            save_state(state_path, state)
             note("Google's quota is used up; the job is put back" if status == "quota" else
                  f"the day's bound of {settings.max_jobs_per_day} jobs is reached")
             break
@@ -217,6 +226,7 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
             note(f"left out this round kind={kind} number={number} reason={','.join(map(str, reasons))}", keep=True)
             continue
         handled[str(event_id)] = status
+        returns.pop(str(event_id), None)
         save_state(state_path, state)
         try:
             job.gh("DELETE", f"repos/{settings.repo}/issues/{number}/labels/{quote(label, safe='')}")

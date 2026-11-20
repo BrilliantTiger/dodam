@@ -79,6 +79,7 @@ EXIT_CODES = {
     "day_bound": 6,
     "signed_out": 7,
     "timeout": 8,
+    "stopped": 1,
 }
 
 # --- Inside a coding agent ----------------------------------------------------------------------------
@@ -205,6 +206,7 @@ BOUNDS = {
     "max_public_chars": (100, 60000),
     "max_answer_bytes": (1000, 50_000_000),
     "max_comment_pages": (1, 100),
+    "max_quota_returns": (0, 20),
 }
 
 
@@ -221,6 +223,7 @@ class Settings:
     max_public_chars: int
     max_answer_bytes: int
     max_comment_pages: int
+    max_quota_returns: int
     discussion_first_line: str
     model: str
     work_item_prefixes: tuple[str, ...]
@@ -456,32 +459,44 @@ def eligibility(settings: Settings, item: Item) -> str | None:
 
 # --- The prompt -----------------------------------------------------------------------------------------
 
-QUOTE_TAG_RE = re.compile(r"(?is)<(/?)(blockquote|q)\b[^>]*>")
+# The start of an HTML quote tag, and a whole quote tag that can be read to its end with certainty: no quote
+# marks and no angle brackets between its name and its closing ">".
+QUOTE_TAG_START_RE = re.compile(r"(?i)</?(?:blockquote|q)\b")
+QUOTE_TAG_RE = re.compile(r"(?i)<(/?)(blockquote|q)\b([^<>\"']*)>")
 # A quote line: `>` at the start, also after the marks of list items (`- >`, `1. >`).
 QUOTE_LINE_RE = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+)*>")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 
 
 def _drop_html_quotes(text: str) -> str:
-    """Leave out HTML block and inline quotes whole, nested ones too. When the tags do not balance,
-    everything from the first opening tag to the end of the text is left out."""
+    """Leave out HTML block and inline quotes whole, nested ones too, following the tags by name. When they do
+    not balance (a closing tag that does not match the innermost open one, a closing tag with nothing open, a
+    tag left open, or a tag that cannot be read to its end with certainty), everything from the first quote
+    tag of the text to its end is left out."""
+    starts = [match.start() for match in QUOTE_TAG_START_RE.finditer(text)]
+    if not starts:
+        return text
+    first = starts[0]
     kept: list[str] = []
     position = 0
-    depth = 0
-    first_open: int | None = None
-    for match in QUOTE_TAG_RE.finditer(text):
+    open_tags: list[str] = []
+    for start in starts:
+        match = QUOTE_TAG_RE.match(text, start)
+        if match is None:
+            return text[:first]
+        name = match.group(2).lower()
         if match.group(1) != "/":
-            if depth == 0:
-                kept.append(text[position:match.start()])
-                if first_open is None:
-                    first_open = match.start()
-            depth += 1
-        elif depth > 0:
-            depth -= 1
-            if depth == 0:
+            if not open_tags:
+                kept.append(text[position:start])
+            open_tags.append(name)
+        else:
+            if not open_tags or open_tags[-1] != name:
+                return text[:first]
+            open_tags.pop()
+            if not open_tags:
                 position = match.end()
-    if depth > 0:
-        return text[: first_open if first_open is not None else len(text)]
+    if open_tags:
+        return text[:first]
     kept.append(text[position:])
     return "".join(kept)
 
@@ -562,7 +577,7 @@ def build_prompt(settings: Settings, kind: str, item: Item, comments: list[dict[
             del entries[question_entry]
     description = strip_quotes(item.body)
     criteria = done_criteria(description)
-    title = " ".join(item.title.split())
+    title = " ".join(strip_quotes(item.title).split())
     if item.is_pull:
         where = (
             f"It is pull request {item.number}: \"{title}\".\n"
@@ -901,9 +916,9 @@ def normalize(text: str) -> str:
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 PATH_RES = (
-    re.compile(r"(?<![\w.])(?:/Users|/home|/private/var|/private/tmp|/var/folders|/var/tmp|/tmp|/Volumes|/root)/[^\s/]+"),
+    re.compile(r"(?i)(?<![\w.])(?:/Users|/home|/private/var|/private/tmp|/var/folders|/var/tmp|/tmp|/Volumes|/root)/[^\s/]+"),
     re.compile(r"(?<![\w/~])~/[\w.-]"),
-    re.compile(r"\$\{?HOME\}?(?![A-Za-z0-9_])"),
+    re.compile(r"(?i)\$\{?HOME\}?(?![A-Za-z0-9_])"),
     re.compile(r"(?i)(?<![a-z])[a-z]:(?:\\{1,2}|/)(?:users|documents and settings)(?:\\{1,2}|/)"),
 )
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?!\.?\d)")
@@ -945,18 +960,21 @@ def _word_pattern(value: str) -> re.Pattern[str]:
     return re.compile(r"(?i)(?<![^\W\d_])" + body + r"(?![^\W\d_])")
 
 
-def unmarked(text: str) -> str:
-    """A copy with character references resolved, and code, tags on one line and the marks * and ~ taken out."""
+def unmarked(text: str, keep_code: bool = False) -> str:
+    """A copy with character references resolved, tags on one line and the marks * and ~ taken out, and code
+    taken out as well unless keep_code is set."""
     for _ in range(3):
         resolved = html.unescape(text)
         if resolved == text:
             break
         text = resolved
-    text = TAG_RE.sub("", CODE_RE.sub(" ", text))
+    if not keep_code:
+        text = CODE_RE.sub(" ", text)
+    text = TAG_RE.sub("", text)
     return normalize(re.sub(r"[*~]", "", text))
 
 
-def known_values() -> dict[str, list[str]]:
+def known_values(private: Path | None = None) -> dict[str, list[str]]:
     """Values of this computer and account that never appear in a public part."""
     account = pwd.getpwuid(os.getuid())
     names = [account.pw_name] + [part.strip() for part in account.pw_gecos.split(",") if part.strip()]
@@ -966,6 +984,8 @@ def known_values() -> dict[str, list[str]]:
             hosts.add(host)
             hosts.add(host.split(".")[0])
     paths = {str(Path.home()), account.pw_dir, str(ROOT)}
+    if private is not None:
+        paths.add(str(private))
     return {
         "name": [n for n in names if len(n) >= 3],
         "computer_name": sorted(h for h in hosts if len(h) >= 4 and h.lower() not in ("localhost", "localhost.localdomain")),
@@ -975,8 +995,12 @@ def known_values() -> dict[str, list[str]]:
 
 def scan(text: str, names: list[str], settings: Settings, known: dict[str, list[str]]) -> list[str]:
     """The kinds of things in `text` that must not be public; empty when it may be posted. The text is scanned
-    as it is, and a second time on the copy that unmarked() makes."""
-    return sorted(set(_scan_once(text, names, settings, known)) | set(_scan_once(unmarked(text), names, settings, known)))
+    as it is, and on two copies that unmarked() makes: one without code and one with code kept, so that
+    nothing passes because the scan took it for code."""
+    found: set[str] = set()
+    for copy in (text, unmarked(text), unmarked(text, keep_code=True)):
+        found |= set(_scan_once(copy, names, settings, known))
+    return sorted(found)
 
 
 def _scan_once(text: str, names: list[str], settings: Settings, known: dict[str, list[str]]) -> list[str]:
@@ -990,9 +1014,9 @@ def _scan_once(text: str, names: list[str], settings: Settings, known: dict[str,
                 found.add("name")
         elif re.search("(?i)" + r"[\W_]*".join(re.escape(word) for word in normalize(name).split()), flat):
             found.add("name")
-    if HONORIFIC_RE.search(text) or MENTION_RE.search(CODE_RE.sub(" ", text)):
+    if HONORIFIC_RE.search(text) or MENTION_RE.search(text):
         found.add("name")
-    if any(pattern.search(text) for pattern in PATH_RES) or any(p in text for p in known.get("local_path", [])):
+    if any(pattern.search(text) for pattern in PATH_RES) or any(p.lower() in text.lower() for p in known.get("local_path", [])):
         found.add("local_path")
     for match in IPV4_RE.finditer(text):
         try:
@@ -1105,7 +1129,9 @@ def job_lock_is_free(private: Path) -> bool:
     return True
 
 
-def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str | None = None) -> dict[str, object]:
+def run_job(
+    kind: str, number: int, settings: Settings, private: Path, tell: str | None = None, last_quota_try: bool = False,
+) -> dict[str, object]:
     """Run one job and return its result: fixed words, numbers and the private answer's path only."""
     result: dict[str, object] = {
         "kind": kind, "number": number, "status": "error", "verdict": "changes-needed",
@@ -1119,6 +1145,7 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
     if lock is None:
         result["status"] = "busy"
         return result
+    stopped: SystemExit | None = None
     try:
         state = load_job_state(private)
         held_back = gate(settings, state)
@@ -1127,9 +1154,12 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
         elif held_back == "day_bound":
             result.update(status="day_bound", reasons=["day_bound"])
         else:
-            _job(kind, number, settings, private, result, lock, state)
-    except SystemExit:
-        raise
+            _job(kind, number, settings, private, result, lock, state, last_quota_try)
+    except SystemExit as exc:
+        # Stopped by a signal: agy's group is ended already; the result and the line say so, and the run
+        # stays counted in the day.
+        result.update(status="stopped", reasons=["signal"])
+        stopped = exc
     except SignedOut as exc:
         result.update(status="signed_out", reasons=[exc.reason])
     except GitHubError as exc:
@@ -1143,12 +1173,14 @@ def run_job(kind: str, number: int, settings: Settings, private: Path, tell: str
     if result["private"] is not None:
         _write_private(Path(str(result["private"])) / "result.json", json.dumps(result, indent=2) + "\n")
         tell_coordinator(private, result, tell)
+    if stopped is not None:
+        raise stopped
     return result
 
 
 def _job(
     kind: str, number: int, settings: Settings, private: Path, result: dict[str, object], lock: int,
-    state: dict[str, object],
+    state: dict[str, object], last_quota_try: bool = False,
 ) -> None:
     item = read_item(settings, number)
     reason = eligibility(settings, item)
@@ -1189,12 +1221,16 @@ def _job(
         shutil.rmtree(work, ignore_errors=True)
     status, reasons, response = interpret(run, settings.max_answer_bytes)
     if status == "quota":
-        # A used-up quota: the run is not counted in the day, and no run starts until the wait has passed.
-        days = state.get("days") if isinstance(state.get("days"), dict) else {}
-        count = days.get(day, 0) if isinstance(days, dict) else 0
-        state["days"] = {day: max(0, (count if isinstance(count, int) else 1) - 1)}
+        # A used-up quota: no run starts until the wait has passed. The run is not counted in the day, unless
+        # its mark was put back as often as the settings allow: then it is an error and counts.
+        if not last_quota_try:
+            days = state.get("days") if isinstance(state.get("days"), dict) else {}
+            count = days.get(day, 0) if isinstance(days, dict) else 0
+            state["days"] = {day: max(0, (count if isinstance(count, int) else 1) - 1)}
         state["hold_until"] = time.time() + settings.quota_retry_seconds
         save_job_state(private, state)
+        if last_quota_try:
+            status, reasons = "error", ["quota", "quota_returns_spent"]
     if response is None:
         result.update(status=status, reasons=reasons)
         return
@@ -1215,7 +1251,7 @@ def _job(
     if names is None:
         result.update(status="held", reasons=["no_names_list", *verdict_reasons])
         return
-    found = scan(comment, names, settings, known_values())
+    found = scan(comment, names, settings, known_values(private))
     if found:
         result.update(status="held", reasons=[*found, *verdict_reasons])
         return
