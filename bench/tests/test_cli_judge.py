@@ -1255,6 +1255,31 @@ def test_walking_and_removing_what_the_program_left_share_one_time_in_a_step(tmp
         judge_module.walk_tree(third, lambda folder, name, info: None)
 
 
+@pytest.mark.parametrize("routine", ["walking", "removing"])
+def test_walking_and_removing_give_up_between_folders_once_the_time_is_spent(tmp_path, monkeypatch, routine):
+    """The time is looked at before each folder is entered, not only at each entry read: a tree of
+    empty folders whose time runs out while they are entered one after another is given up too."""
+    clock = getattr(judge_module, "TREE_CLOCK", None)
+    assert clock is not None, "walking and removing what the program's side left have no time limit"
+    top = tmp_path / "left"
+    top.mkdir()
+    for n in range(100):
+        (top / f"d{n}").mkdir()
+    name = "rmdir" if routine == "removing" else "open"
+    real = getattr(os, name)
+
+    def slow(*args, **kwargs):
+        time.sleep(0.005)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(clock, "left", 0.2)
+    monkeypatch.setattr(judge_module.os, name, slow)
+    with pytest.raises(judge_module.TooMuchLeft, match="seconds"):
+        if routine == "removing":
+            judge_module.remove_tree(top)
+        else:
+            judge_module.walk_tree(top, lambda folder, name, info: None)
+
+
 # a test that leaves files in the cases' folder itself, as a case runner that was ended can
 LEAVES_FILES = ('def test_leaves():\n    root = json.load(open(os.environ["DODAM_CLI_CONFIG"]))["work_root"]\n'
                 '    for n in range(20):\n        open(os.path.join(root, f"left-{n}"), "w").close()\n')
