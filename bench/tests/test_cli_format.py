@@ -85,7 +85,7 @@ def test_a_web_task_takes_no_case_limits(task_dir):
 
 def test_the_judge_must_have_time_for_a_program_that_hangs_in_every_case(cli_task_dir):
     """Every test may use its whole time limit, so the verifier's time must cover the build and all of them."""
-    edit(cli_task_dir / "task.toml", "verifier_timeout_sec = 1200", "verifier_timeout_sec = 900")
+    edit(cli_task_dir / "task.toml", "verifier_timeout_sec = 1600", "verifier_timeout_sec = 900")
     assert any("verifier_timeout_sec" in e and "hangs" in e for e in errors_of(cli_task_dir))
 
 

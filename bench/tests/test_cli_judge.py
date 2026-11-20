@@ -459,14 +459,41 @@ def test_vet_reports_a_fault_of_the_judge_as_such(cli_task_dir, tmp_path, monkey
     assert all("the judge itself failed" in r["problems"][0] for r in results)
 
 
-def test_the_judging_time_the_checker_demands_is_what_the_judge_allows(cli_task_dir):
-    """The checker's bound and the judge's own time limits come from the same numbers."""
+# Every wait and every time limit the judge has in one step of a command-line task, in seconds, as
+# the code has them: ending a user's processes pauses at most 500 times for 0.01 seconds; the judge
+# waits 30 seconds for a build it has ended; a file of tests needs at most two case runners for each
+# of its cases, since a runner that ends twice without deciding a case costs the next case; and every
+# runner is followed by taking back what it left.
+def step_terms(tests_per_file: list[int], limit: int) -> dict[str, int]:
+    runners, ending = sum(max(2 * tests, 2) for tests in tests_per_file), 5
+    return {"ending what the working user left running": ending,
+            "the build": judge_module.BUILD_SECONDS,
+            "ending the build's processes": ending,
+            "waiting for the ended build": 30,
+            "the search for places any user may write": judge_module.SEARCH_SECONDS,
+            "starting every case runner the files can need": runners * judge_module.FILE_SECONDS,
+            "every case at its full time limit": sum(tests_per_file) * (limit + judge_module.CASE_SECONDS),
+            "taking back what every case runner left": runners * ending,
+            "taking back at the end": ending}
+
+
+@pytest.mark.parametrize("term", list(step_terms([1], 1)))
+def test_the_checker_refuses_a_judging_time_that_leaves_out_any_wait_of_a_step(cli_task_dir, term):
+    """The format checker adds up every wait and every time limit of a step. A time limit for
+    judging one term short of that sum is refused, whichever term it is; the whole sum is accepted.
+    The task here has four files of one test each and a time limit of 2 seconds."""
     import dodambench.task as task_module
-    bound = getattr(task_module, "judging_seconds", None)
-    assert bound is not None, "the checker cannot say how long judging may take"
-    files, tests, limit = 4, 4, 2
-    assert bound(load_task(cli_task_dir)) == (task_module.BUILD_SECONDS + files * judge_module.FILE_SECONDS
-                                               + tests * (limit + judge_module.CASE_SECONDS))
+    terms = step_terms([1, 1, 1, 1], 2)
+    whole = sum(terms.values())
+    toml = cli_task_dir / "task.toml"
+    given = toml.read_text(encoding="utf-8")
+    toml.write_text(given.replace("verifier_timeout_sec = 1600", f"verifier_timeout_sec = {whole - terms[term]}"),
+                    encoding="utf-8")
+    refused = [p for p in task_module.cli_problems(load_task(cli_task_dir)) if p["key"] == "limits.verifier_timeout_sec"]
+    assert refused, f"a time limit for judging without {term!r} ({terms[term]} s) was accepted"
+    toml.write_text(given.replace("verifier_timeout_sec = 1600", f"verifier_timeout_sec = {whole}"), encoding="utf-8")
+    assert task_module.judging_seconds(load_task(cli_task_dir)) == whole, terms
+    assert not [p for p in task_module.cli_problems(load_task(cli_task_dir)) if p["key"] == "limits.verifier_timeout_sec"]
 
 
 def test_the_converted_task_is_judged_like_the_source_task(cli_task_dir, tmp_path):
