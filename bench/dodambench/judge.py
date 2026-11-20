@@ -34,7 +34,8 @@ The outcome of every case is written down when the case ends. When the process t
 is ended, by the kernel or by anything else, the case that was running fails with that reason, the
 cases before it keep their outcome and the cases after it are run by a new process. Whatever the
 program's side left as files is handled by routines that take one step per entry, hold two folders
-open at a time, follow no link and refuse a tree of more than TREE_ENTRIES entries.
+open at a time, follow no link and refuse a tree of more than TREE_ENTRIES entries; all of them
+together have TREE_SECONDS in a step.
 
 Without a user to run the program as nothing separates the program from the judge. That is only for
 the project's own prepared solutions: it must be asked for, it is refused for root, and its result
@@ -213,9 +214,13 @@ MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the co
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
 TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
+TREE_SECONDS = 120                 # how long all walking and removing of what it left may take in one step
 WRITABLE_PLACES = 10_000           # how many places any user may write a build may leave
 SEARCH_SECONDS = 300               # how long the search for such places may take
 KERNEL_ENDED = "the kernel ended a process because the container ran out of memory"
+# The kind of the entry that says the step failed for what the program's side left and the judge
+# could not take back. No task gives a test this kind, and no rate counts it.
+LEFT_BEHIND = "left-behind"
 TIMED_OUT = "timed out"
 PROGRESS_ENV = "DODAM_JUDGE_PROGRESS"
 
@@ -284,42 +289,81 @@ class TooMuchLeft(Exception):
     """The program's side left more than the judge handles. The step fails with this reason."""
 
 
+class TreeClock:
+    """How long every walk and removal of what the program's side left may still take in this step,
+    all together. judge() gives it TREE_SECONDS when a step begins and takes it away when the step
+    ends; outside a judging nothing is timed."""
+
+    def __init__(self) -> None:
+        self.left: float | None = None
+
+    def deadline(self) -> float | None:
+        return None if self.left is None else time.monotonic() + self.left
+
+    def spent(self, began: float) -> None:
+        if self.left is not None:
+            self.left = max(self.left - (time.monotonic() - began), 0.0)
+
+
+TREE_CLOCK = TreeClock()
+
+
+def in_time(deadline: float | None) -> None:
+    """Give up when the step's time for walking and removing what the program's side left is spent."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TooMuchLeft(f"walking and removing what the program's side left took all of the {TREE_SECONDS} "
+                          "seconds a step gives it")
+
+
 def remove_tree(top: str | Path, keep_top: bool = False, most: int | None = None) -> None:
     """Remove a folder and everything in it, whatever a program made there: any depth, any names,
-    links (never followed), closed permissions, special files. It holds two folders open at a time
-    and remembers only the names on the way down, so its cost is one step per entry; it gives up
-    after `most` entries."""
+    links (never followed), closed permissions, special files. It holds two folders open at a time.
+    It reads each folder once, removing its files and remembering the folders in it, and once more
+    when those are gone, so its cost is one step per entry; it remembers no more names than walking
+    the tree does. It gives up after `most` entries, and when the step's time for walking and
+    removing is spent."""
     top = str(top)
     here = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    names: list[str] = []
+    names: list[str] = []              # the folders on the way down from top to here
+    waiting: list[list[str]] = [[]]    # for top and for each of them: the folders in it still to remove
     seen, most = 0, TREE_ENTRIES if most is None else most
+    began, deadline = time.monotonic(), TREE_CLOCK.deadline()
     try:
         while True:
-            went_down = False
+            if waiting[-1]:
+                in_time(deadline)
+                name = waiting[-1].pop()
+                os.chmod(name, 0o700, dir_fd=here)
+                below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+                os.close(here)
+                here = below
+                names.append(name)
+                waiting.append([])
+                continue
+            # read the folder: its files go at once, the folders in it one after another
             with os.scandir(here) as entries:
                 for entry in entries:
                     seen += 1
                     if seen > most:
                         raise TooMuchLeft(f"a folder to remove holds more than {most} entries")
+                    in_time(deadline)
                     if entry.is_dir(follow_symlinks=False):
-                        os.chmod(entry.name, 0o700, dir_fd=here)
-                        below = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
-                        os.close(here)
-                        here = below
-                        names.append(entry.name)
-                        went_down = True
-                        break
-                    os.unlink(entry.name, dir_fd=here)
-            if went_down:
+                        waiting[-1].append(entry.name)
+                    else:
+                        os.unlink(entry.name, dir_fd=here)
+            if waiting[-1]:
                 continue
+            # nothing is left in it
             if not names:
                 break
             above = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=here)
             os.close(here)
             here = above
+            waiting.pop()
             os.rmdir(names.pop(), dir_fd=here)
     finally:
         os.close(here)
+        TREE_CLOCK.spent(began)
     if not keep_top:
         os.rmdir(top)
 
@@ -340,10 +384,12 @@ def walk_tree(top: str | Path, visit, most: int | None = None) -> int:
     """Call visit(folder, name, info) for every entry below top: folder is the open folder the entry
     is in, info what the entry itself is (a link is not followed). It reaches every entry at any
     depth and with any name, holds two folders open at a time, remembers only the names of the
-    folders it has still to enter, and gives up after `most` entries. Says how many entries there are."""
+    folders it has still to enter, and gives up after `most` entries, and when the step's time for
+    walking and removing is spent. Says how many entries there are."""
     here = os.open(str(top), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     to_enter: list[list[str]] = []
     seen, most = 0, TREE_ENTRIES if most is None else most
+    began, deadline = time.monotonic(), TREE_CLOCK.deadline()
     try:
         while True:
             below = []
@@ -352,6 +398,7 @@ def walk_tree(top: str | Path, visit, most: int | None = None) -> int:
                     seen += 1
                     if seen > most:
                         raise TooMuchLeft(f"the program's folder holds more than {most} entries")
+                    in_time(deadline)
                     info = entry.stat(follow_symlinks=False)
                     visit(here, entry.name, info)
                     if stat.S_ISDIR(info.st_mode):
@@ -364,11 +411,13 @@ def walk_tree(top: str | Path, visit, most: int | None = None) -> int:
                 above = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=here)
                 os.close(here)
                 here = above
+            in_time(deadline)
             down = os.open(to_enter[-1].pop(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
             os.close(here)
             here = down
     finally:
         os.close(here)
+        TREE_CLOCK.spent(began)
 
 
 GROUP = Path("/sys/fs/cgroup")
@@ -505,7 +554,7 @@ class Side:
     def end(self) -> bool:
         """End every process of this user: as that user, signal everything it may signal. Needs no
         new process when none can be made: then the judge signals them one by one, as root."""
-        for _ in range(500):
+        for _ in range(ENDING_ROUNDS):
             if not self.alive():
                 return True
             try:
@@ -543,7 +592,7 @@ class Side:
                         os.kill(other, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-            time.sleep(0.01)
+            time.sleep(ENDING_PAUSE)
         return not self.alive()
 
 
@@ -593,7 +642,7 @@ def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str
     if side and not side.end():
         raise JudgeFault("processes of the build could not be ended")
     try:
-        proc.wait(timeout=30)
+        proc.wait(timeout=BUILD_ENDING_SECONDS)
     except subprocess.TimeoutExpired:
         raise JudgeFault("the build did not end after it was killed") from None
     proc.stdout.close()
@@ -612,9 +661,47 @@ CLI_LIMITS = {"timeout_sec": "CASE_TIMEOUT_SEC", "memory_mb": "CASE_MEMORY_MB", 
               "processes": "CASE_PROCESSES", "disk_mb": "CASE_DISK_MB"}
 FIRST_CASE_USER_ID, LAST_CASE_USER_ID = 200_000, 2_000_000_000
 NO_FILES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "securityfs", "debugfs", "tracefs", "pstore", "bpf"}
-# What a file of hidden tests may take besides the time of its cases: starting Python and the judge's own work.
+# What a case runner may take besides the time of its cases, starting Python and the judge's own work, and what
+# the judge's work around one case may take.
 FILE_SECONDS, CASE_SECONDS = 30, 2
 BUILD_SECONDS = 900
+BUILD_ENDING_SECONDS = 30          # how long the judge waits for a build it has ended
+ENDING_ROUNDS, ENDING_PAUSE = 500, 0.01   # ending a user's processes: at most so many rounds, each with this pause
+
+
+def build_seconds(lang_env: dict[str, str]) -> float:
+    """The build's time limit: BUILD_SECONDS, unless the settings handed to the judge give another.
+    The format checker refuses a task whose settings would."""
+    return float(lang_env.get("BUILD_TIMEOUT_SEC", BUILD_SECONDS))
+
+
+def runners_at_most(tests: int) -> int:
+    """The most case runners one file of tests can need. A runner that ends without deciding a case
+    is started again, and the second time in a row it costs the next case: so a case needs at most
+    two runners, and a file whose cases cannot be listed needs two."""
+    return max(2 * tests, 2)
+
+
+def file_seconds(tests: int, case_seconds: int) -> int:
+    """The time one file of tests is given, shared by every case runner it needs: each runner's start
+    with the judge's work around it, and every case at its full time limit."""
+    return runners_at_most(tests) * FILE_SECONDS + tests * (case_seconds + CASE_SECONDS)
+
+
+def step_terms(tests_per_file: list[int], case_seconds: int) -> dict[str, float]:
+    """Every wait and every time limit the judge has in one step of a command-line task, in seconds,
+    term by term: what the format checker adds up."""
+    ending, runners = ENDING_ROUNDS * ENDING_PAUSE, sum(runners_at_most(tests) for tests in tests_per_file)
+    return {"ending what the working user left running": ending,
+            "the build": BUILD_SECONDS,
+            "ending the build's processes": ending,
+            "waiting for the ended build": BUILD_ENDING_SECONDS,
+            "the search for places any user may write": SEARCH_SECONDS,
+            "walking and removing what the program's side left": TREE_SECONDS,
+            "starting every case runner the files can need": runners * FILE_SECONDS,
+            "every case at its full time limit": sum(tests_per_file) * (case_seconds + CASE_SECONDS),
+            "taking back what every case runner left": runners * ending,
+            "taking back at the end": ending}
 ARGS_ENV = "DODAM_JUDGE_ARGS"
 RESULT_FILES = ("reward.json", "reward.txt", "details.json", "judge-fault.json")
 
@@ -649,7 +736,7 @@ def writable_by_others(mounts: Path = Path("/proc/self/mounts")):
         try:
             while True:
                 ready, _, _ = select.select([search.stdout], [], [], max(deadline - time.monotonic(), 0))
-                if not ready:
+                if not ready or time.monotonic() >= deadline:
                     raise TooMuchLeft("the build left more files than can be searched for places any user may write")
                 data = os.read(search.stdout.fileno(), 1 << 16)
                 if len(rest) + len(data) > 1 << 22 and b"\0" not in data:
@@ -756,6 +843,7 @@ class CliRun:
     def __init__(self, app_dir: Path, lang_env: dict[str, str], run_as: str, extra_env: dict[str, str]):
         self.run_as = run_as
         self.uid: int | None = None
+        self.left = ""   # why no more files of tests are run: what the cases left cannot be taken back
         limits, command = self.settings(app_dir, lang_env)
         self.limits = limits
         self.private = Path(tempfile.mkdtemp(prefix="dodam-judge-"))
@@ -793,7 +881,7 @@ class CliRun:
 
     def run_file(self, path: Path, ended: list[dict]) -> list[dict]:
         tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
-        timeout = FILE_SECONDS + tests * (self.limits["timeout_sec"] + CASE_SECONDS)
+        timeout = file_seconds(tests, self.limits["timeout_sec"])
         cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
         self.note_records(cases)
         if self.fault_file.exists():
@@ -834,13 +922,18 @@ class CliRun:
         return {"fails_a_case": False, "runs": len(noted), "largest": noted[:HIGHS_KEPT]}
 
     def sweep(self) -> None:
-        """Between two files of tests nothing of the program is left: no process, no case folder."""
+        """Between two files of tests nothing of the program is left: no process, no case folder.
+        Where the cases' folder cannot be emptied in the step's time, no more files of tests are run
+        and `left` says why."""
         if self.uid is not None and not Side(self.uid, self.uid).end():
             raise JudgeFault("processes of the program could not be ended")
         if not self.work_root.is_dir():
             raise JudgeFault("the folder the cases live in is gone")
         try:
             remove_tree(self.work_root, keep_top=True)
+        except TooMuchLeft as exc:
+            # what the program's side left is its doing: the step fails with that reason
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
         except OSError as exc:
             raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
 
@@ -1052,17 +1145,20 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
     case that was running fails with that reason, the cases before it keep their outcome, and a new
     runner goes on with the cases after it. Before a new runner starts, give_back() takes back what
     the last one left; when it returns an outcome and a message, the cases that are left get those.
-    Every time a runner did not end by itself, `ended` gets a record of how."""
+    The runners share `timeout`: one that is started again gets what is left of it. Every time a
+    runner did not end by itself, `ended` gets a record of how."""
     private = Path(tempfile.mkdtemp(prefix="dodam-run-"))
     progress, said = str(private / "progress.jsonl"), str(private / "errors.txt")
     env = {**env, PROGRESS_ENV: progress}
     whole = lambda message: [{"name": test_path.name, "outcome": "failed", "message": message}]
-    fruitless = 0
+    fruitless, spent = 0, 0.0
     try:
         while True:
             known = sum("outcome" in r for r in read_progress(progress))
             kills = killed_for_memory()
-            code = run_pytest(test_path, env, timeout, said)
+            began = time.monotonic()
+            code = run_pytest(test_path, env, timeout - spent, said) if spent < timeout else None
+            spent += time.monotonic() - began
             how = ""
             if code is None:
                 how = TIMED_OUT
@@ -1131,7 +1227,17 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
           unseparated: bool = False) -> dict:
     """Judge one step. With run_as the program's side is that plain user and the judge is root. Without
     it nothing separates the program from the judge: that is only for the project's own prepared
-    solutions, must be asked for with unseparated=True, and is refused when the judge is root."""
+    solutions, must be asked for with unseparated=True, and is refused when the judge is root. All
+    walking and removing of what the program's side left in the step shares TREE_SECONDS."""
+    TREE_CLOCK.left = float(TREE_SECONDS)
+    try:
+        return judge_step(tests_dir, app_dir, step, out_dir, run_as, lang_env, extra_env, unseparated)
+    finally:
+        TREE_CLOCK.left = None
+
+
+def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str,
+               lang_env: dict[str, str] | None, extra_env: dict[str, str] | None, unseparated: bool) -> dict:
     if not run_as:
         if not unseparated:
             raise JudgeFault("no user to run the program as: judging without separation must be asked for")
@@ -1179,7 +1285,7 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
     elif build_cmd:
         report["build_ok"], report["build_log_tail"], report["build_ended"] = run_build(
             build_cmd, app_dir, side, {**os.environ, **(extra_env or {})},
-            float(lang_env.get("BUILD_TIMEOUT_SEC", BUILD_SECONDS)))
+            build_seconds(lang_env))
     else:
         report["build_ok"] = True
     report["build_sec"] = round(time.monotonic() - started, 2)
@@ -1203,6 +1309,9 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
         cases: list[dict]
         if not report["build_ok"]:
             cases = [{"name": path.name, "outcome": not_run, "message": "build failed"}]
+        elif cli is not None and cli.left:
+            # what the cases left could not be taken back: no case runs on it
+            cases = [{"name": path.name, "outcome": not_run, "message": cli.left}]
         elif cli is not None:
             try:
                 cases = cli.run_file(path, report["runner_ended"])
@@ -1237,18 +1346,23 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             report["tests"].append({**c, "file": t["file"], "kind": t.get("kind"), "step": t.get("step"),
                                     "weakness": t.get("weakness")})
     app.stop()
-    if app.left and served is not None and all(c["message"] != app.left for c in report["tests"]):
-        # the last stop of the step could not give back what the program wrote, and no file of tests
-        # came after it: the step fails with that reason all the same
-        report["tests"].append({"name": Path(served["file"]).name, "message": app.left, "file": served["file"],
-                               "outcome": "skipped" if served.get("kind") == "security" else "failed",
-                               "kind": served.get("kind"), "step": served.get("step"), "weakness": served.get("weakness")})
     highs = cli.highs() if cli is not None else None
     if cli is not None and run_as:
         records["highest_in_a_case"] = cli.records_highest
         records["left_out_of_a_case_at_most"] = min(cli.limits["memory_mb"] * 2**20 // 4, RECORDS_LEFT_OUT_MB * 2**20)
     if cli is not None:
         cli.close()
+    left = app.left or (cli.left if cli is not None else "")
+    if left:
+        # the reason the step failed: what the program's side left could not be taken back
+        report["left_behind"] = left
+    last = served if app.left else (selected[-1] if cli is not None and selected else None)
+    if left and last is not None and all(c["message"] != left for c in report["tests"]):
+        # the last stop of the step could not take back what the program's side left, and no file of
+        # tests came after it: the step fails with that reason all the same. The entry is of this step
+        # and of a kind of its own, so it counts neither as unjudged nor as a weakness or an earlier step broken
+        report["tests"].append({"name": Path(last["file"]).name, "message": left, "file": last["file"],
+                               "outcome": "failed", "kind": LEFT_BEHIND, "step": step, "weakness": None})
     if run_as:
         # how near the container came to its cap: the most it held, how often it stood at the cap,
         # and how many processes the kernel ended there

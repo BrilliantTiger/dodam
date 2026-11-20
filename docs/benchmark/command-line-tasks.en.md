@@ -35,7 +35,7 @@ case_disk_mb = 64        # what can be written in the case's whole folder, and t
 
 [limits]
 agent_timeout_sec = 3600
-verifier_timeout_sec = 1800
+verifier_timeout_sec = 5400
 cpus = 2
 memory_mb = 1408         # at least the case's memory + its files + 256 for the judge
 
@@ -119,7 +119,7 @@ Nothing about the judging is on the command line of any process, because every u
 
 What a plain user can still see of the judge's processes is that they exist, the name of their program (`python3`), their state (running or waiting), how much memory they hold, when they started, how much processor time they have used and how often the kernel switched them in and out, and the kernel limits they run under. It can also read the list of file systems mounted in the container. None of that names a test or says which test is being run.
 
-**Whatever the program's side left as files** (in `/app`, where the dependency folders go, in the temporary folders, in a case's folder, in a served program's data folder) the judge removes, hands over, opens for reading or searches with routines that take one step per entry, hold two folders open at a time however deep the tree is, and follow no link out of it. They give up after 500,000 entries, and the search for places any user may write gives up after 10,000 such places or 300 seconds. When they give up, the step fails with that reason and a result is written. When it is a served program's data folder, the program is not started again on what was left, and the files of tests after it are judged as for a program that does not start. A writable place so deep that no path can name it is closed all the same: the judge closes the folder above it that a path can still name to other users, who then reach nothing below it.
+**Whatever the program's side left as files** (in `/app`, where the dependency folders go, in the temporary folders, in a case's folder, in a served program's data folder) the judge removes, hands over, opens for reading or searches with routines that take one step per entry, hold two folders open at a time however deep the tree is, and follow no link out of it. Removing reads each folder once, and once more when the folders in it are gone. They give up after 500,000 entries, or when all of them together have taken the 120 seconds a step gives them, and the search for places any user may write gives up after 10,000 such places or 300 seconds. When they give up, the step fails with that reason and a result is written. When it is a served program's data folder, the program is not started again on what was left, and the files of tests after it are judged as for a program that does not start. When it is the folder the cases live in, no file of tests runs after it, and the files after it are judged as for a program that does not build. When no file of tests comes after it, the result gets one more entry with that reason; the entry has a kind of its own (`left-behind`), which no rate counts. Whenever what the program's side left cannot be taken back after the program ran, the result also gives the reason in a field of its own (`left_behind` in `details.json`). A writable place so deep that no path can name it is closed all the same: the judge closes the folder above it that a path can still name to other users, who then reach nothing below it.
 
 ## When something is ended while a case runs
 
@@ -133,7 +133,7 @@ Whatever is ended, by the kernel because the container's memory ran out or by an
 | The build | The build has failed and the result says by what it was ended. Functional and boundary tests of the step fail, and its security tests are unjudged |
 | The judge itself, or the whole container | Nothing inside can write a result any more. The judge removed the result files of any earlier judging before it ran anything, and it writes a result under another name and moves it into place only when it is complete, so no file reads as a judgement. The exit code is not zero. The script that starts the judge outlives it where the container does, and then writes `judge-fault.json` saying that the judging ended without a result |
 
-The outcomes of a test file do not wait for the file to finish: each is written down when its case ends, in a place only root can enter. A process that runs the cases and is ended twice in a row without any case being decided costs the next case, which fails with that reason, so the judging always ends.
+The outcomes of a test file do not wait for the file to finish: each is written down when its case ends, in a place only root can enter. A process that runs the cases and is ended twice in a row without any case being decided costs the next case, which fails with that reason, so the judging always ends. The processes that run the cases of one file share its time: one that is started again gets what is left of it.
 
 On the path the real measurement uses, a step without a result file is a step with an error and no reward: Harbor records the error for that step and goes on to the next step. The measurement's runner reads the step's reward as missing, lists the step among the missing ones and gives the run a status other than "ok". It does not count such a step as passed. Harbor's own number for the whole run is the mean over the steps that have a result, so it leaves the step out; the runner's status is what tells that a step is missing.
 
@@ -168,7 +168,7 @@ Each rule has a test that fails when the rule is broken.
 | The program cannot write, replace or remove the result file | Only root can enter the results folder, and nobody else can rename it from the folder above. Whatever lay where a result goes is removed before anything runs. The judge writes the result to a new file and renames it into place, so it never follows a planted link |
 | For every limit there is a line that holds whatever the program does | The section "The limits" says for each resource what enforces it and how far it can really be passed |
 | What one case or one step takes is given back before the next starts | Every process is ended and the case's folder removed. Shared memory and message queues that would stay after their processes cannot be made in the first place. What the working user left running is ended before the build, what the build left running before the first case, and what a served program left running and wrote before its next start |
-| The judge survives whatever the program's side leaves behind | Every place where the judge removes, hands over, opens or searches what the program's side wrote is bounded in time, memory and open files for any tree of folders, and follows no link. If a case's folder cannot be removed, that case fails; it is no fault of the judge, and the other cases are judged as usual. A tree with more entries than the judge handles fails the step, with a result |
+| The judge survives whatever the program's side leaves behind | Every place where the judge removes, hands over, opens or searches what the program's side wrote is bounded in time, memory and open files for any tree of folders, and follows no link. If a case's folder cannot be removed, that case fails; it is no fault of the judge, and the other cases are judged as usual. A tree with more entries than the judge handles, or walking and removing that take longer than a step gives them, fails the step, with a result |
 | A kill ends in a judgement | The section "When something is ended while a case runs" |
 | What could not be judged never counts as passed | The three points of the section "A check that could not be judged is no pass" |
 | A fault of the judge itself is told apart from a failure of the program | On a fault the judge writes no result file, records the fault separately and ends with a different exit code |
@@ -249,7 +249,35 @@ What this record cannot show. A run is in it only when it made a new high for th
 
 **The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that fills every process the container may hold, one that eats more memory than the container has and one that prints 400 MB are tests, and in all of them the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
 
-The format checker adds up, for each step, 900 seconds for the build, 30 seconds for every test file, and for every test its case's time limit plus 2 seconds, and refuses a task whose time limit for judging is below the largest such sum. Beyond that sum the judge can spend in a step up to 300 seconds on the search for places any user may write, and a case runner that is started again gets the whole time of its file of tests once more. For the sample task the sum is 1,550 seconds and the time limit for judging is 1,800 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
+The format checker adds up every wait and every time limit the judge has in a step of a command-line task, and refuses a task whose time limit for judging is below the largest such sum. A file of tests needs at most two processes that run its cases for each of its cases, since one that is ended twice in a row without deciding a case costs the next case, and those processes share the file's time. The terms, and what they come to in the sample task's longest step (10 files, 50 tests, a time limit of 5 seconds):
+
+| Term | Seconds | In the sample |
+|---|---|---|
+| ending what the working user left running (at most 500 rounds, each with a pause of 0.01 seconds) | 5 | 5 |
+| the build | 900 | 900 |
+| ending the build's processes | 5 | 5 |
+| waiting for the ended build | 30 | 30 |
+| the search for places any user may write | 300 | 300 |
+| walking and removing what the program's side left, all of it together | 120 | 120 |
+| starting every process that runs cases, with the judge's work around it | 30 for each, two for each test | 3,000 |
+| every case at its full time limit, with the judge's work around it | the time limit and 2 for each test | 350 |
+| taking back what each of those processes left | 5 for each | 500 |
+| taking back at the end | 5 | 5 |
+| Sum | | 5,215 |
+
+The sample task's time limit for judging is 5,400 seconds, so the sum fits with 185 seconds to spare. If every process that is started again got the whole time of its file once more, the sum for the same step would be 9,709 seconds; the processes of a file share its time instead. The term for ending a user's processes counts the pauses between its rounds, not the work of each round (starting a process that signals them, waiting for it, and reading which processes are left); that work is bounded by the number of rounds. The build is counted at 900 seconds, and the format checker refuses a task whose settings would give the judge another time limit for the build.
+
+All walking and removing of what the program's side left in a step shares the one term of 120 seconds. A command-line step walks or removes at most four times before the cases (the program's folder twice, a dependency folder, the memory-backed folder), and empties the cases' folder once before the first file, after every process that runs cases and once at the end: 106 times in the sample's longest step. A limit of 120 seconds for each of them would add 12,720 seconds to the sum instead of 120. Removing reads each folder once, and once more when the folders in it are gone; before, it read a folder again from its start every time it had removed a folder in it. `python experiments/removal_time.py` makes trees of four layouts and times the judge's own walking and removing of each, as root in a container of the Python image with no network, 1 GB of memory and no swap beyond it, 64 processes and 2 processors. On the measuring computer on 20 November, in seconds, walking and then removing:
+
+| Layout | 10,000 entries | 160,000 entries | 500,000 entries |
+|---|---|---|---|
+| files in one folder | 0.02 and 0.07 | 0.39 and 1.24 | 4.85 and 4.13 |
+| empty folders in one folder | 0.11 and 0.16 | 3.56 and 3.74 | 64.62 and 82.95 |
+| half files and half empty folders in one folder | 0.08 and 0.13 | 1.15 and 2.26 | 21.31 and 30.23 |
+| chains of 1,000 folders inside each other | 0.47 and 0.71 | 7.29 and 9.82 | 50.45 and 55.62 |
+| empty folders in one folder, with the earlier removal | 0.12 and 1.65 | 4.15 and 37.59 | 90.29 and 398.0 |
+
+Above 160,000 entries, in the layouts with many folders, walking and removing both grow faster than the count, the earlier removal as much as the new one; why was not measured. The container's own disk refuses folders nested much deeper than a few thousand, so the deep layout is made of chains. One tree at the bound of 500,000 entries in the slowest layout takes up to 90 seconds to walk or 83 seconds to remove, so the 120 seconds hold one walk or one removal of such a tree, and more fails the step. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
 
 ## The container's caps, and the path the real measurement uses
 
@@ -272,7 +300,7 @@ The caps bound each container, not their sum. On the path through Harbor the con
 
 A problem that is not the program's is a fault of the judge: it cannot make the case's folder, cannot start the program as the judging user, cannot end the processes of the program's side, the task's settings are incomplete, the container has no caps that hold, the cases of a command-line test file cannot be listed, or such a file does not finish in its time. The judge then writes no result file (and removes one that is there), says what failed in `judge-fault.json` and ends with exit code 3. Without a result file the measuring harness treats the run as a failed judging and does not count it as a score of the program. The tool that checks prepared solutions also reports it separately, as "the judge itself failed".
 
-A problem that comes from what the program left is no fault of the judge. If the case's folder cannot be removed, that case fails, and what is left is removed again when the next case starts. If the program's folder holds more than the judge handles, the step fails and a result is written.
+A problem that comes from what the program left is no fault of the judge. If the case's folder cannot be removed, that case fails, and what is left is removed again when the next case starts. If what the program's side left holds more than the judge handles, or takes longer to walk and remove than a step gives, the step fails and a result is written.
 
 A judge that is ended from outside cannot write `judge-fault.json` itself. The script that starts it does, where it survives: it removes any result file, writes that the judging ended without a result, with the exit code, and ends with an exit code that is not zero. The message is JSON first, like every other diagnostic.
 
@@ -496,6 +524,8 @@ Counting alone depends on the judge counting in time. In this run it ended the f
 | The standard library's removal | fails: too many open files | 0.145 s |
 | **Chosen**: a removal that holds two folders open on its way down | removed, 0.063 s | 0.128 s |
 
+These figures are from the first form of the chosen removal. It now reads each folder once, and once more when the folders in it are gone; in a capped container it removes 500,000 empty folders in one folder in 83 seconds, where the first form took 398.
+
 ### How often the judge measures
 
 What one process taking memory as fast as it can reached before it was ended (limit 256 MB, twenty tries), and the processor the judge uses. The processor use is the processor time the judging process used while a program slept for two seconds, divided by those two seconds; the smallest and the largest of five.
@@ -535,7 +565,7 @@ A kernel limit on address space would need a different value for each language. 
 
 ## Every protection, and the test that fails without it
 
-For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 109 of them). `python experiments/check_protections.py` takes the protections out of a copy of the repository one at a time and runs that protection's tests. The tests catch 102 of them, and the check fails when a protection can be taken out without a test failing. A protection counts as caught at the first of its tests that fails: the check stops that protection's tests there and does not run the others the entry names. So the count says that at least one test catches each protection, not how many do. The other 7 are second lines of defence: without them the attack still gets nothing, and the table says which other protections see to that. For those the check runs the attack tests without the protection and fails if one of them fails. A test also checks that this table and that file hold the same protections. The list was made from the code and not from this document: both judges, the converter and the script that starts the judge were read statement by statement, and every statement that is there only for separation, for a limit or for giving back got an entry. Where a protection sits in more than one place of the code, each place is an entry of its own: the text a variant takes out occurs exactly once in its file, and the check refuses an entry whose text occurs twice or not at all.
+For every protection there is one variant of the code without it (`bench/experiments/protections.toml`, 126 of them). `python experiments/check_protections.py` takes the protections out of a copy of the repository one at a time and runs that protection's tests. The tests catch 119 of them, and the check fails when a protection can be taken out without a test failing. A protection counts as caught at the first of its tests that fails: the check stops that protection's tests there and does not run the others the entry names. So the count says that at least one test catches each protection, not how many do. The other 7 are second lines of defence: without them the attack still gets nothing, and the table says which other protections see to that. For those the check runs the attack tests without the protection and fails if one of them fails. A test also checks that this table and that file hold the same protections. The list was made from the code and not from this document: both judges, the converter and the script that starts the judge were read statement by statement, and every statement that is there only for separation, for a limit or for giving back got an entry. Where a protection sits in more than one place of the code, each place is an entry of its own: the text a variant takes out occurs exactly once in its file, and the check refuses an entry whose text occurs twice or not at all.
 
 | Protection | The attack its test makes |
 |---|---|
@@ -637,7 +667,24 @@ For every protection there is one variant of the code without it (`bench/experim
 | What one start of a served program wrote is removed before the next | a served program fills its data folder 3,000 folders deep; the next start looks for it |
 | A served program's data folder that the judge cannot remove fails the step, with a result | a served program writes more into its data folder than the judge removes: after a file of tests with a program of its own, before the next start, and at the last stop of the step |
 | A served program is not started again on what an earlier start left | the same; the program notes each of its starts |
-| The last stop of a step that cannot remove the data folder fails the step | the same at the last stop of the step, after a file of tests that passed |
+| The last stop of a step that cannot take back what the program's side left fails the step | the same at the last stop of the step, after a file of tests that passed; and a test leaves files in the cases' folder in the last file of tests while the step gives no time for removing |
+| The last stop gives the data folder's reason also when no start of the program came up | a served program fills its data folder and ends before it opens its port, or stays up without opening it |
+| The cases after a case runner that was ended get the data folder's reason | a case ends its own case runner; the case after it meets the program's restart on what it left |
+| The case runners of one file share its time | runners that are ended one after another are timed: each gets what is left of the file's time |
+| The last stop's entry has a kind of its own, which no rate counts | the result of such a stop is read for its rates, by the pilot's record and by the tool that checks prepared solutions |
+| The tool that checks prepared solutions gives the reason a step failed for what the program's side left | a result whose step failed for a data folder that could not be removed is checked as a solution written to be broken |
+| Removing reads each folder once, and once more when the folders in it are gone | trees of four layouts are removed while the judge's readings of each folder are counted |
+| All walking and removing of what the program's side left in a step shares one time | the step gives no time for walking and removing, and a served program's data folder or the cases' folder holds files |
+| Removing gives up at an entry it reads once the step's time is spent | within one second, two trees are removed and a third is walked, with the removal of each file slowed down |
+| Removing gives up before a folder it enters once the step's time is spent | a tree of empty folders is removed with each removal of a folder slowed down |
+| Walking gives up at an entry it reads once the step's time is spent | the same; the third tree is walked |
+| Walking gives up before a folder it enters once the step's time is spent | a tree of empty folders is walked with each opening slowed down |
+| A cases' folder that cannot be emptied in the step's time fails the step, with a result | a test leaves files in the cases' folder in the last file of tests while the step gives no time for removing |
+| No file of tests runs after the cases' folder could not be emptied | the same with a file of tests after it |
+| The search for places any user may write ends at its time, also while it still finds some | the search is given one second and finds places without a pause for three, which always wait to be read |
+| The format checker refuses settings that would give the build another time limit | the settings the judge is handed for a language name another time for the build |
+| A file whose cases cannot be listed gets two case runners and no more | every runner of a file is ended before it lists the cases |
+| The format checker counts two case runners for a file whose cases cannot be listed | the format checker's count for such a file is read |
 | A case during which the kernel ended a process fails, whatever its test says | a served program takes memory until the kernel ends it, in a test that would pass by itself |
 | The case that was running when its runner was ended fails with that reason | a case runner is ended in the middle of the second of three cases |
 | Before a new runner starts, what the last one left is taken back and a served program is started afresh | a case runner is ended while its program runs; a served program is ended by the kernel |
@@ -653,14 +700,14 @@ For every protection there is one variant of the code without it (`bench/experim
 
 | Check | Where | Numbers |
 |---|---|---|
-| All tests that need no image | automatically on every push | 965 tests pass, 5 min 19 s (time limit 15 minutes) |
-| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that only read files that are not in the cache, of three kinds; programs that hold on to the kernel's records in five ways; programs that lock pages, hand them to pipes and sockets, leave things for a later run or a later case; the reading from outside, ten times over; what the Python runtime's library calls do under the filter; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 160 tests pass, 14 min 14 s (time limit 40 minutes) |
-| Taking each of the 109 protections out in turn | automatically on every push | the tests catch 102, the 7 second lines hold, 15 min 33 s (time limit 40 minutes) |
+| All tests that need no image | automatically on every push | 921 tests pass, 6 min 0 s (time limit 25 minutes) |
+| The tests in which a program, a build and a served web program attack, inside the Python image; the sample's 10 Python solutions, and those three times over; the attack that runs the container out of memory, judged 15 times over; programs that only read files that are not in the cache, of three kinds; programs that hold on to the kernel's records in five ways; programs that lock pages, hand them to pipes and sockets, leave things for a later run or a later case; the reading from outside, ten times over; what the Python runtime's library calls do under the filter; the quick mode of both experiment scripts | automatically on every push; the image is built on the spot | 160 tests pass, 19 min 44 s (time limit 60 minutes) |
+| Taking each of the 126 protections out in turn | automatically on every push | the tests catch 119, the 7 second lines hold, 16 min 30 s (time limit 65 minutes) |
 | The sample's 60 solutions in the other six languages | on the measuring machine only (building six more images takes long) | all 60 as written, once after the last change and five times over before it |
 | The web task's 78 solutions in seven languages, with the caps the converted task carries | on the measuring machine only | all 78 as before |
 | Judging through Harbor, the design experiment, the memory experiment | on the measuring machine only | the numbers above |
 
-The counts and times are from the two runs of the automatic check on the commit 3071652 of 19 November; each time is the longer of the two. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the change that made pages of files count and gave a case one starting figure, the three jobs took at most 5 min 53 s, 14 min 47 s and 14 min 58 s; the count of the first includes the tests main gained meanwhile. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
+The counts and times are from the two runs of the automatic check on the commit 238f525 of 20 November; each time is the longer of the two. Since that day the desk's own tests run in a job of their own, and the first count no longer holds them. Before command-line tasks came in, the job that runs the tests took 1 min 9 s. Before the change that made pages of files count and gave a case one starting figure, the three jobs took at most 5 min 53 s, 14 min 47 s and 14 min 58 s; the count of the first includes the tests main gained meanwhile. Each job ends within half of its time limit; the rest of the limit is room for a run in which tests fail.
 
 The commands that check these again on the measuring machine:
 

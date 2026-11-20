@@ -63,3 +63,16 @@ def test_without_the_stop_a_run_in_which_the_kernel_ended_the_case_runner_is_a_j
 def test_without_the_stop_a_run_that_handed_back_nothing_for_no_reason_is_an_error(monkeypatch, capsys):
     failed, report = memory_experiment(monkeypatch, capsys, lambda stop: {**MEASURED, **AS_MEANT} if stop else AS_MEANT)
     assert failed and len(report["rows_that_did_not_come_out"]) == 4
+
+
+def test_the_removal_measurement_comes_out_for_every_layout(tmp_path, capsys):
+    """The script that measures the judge's walking and removing makes a tree of each layout, times
+    the judge's own routines on it, removes it whole and prints one row for each."""
+    assert (BENCH / "experiments" / "removal_time.py").is_file(), (
+        "no script in the repository measures how long walking and removing take")
+    removal = script("removal_time")
+    removal.inside(str(BENCH / "dodambench" / "judge.py"), list(removal.LAYOUTS), [200], str(tmp_path))
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["layout"] for r in rows] == list(removal.LAYOUTS) and all(r["entries"] == 200 for r in rows), rows
+    assert all(r["walk_seconds"] >= 0 and r["remove_seconds"] >= 0 for r in rows), rows
+    assert not any(tmp_path.iterdir()), "a tree was not removed whole"
