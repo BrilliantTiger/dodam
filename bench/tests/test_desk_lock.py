@@ -7945,6 +7945,80 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "The line of a digest that names the accounts whose arrivals went names every one of them, so its length has no bound:",
     "A session for what was typed in the desk's terminal handles no account:",
     "What the watcher has printed and the relay has not yet placed is lost when the desk is stopped in between:",
+    "A stop while a message to the coordinator is being sent can leave it delivered without its sending being written down, or neither:",
 ])  # fmt: skip
 def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
+
+
+# --- The live check compares known values by the rule of the outgoing check --------------------------
+
+
+def test_the_live_check_compares_known_values_by_the_rule_of_the_check_on_text_that_leaves(place, monkeypatch, tmp_path):
+    check = module("check_lock")
+    guard = importlib.import_module("guard")  # The module the live check loads.
+    made_up = [("the account name", "Al"), ("the computer's name", "홍길"), ("the home folder path", "/Users/Al")]
+    monkeypatch.setattr(guard, "machine_words", lambda known=None: made_up + [("the owner's git name or address", "田中")] * (known is not None))
+    real_run = subprocess.run
+
+    def run(argv, *more, **named):
+        # Stand-ins for what the live check asks of Claude Code and of git; nothing else is run here.
+        answers = {("claude", "auth", "status"): json.dumps({"email": ""}), ("git", "config", "--global", "user.name"): "田中",
+                   ("git", "config", "--global", "user.email"): ""}  # fmt: skip
+        if tuple(argv) in answers:
+            return subprocess.CompletedProcess(argv, 0, answers[tuple(argv)], "")
+        return real_run(argv, *more, **named)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    rows = {row["what"]: row for row in check.what_is_known("Al wrote to 홍길에게 and to 田中さん.", {"state": tmp_path, "copy": place.copy})}
+    # Values of every length are looked for and refused, by the same rule as the check on text that leaves.
+    for what in ("the account name on this computer", "the computer's name", "the owner's git name or address"):
+        assert rows[what]["in_the_session"] is True and rows[what]["refused_by_the_answering_tool"] is True, (what, rows[what])
+    # A short value in the Latin alphabet counts only as a whole word, as it does in what leaves.
+    rows = {row["what"]: row for row in check.what_is_known("Alice and Albert wrote it.", {"state": tmp_path, "copy": place.copy})}
+    assert rows["the account name on this computer"]["in_the_session"] is False
+
+
+# --- What an outside pull request must not change, said where people read it ---------------------------
+
+# The things the code protects, in the plain words of each place that says it, and that new tests and tasks are welcome.
+SAID_OF_WHAT_IS_PROTECTED = {
+    "charter in Korean": ["측정 도구", "측정을 돌리는 틀", "기존 과제", "기존 테스트", "보안 테스트", "보안 실험", "기록된 측정값", "벤치마크 폴더의 나머지",
+                          "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "새 테스트와 새 과제는 받"],
+    "charter in English": ["measuring tools", "harness that runs the measurement", "existing tasks", "existing tests", "security tests",
+                           "security experiments", "recorded measurements", "rest of the benchmark's folder", "approval lock file",
+                           "desk's own tools and its closed list", "Gemini job", "workflows", "New tests and new tasks are accepted"],
+    "en": ["the judge", "the language images", "the harness that runs the measurement", "existing benchmark tasks", "existing tests",
+           "security tests", "security experiments", "the recorded measurements", "the rest of the benchmark’s folder", "approval locks",
+           "the desk’s own tools and its closed list", "the Gemini job", "the workflows", "New tests and new benchmark tasks are welcome"],
+    "ko": ["채점기", "언어 이미지", "측정을 돌리는 틀", "기존 벤치마크 과제", "기존 테스트", "보안 테스트", "보안 실험", "기록된 측정값", "벤치마크 폴더의 나머지",
+           "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "새 테스트와 새 벤치마크 과제는 환영한다"],
+    "ja": ["判定ツール", "言語イメージ", "計測を動かす仕組み", "既存のベンチマーク課題", "既存のテスト", "セキュリティテスト", "セキュリティ実験", "記録された計測値",
+           "ベンチマークフォルダのそのほかの部分", "承認ロック", "窓口のツールとその許可リスト", "Geminiのジョブ", "ワークフロー", "新しいテストと新しいベンチマーク課題は歓迎します"],
+    "es": ["el juez", "las imágenes de los lenguajes", "el entorno que ejecuta la medición", "las tareas existentes del benchmark", "las pruebas existentes",
+           "las pruebas de seguridad", "los experimentos de seguridad", "las mediciones registradas", "el resto de la carpeta del benchmark",
+           "los bloqueos de aprobación", "las herramientas de la ventanilla y su lista cerrada", "el trabajo de Gemini", "los flujos de trabajo",
+           "Las pruebas nuevas y las tareas nuevas del benchmark son bienvenidas"],
+}  # fmt: skip
+
+
+def test_what_an_outside_pull_request_must_not_change_is_said_where_people_read_it():
+    pr_files = module("pr_files")
+    # The working rules name every protected folder by its path, as the code holds them, and nothing more.
+    rule = next(line for line in (ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines() if line.startswith("- Outside pull requests do not change"))
+    named = set(re.findall(r"`([^`]+)`", rule))
+    assert named == {folder.rstrip("/") for folder in pr_files.PROTECTED_FOLDERS}, sorted(named ^ {f.rstrip("/") for f in pr_files.PROTECTED_FOLDERS})
+    assert "New tests and new benchmark tasks are welcome" in rule
+    # The charter, in both languages, and the introduction page, in its four, say the same in plain words.
+    places = {"charter in Korean": next(line for line in (ROOT / "docs" / "charter.ko.md").read_text(encoding="utf-8").splitlines() if "바꾸는 바깥 수정은 받지 않는다" in line),
+              "charter in English": next(line for line in (ROOT / "docs" / "charter.en.md").read_text(encoding="utf-8").splitlines() if "are not accepted. From outside" in line)}  # fmt: skip
+    for language in ("en", "ko", "ja", "es"):
+        places[language] = json.loads((ROOT / "tools" / "site" / "strings" / f"{language}.json").read_text(encoding="utf-8"))["rule4_p"]
+    missing = {where: [words for words in SAID_OF_WHAT_IS_PROTECTED[where] if words not in text] for where, text in places.items()}
+    assert not [where for where, words in missing.items() if words], missing
+
+
+def test_a_new_benchmark_task_from_outside_stays_welcome(place):
+    files = [{"filename": "bench/tasks/brand-new-task/task.toml", "status": "added"}, {"filename": "bench/tasks/brand-new-task/tests/check.py", "status": "added"},
+             {"filename": "bench/tests/test_brand_new_task.py", "status": "added"}]  # fmt: skip
+    assert verdict(place, files) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
