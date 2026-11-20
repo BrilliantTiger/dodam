@@ -477,3 +477,62 @@ def test_a_listed_package_whose_metadata_cannot_be_read_is_refused(tmp_path, mon
     with pytest.raises(harbor_patch.HarborSetupError) as err:
         check(harbor)
     assert "filelock-4.2.1.dist-info" in str(err.value)
+
+
+def add_record(root: Path, folder: str, file: str, text: str) -> None:
+    """A package record in site-packages exactly as given: a folder and one file in it."""
+    record = site_of(root) / folder
+    record.mkdir()
+    (record / file).write_text(text)
+
+
+def refusal(harbor: Path) -> str:
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    return str(err.value)
+
+
+def test_a_listed_package_spelled_with_underscores_at_another_version_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_package(tmp_path, "huggingface_hub", "huggingface_hub", "1.32.0")  # the file writes huggingface-hub
+    assert "huggingface_hub 1.32.0" in refusal(harbor)
+
+
+def test_a_listed_package_recorded_as_egg_info_at_another_version_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_record(tmp_path, "filelock-3.32.7-py3.13.egg-info", "PKG-INFO",
+               "Metadata-Version: 2.1\nName: filelock\nVersion: 3.32.7\n")
+    assert "filelock 3.32.7" in refusal(harbor)
+
+
+def test_a_listed_package_whose_metadata_writes_field_names_in_lower_case_is_refused_at_another_version(
+        tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_record(tmp_path, "filelock-3.32.7.dist-info", "METADATA",
+               "metadata-version: 2.4\nname: filelock\nversion: 3.32.7\n")
+    assert "filelock 3.32.7" in refusal(harbor)
+
+
+@pytest.mark.parametrize("text", [
+    "\nMetadata-Version: 2.4\nName: filelock\nVersion: 3.32.7\n",  # the headers come after an empty line
+    "Metadata-Version: 2.4\nName:\nName: filelock\nVersion: 3.32.7\n",  # a name without a value, then one
+    "Metadata-Version: 2.4\nName: filelock\nVersion: 4.2.1\nVersion: 3.32.7\n",  # two versions
+    "Metadata-Version: 2.4\nName: filelock\n",  # no version
+], ids=["empty-line-first", "two-names", "two-versions", "no-version"])
+def test_a_package_record_whose_name_or_version_cannot_be_read_is_refused(tmp_path, monkeypatch, text):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_record(tmp_path, "filelock-3.32.7.dist-info", "METADATA", text)
+    assert "filelock-3.32.7.dist-info" in refusal(harbor)
+
+
+def test_a_line_of_the_description_that_looks_like_a_header_does_not_hide_the_installed_version(
+        tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_record(tmp_path, "filelock-3.32.7.dist-info", "METADATA",
+               "Metadata-Version: 2.4\nName: filelock\nVersion: 3.32.7\n\nVersion: 4.2.1\n")
+    assert "filelock 3.32.7" in refusal(harbor)
