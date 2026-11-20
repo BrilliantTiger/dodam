@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from pathlib import Path
+
+# Two threads of one program that write the same file take turns, so that neither finds the other's half-written copy.
+# Programs that write the same file hold a lock of the state folder for it, or are the only one that writes it.
+_WRITING = threading.Lock()
 
 
 class StateProblem(Exception):
@@ -71,32 +76,41 @@ def read(path: Path, what: str) -> str | None:
 
 
 def opened(path: Path, what: str, append: bool = False):
-    """Open the file for writing, making it closed to others when it is not there yet."""
-    try:
-        if file(path, what):
-            # Emptied only after it was looked at: a file that is not the desk's is never cut short.
-            descriptor = _open(path, what, os.O_WRONLY | (os.O_APPEND if append else 0))
-            if not append:
-                os.ftruncate(descriptor, 0)
-        else:
-            descriptor = _open(path, what, os.O_WRONLY | os.O_CREAT | os.O_EXCL | (os.O_APPEND if append else 0))
-        return os.fdopen(descriptor, "a" if append else "w", encoding="utf-8")
-    except OSError:
-        raise StateProblem(f"{what} could not be written.") from None
+    """Open the file for writing, making it closed to others when it is not there yet.
+
+    Two callers that find the file missing at once both work: the one that does not make it opens the one the other
+    made, after looking at it like every file.
+    """
+    for _ in range(2):
+        try:
+            if file(path, what):
+                # Emptied only after it was looked at: a file that is not the desk's is never cut short.
+                descriptor = _open(path, what, os.O_WRONLY | (os.O_APPEND if append else 0))
+                if not append:
+                    os.ftruncate(descriptor, 0)
+            else:
+                descriptor = _open(path, what, os.O_WRONLY | os.O_CREAT | os.O_EXCL | (os.O_APPEND if append else 0))
+            return os.fdopen(descriptor, "a" if append else "w", encoding="utf-8")
+        except FileExistsError:
+            continue  # Made by another caller between the look and the making: looked at again and opened.
+        except OSError:
+            break
+    raise StateProblem(f"{what} could not be written.")
 
 
 def write(path: Path, what: str, text: str) -> None:
     """Replace the file's text in one step, so that a reader never sees half of it."""
     file(path, what)
     temporary = path.with_name(path.name + ".tmp")
-    try:
-        if file(temporary, what):
-            os.unlink(temporary)
-        with os.fdopen(_open(temporary, what, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(temporary, path)
-    except OSError:
-        raise StateProblem(f"{what} could not be written.") from None
+    with _WRITING:
+        try:
+            if file(temporary, what):
+                os.unlink(temporary)
+            with os.fdopen(_open(temporary, what, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(temporary, path)
+        except OSError:
+            raise StateProblem(f"{what} could not be written.") from None
 
 
 def real_folder(raw: Path, what: str) -> Path:

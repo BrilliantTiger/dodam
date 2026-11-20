@@ -103,12 +103,23 @@ DIGIT_FOR_LETTER = str.maketrans({"0": "o", "1": "l", "i": "l", "2": "z", "3": "
 # A known value of six or more letters and digits in its reduced form is refused wherever it stands, whatever is
 # attached to it, also with its characters or groups of them set apart by up to three characters that are not
 # letters or digits; and across words, however far apart, when it begins where a word begins and ends where a
-# word ends. A shorter value is refused as a whole word, also set apart like that.
+# word ends. A shorter value is refused as a whole word, also set apart like that, unless it is written in another
+# alphabet than the Latin one: then it is refused wherever it stands, at any length, because Korean attaches its
+# endings to a name and Japanese puts no space between words, so that a name there is seldom a whole word.
 SHORTEST_REDUCED = 6
 MOST_BETWEEN = 3
 # The long-vowel mark of Japanese looks like a dash and is counted as one: it sets letters apart and is no letter itself.
 # Its half-width form becomes the same character when the text is folded.
 LONG_VOWEL = "\u30fc"
+# Korean writes a syllable with single letters, and the same letters have several forms: typed alone, at the beginning,
+# in the middle or at the end of a syllable, in half width, and doubled or joined. Every form is read as the single
+# letters it is made of, so that a name typed letter by letter, or in other forms of its letters, is the same name.
+JOINED_KOREAN = {
+    "ㄲ": "ㄱㄱ", "ㄸ": "ㄷㄷ", "ㅃ": "ㅂㅂ", "ㅆ": "ㅅㅅ", "ㅉ": "ㅈㅈ", "ㄳ": "ㄱㅅ", "ㄵ": "ㄴㅈ", "ㄶ": "ㄴㅎ", "ㄺ": "ㄹㄱ", "ㄻ": "ㄹㅁ",
+    "ㄼ": "ㄹㅂ", "ㄽ": "ㄹㅅ", "ㄾ": "ㄹㅌ", "ㄿ": "ㄹㅍ", "ㅀ": "ㄹㅎ", "ㅄ": "ㅂㅅ", "ㅐ": "ㅏㅣ", "ㅒ": "ㅑㅣ", "ㅔ": "ㅓㅣ", "ㅖ": "ㅕㅣ",
+    "ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅏㅣ", "ㅚ": "ㅗㅣ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅓㅣ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ",
+}  # fmt: skip
+KOREAN_FORMS = ("HANGUL CHOSEONG ", "HANGUL JUNGSEONG ", "HANGUL JONGSEONG ", "HANGUL LETTER ", "HALFWIDTH HANGUL LETTER ")
 
 
 def looks_like_a_secret(value: str) -> bool:
@@ -143,8 +154,10 @@ WORD_WITH_PATH = re.compile(r"[^\s`'\"()<>\[\],;]+")
 # about a web task or a container needs. Addresses that mean "this machine" on every machine (localhost,
 # 127.0.0.1, ::1, 0.0.0.0) say nothing about this computer and are not refused.
 PRIVATE_PLACES = (
-    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+(?:users|home|root|var/+root|private|volumes|tmp|etc|opt|library)/+[^\s/]")),
-    ("a path outside the repository", re.compile(r"(?i)\b[a-z]:\\")),
+    # Every folder for temporary files of the system is one: /tmp, /var/tmp, /private/tmp, /var/folders, /dev/shm.
+    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+(?:users|home|root|var/+(?:root|tmp|folders)|private|volumes|tmp|etc|opt|library|dev/+shm)/+[^\s/]")),
+    # A drive of Windows, with either slash.
+    ("a path outside the repository", re.compile(r"(?i)\b[a-z]:[\\/]")),
     ("a path outside the repository", re.compile(r"(?<![\w.])~/+[^\s/]")),
     ("a hidden folder of this computer", re.compile(r"(?<![\w-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)/+[^\s/]")),
     (
@@ -171,19 +184,20 @@ def machine_words(known: str | os.PathLike | None = None) -> list[tuple[str, str
     """What names this computer and this account, read from the computer itself.
 
     known is a file the start command writes outside the session's reach, with further values of
-    the owner (what each sign-in shows about the account, and the owner's git name).
+    the owner (what each sign-in shows about the account, and the owner's git name). Every value is
+    kept whatever its length: a name of two letters is as much a name as one of ten.
     """
     words: list[tuple[str, str]] = []
     if known:
         for entry in json.loads(Path(known).read_text(encoding="utf-8")):
-            if isinstance(entry, list) and len(entry) == 2 and all(isinstance(part, str) for part in entry) and len(entry[1]) >= 3:
+            if isinstance(entry, list) and len(entry) == 2 and all(isinstance(part, str) for part in entry) and entry[1].strip():
                 words.append((entry[0], entry[1]))
     hosts = {socket.gethostname(), os.uname().nodename}
     for key in ("ComputerName", "LocalHostName", "HostName"):
         hosts.add(_command_line("/usr/sbin/scutil", "--get", key))
     for host in hosts:
         for part in {host, host.split(".")[0]}:
-            if len(part) >= 3:
+            if part.strip():
                 words.append(("the computer's name", part))
     try:
         account = getpass.getuser()
@@ -197,7 +211,7 @@ def machine_words(known: str | os.PathLike | None = None) -> list[tuple[str, str
     except (ImportError, KeyError, OSError):
         names_of_account = {account}
     for name in names_of_account:
-        if len(name) >= 3:
+        if name.strip():
             words.append(("the account name", name))
     home = str(Path.home())
     if len(home) > 1:
@@ -228,10 +242,26 @@ def shown(text: str) -> str:
     return "".join(character if ord(character) in _ALLOWED else "?" for character in plain(text))
 
 
+@functools.lru_cache(maxsize=4096)
+def _korean_letters(character: str) -> str:
+    """The single Korean letters one letter of any of its forms is made of; any other character as it is."""
+    name = unicodedata.name(character, "")
+    for form in KOREAN_FORMS:
+        if name.startswith(form):
+            if "FILLER" in name:
+                return ""  # A blank that only holds a place in a syllable is no letter.
+            try:
+                letter = unicodedata.lookup("HANGUL LETTER " + name[len(form) :])
+            except KeyError:
+                return character
+            return JOINED_KOREAN.get(letter, letter)
+    return character
+
+
 def _folded(text: str) -> str:
-    """One case, one alphabet, no accents; the separators are still there."""
+    """One case, one alphabet, no accents, every form of a Korean letter one; the separators are still there."""
     folded = unicodedata.normalize("NFKC", text).casefold().translate(LOOK_ALIKE)
-    return "".join(character for character in unicodedata.normalize("NFKD", folded) if unicodedata.category(character) != "Mn")
+    return "".join(_korean_letters(character) for character in unicodedata.normalize("NFKD", folded) if unicodedata.category(character) != "Mn")
 
 
 def reduced(text: str) -> str:
@@ -278,15 +308,28 @@ def holds(spelled: Spelled, value: str) -> bool:
     if not value:
         return False
     letters, gaps, wide = spelled.letters, spelled.gaps, spelled.wide
+    long = len(value) >= SHORTEST_REDUCED
+    # A value in another alphabet than the Latin one is refused wherever it stands, at any length.
+    anywhere = long or not value.isascii()
     start = letters.find(value)
     while start != -1:
         end = start + len(value)
         whole = gaps[start] > 0 and (end == len(letters) or gaps[end] > 0)
         close = wide[end] == wide[start + 1]
-        if (whole and close) or (len(value) >= SHORTEST_REDUCED and (whole or close)):
+        if (whole and close) or (anywhere and close) or (long and whole):
             return True
         start = letters.find(value, start + 1)
     return False
+
+
+def state_paths(state: str | os.PathLike) -> list[tuple[str, str]]:
+    """The state folder's own path, as given and as the computer resolves it, as values that no text may carry out.
+
+    Compared like every known value, so that it is found in each way of writing it: in other capital letters, with
+    the slashes doubled or turned round, with spaces between its parts.
+    """
+    given = os.path.abspath(state)
+    return [("the state folder's path", path) for path in dict.fromkeys((given, os.path.realpath(given)))]
 
 
 def names(text: str, machine: list[tuple[str, str]], public: tuple[str, ...] = ()) -> list[str]:
@@ -440,13 +483,20 @@ def bytes_of(call: dict, lock: dict, copy: Path) -> int | str:
         return "The desk reads text files only."
     try:
         real = (copy / path).resolve()
+        # What the name says is looked at once more where a link leads: a link to a picture is a picture.
+        if real.name.lower().endswith(NOT_TEXT):
+            return "The desk reads text files only."
+        # A call that would read nothing is refused before it runs, so that nothing Claude Code says instead of a
+        # file's lines reaches the session uncounted.
         if not real.is_relative_to(copy.resolve()) or not real.is_file():
-            return 0  # Claude Code refuses it or finds nothing; nothing is handed over.
+            return "Read only a text file that is in the desk's copy."
         with open(real, "rb") as handle:
             lines = handle.read().split(b"\n")
     except OSError:
-        return 0
+        return "Read only a text file that is in the desk's copy."
     wanted = lines[max(offset - 1, 0) : max(offset - 1, 0) + limit]
+    if not wanted:
+        return "The file ends before that line; give Read an offset inside it."
     if any(b"\0" in line for line in wanted):
         return "The desk reads text files only."
     # Each line comes with its number in front.
@@ -505,7 +555,7 @@ def hook(argv: list[str]) -> int:
         lock = json.loads(Path(options["--lock"]).read_text(encoding="utf-8"))
         facts = facts_file.load(options["--facts"])
         call = json.loads(sys.stdin.read())
-        reason = judge_call(call, lock, facts, machine_words(options.get("--known")))
+        reason = judge_call(call, lock, facts, machine_words(options.get("--known")) + state_paths(options["--state"]))
         if reason is None:
             reason = count_call(call, lock, Path(options["--copy"]), Path(options["--state"]))
     except Exception:  # Anything that goes wrong here refuses the call.

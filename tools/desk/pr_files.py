@@ -50,18 +50,36 @@ TARGET_BASE_BRANCH = "main"
 EXIT_OK = 0
 EXIT_REFUSED = 2
 
+# What an outside pull request must not change, as the project's rules name it: the measuring tools, the existing
+# benchmark tasks, the security tests and the approval locks; and with them the desk's own tools and its closed list,
+# the Gemini job, the measuring harness, the security experiments, the recorded measurements and the workflows.
+# "bench/" stands for everything else in the benchmark's folder, such as its settings for the test runner, which
+# decide which tests run. New tests directly in bench/tests/ and new task folders in bench/tasks/ are welcome.
 PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/dodambench/",
     "bench/images/",
     ".github/",
     "bench/tests/",
     "bench/tasks/",
+    "bench/experiments/",
+    "bench/harbor/",
+    "bench/records/",
+    "tools/desk/",
+    "tools/gemini/",
+    "bench/",
 )
 ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/dodambench/",
     "bench/images/",
     ".github/",
+    "bench/experiments/",
+    "bench/harbor/",
+    "bench/records/",
+    "tools/desk/",
+    "tools/gemini/",
 )
+# The folder of the benchmark as a whole, for what lies in it outside every folder named above.
+REST_OF_BENCH = "bench/"
 
 
 class PRFilesError(Exception):
@@ -228,6 +246,15 @@ def _matches_folder(path: str, folder: str) -> bool:
     return False
 
 
+def _protected_by_place(path: str) -> set[str]:
+    """The protected folders a path lies in by its place alone, whatever it is: the last of the folders named."""
+    found = {folder for folder in ALWAYS_PROTECTED_FOLDERS if _matches_folder(path, folder)}
+    named_in_bench = [folder for folder in PROTECTED_FOLDERS if folder.startswith("bench/") and folder != REST_OF_BENCH]
+    if _matches_folder(path, REST_OF_BENCH) and not any(_matches_folder(path, folder) for folder in named_in_bench):
+        found.add(REST_OF_BENCH)
+    return found
+
+
 def _is_canonical_repo_path(path: str) -> bool:
     if not path or path.startswith("/") or path.endswith("/") or _has_control_or_backslash(path):
         return False
@@ -339,12 +366,11 @@ def classify_pr_files(
 
         if has_earlier_path:
             for folder in PROTECTED_FOLDERS:
-                if _matches_folder(prev_filename, folder):
+                if folder != REST_OF_BENCH and _matches_folder(prev_filename, folder):
                     touched.add(folder)
+            touched |= _protected_by_place(prev_filename)
 
-        for folder in ALWAYS_PROTECTED_FOLDERS:
-            if _matches_folder(filename, folder):
-                touched.add(folder)
+        touched |= _protected_by_place(filename)
 
         if _matches_folder(filename, "bench/tests/"):
             if is_pure_add and _is_unprotected_new_test(filename, existing_tests_folded):
