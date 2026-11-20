@@ -1494,11 +1494,11 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
 def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
     """What a case runner spends removing what the program left is drawn from the step's time for
     walking and removing, not from the time of its file of tests, also for the runner started after
-    it. Here the file has about nine seconds, removing what its first case left takes about eight,
-    and the runner is ended after it, so a second runner judges the last case."""
-    monkeypatch.setattr(judge_module, "FILE_SECONDS", 1, raising=False)
+    it. Here the file has six seconds, removing what its first case left takes about ten, and the
+    runner is ended after it, so a second runner judges the last case."""
+    monkeypatch.setattr(judge_module, "FILE_SECONDS", 0.5, raising=False)
     monkeypatch.setattr(judge_module, "CASE_SECONDS", 0, raising=False)
-    program = ("import sys\nif sys.argv[1:] == ['leave']:\n    for n in range(80):\n"
+    program = ("import sys\nif sys.argv[1:] == ['leave']:\n    for n in range(100):\n"
                "        open(f'left-{n}', 'w').close()\nprint('ok')\n")
     slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.1)")
     tests = slow + ("def test_leaves():\n    with case() as c:\n        assert c.run(['leave']).out == 'ok\\n'\n\n\n"

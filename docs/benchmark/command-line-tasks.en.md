@@ -737,7 +737,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | No case runner starts on a cases' folder the judge could not empty | a case runner is ended while files lie in the cases' folder, and the step gives no time for removing |
 | The case runners remove on the one time a step gives all walking and removing | the step gives no time for removing while a case's folder holds what the program left |
 | What a case runner used of that time is taken back | the step gives one second, and removing what one case left takes about 0.6 of it, in each of two files of tests |
-| A case runner's own time is longer by what it used of the step's time for walking and removing | removing what one case left takes about eight seconds of a file's nine, and the case runner is ended after it |
+| A case runner's own time is longer by what it used of the step's time for walking and removing | removing what one case left takes about ten seconds, its file has six, and the case runner is ended after it |
 | What a case runner used of the step's time for walking and removing is not taken from its file's time | the same |
 | A case's folder that cannot be removed for a reason no program causes is the judge's fault | removing a case's folder fails with an error of input and output, in the case runner |
 | A cases' folder the judge cannot empty for a reason no program causes is the judge's fault | emptying the cases' folder fails with an error of input and output, in the judge |
