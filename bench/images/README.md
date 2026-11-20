@@ -28,6 +28,17 @@ Every image keeps these rules, which the judge relies on:
   Agents are told the listed packages; reaching for one of their dependencies is allowed,
   because it adds nothing that every agent of that language could not also use.
 
+A command-line task needs nothing more from an image. Its program is built the same way and then
+run once per case with the language's run command. The judge runs it as a user of its own, with a
+number no user of the image has, so that it owns nothing in the image. Before the build the judge
+closes the tests and the results to everyone but root; after the build and before the first case it
+takes write access away from every place any user could write.
+
 To check an image with a task's prepared solutions, judged exactly as the verifier judges them:
 
     .venv/bin/python -m dodambench.vet tasks/web-signup --lang python --image
+    .venv/bin/python -m dodambench.vet tasks/cli-csv-json --lang python --image
+
+To check a task folder against the format rules (JSON by default, `--text` for the lines a person reads):
+
+    .venv/bin/python -m dodambench.task tasks/cli-csv-json

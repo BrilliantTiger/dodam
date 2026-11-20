@@ -11,9 +11,10 @@ import stat
 from pathlib import Path
 
 from .languages import DEPS_DIR, LANGUAGES, Language
-from .task import Task, materialize, validate
+from .task import CLI_LIMIT_KEYS, PROCESS_CAP, Task, cases_mount, materialize, validate
 
 JUDGE_SOURCE = Path(__file__).with_name("judge.py")
+CLI_SOURCE = Path(__file__).with_name("dodam_cli.py")
 
 
 class ConversionError(Exception):
@@ -38,7 +39,31 @@ def _toml_table(name: str, values: dict) -> str:
     return f"[{name}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in values.items())
 
 
+def cli_instruction(task: Task, step_text: str, lang: Language) -> str:
+    """What an agent is told about a command-line task: how the program is built, run and limited."""
+    cli = task.cli
+    build = f"`{lang.build_cmd}` once and then, " if lang.build_cmd else ""
+    run = lang.run_cmd.replace("{app}", "/app")
+    return "\n".join([
+        step_text.rstrip(), "", "## Environment", "",
+        f"- Language: {lang.name}.",
+        f"- {lang.cli_layout or lang.layout}",
+        f"- Allowed packages: {lang.packages}. They are already installed; do not install anything else.",
+        f"- In /app we run {build}for every case, `{run}` followed by the case's arguments. "
+        "Leave the finished program in /app.",
+        "- Every case starts the program in a working folder of its own that holds the case's input files, "
+        "as a plain user without network. A relative path in an argument is relative to that folder.",
+        f"- Every case has limits: {cli['case_timeout_sec']} seconds, {cli['case_memory_mb']} MB of memory, "
+        f"{cli['case_output_kb']} KB written to standard output and standard error together, "
+        f"{cli['case_processes']} processes (threads count as processes) and {cli['case_disk_mb']} MB of files. "
+        "A program that breaks a limit, "
+        "or leaves a process running when it ends, fails that case.",
+    ]) + "\n"
+
+
 def agent_instruction(task: Task, step_text: str, lang: Language) -> str:
+    if task.meta.get("interface") == "cli":
+        return cli_instruction(task, step_text, lang)
     app = task.app
     port = app.get("port", 8080)
     lines = [step_text.rstrip(), "", "## Environment", "",
@@ -59,6 +84,11 @@ def agent_instruction(task: Task, step_text: str, lang: Language) -> str:
 def verifier_env(task: Task, lang_key: str) -> dict[str, str]:
     """What the judge needs to know about the task and the language, written to tests/lang.env."""
     lang, app = LANGUAGES[lang_key], task.app
+    if task.meta.get("interface") == "cli":
+        cli = task.cli
+        return {"STEPS": ",".join(s.name for s in task.steps), "INTERFACE": "cli", "BUILD_CMD": lang.build_cmd,
+                "RUN_CMD": lang.run_cmd, **{key.upper(): str(cli[key]) for key in CLI_LIMIT_KEYS},
+                "DEPS_DIR": DEPS_DIR if lang.deps_links else "", "DEPS_LINKS": ",".join(lang.deps_links)}
     return {"STEPS": ",".join(s.name for s in task.steps), "BUILD_CMD": lang.build_cmd,
             "START_CMD": lang.start_cmd, "PORT": str(app.get("port", 8080)),
             "APP_DB": "1" if app.get("db") else "0", "APP_SECRET_NEEDED": "1" if app.get("secret") else "0",
@@ -78,14 +108,36 @@ mkdir -p /app
 cp -R "$here/variants/$variant/." /app/
 """
 
-TEST_SH = """#!/bin/sh
+TEST_SH = r"""#!/bin/sh
 # Judge one step: build the program from /app, start it, run the hidden tests, write /logs/verifier/reward.json.
 # The judge runs as root with its own Python; the program builds and runs as the plain user agent.
 set -u
 . /tests/step.env
-export DODAM_APP_USER="${DODAM_APP_USER:-agent}"
-exec /opt/judge/bin/python /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out /logs/verifier
+export DODAM_APP_USER="${DODAM_APP_USER-agent}"
+out=/logs/verifier
+/opt/judge/bin/python /tests/lib/dodam_judge.py --tests /tests --app /app --step "$DODAM_STEP" --out "$out" "$@"
+code=$?
+# The judge leaves a result (exit code 0) or its own account of a fault (exit code 3). A judge that
+# was ended from outside leaves neither. Then nothing here may read as a judgement, and this says so.
+if [ "$code" -eq 0 ] && [ -f "$out/reward.json" ]; then exit 0; fi
+if [ "$code" -eq 3 ] && [ -f "$out/judge-fault.json" ]; then exit 3; fi
+rm -rf "$out/reward.json" "$out/reward.txt" "$out/judge-fault.json"
+set -C
+printf '{"judge_fault": "{\\"severity\\": \\"error\\", \\"file\\": \\"judge\\", \\"key\\": \\"ended\\", \\"message\\": \\"the judging ended without a result (exit code %s)\\"}"}\n' "$code" > "$out/judge-fault.json"
+if [ "$code" -eq 0 ]; then code=3; fi
+exit "$code"
 """
+
+
+def container_settings(task: Task) -> str:
+    """What Harbor's task settings cannot say, as a file Harbor merges into its own container
+    settings: a cap on processes, no swap beyond the memory cap, and for a command-line task the
+    capped memory-backed folder the cases live in. Every kind of task carries it."""
+    lines = ["services:", "  main:", f"    pids_limit: {PROCESS_CAP}",
+             f"    memswap_limit: {task.limits['memory_mb']}m"]
+    if task.meta.get("interface") == "cli":
+        lines += ["    tmpfs:", f"      - {cases_mount(task)}"]
+    return "\n".join(lines) + "\n"
 
 
 def _executable(path: Path, text: str) -> None:
@@ -147,6 +199,10 @@ def to_harbor(task: Task, lang_key: str, out_root: Path | str, image: str | None
     shutil.copytree(task.root / "tests", tests, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
     (tests / "lib").mkdir(exist_ok=True)
     shutil.copy(JUDGE_SOURCE, tests / "lib" / "dodam_judge.py")
+    if task.meta.get("interface") == "cli":
+        shutil.copy(CLI_SOURCE, tests / "lib" / "dodam_cli.py")
+    (out / "environment").mkdir()
+    (out / "environment" / "docker-compose.yaml").write_text(container_settings(task), encoding="utf-8")
     env = verifier_env(task, lang_key)
     (tests / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
     _executable(tests / "test.sh", TEST_SH)

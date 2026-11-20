@@ -1,0 +1,135 @@
+# Variants of the C# secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        if (!Inside(folder, place))
+        {
+            throw new Refused(3, name + " is outside the working folder");
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''        return FollowLinks(Path.GetFullPath(name));'''
+new = '''        return Path.GetFullPath(name);'''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        if (Exists(place)) throw new Refused(3, place + " already exists");
+        try
+        {
+            using var file = new FileStream(place, FileMode.CreateNew, FileAccess.Write);'''
+new = '''
+        try
+        {
+            using var file = new FileStream(place, FileMode.Create, FileAccess.Write);'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        var buffer = new byte[MaxInput + 1];
+        var size = 0;
+        while (size < buffer.Length)
+        {
+            var got = stream.Read(buffer, size, buffer.Length - size);
+            if (got == 0) break;
+            size += got;
+        }
+        return buffer.AsSpan(0, size).ToArray();
+'''
+new = '''
+        using var all = new MemoryStream();
+        stream.CopyTo(all);
+        return all.ToArray();
+'''
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        if (data.Length > MaxInput)
+        {
+            throw new Refused(2, "the input is larger than 1048576 bytes");
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        if (record.Count > 0 || !atStart)
+        {
+            record.Add(field.ToString());
+            records.Add(record);
+        }
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+            if (!FileName(row[column])) throw new Refused(2, "a value of the column cannot be a file name");
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''
+        if (Exists(place)) throw new Refused(3, place + " already exists");
+        Directory.CreateDirectory(place);'''
+new = '''        Directory.CreateDirectory(place);'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "Program.cs"
+old = '''            var lineEnd = c == '\n' ? 1 : c == '\r' && i + 1 < n && text[i + 1] == '\n' ? 2 : 0;'''
+new = '''            var lineEnd = c == '\n' ? 1 : 0;'''

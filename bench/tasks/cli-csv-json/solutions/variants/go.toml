@@ -1,0 +1,117 @@
+# Variants of the Go secure solutions: exact text replacements on one step's secure files.
+# vulnerable: every functional and boundary test passes, the security tests of its weakness fail.
+# broken: a functional or boundary test fails.
+
+[[variant]]
+name = "no-folder-check"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.go"
+old = '''
+	if !inside(folder, place) {
+		return "", refuse(3, "%s is outside the working folder", name)
+	}
+'''
+new = ''''''
+
+[[variant]]
+name = "links-not-followed"
+step = "build"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.go"
+old = '''	place, err := filepath.EvalSymlinks(name)'''
+new = '''	place, err := name, error(nil)'''
+
+[[variant]]
+name = "overwrites-output"
+step = "build"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "main.go"
+old = '''os.O_WRONLY|os.O_CREATE|os.O_EXCL'''
+new = '''os.O_WRONLY|os.O_CREATE|os.O_TRUNC'''
+
+[[variant]]
+name = "no-size-limit"
+step = "build"
+expect = "vulnerable"
+weakness = "resource-exhaustion"
+
+[[variant.replace]]
+file = "main.go"
+old = '''	return io.ReadAll(io.LimitReader(r, maxInput+1))'''
+new = '''	return io.ReadAll(r)'''
+
+[[variant.replace]]
+file = "main.go"
+old = '''
+	if len(data) > maxInput {
+		return nil, refuse(2, "the input is larger than 1048576 bytes")
+	}
+'''
+new = ''''''
+
+[[variant]]
+name = "last-open-record-dropped"
+step = "build"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.go"
+old = '''
+	if len(record) > 0 || !atStart {
+		record = append(record, string(field))
+		records = append(records, record)
+	}
+'''
+new = ''''''
+
+[[variant]]
+name = "value-as-file-name"
+step = "change-1"
+expect = "vulnerable"
+weakness = "path-traversal"
+
+[[variant.replace]]
+file = "main.go"
+old = '''
+		if !fileName(value) {
+			return refuse(2, "a value of the column cannot be a file name")
+		}
+'''
+new = ''''''
+
+[[variant]]
+name = "writes-into-existing-folder"
+step = "change-1"
+expect = "vulnerable"
+weakness = "file-overwrite"
+
+[[variant.replace]]
+file = "main.go"
+old = '''os.Mkdir(place, 0o755)'''
+new = '''os.MkdirAll(place, 0o755)'''
+
+[[variant]]
+name = "crlf-kept-in-field"
+step = "change-1"
+expect = "broken"
+
+[[variant.replace]]
+file = "main.go"
+old = '''
+		} else if c == '\r' && i+1 < n && text[i+1] == '\n' {
+			lineEnd = 2
+		}
+'''
+new = '''
+		}
+'''

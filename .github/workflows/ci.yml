@@ -53,13 +53,18 @@ jobs:
       - name: Apply Dodam's patch to Harbor
         working-directory: bench
         run: python -m dodambench.harbor_patch apply
-      # The desk's own tests run in the job "desk" of the workflow "site", so that this job stays inside half of its limit.
+      # The tests that judge inside a container are skipped here, where the image is not built; the
+      # job below runs them. The desk's own tests run in the job "desk" of the workflow "site", so that
+      # this job stays inside half of its limit.
       - name: Run the tests
         working-directory: bench
-        run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_desk.py --ignore=tests/test_desk_lock.py
+        run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_gemini.py --ignore=tests/test_desk.py --ignore=tests/test_desk_lock.py
 
   # For every test about the pilot, one broken variant of the files; each test must fail on its variant.
   # It needs only the test runner, and it runs beside the job above so that neither comes near its time limit.
+  # The checks on the Gemini job (tools/gemini) run here as well: they need only the test runner and git. Measured
+  # on 19 November 2026: in the job above, when they all failed before the job existed, that job took 7 minutes
+  # 29 seconds of its 15; here, passing, 103 of them took 32 seconds and this whole job 2 minutes 18 seconds.
   variants:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -85,6 +90,9 @@ jobs:
             echo "A part of the variants check was skipped in the job that is there to run it."
             exit 1
           fi
+      - name: Run the checks on the Gemini job
+        working-directory: bench
+        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py
 
   # The estimates' recorded outputs, worked out again in full: every seed and every case, not only the first
   # seed that the tests recompute. The scripts use the standard library only.
@@ -111,3 +119,55 @@ jobs:
       - name: Check that the recorded output is what the script gives
         working-directory: tools/plan
         run: python ${{ matrix.check }}
+
+  # What a judged program, its build and a served web program can reach, tried from inside the
+  # verifier's container: the judge runs as root in a container of the Python image, without network
+  # and under caps, as the verifier does. The other six images are checked on the project's own
+  # machine, where they are already built.
+  # An ordinary run ends in less than half of the time limit. The rest is room for a run in which tests
+  # fail: a failing test in a container waits out its own time limit before it reports.
+  attacks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install the judge's pinned packages
+        working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: Build the Python language image
+        working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: Run the tests that judge inside the image
+        working-directory: bench
+        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py
+
+  # Every protection of the judging is broken in turn, in a copy; a test must then fail. A
+  # protection that can be removed without a test noticing fails this job.
+  # An ordinary run ends in less than half of the time limit. The rest is room for a run in which a
+  # broken variant makes a container wait out the time limit its test sets.
+  protections:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Install the judge's pinned packages
+        working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: Build the Python language image
+        working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: Break each protection and see a test fail
+        working-directory: bench
+        run: python experiments/check_protections.py
