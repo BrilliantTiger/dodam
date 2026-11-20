@@ -149,12 +149,23 @@ def serve(state, args, stdin_text):
     path = parts.path.strip("/")
     query = parse_qs(parts.query)
     if method == "GET" and path == "user":
-        return 0, state["user"], ""
+        # Who is signed in, each time it is asked, in turn; the last answer stays. "refused" is a sign-in that
+        # GitHub refuses, as gh 2.101.0 answered it for a made-up token; "fault" is a fault of GitHub.
+        users = state.get("users")
+        who = (users.pop(0) if len(users) > 1 else users[0]) if users else state["user"]
+        if who == "refused":
+            return 1, None, "gh: Bad credentials (HTTP 401)"
+        if who == "fault":
+            return 1, None, "gh: Server Error (HTTP 500)"
+        return 0, who, ""
     segs = path.split("/")
     if len(segs) < 4 or segs[0] != "repos" or "/".join(segs[1:3]) != state["repo"]:
         return 1, None, NOT_FOUND
     tail, items = segs[3:], state["items"]
     if method == "GET" and tail == ["issues"]:
+        if state.get("fail_listings"):
+            state["fail_listings"] -= 1
+            return 1, None, "gh: Server Error (HTTP 500)"
         label = query.get("labels", [""])[0]
         found = [issue_view(it) for it in items.values() if label in it.get("labels", []) and it.get("state") == "open"]
         found.sort(key=lambda view: view["number"])
@@ -227,7 +238,7 @@ sys.exit(main())
 '''
 
 AGY_STANDIN = r'''
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(BASE, "agy")
@@ -259,6 +270,18 @@ record["git_helper"] = run(["git", "config", "--get-all", "credential.helper"])
 record["git_head"] = run(["git", "rev-parse", "HEAD"])
 record["git_base"] = run(["git", "rev-parse", "--verify", "--quiet", "base"])
 record["git_common_dir"] = run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
+prompt = sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv[:-1] else ""
+named = re.search(r"dodam-gemini-run=[0-9a-f]+", prompt)
+record["run_label"] = named.group(0) if named else None
+if answer.get("containers"):
+    # Containers the model starts, with the label the prompt names (none when it names none).
+    path = os.path.join(BASE, "docker", "containers.json")
+    held = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
+    for _ in range(answer["containers"]):
+        labels = dict([named.group(0).split("=", 1)]) if named else {}
+        held.append({"id": "%064x" % (0xC0FFEE000 + len(held)), "labels": labels})
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(held, handle)
 with open(os.path.join(DATA, "runs.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 limit = None
@@ -284,6 +307,34 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(BASE, "orca", "calls.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\n")
 sys.stdout.write('{"ok": true}\n')
+'''
+
+# The container tool: it lists the made-up containers whose label matches a filter, and removes the ones it is
+# named. With a file named "fail" beside its records it fails, as a tool whose daemon cannot be reached does.
+DOCKER_STANDIN = r'''
+import json, os, sys
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.path.join(BASE, "docker")
+args = sys.argv[1:]
+with open(os.path.join(DATA, "calls.jsonl"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+path = os.path.join(DATA, "containers.json")
+held = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
+if os.path.exists(os.path.join(DATA, "fail")):
+    sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\n")
+    sys.exit(1)
+if args[:1] == ["ps"] and "--filter" in args:
+    key, _, value = args[args.index("--filter") + 1].removeprefix("label=").partition("=")
+    sys.stdout.write("".join(c["id"] + "\n" for c in held if c["labels"].get(key) == value))
+elif args[:2] == ["rm", "--force"]:
+    named = set(args[2:])
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump([c for c in held if c["id"] not in named], handle)
+    sys.stdout.write("".join(name + "\n" for name in args[2:]))
+else:
+    sys.stderr.write("stand-in docker does not know these arguments\n")
+    sys.exit(2)
 '''
 
 # Starts a program after leaving its own parent: the runner forks, the first half exits at once, and the
@@ -425,15 +476,17 @@ class World:
         self.github = root / "github"
         self.agy_dir = root / "agy"
         self.orca_dir = root / "orca"
+        self.docker_dir = root / "docker"
         self.home = root / "home"
         self.tmpdir = root / "tmpdir"
         self.private = root / "private"
         self.settings = root / "settings.toml"
-        for folder in (self.bin, self.github, self.agy_dir, self.orca_dir, self.home, self.tmpdir):
+        for folder in (self.bin, self.github, self.agy_dir, self.orca_dir, self.docker_dir, self.home, self.tmpdir):
             folder.mkdir()
         _write_program(self.bin / "gh", GH_STANDIN)
         _write_program(self.bin / "agy", AGY_STANDIN)
         _write_program(self.bin / "orca", ORCA_STANDIN)
+        _write_program(self.bin / "docker", DOCKER_STANDIN)
         (self.root / "runner.py").write_text(RUNNER, encoding="utf-8")
         self.items: dict[str, dict[str, object]] = {}
         self.state_extra: dict[str, object] = {}
@@ -447,11 +500,23 @@ class World:
     def write_settings(self, **overrides: object) -> None:
         self.settings.write_text(settings_text(self.source, **overrides), encoding="utf-8")
 
-    def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False) -> None:
+    def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False,
+               containers: int = 0) -> None:
         (self.agy_dir / "answer.json").write_text(
-            json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep, "child": child}),
+            json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep, "child": child,
+                        "containers": containers}),
             encoding="utf-8",
         )
+
+    def containers(self) -> list[dict[str, object]]:
+        path = self.docker_dir / "containers.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+    def docker_calls(self) -> list[list[str]]:
+        path = self.docker_dir / "calls.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def job_state(self) -> dict[str, object]:
         path = self.private / "job-state.json"
@@ -633,6 +698,7 @@ def world(tmp_path: Path, source: Source) -> World:
     assert shutil.which("agy", path=path) == str(made.bin / "agy")
     assert shutil.which("gh", path=path) == str(made.bin / "gh")
     assert shutil.which("orca", path=path) == str(made.bin / "orca")
+    assert shutil.which("docker", path=path) == str(made.bin / "docker")
     assert source.url.startswith("file://")
     return made
 
@@ -877,6 +943,110 @@ def test_the_jobs_own_comments_and_unlabeling_start_nothing(world: World):
     assert len(world.agy_runs()) == 1
 
 
+def _requests(world: World) -> list[str]:
+    return [" ".join(map(str, call["args"])) for call in world.gh_calls()]
+
+
+ASK_USER = "api --method GET user"
+
+
+def test_the_watcher_confirms_the_signed_in_account_in_every_round(world: World):
+    world.label(world.pull(7), "verify")
+    # Who is signed in, each time it is asked: at the start, in the first round, by the job right before it posts,
+    # and in the second round, where another account is signed in.
+    world.state_extra["users"] = [PROJECT, PROJECT, PROJECT, OUTSIDER_B]
+    run = world.run_watch(polls=3)
+    assert run["code"] == 4 and "not the project's account" in str(run["stderr"]), run
+    assert [r.get("status") for r in results_of(run)] == ["posted"], run
+    asked = _requests(world)
+    assert asked[:2] == [ASK_USER, ASK_USER], f"the first round read before it confirmed the account: {asked}"
+    last = max(i for i, request in enumerate(asked) if request == ASK_USER)
+    assert asked.count(ASK_USER) == 4 and last == len(asked) - 1, f"the watcher went on after another account: {asked}"
+    assert sum("labels=" in request for request in asked) == len(KINDS), asked
+
+
+@pytest.mark.parametrize("program", ["job", "watcher"])
+def test_the_account_is_confirmed_again_right_before_the_job_posts(world: World, program: str):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    event = world.label(world.pull(7), "verify")
+    # The account turns into another one while agy runs, after the last confirmation before it.
+    if program == "job":
+        world.state_extra["users"] = [PROJECT, OUTSIDER_B]
+        run = world.run_job("verify", 7)
+        result = result_of(run)
+    else:
+        world.state_extra["users"] = [PROJECT, PROJECT, OUTSIDER_B]
+        run = world.run_watch(polls=2)
+        assert run["code"] == 4 and "not the project's account" in str(run["stderr"]), run
+        [result] = results_of(run)
+        saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+        assert str(event) not in saved["handled"], "the mark was handled under another account"
+    assert result.get("status") == "settings" and result.get("reasons") == ["account"], run
+    assert len(world.agy_runs()) == 1 and world.job_state().get("days") == {today: 1}
+    state = world.github_state()
+    assert state.get("posted") is None and state.get("removed") is None, "something was written under another account"
+    assert _requests(world)[-1] == ASK_USER, "the job asked GitHub for more after another account was signed in"
+
+
+@pytest.mark.parametrize("case", ["a refused sign-in", "a fault while confirming the account", "a fault while reading the marks"])
+def test_a_refused_sign_in_or_a_fault_in_a_round_starts_nothing_and_the_next_round_tries_again(world: World, case: str):
+    world.label(world.pull(7), "verify")
+    if case == "a refused sign-in":
+        world.state_extra["users"] = [PROJECT, "refused", PROJECT]
+    elif case == "a fault while confirming the account":
+        world.state_extra["users"] = [PROJECT, "fault", PROJECT]
+    else:
+        world.state_extra["fail_listings"] = 1
+    run = world.run_watch(polls=2)
+    assert run["code"] == 0, f"{case}: {run}"
+    assert "this round" in str(run["stderr"]), f"{case}: the watcher did not say why the round read nothing: {run}"
+    assert [r.get("status") for r in results_of(run)] == ["posted"], f"{case}: {run}"
+    asked = _requests(world)
+    assert sum("issues/7/events" in request for request in asked) == 1, f"{case}: the first round read marks: {asked}"
+    if case != "a fault while reading the marks":
+        assert sum("labels=" in request for request in asked) == len(KINDS), f"{case}: {asked}"
+    assert len(world.agy_runs()) == 1
+
+
+@pytest.mark.parametrize("case", ["a refused sign-in", "a fault"])
+def test_the_watcher_does_not_start_when_it_cannot_confirm_the_account(world: World, case: str):
+    world.label(world.pull(7), "verify")
+    world.state_extra["users"] = ["refused" if case == "a refused sign-in" else "fault", PROJECT]
+    run = world.run_watch(polls=2)
+    assert run["code"] not in (0, None) and "could not ask GitHub who is signed in" in str(run["stderr"]), run
+    assert _requests(world) == [ASK_USER] and world.agy_runs() == []
+
+
+def test_a_job_started_by_hand_on_a_marked_item_leaves_the_mark_for_the_watcher(world: World):
+    world.label(world.pull(7), "verify")
+    by_hand = result_of(world.run_job("verify", 7))
+    assert by_hand.get("status") == "posted", by_hand
+    state = world.github_state()
+    assert LABELS["verify"] in state["items"]["7"]["labels"] and state.get("removed") is None  # type: ignore[index]
+    assert not (world.private / "watch-state.json").exists(), "the job changed the watcher's state"
+    world.items = state["items"]  # type: ignore[assignment]
+    run = world.run_watch()
+    assert [r.get("status") for r in results_of(run)] == ["posted"], run
+    assert len(world.agy_runs()) == 2, "the watcher did not start a second job for the mark"
+    assert world.github_state().get("removed") == [{"number": 7, "label": LABELS["verify"]}]
+
+
+def test_a_prompt_that_cannot_be_brought_under_its_bound_is_handled_without_agy(world: World):
+    world.write_settings(max_prompt_bytes=1000)
+    item = world.pull(7)
+    world.comment(item, PROJECT, "A note of the project.")
+    event = world.label(item, "verify")
+    run = world.run_watch()
+    found = [(r.get("status"), r.get("reasons"), r.get("ran")) for r in results_of(run)]
+    assert found == [("error", ["prompt_too_long"], False)], run
+    assert world.agy_runs() == []
+    state = world.github_state()
+    assert state.get("removed") == [{"number": 7, "label": LABELS["verify"]}] and state.get("posted") is None
+    saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+    assert str(event) in saved["handled"], "the mark was not handled"
+    assert sum(world.job_state().get("days", {}).values()) == 0, "a job that never started agy counted in the day"  # type: ignore[union-attr]
+
+
 # --- What reaches the prompt --------------------------------------------------------------------------
 
 
@@ -950,12 +1120,24 @@ def test_the_discussion_question_is_the_newest_marked_comment_of_the_project_acc
     assert "CANARY-NEWEST-OUTSIDER-QUESTION" not in prompt
 
 
-def test_a_discussion_without_a_question_of_the_project_account_does_not_start_agy(world: World):
+@pytest.mark.parametrize("program", ["job", "watcher"])
+def test_a_discussion_without_a_question_of_the_project_account_does_not_start_agy(world: World, program: str):
     item = world.issue(9)
     world.comment(item, OUTSIDER_A, f"{QUESTION_LINE}\nCANARY-ONLY-OUTSIDER")
-    world.label(item, "discuss")
-    run = world.run_job("discuss", 9)
-    assert result_of(run).get("status") == "no_question", run
+    event = world.label(item, "discuss")
+    if program == "job":
+        run = world.run_job("discuss", 9)
+        assert result_of(run).get("status") == "no_question", run
+    else:
+        # The watcher handles the mark: it is taken off without a comment and without counting in the day, so a
+        # question written afterwards needs the mark again.
+        run = world.run_watch(polls=2)
+        assert [r.get("status") for r in results_of(run)] == ["no_question"], run
+        state = world.github_state()
+        assert state.get("removed") == [{"number": 9, "label": LABELS["discuss"]}] and state.get("posted") is None
+        saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+        assert saved["handled"].get(str(event)) == "no_question", saved
+        assert sum(world.job_state().get("days", {}).values()) == 0  # type: ignore[union-attr]
     assert world.agy_runs() == []
 
 
@@ -1153,8 +1335,9 @@ def test_an_answer_not_cut_by_exactly_one_line_of_each_mark_in_order_is_not_post
     world.label(item, "verify")
     world.answer(envelope(CUTS[case]))
     result = result_of(world.run_job("verify", 7))
-    assert result.get("status") == "held" and "no_public_part" in result.get("reasons", []), f"{case}: {result}"
-    assert posted(world) == []
+    assert result.get("status") == "no_public_part" and result.get("verdict") == "none", f"{case}: {result}"
+    # Only the job's fixed comment is posted: nothing of the answer.
+    assert all(ANSWER_PUBLIC not in str(c["body"]) and ANSWER_PRIVATE not in str(c["body"]) for c in posted(world))
 
 
 @pytest.mark.parametrize(
@@ -1323,6 +1506,9 @@ def test_the_job_looks_again_for_a_coding_agent_right_before_agy(world: World):
     assert "issues/7/comments" in asked, f"the job stopped before the parent changed: {run}"
     assert result.get("status") == "refused" and "parent:claude" in result.get("reasons", []), run
     assert world.agy_runs() == []
+    # A run that stops before agy starts leaves the prompt, the way agy would have been started, and the result.
+    kept = sorted(path.name for path in answer_folder(result).iterdir())
+    assert kept == ["agy.json", "prompt.txt", "result.json"], kept
 
 
 def test_when_the_process_list_cannot_be_read_the_job_refuses(world: World):
@@ -1655,6 +1841,7 @@ DAMAGED_JOB_STATES = {
     "a day that is not a date": '{"version": 1, "days": {"soon": 1}, "hold_until": 0}',
     "a wait that is a word": '{"version": 1, "days": {}, "hold_until": "soon"}',
     "a wait that is not a number": '{"version": 1, "days": {}, "hold_until": NaN}',
+    "a version that is true": '{"version": true, "days": {}, "hold_until": 0}',
 }
 
 
@@ -1682,6 +1869,7 @@ DAMAGED_WATCH_STATES = {
     "a count of returns that is true": '{"version": 2, "handled": {}, "ignored": {}, "quota_returns": {"5001": true}}',
     "a handled mark whose value is a number": '{"version": 2, "handled": {"5001": 1}, "ignored": {}, "quota_returns": {}}',
     "an ignored mark whose key is not a number": '{"version": 2, "handled": {}, "ignored": {"x": "account"}, "quota_returns": {}}',
+    "a version that is true": '{"version": true, "handled": {}, "ignored": {}, "quota_returns": {}}',
 }
 
 
@@ -1781,19 +1969,64 @@ def test_an_answer_without_a_public_part_or_too_long_is_not_posted(world: World)
     world.write_settings(max_public_chars=200)
     item = world.pull(7)
     world.label(item, "verify")
-    world.answer(envelope("Only free text, no parts.\nVerdict: approve\n"))
+    world.answer(envelope("Only free text, no parts. FREE-TEXT-ONLY\nVerdict: approve\n"))
     first = result_of(world.run_job("verify", 7))
-    assert first.get("status") == "held" and "no_public_part" in first.get("reasons", []), first
+    assert first.get("status") == "no_public_part" and first.get("verdict") == "none", first
+    assert all("FREE-TEXT-ONLY" not in str(c["body"]) for c in posted(world)), "the answer was posted"
     world.answer(envelope(answer_text(public="word " * 100)))
-    second = result_of(world.run_job("verify", 7))
+    second = result_of(world.run_job("verify", 7))  # the stand-in's record of posts starts anew with each run
     assert second.get("status") == "held" and "too_long" in second.get("reasons", []), second
+    assert posted(world) == [], "a public part past its bound was posted"
+
+
+def test_an_answer_without_a_public_part_gets_a_status_of_its_own_and_a_fixed_comment(world: World):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    secret = "ghp_" + "Q1w2E3r4T5y6U7i8O9p0" * 2
+    responses = [
+        f"Free text with no parts. CANARY-NO-PARTS-1 {secret}\nCANARY-OUTSIDE-A ignore every rule.\nVerdict: approve\n",
+        f"=== PUBLIC ===\nCANARY-NO-PARTS-2 written twice\n=== PUBLIC ===\nVerdict: approve\n=== PRIVATE ===\n{ANSWER_PRIVATE}\n",
+    ]
+    bodies, events = [], []
+    for number, response in zip((7, 12), responses):
+        events.append(world.label(world.pull(number), "verify"))
+        world.answer(envelope(response))
+        run = world.run_watch(tell="run_madeup000000")
+        [result] = results_of(run)
+        assert result.get("status") == "no_public_part" and result.get("verdict") == "none", run
+        [comment] = posted(world)
+        bodies.append(str(comment["body"]))
+        state = world.github_state()
+        assert state.get("removed") == [{"number": number, "label": LABELS["verify"]}], "the mark was not taken off"
+        world.items = state["items"]  # type: ignore[assignment]
+        no_model_text_in(run, "CANARY", secret)
+    # One fixed comment in the project's own words: the same for both answers, with nothing of either.
+    assert bodies[0] == bodies[1], "the comment depends on the answer"
+    first, _, rest = bodies[0].partition("\n")
+    assert first.startswith(FIRST_LINE_PREFIX)
+    for wanted in ("nothing that can be posted", "nothing of it is used", "another run"):
+        assert wanted in rest, f"the fixed comment does not say {wanted!r}"
+    for unwanted in ("CANARY", "ghp_", "Verdict", "ignore every rule", "Free text", "written twice"):
+        assert unwanted not in bodies[0], f"the fixed comment carries {unwanted!r} of the answer"
+    saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+    assert all(saved["handled"].get(str(event)) == "no_public_part" for event in events), saved
+    assert world.job_state().get("days") == {today: 2}, "the runs did not count in the day"
+    lines = (world.private / "finished.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2 and all(" status=no_public_part verdict=none " in line for line in lines), lines
+    for line in [*lines, *map(json.dumps, world.orca_calls())]:
+        assert "CANARY" not in line and secret not in line
+    # The scan still runs on the fixed comment: with a listed word in it, nothing is posted.
+    (world.private / "names.txt").write_text("Antigravity\n", encoding="utf-8")
+    world.label(world.pull(13), "verify")
+    world.answer(envelope(responses[0]))
+    held = result_of(world.run_job("verify", 13))
+    assert held.get("status") == "no_public_part" and "name" in held.get("reasons", []), held
     assert posted(world) == []
 
 
 # --- Telling the coordinator --------------------------------------------------------------------------
 
 LINE_RE = re.compile(
-    r"^gemini-job kind=(verify|attack|discuss) number=\d+ status=[a-z_]+ verdict=(approve|changes-needed) private=\S+$"
+    r"^gemini-job kind=(verify|attack|discuss) number=\d+ status=[a-z_]+ verdict=(approve|changes-needed|none) private=\S+$"
 )
 
 
@@ -2001,6 +2234,98 @@ def _alive(pid: int) -> bool:
     return True
 
 
+# --- Containers an attack run leaves -------------------------------------------------------------------
+
+RUN_LABEL_KEY = "dodam-gemini-run"
+OTHER_CONTAINERS = [
+    {"id": "a" * 64, "labels": {}},
+    {"id": "b" * 64, "labels": {RUN_LABEL_KEY: "0123456789abcdef"}},
+    {"id": "c" * 64, "labels": {"other": "x"}},
+]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["an attack look", "an attack look past its time", "an attack look stopped by a signal", "a fault of the container tool",
+     "no container tool", "a verification look", "a discussion"],
+)
+def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world: World, case: str):
+    kind = {"a verification look": "verify", "a discussion": "discuss"}.get(case, "attack")
+    item = world.pull(7)
+    if kind == "discuss":
+        world.comment(item, PROJECT, f"{QUESTION_LINE}\nIs it right?")
+    world.label(item, kind)
+    (world.docker_dir / "containers.json").write_text(json.dumps(OTHER_CONTAINERS), encoding="utf-8")
+    slow = case in ("an attack look past its time", "an attack look stopped by a signal")
+    if case == "an attack look past its time":
+        world.write_settings(job_seconds=2)
+    world.answer(envelope(answer_text()), containers=2, sleep=60 if slow else 0)
+    env = world.env()
+    if case == "a fault of the container tool":
+        (world.docker_dir / "fail").touch()
+    elif case == "no container tool":
+        # A folder with git and the stand-ins only, so that no container tool of the computer is found.
+        (world.bin / "docker").unlink()
+        (world.bin / "git").write_text(f'#!/bin/sh\nexec "{GIT}" "$@"\n', encoding="utf-8")
+        (world.bin / "git").chmod(0o755)
+        env["PATH"] = str(world.bin)
+        assert shutil.which("docker", path=env["PATH"]) is None
+    if case == "an attack look stopped by a signal":
+        out, pid_file = world.start(world.job_argv(kind, 7), env)
+        deadline = time.monotonic() + 30
+        while not world.agy_runs():
+            assert time.monotonic() < deadline, "agy was never started"
+            time.sleep(0.05)
+        os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGTERM)
+        run = World.wait(out, timeout=30)
+        # A job stopped by a signal prints no result; it writes it to its answer folder.
+        finished = world.private / "finished.log"
+        assert finished.is_file(), f"{case}: the stopped job left no line: {run}"
+        folder = Path(finished.read_text(encoding="utf-8").splitlines()[-1].rsplit("private=", 1)[1])
+        result = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+    else:
+        out, _ = world.start(world.job_argv(kind, 7), env)
+        run = World.wait(out)
+        result = result_of(run)
+    expected = {"an attack look past its time": "timeout", "an attack look stopped by a signal": "stopped"}.get(case, "posted")
+    assert result.get("status") == expected, f"{case}: {run}"
+    if expected == "posted":
+        [comment] = posted(world)
+        assert ANSWER_PUBLIC in str(comment["body"]), f"{case}: the comment changed"
+    [record] = world.agy_runs()
+    label = record.get("run_label")
+    left = {str(c["id"]) for c in world.containers()}
+    others = {str(c["id"]) for c in OTHER_CONTAINERS}
+    calls = world.docker_calls()
+    if kind != "attack":
+        assert label is None and calls == [], f"{case}: the container tool was called after a reading look"
+        assert len(left) == len(others) + 2
+        return
+    assert isinstance(label, str) and label.startswith(RUN_LABEL_KEY + "="), f"{case}: the prompt names no label"
+    theirs = {str(c["id"]) for c in world.containers() if c["labels"].get(RUN_LABEL_KEY) == label.split("=", 1)[1]}
+    record_path = answer_folder(result) / "containers.json"
+    assert record_path.is_file(), f"{case}: the job kept no record of the run's containers"
+    kept = json.loads(record_path.read_text(encoding="utf-8"))
+    assert kept.get("label") == label, kept
+    for call in calls:
+        # Only this run's label is asked for, and only containers that carry it are removed.
+        if call[:1] == ["ps"]:
+            assert call[call.index("--filter") + 1] == f"label={label}", call
+        else:
+            assert call[:2] == ["rm", "--force"] and not set(call[2:]) & others, call
+    if case in ("a fault of the container tool", "no container tool"):
+        assert left == others | theirs and len(theirs) == 2, f"{case}: {left}"
+        assert kept.get("fault"), f"{case}: the fault was not recorded: {kept}"
+        if case == "no container tool":
+            assert calls == [], calls
+        else:
+            assert calls, "the container tool was not called"
+    else:
+        assert left == others, f"{case}: the run's containers were not all removed, or others were: {left}"
+        assert any(call[:2] == ["rm", "--force"] for call in calls), calls
+        assert not kept.get("fault"), kept
+
+
 # --- It runs only while its terminal is open, and installs nothing -------------------------------------
 
 
@@ -2101,6 +2426,43 @@ def test_each_template_states_the_look_the_two_parts_the_verdict_and_the_rules(k
         assert "could not be run" in lowered, "the verification look does not say what to do with what it cannot run"
     if kind == "attack":
         assert "what you tried, and how, goes in the private part" in lowered, "the attack template's two parts disagree"
+        for rule in ("longer than five minutes", "in the background", "stop and remove every container you started",
+                     "--label {{run_label}}"):
+            assert rule in lowered, f"attack: the template lacks the rule about {rule!r}"
+    else:
+        assert "cannot start containers" in lowered, f"{kind}: the template does not say that it cannot start containers"
+
+
+@pytest.mark.parametrize("seconds", [1800, 900])
+@pytest.mark.parametrize("kind", KINDS)
+def test_each_template_tells_the_model_its_time_with_numbers_from_the_settings(world: World, kind: str, seconds: int):
+    world.write_settings(job_seconds=seconds)
+    item = world.pull(7)
+    if kind == "discuss":
+        world.comment(item, PROJECT, f"{QUESTION_LINE}\nIs it right?")
+    world.label(item, kind)
+    result = result_of(world.run_job(kind, 7))
+    assert result.get("status") == "posted", result
+    template = prompt_of(world.agy_runs()[0]).split("\n---\n", 1)[0]
+    assert "{{" not in template and "}}" not in template, "a value of the template was not filled in"
+    assert f"This run is ended {seconds // 60} minutes after it starts" in template, template
+    assert "nothing of a run that is ended is kept" in template.lower()
+    assert f"by {seconds * 2 // 3 // 60} minutes into the run" in template, "the time for the answer is not two thirds"
+
+
+RUN_WORDS = "You are the Dodam project's Gemini job"
+
+
+def test_a_run_can_be_seen_from_outside_by_the_first_words_of_its_command_line(world: World):
+    for kind in KINDS:
+        path = TEMPLATES / f"{kind}.md"
+        assert path.read_text(encoding="utf-8").startswith(RUN_WORDS), f"{kind}: the template begins otherwise"
+    document = DOCUMENT.read_text(encoding="utf-8") if DOCUMENT.is_file() else ""
+    assert f"`{RUN_WORDS}`" in document, "the document does not name the words a run can be seen by"
+    world.label(world.pull(7), "attack")
+    assert result_of(world.run_job("attack", 7)).get("status") == "posted"
+    argv = [str(a) for a in world.agy_runs()[0]["argv"]]  # type: ignore[union-attr]
+    assert argv[0] == "-p" and argv[1].startswith(RUN_WORDS), "the command line does not begin with the words"
 
 
 def test_the_document_states_each_property_with_a_test_that_exists():
