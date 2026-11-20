@@ -7578,7 +7578,10 @@ def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_on
     ("tools/desk/guard.py", "tools/desk/"), ("tools/desk/lock.json", "tools/desk/"), ("tools/gemini/job.py", "tools/gemini/"),
     ("bench/harbor/requirements.txt", "bench/harbor/"), ("bench/experiments/protections.toml", "bench/experiments/"),
     ("bench/records/pilot-2026-11-17.json", "bench/records/"), ("bench/pyproject.toml", "bench/"), ("bench/conftest.py", "bench/"),
-    (".github/workflows/site.yml", ".github/"), ("tools/site/sweep.py", "tools/site/sweep.py"), ("tools/site/requirements.txt", "tools/site/requirements.txt"),
+    (".github/workflows/site.yml", ".github/"), ("tools/site/sweep.py", "tools/site/"), ("tools/site/requirements.txt", "tools/site/"),
+    # Beside the page's check: its builder, which the same jobs run before it, and a module that a script there would import.
+    ("tools/site/build.py", "tools/site/"), ("tools/site/playwright.py", "tools/site/"), ("tools/site/template.html", "tools/site/"),
+    ("tools/site/strings/helper.py", "tools/site/"), ("tools/site/strings/more/en.json", "tools/site/"),
 ])  # fmt: skip
 @pytest.mark.parametrize("how", ["modified", "added", "moved out of it"])
 def test_an_outside_pull_request_does_not_change_the_desk_the_gemini_job_the_harness_the_security_tests_or_the_workflows(place, path, folder, how):
@@ -7955,6 +7958,7 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "A stop while a message to the coordinator is being sent can leave it delivered without its sending being written down, or neither:",
     "a digest sent again so can come within the hour of the first",
     "Unlike the room for vulnerability reports, it has no number:",
+    "A session that ends with Claude Code's own report of an error after the service counted a response ends as one that ended by itself:",
 ])  # fmt: skip
 def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
@@ -7993,25 +7997,25 @@ def test_the_live_check_compares_known_values_by_the_rule_of_the_check_on_text_t
 # The things the code protects, in the plain words of each place that says it, and that new tests and tasks are welcome.
 SAID_OF_WHAT_IS_PROTECTED = {
     "charter in Korean": ["측정 도구", "측정을 돌리는 틀", "기존 과제", "기존 테스트", "보안 테스트", "보안 실험", "기록된 측정값", "벤치마크 폴더의 나머지",
-                          "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "소개 페이지가 측정 전에 묻는지 보는 검사", "새 테스트와 새 과제는 받"],
+                          "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "소개 페이지를 만드는 도구와 측정 전에 묻는지 보는 검사", "새 테스트와 새 과제는 받"],
     "charter in English": ["measuring tools", "harness that runs the measurement", "existing tasks", "existing tests", "security tests",
                            "security experiments", "recorded measurements", "rest of the benchmark's folder", "approval lock file",
                            "desk's own tools and its closed list", "Gemini job", "workflows",
-                           "check that the introduction page asks before it measures", "New tests and new tasks are accepted"],
+                           "tools that build the introduction page and check that it asks before it measures", "New tests and new tasks are accepted"],
     "en": ["the judge", "the language images", "the harness that runs the measurement", "existing benchmark tasks", "existing tests",
            "security tests", "security experiments", "the recorded measurements", "the rest of the benchmark’s folder", "approval locks",
            "the desk’s own tools and its closed list", "the Gemini job", "the workflows",
-           "the check that this page asks before it measures", "New tests and new benchmark tasks are welcome"],
+           "the tools that build this page and check that it asks before it measures", "New tests and new benchmark tasks are welcome"],
     "ko": ["채점기", "언어 이미지", "측정을 돌리는 틀", "기존 벤치마크 과제", "기존 테스트", "보안 테스트", "보안 실험", "기록된 측정값", "벤치마크 폴더의 나머지",
-           "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "이 페이지가 측정 전에 묻는지 보는 검사",
+           "승인 잠금 파일", "창구의 도구와 잠금 목록", "Gemini 작업", "워크플로", "이 페이지를 만드는 도구와 측정 전에 묻는지 보는 검사",
            "새 테스트와 새 벤치마크 과제는 환영한다"],
     "ja": ["判定ツール", "言語イメージ", "計測を動かす仕組み", "既存のベンチマーク課題", "既存のテスト", "セキュリティテスト", "セキュリティ実験", "記録された計測値",
            "ベンチマークフォルダのそのほかの部分", "承認ロック", "窓口のツールとその許可リスト", "Geminiのジョブ", "ワークフロー",
-           "このページが計測の前に同意を求めるかを確かめる検査", "新しいテストと新しいベンチマーク課題は歓迎します"],
+           "このページを作るツールと、計測の前に同意を求めるかを確かめる検査", "新しいテストと新しいベンチマーク課題は歓迎します"],
     "es": ["el juez", "las imágenes de los lenguajes", "el entorno que ejecuta la medición", "las tareas existentes del benchmark", "las pruebas existentes",
            "las pruebas de seguridad", "los experimentos de seguridad", "las mediciones registradas", "el resto de la carpeta del benchmark",
            "los bloqueos de aprobación", "las herramientas de la ventanilla y su lista cerrada", "el trabajo de Gemini", "los flujos de trabajo",
-           "la comprobación de que esta página pregunta antes de medir", "Las pruebas nuevas y las tareas nuevas del benchmark son bienvenidas"],
+           "las herramientas que construyen esta página y comprueban que pregunta antes de medir", "Las pruebas nuevas y las tareas nuevas del benchmark son bienvenidas"],
 }  # fmt: skip
 
 
@@ -8031,8 +8035,9 @@ def test_what_an_outside_pull_request_must_not_change_is_said_where_people_read_
     assert not [where for where, words in missing.items() if words], missing
 
 
-def test_a_change_to_the_introduction_pages_text_from_outside_stays_welcome(place):
-    files = [{"filename": "tools/site/strings/ko.json", "status": "modified"}, {"filename": "bench/tests/test_brand_new_wording.py", "status": "added"}]
+@pytest.mark.parametrize("text", [{"filename": "tools/site/strings/ko.json", "status": "modified"}, {"filename": "tools/site/strings/fr.json", "status": "added"}])
+def test_a_change_to_the_introduction_pages_text_from_outside_stays_welcome(place, text):
+    files = [text, {"filename": "bench/tests/test_brand_new_wording.py", "status": "added"}]
     assert verdict(place, files) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
 
 
@@ -8067,7 +8072,8 @@ def test_a_short_latin_value_ends_where_a_korean_or_japanese_letter_begins_and_b
 
 
 @pytest.mark.parametrize("path", ["\\var\\tmp\\dodam-desk-501\\check", "/System/Volumes/Data/private/tmp/x", "/system/volumes/data/var/folders/dq/x",
-                                  "/./tmp/x", "/var/./tmp/x", "/usr/../tmp/x", "/var/../var/folders/dq/x", "/ var / tmp / x", "/run/user/501/x"])  # fmt: skip
+                                  "/./tmp/x", "/var/./tmp/x", "/usr/../tmp/x", "/var/../var/folders/dq/x", "/ var / tmp / x", "/run/user/501/x",
+                                  "/var/.hidden/../tmp/x", "/usr/.../../tmp/x", "/../tmp/x", "/./../var/tmp/x", "/a/b/../../tmp/x"])  # fmt: skip
 def test_the_folders_for_temporary_files_are_found_in_each_way_of_writing_them_that_the_computer_accepts(path):
     assert "a path outside the repository" in module("guard").leaks(f"It is kept in {path} for now.", [])
 
