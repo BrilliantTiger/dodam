@@ -149,7 +149,10 @@ def test_after():
 
 
 @pytest.mark.parametrize("how", ["hang", "spin"])
-def test_a_program_that_hangs_fails_its_case_only_and_never_hangs_the_judge(tmp_path, how):
+def test_a_program_that_hangs_fails_its_case_only_and_never_hangs_the_judge(tmp_path, monkeypatch, how):
+    # the file gets 18 seconds here (one for each runner it may need, and each case's limit and 2), so
+    # a judge that waited for the program until the file's time ran out would end in a fault, not here
+    monkeypatch.setattr(judge_module, "FILE_SECONDS", 1)
     started = time.monotonic()
     result = judge_program(tmp_path, HANG, {"functional/test_hang.py": AROUND % how})
     assert time.monotonic() - started < 20
