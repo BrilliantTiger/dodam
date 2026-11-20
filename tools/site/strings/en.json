@@ -157,7 +157,7 @@
   "rule3_h": "Outside code runs in isolation",
   "rule3_p": "It is built and run only in containers with no credentials and no network.",
   "rule4_h": "The measuring tools stay with the project",
-  "rule4_p": "Outside pull requests do not change the judge, the language images, the harness that runs the measurement, existing benchmark tasks, existing tests, security tests, security experiments, the recorded measurements, the rest of the benchmark’s folder, approval locks, the desk’s own tools and its closed list, the Gemini job, the workflows or the check that this page asks before it measures. New tests and new benchmark tasks are welcome. Report the problem, and the project’s own agents fix it, so the measurement cannot be steered from outside.",
+  "rule4_p": "Outside pull requests do not change the judge, the language images, the harness that runs the measurement, existing benchmark tasks, existing tests, security tests, security experiments, the recorded measurements, the rest of the benchmark’s folder, approval locks, the desk’s own tools and its closed list, the Gemini job, the workflows or the tools that build this page and check that it asks before it measures. New tests and new benchmark tasks are welcome, and so are changes to this page’s text. Report the problem, and the project’s own agents fix it, so the measurement cannot be steered from outside.",
   "rule5_h": "Hidden tasks stay private",
   "rule5_p": "They are kept in a separate private repository and are never shared.",
   "rule6_h": "Vulnerabilities go to the Security tab",

@@ -367,13 +367,15 @@ def _is_path_of_the_copy(word: str, copy: Path | None) -> bool:
 
 def as_a_path(text: str) -> str:
     """The text with other ways of writing a path that the computer accepts made plain: backslashes as slashes, the data
-    volume of macOS left out, a part that is a dot left out, and a part followed by two dots left out with them."""
+    volume of macOS left out, a part that is a dot left out, a part followed by two dots left out with them, whatever its
+    name begins with, and two dots at the root left out, since there they lead to the root itself."""
     text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
     before = None
     while before != text:
         before = text
         text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
-        text = re.sub(r"/[ \t]*[^/\s.][^/\s]*[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![\w./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
     return text
 
 

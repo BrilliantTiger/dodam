@@ -8073,7 +8073,7 @@ def test_a_short_latin_value_ends_where_a_korean_or_japanese_letter_begins_and_b
 
 @pytest.mark.parametrize("path", ["\\var\\tmp\\dodam-desk-501\\check", "/System/Volumes/Data/private/tmp/x", "/system/volumes/data/var/folders/dq/x",
                                   "/./tmp/x", "/var/./tmp/x", "/usr/../tmp/x", "/var/../var/folders/dq/x", "/ var / tmp / x", "/run/user/501/x",
-                                  "/var/.hidden/../tmp/x", "/usr/.../../tmp/x", "/../tmp/x", "/./../var/tmp/x", "/a/b/../../tmp/x"])  # fmt: skip
+                                  "/var/.hidden/../tmp/x", "/.../../tmp/x", "/../tmp/x", "/./../var/tmp/x", "/a/b/../../tmp/x"])  # fmt: skip
 def test_the_folders_for_temporary_files_are_found_in_each_way_of_writing_them_that_the_computer_accepts(path):
     assert "a path outside the repository" in module("guard").leaks(f"It is kept in {path} for now.", [])
 

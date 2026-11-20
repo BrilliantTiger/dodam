@@ -53,8 +53,9 @@ EXIT_REFUSED = 2
 # What an outside pull request must not change, as the project's rules name it: the measuring tools, the existing
 # benchmark tasks, the security tests and the approval locks; and with them the desk's own tools and its closed list,
 # the Gemini job, the measuring harness, the security experiments, the recorded measurements, the workflows, and the
-# check that the introduction page asks before it measures (a promise that only the owner may change) with the
-# packages that check runs with.
+# tools that build the introduction page and check that it asks before it measures (a promise that only the owner may
+# change): everything in their folder, which the check imports from and whose builder the same jobs run before it,
+# but the page's text, one file for each language in its strings folder, which is welcome from outside.
 # "bench/" stands for everything else in the benchmark's folder, such as its settings for the test runner, which
 # decide which tests run. New tests directly in bench/tests/ and new task folders in bench/tasks/ are welcome.
 PROTECTED_FOLDERS: tuple[str, ...] = (
@@ -68,8 +69,7 @@ PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/records/",
     "tools/desk/",
     "tools/gemini/",
-    "tools/site/sweep.py",
-    "tools/site/requirements.txt",
+    "tools/site/",
     "bench/",
 )
 ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
@@ -81,11 +81,12 @@ ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/records/",
     "tools/desk/",
     "tools/gemini/",
-    "tools/site/sweep.py",
-    "tools/site/requirements.txt",
+    "tools/site/",
 )
 # The folder of the benchmark as a whole, for what lies in it outside every folder named above.
 REST_OF_BENCH = "bench/"
+# The folder of the page's tools, and in it the page's text.
+PAGE_TOOLS, PAGE_TEXT = "tools/site/", "tools/site/strings/"
 
 
 class PRFilesError(Exception):
@@ -254,11 +255,19 @@ def _matches_folder(path: str, folder: str) -> bool:
 
 def _protected_by_place(path: str) -> set[str]:
     """The protected folders a path lies in by its place alone, whatever it is: the last of the folders named."""
-    found = {folder for folder in ALWAYS_PROTECTED_FOLDERS if _matches_folder(path, folder)}
+    found = {folder for folder in ALWAYS_PROTECTED_FOLDERS if _matches_folder(path, folder) and not (folder == PAGE_TOOLS and _is_page_text(path))}
     named_in_bench = [folder for folder in PROTECTED_FOLDERS if folder.startswith("bench/") and folder != REST_OF_BENCH]
     if _matches_folder(path, REST_OF_BENCH) and not any(_matches_folder(path, folder) for folder in named_in_bench):
         found.add(REST_OF_BENCH)
     return found
+
+
+def _is_page_text(path: str) -> bool:
+    """True only for one language's text of the introduction page: a .json file directly in canonical tools/site/strings/."""
+    if not _is_canonical_repo_path(path) or not path.startswith(PAGE_TEXT):
+        return False
+    name = path[len(PAGE_TEXT) :]
+    return "/" not in name and not name.startswith(".") and name.endswith(".json") and len(name) > len(".json")
 
 
 def _is_canonical_repo_path(path: str) -> bool:
@@ -371,8 +380,9 @@ def classify_pr_files(
         is_pure_add = (status == "added") and (not has_earlier_path)
 
         if has_earlier_path:
-            for folder in PROTECTED_FOLDERS:
-                if folder != REST_OF_BENCH and _matches_folder(prev_filename, folder):
+            # The folders whose new files are welcome: what was moved out of them changed something that exists.
+            for folder in ("bench/tests/", "bench/tasks/"):
+                if _matches_folder(prev_filename, folder):
                     touched.add(folder)
             touched |= _protected_by_place(prev_filename)
 
