@@ -20,6 +20,11 @@ except ImportError:  # each test then fails on its own instead of stopping the w
 BENCH = Path(__file__).resolve().parents[1]
 HARBOR_VENV = Path(os.environ.get("DODAM_HARBOR_VENV") or BENCH / ".harbor-venv")
 PROBE = Path(__file__).with_name("harbor_exec_probe.py")
+USES_PROBE = Path(__file__).with_name("harbor_uses_probe.py")
+# name -> version, as bench/harbor/requirements.txt pins them
+PINNED = dict(line.split(" ", 1)[0].split("==", 1)
+              for line in (BENCH / "harbor" / "requirements.txt").read_text(encoding="utf-8").splitlines()
+              if "==" in line and not line.startswith("#"))
 FAKE_SECRET = "sk-ant-oat01-PROBE0123456789abcdefghijklmnopqrstuvwxyzPROBE"
 HOST_PATH = "/usr/local/bin:/usr/bin:/bin"
 
@@ -90,7 +95,26 @@ def test_the_installed_harbor_is_the_pinned_patched_one():
     assert installed.sha256 == harbor_patch.PATCHED_SHA256
 
 
+@needs_harbor
+def test_what_harbor_runs_of_filelock_and_litellm_works_in_the_installed_harbor(tmp_path):
+    out = subprocess.run([str(HARBOR_VENV / "bin" / "python"), "-I", str(USES_PROBE)], capture_output=True, text=True,
+                         timeout=120, cwd=tmp_path, env={"PATH": HOST_PATH, "HOME": str(tmp_path),
+                                                         "LITELLM_LOCAL_MODEL_COST_MAP": "True"})
+    assert out.returncode == 0, out.stderr[-2000:]
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    assert seen["filelock"] == PINNED["filelock"] and seen["litellm"] == PINNED["litellm"]
+    assert seen["harbor_locks_with_this_filelock"] is True
+    assert seen["build_lock"] == {"second_while_held": "timeout", "second_after_release": "acquired"}
+    assert seen["hub_lock"] == "acquired"
+    assert len(seen["cost_usd"]) == 2 and all(cost > 0 for cost in seen["cost_usd"])
+
+
 # --- the patch file and its pins ---------------------------------------------------------------------------------
+
+def test_the_pinned_filelock_is_at_least_the_first_release_outside_every_published_advisory_on_it():
+    # 4.2.1 is the first filelock outside all twenty advisories published on it up to 20 November 2026.
+    assert tuple(int(part) for part in PINNED["filelock"].split(".")) >= (4, 2, 1)
+
 
 def test_the_patch_file_changes_only_the_docker_environment():
     text = harbor_patch.PATCH_FILE.read_text(encoding="utf-8")
@@ -395,3 +419,61 @@ def test_a_virtual_environment_with_setuptools_is_refused_with_what_to_do(tmp_pa
     with pytest.raises(harbor_patch.HarborSetupError) as err:
         check(harbor)
     assert "setuptools" in str(err.value) and "requirements.txt" in str(err.value)
+
+
+# --- the packages of the install against the pinned file -----------------------------------------------------------
+
+PINS = ("harbor==0.25.0 \\\n    --hash=sha256:aa\n"
+        "filelock==4.2.1 \\\n    --hash=sha256:bb \\\n    --hash=sha256:cc\n"
+        "huggingface-hub==1.33.0 \\\n    --hash=sha256:dd\n"
+        "colorama==0.4.6 ; sys_platform == 'win32' \\\n    --hash=sha256:ee\n")
+
+
+def pin(monkeypatch, root: Path, text: str = PINS) -> None:
+    path = root / "requirements.txt"
+    path.write_text(text)
+    monkeypatch.setattr(harbor_patch, "REQUIREMENTS", path, raising=False)
+
+
+def add_package(root: Path, folder: str, name: str, version: str) -> None:
+    info = site_of(root) / f"{folder}-{version}.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n\nA description.\n")
+
+
+def test_an_install_whose_listed_packages_have_the_pinned_versions_passes(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_package(tmp_path, "filelock", "filelock", "4.2.1")
+    add_package(tmp_path, "huggingface_hub", "huggingface_hub", "1.33.0")  # its own spelling of a listed name
+    add_package(tmp_path, "pip", "pip", "25.2")  # the installer, which the file does not list
+    check(harbor)
+
+
+def test_a_listed_package_at_another_version_is_refused_with_what_to_do(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_package(tmp_path, "filelock", "filelock", "3.32.7")
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    message = str(err.value)
+    assert "filelock 3.32.7" in message and "4.2.1" in message and "requirements.txt" in message
+
+
+def test_a_second_copy_of_a_listed_package_at_another_version_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    add_package(tmp_path, "filelock", "filelock", "4.2.1")
+    add_package(tmp_path, "FileLock", "FileLock", "3.32.7")
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    assert "FileLock 3.32.7" in str(err.value)
+
+
+def test_a_listed_package_whose_metadata_cannot_be_read_is_refused(tmp_path, monkeypatch):
+    harbor = fake_install(monkeypatch, tmp_path)
+    pin(monkeypatch, tmp_path)
+    (site_of(tmp_path) / "filelock-4.2.1.dist-info").mkdir()
+    with pytest.raises(harbor_patch.HarborSetupError) as err:
+        check(harbor)
+    assert "filelock-4.2.1.dist-info" in str(err.value)
