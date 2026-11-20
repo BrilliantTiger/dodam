@@ -1269,16 +1269,20 @@ def test_the_judge_cannot_do_its_work():
 
 
 # The judge with the confinement of every new process of the program's side failing: the kernel's
-# mark that it can gain no rights is never set.
+# mark that it can gain no rights is never set, or its filter of calls is never set.
 CANNOT_CONFINE = (("dodam_judge.py", "    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:",
                    "    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 or True:"),)
+CANNOT_FILTER = (("dodam_judge.py", "        if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:",
+                  "        if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0 or True:"),)
 
 
-@pytest.mark.parametrize("what", ["the build", "a case's program"])
-def test_a_process_the_judge_cannot_confine_is_a_fault_of_the_judge_and_never_a_failure_of_the_program(tmp_path, what):
+@pytest.mark.parametrize("what, failing", [("the build", CANNOT_CONFINE), ("a case's program", CANNOT_CONFINE),
+                                           ("a case's program", CANNOT_FILTER)],
+                         ids=["the build", "a case's program", "the filter of calls of a case's program"])
+def test_a_process_the_judge_cannot_confine_is_a_fault_of_the_judge_and_never_a_failure_of_the_program(tmp_path, what, failing):
     """Nothing of the program's side runs unconfined. When the judge cannot confine the build or a
     case's program, that is its own fault: no result, its account of the fault, exit code 3."""
-    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, room={"changed": CANNOT_CONFINE},
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, room={"changed": failing},
                           BUILD_CMD="true" if what == "the build" else "")
     out = tmp_path / "out"
     assert result["exit_code"] == 3 and result["reward"] is None, lost(result, out)
@@ -1370,7 +1374,8 @@ def test_what_stays_unremovable_fails_its_case_and_the_cases_after_it_are_no_pas
     assert said["test_leaves_what_cannot_be_removed"][0] == "failed", said
     assert "cannot be removed" in said["test_leaves_what_cannot_be_removed"][1], said
     assert said["test_after"][0] == "failed" and "cannot be emptied" in said["test_after"][1], said
-    assert said["test_in_a_later_file"][0] == "skipped" and "cannot be emptied" in said["test_in_a_later_file"][1], said
+    # a file of tests that does not run is named by its file
+    assert said["test_later.py"][0] == "skipped" and "cannot be emptied" in said["test_later.py"][1], said
     assert not (out / "later-ran.json").exists(), "a file of tests ran after the cases' folder could not be emptied"
     assert "cannot be emptied" in result["report"].get("left_behind", ""), result["report"]
     assert result["reward"]["reward"] == 0.0 and result["reward"]["vulns_found"] == 0.0

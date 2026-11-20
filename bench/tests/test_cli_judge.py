@@ -1,6 +1,7 @@
 """Judging a command-line program from outside: arguments, standard input and files in; standard output,
 the exit code and files out. These run the judge on this machine, where the program runs as the developer;
 what needs the verifier's own user is in test_cli_isolation.py."""
+import errno
 import inspect
 import json
 import os
@@ -327,7 +328,7 @@ def test_a_link_left_by_the_program_is_not_followed():
         assert c.read("folder/expected-answer.txt") is None
         assert c.read("beside/neighbour.txt") is None
         assert c.read("again/mine.txt") is None
-        assert c.read("inner/mine.txt") == b"the case's own"
+        assert c.read("inner/mine.txt") == b"the case's own" and c.read("inner") is None
         for folder in ("folder", "beside", "again", "dangling"):
             assert refused(lambda: c.write(folder + "/planted.txt", "x")), folder
             assert refused(lambda: c.sparse(folder + "/planted.txt", 10)), folder
@@ -725,6 +726,7 @@ def test_removing_follows_no_link_that_takes_the_place_of_a_folder_it_listed(tmp
 
 def test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge(tmp_path):
     tests = {"functional/test_stuck.py": '''
+import errno
 import dodam_cli
 
 
@@ -742,7 +744,7 @@ def test_cannot_be_removed():
 
         def stuck(top, keep_top=False):
             tool.remove_tree = real
-            raise OSError(39, "Directory not empty")
+            raise OSError(errno.ENOTEMPTY, "Directory not empty")
         tool.remove_tree = stuck
 
 
@@ -1470,7 +1472,7 @@ def test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_remo
              "functional/test_b.py": RUNS_OK.replace("test_ok", "test_in_a_later_file")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
     said = said_of(result)
-    for name in ("test_first", "test_second", "test_in_a_later_file"):
+    for name in ("test_first", "test_second", "test_b.py"):     # a file of tests that does not run is named by its file
         assert said[name][0] == "failed" and "seconds" in said[name][1], said
     assert "seconds" in result["report"].get("left_behind", ""), result["report"]
     assert (tmp_path / "out/reward.json").is_file() and result["reward"]["reward"] == 0.0
@@ -1491,16 +1493,21 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
 
 def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
     """What a case runner spends removing what the program left is drawn from the step's time for
-    walking and removing, not from the time of its file of tests. Here the file has about three
-    seconds and removing what its one case left takes about five."""
+    walking and removing, not from the time of its file of tests, also for the runner started after
+    it. Here the file has about nine seconds, removing what its first case left takes about eight,
+    and the runner is ended after it, so a second runner judges the last case."""
     monkeypatch.setattr(judge_module, "FILE_SECONDS", 1, raising=False)
     monkeypatch.setattr(judge_module, "CASE_SECONDS", 0, raising=False)
-    program = "import os\nfor n in range(50):\n    open(f'left-{n}', 'w').close()\nprint('ok')\n"
+    program = ("import sys\nif sys.argv[1:] == ['leave']:\n    for n in range(80):\n"
+               "        open(f'left-{n}', 'w').close()\nprint('ok')\n")
     slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.1)")
-    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": slow + RUNS_OK}, CASE_TIMEOUT_SEC="1")
+    tests = slow + ("def test_leaves():\n    with case() as c:\n        assert c.run(['leave']).out == 'ok\\n'\n\n\n"
+                    "def test_ends_its_runner():\n    os.kill(os.getpid(), 9)\n\n\n") + RUNS_OK
+    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": tests}, CASE_TIMEOUT_SEC="1")
     assert code == 0 and (out / "reward.json").is_file(), capsys.readouterr()
     report = json.loads((out / "details.json").read_text())
-    assert [(t["name"], t["outcome"]) for t in report["tests"]] == [("test_ok", "passed")], report["tests"]
+    assert [(t["name"], t["outcome"]) for t in report["tests"]] == [
+        ("test_leaves", "passed"), ("test_ends_its_runner", "failed"), ("test_ok", "passed")], report["tests"]
 
 
 def test_no_case_runner_starts_on_a_cases_folder_the_judge_could_not_empty(tmp_path, monkeypatch):
@@ -1535,6 +1542,25 @@ def test_third():
     for name in ("test_second", "test_third"):
         assert said[name][0] == "failed" and "seconds" in said[name][1], said
     assert sorted(path.name for path in ran.iterdir()) == [], "a case runner started on what the judge could not empty"
+
+
+def test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_judge(tmp_path, monkeypatch, capsys):
+    """Only what cannot be removed whatever the judge does, or the step's time for removing running
+    out, is the program's doing. A removal that fails otherwise is the judge's fault, in the case
+    runner as in the judge, and never fails a case or the step."""
+    in_the_runner = ("import errno\nimport dodam_cli\n\n\ndef _fails(*args, **kwargs):\n"
+                     "    raise OSError(errno.EIO, 'Input/output error')\n\n\n" + RUNS_OK.replace(
+                         "    with case() as c:\n", "    with case() as c:\n        dodam_cli._judge.remove_tree = _fails\n"))
+    code, out = judge_command(tmp_path / "runner", "print('ok')\n", {"functional/test_removal.py": in_the_runner})
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert "remove" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
+    def fails(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+    monkeypatch.setattr(judge_module, "remove_tree", fails)
+    code, out = judge_command(tmp_path / "judge", "print('ok')\n", {"functional/test_ok.py": RUNS_OK})
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert "empty" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
 
 
 def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):
