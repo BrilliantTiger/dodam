@@ -8106,3 +8106,48 @@ def test_the_line_of_an_item_that_a_stop_left_unwritten_is_dated_at_the_closing(
     again.start_one()
     (line,) = [r for r in counted(place)["reports"] if r["kind"] == "item_closed" and r["number"] == 50]
     assert line["t"] == closed_at
+
+
+# --- What the jobs run from where -------------------------------------------------------------------------------
+
+
+def python_started_by_the_workflows() -> list[tuple[str, str | None, str]]:
+    """Every line of a step of a workflow that starts Python with -m or -c: the workflow, the folder it runs in, the line."""
+    found = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        steps: list[dict] = []
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for n, line in enumerate(lines):
+            if re.match(r"^\s*- (?:name|uses):", line):
+                steps.append({"folder": None, "run": []})
+            elif steps and (folder := re.match(r"^\s+working-directory:\s*(\S+)", line)):
+                steps[-1]["folder"] = folder.group(1)
+            elif steps and (run := re.match(r"^(\s+)run:\s*(.*)$", line)):
+                if run.group(2) not in ("|", ">"):
+                    steps[-1]["run"].append(run.group(2))
+                else:
+                    for later in lines[n + 1 :]:
+                        if later.strip() and len(later) - len(later.lstrip()) <= len(run.group(1)):
+                            break
+                        steps[-1]["run"].append(later.strip())
+        for step in steps:
+            for command in step["run"]:
+                if re.search(r"(?:^|[\s/(])python3?\s+(?:-\w+\s+)*-[mc]\b", command):
+                    found.append((path.name, step["folder"], command))
+    return found
+
+
+def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_in_isolated_mode():
+    pr_files = module("pr_files")
+    found = python_started_by_the_workflows()
+    assert len(found) >= 10, found
+    open_to_outside = []
+    for workflow, folder, command in found:
+        # Python with -m or -c looks for what it runs in the folder it runs in first; isolated mode (-I) does not.
+        protected = folder is not None and any(pr_files._matches_folder(folder + "/x", protected) for protected in pr_files.PROTECTED_FOLDERS)
+        if not protected and not re.search(r"python3?\s+(?:-\w+\s+)*-I\b", command):
+            open_to_outside.append((workflow, folder or "the root of the repository", command))
+    assert open_to_outside == []
+    phrase = ("Every job that starts Python with a module from the root of the repository, which is not protected, starts it in isolated "
+              "mode, so that nothing placed there runs in place of what the job means to run.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
