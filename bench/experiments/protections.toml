@@ -820,6 +820,9 @@ tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_
 [[protection.change]]
 find = '''        try:
             remove_tree(self.work_root, keep_top=True)
+        except TooMuchLeft as exc:
+            # what the program's side left is its doing: the step fails with that reason
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
         except OSError as exc:
             raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
 '''
@@ -870,12 +873,181 @@ find = '''        if self.left:
 put = ''''''
 
 [[protection]]
-what = "The last stop of a step that cannot remove the data folder fails the step"
+what = "The last stop of a step that cannot take back what the program's side left fails the step"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result",
+         "tests/test_cli_judge.py::test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result[in the cases' folder after the last file of tests]"]
+[[protection.change]]
+find = '''    if left and last is not None and all(c["message"] != left for c in report["tests"]):'''
+put = '''    if False:'''
+
+[[protection]]
+what = "The last stop gives the data folder's reason also when no start of the program came up"
 file = "dodambench/judge.py"
 tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
 [[protection.change]]
-find = '''    if app.left and served is not None and all(c["message"] != app.left for c in report["tests"]):'''
+find = '''            served = t
+            if not up:
+'''
+put = '''            if not up:
+'''
+[[protection.change]]
+find = '''            else:
+                def again() -> tuple[str, str] | None:'''
+put = '''            else:
+                served = t
+                def again() -> tuple[str, str] | None:'''
+
+[[protection]]
+what = "The cases after a case runner that was ended get the data folder's reason"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
+[[protection.change]]
+find = '''                    return None if up else (not_run, app.left or "program did not start")'''
+put = '''                    return None if up else (not_run, "program did not start")'''
+
+[[protection]]
+what = "The case runners of one file share its time"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_the_case_runners_of_one_file_share_its_time"]
+[[protection.change]]
+find = '''            code = run_pytest(test_path, env, timeout - spent, said) if spent < timeout else None'''
+put = '''            code = run_pytest(test_path, env, timeout, said)'''
+
+[[protection]]
+what = "The last stop's entry has a kind of its own, which no rate counts"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_the_entry_the_last_stop_adds_has_a_kind_of_its_own_that_every_reader_takes"]
+[[protection.change]]
+find = '''                               "outcome": "failed", "kind": LEFT_BEHIND, "step": step, "weakness": None})'''
+put = '''                               "outcome": "failed", "kind": None, "step": step, "weakness": None})'''
+
+[[protection]]
+what = "The tool that checks prepared solutions gives the reason a step failed for what the program's side left"
+file = "dodambench/vet.py"
+tests = ["tests/test_judge.py::test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgement_it_was_written_for"]
+[[protection.change]]
+find = '''    if report.get("left_behind"):'''
 put = '''    if False:'''
+
+[[protection]]
+what = "Removing reads each folder once, and once more when the folders in it are gone"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_removing_reads_each_folder_at_most_twice_whatever_the_layout[empty folders in one folder]"]
+[[protection.change]]
+find = '''            waiting.pop()
+            os.rmdir(names.pop(), dir_fd=here)
+'''
+put = '''            waiting.pop()
+            waiting[-1].clear()
+            os.rmdir(names.pop(), dir_fd=here)
+'''
+
+[[protection]]
+what = "All walking and removing of what the program's side left in a step shares one time"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result[in the cases' folder before the next file of tests]",
+         "tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result[at the last stop, when removing takes longer than the step gives it]"]
+[[protection.change]]
+find = '''    TREE_CLOCK.left = float(TREE_SECONDS)
+'''
+put = '''    TREE_CLOCK.left = None
+'''
+
+[[protection]]
+what = "Removing gives up at an entry it reads once the step's time is spent"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_walking_and_removing_what_the_program_left_share_one_time_in_a_step"]
+[[protection.change]]
+find = '''                    in_time(deadline)
+                    if entry.is_dir(follow_symlinks=False):
+'''
+put = '''                    if entry.is_dir(follow_symlinks=False):
+'''
+
+[[protection]]
+what = "Removing gives up before a folder it enters once the step's time is spent"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_walking_and_removing_give_up_between_folders_once_the_time_is_spent[removing]"]
+[[protection.change]]
+find = '''            if waiting[-1]:
+                in_time(deadline)
+'''
+put = '''            if waiting[-1]:
+'''
+
+[[protection]]
+what = "Walking gives up at an entry it reads once the step's time is spent"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_walking_and_removing_what_the_program_left_share_one_time_in_a_step"]
+[[protection.change]]
+find = '''                    in_time(deadline)
+                    info = entry.stat(follow_symlinks=False)
+'''
+put = '''                    info = entry.stat(follow_symlinks=False)
+'''
+
+[[protection]]
+what = "Walking gives up before a folder it enters once the step's time is spent"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_walking_and_removing_give_up_between_folders_once_the_time_is_spent[walking]"]
+[[protection.change]]
+find = '''            in_time(deadline)
+            down = os.open(to_enter[-1].pop(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+'''
+put = '''            down = os.open(to_enter[-1].pop(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+'''
+
+[[protection]]
+what = "A cases' folder that cannot be emptied in the step's time fails the step, with a result"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result[in the cases' folder after the last file of tests]"]
+[[protection.change]]
+find = '''            # what the program's side left is its doing: the step fails with that reason
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
+'''
+put = '''            raise JudgeFault(f"the folder the cases live in cannot be emptied: {exc}") from None
+'''
+
+[[protection]]
+what = "No file of tests runs after the cases' folder could not be emptied"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result[in the cases' folder before the next file of tests]"]
+[[protection.change]]
+find = '''        elif cli is not None and cli.left:'''
+put = '''        elif False:'''
+
+[[protection]]
+what = "The search for places any user may write ends at its time, also while it still finds some"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some"]
+[[protection.change]]
+find = '''                if not ready or time.monotonic() >= deadline:'''
+put = '''                if not ready:'''
+
+[[protection]]
+what = "The format checker refuses settings that would give the build another time limit"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_judge.py::test_the_checker_refuses_a_task_whose_settings_would_give_the_build_another_time_limit"]
+[[protection.change]]
+find = '''            if given != BUILD_SECONDS:'''
+put = '''            if False:'''
+
+[[protection]]
+what = "A file whose cases cannot be listed gets two case runners and no more"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_file_whose_cases_cannot_be_listed_needs_two_case_runners_and_no_more"]
+[[protection.change]]
+find = '''                if code is None or not how or fruitless >= 2:'''
+put = '''                if code is None or not how or fruitless >= 3:'''
+
+[[protection]]
+what = "The format checker counts two case runners for a file whose cases cannot be listed"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_file_whose_cases_cannot_be_listed_needs_two_case_runners_and_no_more"]
+[[protection.change]]
+find = '''    return max(2 * tests, 2)'''
+put = '''    return max(2 * tests, 1)'''
 
 [[protection]]
 what = "A case during which the kernel ended a process fails, whatever its test says"
