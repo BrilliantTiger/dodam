@@ -12,9 +12,13 @@ pins what runs as Harbor's own code with the token in its environment: every fil
 patched one by its patched hash, all the others by one digest of the release), the `harbor` entry script (by its
 structure, since installers write it from their own templates, with nothing after the interpreter on its #! line),
 the files that run whenever that Python starts (.pth files, sitecustomize and usercustomize in any form), and a
-virtual environment that does not also load the system's site-packages. Out of scope, for the same reason: Harbor's
-dependencies and the Python interpreter, which run with the token in their environment but build no command lines
-and are pinned by hash when installed (bench/harbor/requirements.txt); compiled files in __pycache__; and anything
+virtual environment that does not also load the system's site-packages. Harbor's dependencies run with the token in
+their environment but build no command lines. Their files are pinned by hash when installed, from
+bench/harbor/requirements.txt, and the check pins their versions: every installed package that the file lists must
+have the version the file gives, so an install made from an earlier file, with a dependency since moved off a known
+vulnerability, is refused. The installed packages are found and read as Python's own metadata reader finds and reads
+them, and a package record whose name or version cannot be read is refused. Out of scope, for the same reason as
+above: the dependencies' files after installing, the Python interpreter, compiled files in __pycache__, and anything
 else that needs write access to the install.
 
 Set up the install once, from bench/ (to move from an earlier version of the patch, install again first):
@@ -32,12 +36,15 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass
+from importlib.metadata import distributions
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
 DEFAULT_VENV = BENCH / ".harbor-venv"
 PINNED_VERSION = "0.25.0"
 PATCH_FILE = BENCH / "harbor" / "docker-exec-env-by-name.patch"
+REQUIREMENTS = BENCH / "harbor" / "requirements.txt"
+PIN = re.compile(r"(?m)^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)")
 TARGET = Path("harbor/environments/docker/docker.py")
 # sha256 of TARGET as released in harbor 0.25.0 (the wheel's RECORD agrees), and after the patch.
 ORIGINAL_SHA256 = "4f74e08941b3534864643405dd6ff43543597248539d7f5de7208ec5c2f5b511"
@@ -187,6 +194,39 @@ def startup_problems(site: Path) -> list[str]:
     return problems
 
 
+def normalized(name: str) -> str:
+    """A package name as installers compare names: case, '-', '_' and '.' make no difference."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pinned_versions(requirements: Path) -> dict[str, str]:
+    """The version the pinned file gives each package it lists, by normalized name."""
+    return {normalized(m.group(1)): m.group(2) for m in PIN.finditer(Path(requirements).read_text(encoding="utf-8"))}
+
+
+def package_problems(site: Path, pins: dict[str, str]) -> list[str]:
+    """Installed packages that the pinned file lists with another version, and package records whose name or version
+    cannot be read. The records (.dist-info and .egg-info) are found and read by Python's own metadata reader, as the
+    Python that runs Harbor finds and reads them."""
+    problems = []
+    for dist in distributions(path=[str(site)]):
+        record = getattr(dist, "_path", site)  # the record's folder or file, only to name it
+        try:
+            metadata = dist.metadata
+            names = [] if metadata is None else [v.strip() for v in metadata.get_all("Name") or []]
+            versions = [] if metadata is None else [v.strip() for v in metadata.get_all("Version") or []]
+        except (OSError, ValueError):  # ValueError covers bytes that are not UTF-8
+            names = versions = []
+        if len(names) != 1 or len(versions) != 1 or not names[0] or not versions[0]:
+            problems.append(f"the package record {record} has no single readable name and version")
+            continue
+        want = pins.get(normalized(names[0]))
+        if want is not None and versions[0] != want:
+            problems.append(f"{names[0]} {versions[0]} is installed in {site}, "
+                            f"where bench/harbor/requirements.txt pins {want}")
+    return sorted(problems)
+
+
 def check(harbor: Path, version: str = PINNED_VERSION, original_sha256: str = ORIGINAL_SHA256,
           patched_sha256: str = PATCHED_SHA256) -> Installed:
     """The install behind `harbor`, when it is the pinned release with the patch; an error otherwise."""
@@ -215,6 +255,10 @@ def check(harbor: Path, version: str = PINNED_VERSION, original_sha256: str = OR
     problems = startup_problems(installed.site_packages)
     if problems:
         raise HarborSetupError("; ".join(problems))
+    problems = package_problems(installed.site_packages, pinned_versions(REQUIREMENTS))
+    if problems:
+        raise HarborSetupError("; ".join(problems) + "; make a fresh virtual environment and install Harbor into it "
+                               "from bench/harbor/requirements.txt")
     return installed
 
 
