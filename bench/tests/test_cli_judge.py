@@ -461,8 +461,9 @@ def test_vet_reports_a_fault_of_the_judge_as_such(cli_task_dir, tmp_path, monkey
 
 # Every wait and every time limit the judge has in one step of a command-line task, in seconds, as
 # the code has them: ending a user's processes pauses at most 500 times for 0.01 seconds; the judge
-# waits 30 seconds for a build it has ended; a file of tests needs at most two case runners for each
-# of its cases, since a runner that ends twice without deciding a case costs the next case; and every
+# waits 30 seconds for a build it has ended; all walking and removing of what the program's side
+# left in a step shares 120 seconds; a file of tests needs at most two case runners for each of its
+# cases, since a runner that ends twice without deciding a case costs the next case; and every
 # runner is followed by taking back what it left.
 def step_terms(tests_per_file: list[int], limit: int) -> dict[str, int]:
     runners, ending = sum(max(2 * tests, 2) for tests in tests_per_file), 5
@@ -471,6 +472,7 @@ def step_terms(tests_per_file: list[int], limit: int) -> dict[str, int]:
             "ending the build's processes": ending,
             "waiting for the ended build": 30,
             "the search for places any user may write": judge_module.SEARCH_SECONDS,
+            "walking and removing what the program's side left": 120,
             "starting every case runner the files can need": runners * judge_module.FILE_SECONDS,
             "every case at its full time limit": sum(tests_per_file) * (limit + judge_module.CASE_SECONDS),
             "taking back what every case runner left": runners * ending,
@@ -487,13 +489,26 @@ def test_the_checker_refuses_a_judging_time_that_leaves_out_any_wait_of_a_step(c
     whole = sum(terms.values())
     toml = cli_task_dir / "task.toml"
     given = toml.read_text(encoding="utf-8")
-    toml.write_text(given.replace("verifier_timeout_sec = 1600", f"verifier_timeout_sec = {whole - terms[term]}"),
+    toml.write_text(given.replace("verifier_timeout_sec = 1800", f"verifier_timeout_sec = {whole - terms[term]}"),
                     encoding="utf-8")
     refused = [p for p in task_module.cli_problems(load_task(cli_task_dir)) if p["key"] == "limits.verifier_timeout_sec"]
     assert refused, f"a time limit for judging without {term!r} ({terms[term]} s) was accepted"
-    toml.write_text(given.replace("verifier_timeout_sec = 1600", f"verifier_timeout_sec = {whole}"), encoding="utf-8")
+    toml.write_text(given.replace("verifier_timeout_sec = 1800", f"verifier_timeout_sec = {whole}"), encoding="utf-8")
     assert task_module.judging_seconds(load_task(cli_task_dir)) == whole, terms
     assert not [p for p in task_module.cli_problems(load_task(cli_task_dir)) if p["key"] == "limits.verifier_timeout_sec"]
+
+
+def test_the_checker_refuses_a_task_whose_settings_would_give_the_build_another_time_limit(cli_task_dir, monkeypatch):
+    """The checker counts the build at the judge's 900 seconds. Were the settings the judge is handed
+    for a language to give the build another time limit, the task is refused instead."""
+    import dodambench.convert as convert_module
+    import dodambench.task as task_module
+    handed = convert_module.verifier_env
+    assert not [p for p in task_module.cli_problems(load_task(cli_task_dir)) if "build" in p["message"]]
+    monkeypatch.setattr(convert_module, "verifier_env",
+                        lambda task, lang: {**handed(task, lang), "BUILD_TIMEOUT_SEC": "1200"})
+    refused = [p for p in task_module.cli_problems(load_task(cli_task_dir)) if "build" in p["message"]]
+    assert refused and "900" in refused[0]["message"], refused
 
 
 def test_the_converted_task_is_judged_like_the_source_task(cli_task_dir, tmp_path):
@@ -1175,6 +1190,124 @@ def test_a_tree_with_more_entries_than_the_judge_handles_is_given_up_on(tmp_path
     assert judge_module.walk_tree(tmp_path / "walk", lambda folder, name, info: None, most=10) == 10
 
 
+LAYOUTS = ("files in one folder", "empty folders in one folder", "files and empty folders in one folder",
+           "folders inside each other")
+
+
+def lay_out(top: Path, layout: str) -> None:
+    """A tree as a program's side may leave it, in one of four layouts."""
+    if layout == "folders inside each other":
+        here = top
+        for _ in range(60):
+            (here / "f").write_text("")
+            here = here / "d"
+            here.mkdir()
+        return
+    for n in range(300):
+        if layout == "files in one folder" or (layout == "files and empty folders in one folder" and n % 2):
+            (top / f"f{n}").write_text("")
+        else:
+            (top / f"d{n}").mkdir()
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_removing_reads_each_folder_at_most_twice_whatever_the_layout(tmp_path, monkeypatch, layout):
+    """Removing reads a folder once, and once more when the folders in it are gone, so its time grows
+    with the entries and no faster: it never reads a folder again from its start for every folder
+    in it."""
+    top = tmp_path / "left"
+    top.mkdir()
+    lay_out(top, layout)
+    reads: dict[int, int] = {}
+    listing = os.scandir
+
+    def counted(folder):
+        number = os.fstat(folder).st_ino if isinstance(folder, int) else os.stat(folder).st_ino
+        reads[number] = reads.get(number, 0) + 1
+        return listing(folder)
+    monkeypatch.setattr(judge_module.os, "scandir", counted)
+    judge_module.remove_tree(top)
+    monkeypatch.undo()
+    assert not top.exists()
+    assert max(reads.values()) <= 2, f"a folder was read {max(reads.values())} times"
+
+
+def test_walking_and_removing_what_the_program_left_share_one_time_in_a_step(tmp_path, monkeypatch):
+    """Every walk and removal of what the program's side left in a step draws on one time: what one
+    takes, the next has no more. When it is spent, a walk or a removal gives up with that reason."""
+    clock = getattr(judge_module, "TREE_CLOCK", None)
+    assert clock is not None, "walking and removing what the program's side left have no time limit"
+    much = judge_module.TooMuchLeft
+    first, second = many_files(tmp_path / "first", 20), many_files(tmp_path / "second", 40)
+    third = many_files(tmp_path / "third", 5)
+    unlink = os.unlink
+
+    def slow(*args, **kwargs):
+        time.sleep(0.02)
+        return unlink(*args, **kwargs)
+    monkeypatch.setattr(clock, "left", 1.0)
+    monkeypatch.setattr(judge_module.os, "unlink", slow)
+    judge_module.remove_tree(first)                 # about 0.4 of the 1.0 seconds
+    assert not first.exists()
+    with pytest.raises(much, match="seconds"):
+        judge_module.remove_tree(second)            # needs about 0.8 seconds; about 0.6 are left
+    with pytest.raises(much, match="seconds"):
+        judge_module.walk_tree(third, lambda folder, name, info: None)
+
+
+# a test that leaves files in the cases' folder itself, as a case runner that was ended can
+LEAVES_FILES = ('def test_leaves():\n    root = json.load(open(os.environ["DODAM_CLI_CONFIG"]))["work_root"]\n'
+                '    for n in range(20):\n        open(os.path.join(root, f"left-{n}"), "w").close()\n')
+RUNS_OK = "def test_ok():\n    with case() as c:\n        assert c.run([]).out == 'ok\\n'\n"
+WHERE_TIME_RUNS_OUT = {
+    "where a dependency folder goes": {"functional/test_ok.py": RUNS_OK},
+    "in the cases' folder before the next file of tests": {"functional/test_a.py": LEAVES_FILES,
+                                                            "functional/test_ok.py": RUNS_OK},
+    "in the cases' folder after the last file of tests": {"functional/test_a.py": LEAVES_FILES},
+}
+
+
+@pytest.mark.parametrize("where", WHERE_TIME_RUNS_OUT)
+def test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result(tmp_path, monkeypatch, where):
+    """When walking and removing what the program's side left has taken all the time a step gives
+    it, the step fails with that reason and a result is written: before the build, where a
+    dependency folder goes, and when the cases' folder is emptied after a file of tests. No file
+    of tests runs after that, the result gives the reason in a field of its own, and nothing is
+    timed once the step is judged. Here the step gives no time at all."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 0, raising=False)
+    deps = tmp_path / "deps"
+    (deps / "node_modules").mkdir(parents=True)
+    if where == "where a dependency folder goes":
+        many_files(tmp_path / "app/node_modules", 10)
+    else:
+        (tmp_path / "app").mkdir()
+    (tmp_path / "app/main.py").write_text("print('ok')\n")
+    tests_dir = tmp_path / "tests"
+    manifest = ""
+    for file, source in WHERE_TIME_RUNS_OUT[where].items():
+        (tests_dir / file).parent.mkdir(parents=True, exist_ok=True)
+        (tests_dir / file).write_text(HEAD + source)
+        manifest += f'[[test]]\nfile = "{file}"\nkind = "functional"\nstep = "build"\n\n'
+    (tests_dir / "manifest.toml").write_text(manifest)
+    env = lang_env(DEPS_DIR=str(deps), DEPS_LINKS="node_modules")
+    try:
+        result = judge(tests_dir, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    except Exception as error:
+        result = error
+    assert isinstance(result, dict), f"the time running out ended the judge: {result!r}"
+    assert (tmp_path / "out/reward.json").is_file()
+    assert result["reward"]["reward"] == 0.0, f"the step came out as passed: {result['reward']}"
+    if where == "where a dependency folder goes":
+        assert result["reward"]["build_ok"] == 0.0 and "seconds" in result["report"]["build_ended"], result["report"]
+    else:
+        told = result["report"]["tests"]
+        assert "seconds" in result["report"].get("left_behind", ""), "the result has no field that gives the reason"
+        assert any("seconds" in t["message"] for t in told), f"the result does not say why the step failed: {told}"
+        assert not any(t["name"] == "test_ok" for t in told), f"a file of tests ran after the time ran out: {told}"
+    clock = getattr(judge_module, "TREE_CLOCK", None)
+    assert clock is None or clock.left is None, "walking and removing are still timed after the step"
+
+
 def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):
     """What the working phase left where the pinned dependencies go holds more than the judge handles."""
     monkeypatch.setattr(judge_module, "TREE_ENTRIES", 5, raising=False)
@@ -1195,6 +1328,26 @@ def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_resu
     assert result["reward"]["build_ok"] == 0.0 and result["reward"]["reward"] == 0.0
     assert "more than 5 entries" in result["report"]["build_ended"]
     assert (tmp_path / "out/reward.json").is_file()
+
+
+def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some(tmp_path, monkeypatch):
+    """The search is given its time whether or not what it found so far waits to be read: one that
+    still finds places when its time is up gives up all the same. Here it has one second, and the
+    search, a stand-in, finds places without a pause for eight."""
+    much = judge_module.TooMuchLeft
+    monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 1)
+    monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 10**12)
+    start = subprocess.Popen
+    finds = ("import sys, time\nend = time.monotonic() + 8\nwhile time.monotonic() < end:\n"
+             "    sys.stdout.buffer.write(b'/nowhere\\0' * 1000)\n")
+    monkeypatch.setattr(judge_module.subprocess, "Popen", lambda args, **kwargs: start([sys.executable, "-c", finds], **kwargs))
+    mounts = tmp_path / "mounts"
+    mounts.write_text(f"none {tmp_path} tmpfs rw 0 0\n")
+    began = time.monotonic()
+    with pytest.raises(much):
+        for _ in judge_module.writable_by_others(mounts):
+            pass
+    assert time.monotonic() - began < 5, "the search went on past its time"
 
 
 def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):

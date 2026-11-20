@@ -157,7 +157,7 @@ def cli_task_dir(tmp_path: Path) -> Path:
 
         [limits]
         agent_timeout_sec = 1800
-        verifier_timeout_sec = 1600
+        verifier_timeout_sec = 1800
         cpus = 2
         memory_mb = 2048
 

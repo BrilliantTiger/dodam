@@ -10,6 +10,7 @@ import pytest
 from conftest import unseparated, write
 from dodambench import judge as judge_module
 from dodambench.judge import PROGRESS_ENV, App, judge, read_progress, restore_deps, run_cases, user_pids, write_output
+from dodambench.task import TEST_KINDS
 from dodambench.vet import judgement_problems
 
 
@@ -276,6 +277,7 @@ WHERE_IT_IS_GIVEN_BACK = {
     "at the last stop of the step": ["functional/test_one.py"],
     "at the last stop, of a program that ends before it opens its port": ["functional/test_one.py"],
     "at the last stop, of a program that stays up without opening its port": ["functional/test_one.py"],
+    "at the last stop, when removing takes longer than the step gives it": ["functional/test_one.py"],
     "before the next start": ["functional/test_one.py", "security/test_two.py"],
     "after a file with a program of its own": ["security/test_one.py", "functional/test_two.py"],
     "when a case runner that was ended is started again": ["functional/test_ended.py"],
@@ -290,11 +292,15 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
     file of tests that had a program of its own, before the next start, and at the last stop of the
     step, also when the program ended before it opened its port or stayed up without opening it,
     and when a case runner that was ended is started again. Where the data folder holds more than
-    the judge removes, the step fails with that reason and a result is written, whatever the tests
-    said before, and the result says so in a field of its own; the program is not started again on
-    what it left, and the files of tests after it are judged as for a program that does not start.
-    The judge waits 5 seconds here for a program to open its port."""
-    monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
+    the judge removes, or takes longer to remove than the step gives all walking and removing, the
+    step fails with that reason and a result is written, whatever the tests said before, and the
+    result gives the reason in a field of its own; the program is not started again on what it left,
+    and the files of tests after it are judged as for a program that does not start. The judge waits
+    5 seconds here for a program to open its port."""
+    if "longer" in where:
+        monkeypatch.setattr("dodambench.judge.TREE_SECONDS", 0, raising=False)
+    else:
+        monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
     waits = judge_module.wait_for_port
     monkeypatch.setattr("dodambench.judge.wait_for_port", lambda port, timeout, proc: waits(port, min(timeout, 5), proc))
     tests, app, out, starts = tmp_path / "tests", tmp_path / "app", tmp_path / "out", tmp_path / "starts.txt"
@@ -319,8 +325,10 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
     told = json.loads((out / "details.json").read_text())["tests"]
     assert reward["reward"] == 0.0, f"the step came out as passed: {reward}"
     assert any("data folder" in t["message"] for t in told), f"the result does not say why the step failed: {told}"
-    assert "data folder" in json.loads((out / "details.json").read_text()).get("served_program_left", ""), (
-        "the result has no field that says what the served program left")
+    assert "data folder" in json.loads((out / "details.json").read_text()).get("left_behind", ""), (
+        "the result has no field that gives the reason")
+    if "longer" in where:
+        assert any("seconds" in t["message"] for t in told), f"the result does not say that the time ran out: {told}"
     assert starts.read_text().count("started") == 1, "the program was started again on what an earlier start left"
     if where == "when a case runner that was ended is started again":
         said = {t["name"]: (t["outcome"], t["message"]) for t in told}
@@ -328,14 +336,18 @@ def test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_wi
         assert said["test_after"][0] == "failed" and "data folder" in said["test_after"][1], said
 
 
-def a_runner_that_is_ended(given: list, starts_a_case: bool, cases: list[str]):
-    """A stand-in for the case runner: it notes the time it was given, lists the cases, starts the
-    next one that is not decided when told to, and is then ended by a signal."""
+def a_runner_that_is_ended(given: list, starts_a_case: bool, cases: list[str] | None):
+    """A stand-in for the case runner: it notes the time it was given, lists the cases (none when
+    there are none to list), starts the next one that is not decided when told to, and is then ended
+    by a signal."""
     def run(test_path, env, timeout, said):
         given.append(timeout)
         open(said, "wb").close()
         records = read_progress(env[PROGRESS_ENV])
         decided = {r["case"] for r in records if "outcome" in r}
+        if cases is None:
+            time.sleep(0.05)
+            return -9
         with open(env[PROGRESS_ENV], "a", encoding="utf-8") as f:
             if not any("listed" in r for r in records):
                 f.write(json.dumps({"listed": cases}) + "\n")
@@ -371,6 +383,21 @@ def test_a_file_of_tests_needs_at_most_two_case_runners_for_each_case(tmp_path, 
     assert [c["outcome"] for c in outcome] == ["failed"] * cases and len(given) == 2 * cases, (outcome, given)
 
 
+def test_a_file_whose_cases_cannot_be_listed_needs_two_case_runners_and_no_more(tmp_path, monkeypatch):
+    """A runner that is ended before it lists the cases of its file is started once more; when the
+    second is ended too, the file fails as a whole. So such a file needs two runners, which is what
+    the format checker counts for it."""
+    given = []
+    monkeypatch.setattr("dodambench.judge.run_pytest", a_runner_that_is_ended(given, False, None))
+    (tmp_path / "test_x.py").write_text("")
+    outcome = run_cases(tmp_path / "test_x.py", {}, 10.0)
+    assert len(given) == 2, given
+    assert outcome == [{"name": "test_x.py", "outcome": "failed", "message": "the case runner was ended by signal 9"}]
+    assert judge_module.runners_at_most(0) == 2
+    terms = judge_module.step_terms([0], 2)
+    assert terms["starting every case runner the files can need"] == 2 * judge_module.FILE_SECONDS, terms
+
+
 @pytest.mark.parametrize("last", ["a security file", "a file of an earlier step"])
 def test_the_entry_the_last_stop_adds_counts_neither_as_unjudged_nor_as_a_broken_earlier_step(tmp_path, monkeypatch, last):
     """When the last stop of a step cannot remove the data folder and no file of tests comes after
@@ -392,12 +419,45 @@ def test_the_entry_the_last_stop_adds_counts_neither_as_unjudged_nor_as_a_broken
     assert (reward["unjudged"], reward["vulns_found"], reward["regression_broken"]) == (0.0, 0.0, 0.0), reward
 
 
+def test_the_entry_the_last_stop_adds_has_a_kind_of_its_own_that_every_reader_takes(tmp_path, monkeypatch):
+    """The entry the last stop adds has a kind of its own: a plain name that no task gives its tests
+    and no rate counts. The rates of every kind of test leave it out, the pilot's record takes a
+    result that holds it and names its kind, and the tool that checks prepared solutions gives its
+    reason."""
+    from dodambench import pilot_record
+    from test_pilot_record import record, write_batch
+    monkeypatch.setattr("dodambench.judge.TREE_ENTRIES", 10)
+    tests, app, out = tmp_path / "tests", tmp_path / "app", tmp_path / "out"
+    write(tests, "manifest.toml", '[[test]]\nfile = "functional/test_one.py"\nkind = "functional"\nstep = "build"\n')
+    write(tests, "functional/test_one.py", "def test_one():\n    assert True\n")
+    write(app, "main.py", FILLS_ITS_DATA_FOLDER)
+    env = {"STEPS": "build,change-1", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py {tmp_path / 'starts.txt'}",
+           "PORT": str(free_port())}
+    reward = judge(tests, app, "build", out, lang_env=env, **unseparated(judge))["reward"]
+    details = json.loads((out / "details.json").read_text())
+    entry = details["tests"][-1]
+    assert entry["outcome"] == "failed" and "data folder" in entry["message"], details["tests"]
+    assert isinstance(entry["kind"], str) and entry["kind"] not in TEST_KINDS, (
+        f"the entry's kind is {entry['kind']!r}, not a plain name of its own")
+    assert reward["reward"] == 0.0 and reward["functional_pass_rate"] == 1.0 and reward["functional_judged"] == 1.0, reward
+    assert (reward["unjudged"], reward["vulns_found"], reward["regression_broken"]) == (0.0, 0.0, 0.0), reward
+    batch = write_batch(tmp_path / "pilot", "20261120T090000Z", [record("python")],
+                        {"python": {"build": details["tests"], "change-1": []}})
+    try:
+        run = pilot_record.collect([batch])["runs"][0]
+    except pilot_record.RecordError as error:
+        run = {"failed_checks": str(error)}
+    assert [c["kind"] for c in run["failed_checks"]] == [entry["kind"]], run["failed_checks"]
+    problems = judgement_problems("broken", None, details)
+    assert problems and "data folder" in problems[0], problems
+
+
 def test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgement_it_was_written_for():
     """A prepared solution written to be broken that leaves more in its data folder than the judge
     removes fails its features for that reason, not for the one it was written for. The tool that
     checks prepared solutions says so instead of taking it as broken."""
     left = "the served program's data folder cannot be removed: a folder to remove holds more than 10 entries"
-    report = {"build_ok": True, "served_program_left": left,
+    report = {"build_ok": True, "left_behind": left,
               "tests": [{"name": "test_one", "outcome": "passed", "message": "", "kind": "functional",
                          "file": "functional/test_one.py", "weakness": None},
                         {"name": "test_two.py", "outcome": "failed", "message": left, "kind": "functional",
