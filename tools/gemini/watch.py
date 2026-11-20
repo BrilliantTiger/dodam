@@ -81,9 +81,16 @@ def load_state(path: Path) -> dict[str, object]:
     if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
         raise StateError()
     for key in ("handled", "ignored"):
-        if not isinstance(data.get(key), dict):
+        entries = data.get(key)
+        if not isinstance(entries, dict) or not all(
+            isinstance(k, str) and k.isdigit() and isinstance(v, str) for k, v in entries.items()
+        ):
             raise StateError()
-    if not isinstance(data.setdefault("quota_returns", {}), dict):
+    returns = data.setdefault("quota_returns", {})
+    if not isinstance(returns, dict) or not all(
+        isinstance(k, str) and k.isdigit() and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+        for k, v in returns.items()
+    ):
         raise StateError()
     return data
 
