@@ -408,13 +408,15 @@ def what_is_known(said: str, places: dict) -> list[dict]:
     # The address is taken out before looking for the rest, so that a name inside the address is not counted twice.
     rest = folded.replace(email.casefold(), " ") if email else folded
     for what, words in values.items():
-        words = [w for w in words if len(w) >= 3]
+        # Every value at whatever length it has, looked for and refused by the rule of the check on text that leaves: a
+        # short value in the Latin alphabet as a whole word, every other value wherever it stands.
+        words = [w for w in words if w.strip()]
         rows.append({
             "what": what,
-            "in_the_session": email_there if what == "the account's email address" else any(w.casefold() in rest for w in words if w.casefold() != email.casefold()),
+            "in_the_session": email_there if what == "the account's email address" else bool(guard.names(rest, [(what, w) for w in words if w.casefold() != email.casefold()])),
             "refused_by_the_answering_tool": bool(words) and all(
                 guard.leaks(f"It is {spell(w)} here.", refuses_with)
-                for w in words for spell in (spellings if len(guard.reduced(w)) >= guard.SHORTEST_REDUCED else whole)),
+                for w in words for spell in (spellings if len(guard.reduced(w)) >= guard.SHORTEST_REDUCED or not guard.reduced(w).isascii() else whole)),
         })  # fmt: skip
     import datetime
     for what, present in (

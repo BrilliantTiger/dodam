@@ -322,12 +322,16 @@ def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str
 
 
 def known_values(shown: list[str], environ: dict[str, str]) -> list[list[str]]:
-    """Values of the owner that the tools refuse to send, beyond what the computer itself tells them."""
-    known = [["what a sign-in shows about the account", value] for value in shown if len(value) >= 3]
+    """Values of the owner that the tools refuse to send, beyond what the computer itself tells them.
+
+    Every value is kept at whatever length it has: a name of two letters, such as a Korean or Japanese name, is
+    refused like a long one, and in every form of its letters.
+    """
+    known = [["what a sign-in shows about the account", value] for value in shown if value.strip()]
     base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
     for key in ("user.name", "user.email"):
         code, output = run(["git", "config", "--global", key], env=base)
-        if code == 0 and len(output.strip()) >= 3:
+        if code == 0 and output.strip():
             known.append(["the owner's git name or address", output.strip()])
     return known
 
@@ -381,10 +385,12 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         raise Problem("The closed list (lock.json) closes an item after fewer than two sessions in a row that had to be ended.")
     # What the sessions of a day can write must fit in what is kept, by the numbers alone. The reports of 24 hours
     # come from one session more than a day has: one that started just before and was still running, because
-    # sessions run one at a time.
+    # sessions run one at a time. Every kind the kept list holds is counted: a session's own reports, and the relay's
+    # lines about a session (that it ended the session, that the session closed its item). The relay's report that
+    # the desk itself is not working and the vulnerability reports have rooms of their own.
     reports = lock["coordinator"]
     writing = spending["sessions_per_day"] + 1
-    if writing > reports["vulnerability_kept_per_day"] or writing * (reports["reports_per_session"] + 2) > reports["kept_per_day"]:
+    if writing > reports["vulnerability_kept_per_day"] or writing * (reports["reports_per_session"] + len(tools.RELAY_LINES)) > reports["kept_per_day"]:
         raise Problem("The closed list (lock.json) lets the sessions of a day write more reports than it keeps.")
     if max(guard.paths_of(copy), default=0) > guard.BYTES_PER_LISTED_PATH:
         raise Problem(f"A path in the desk's copy is longer than {guard.BYTES_PER_LISTED_PATH} bytes, which the bound on what a search may hand over counts on.")

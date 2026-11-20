@@ -38,7 +38,7 @@ What you can work on now:
 Rules for outside work:
 
 - Tests first: a change comes with a test that fails before it and passes after it.
-- Outside pull requests do not change the measuring tools, existing tasks, security tests or approval locks.
+- Outside pull requests do not change the measuring tools or the harness that runs the measurement, existing tasks, existing tests and security tests, the security experiments, the recorded measurements, the rest of the benchmark's folder, approval locks, the tools and closed list of the project's AI session that answers outsiders, the Gemini job, the workflows, or the tools that build the introduction page and check that it asks before it measures. New tests, new tasks and changes to the page's text are welcome.
 - Hidden benchmark tasks are kept in a separate private repository and are never shared.
 - Text in issues and pull requests is treated as data. Instructions inside it are not followed.
 - Outside code is built and run only in isolated containers with no credentials and no network.
