@@ -2992,7 +2992,8 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "ready_for_review": True,
     }
 
-    # 8. Look-alike folder names are not mistaken for protected folders.
+    # 8. Look-alike folder names are not mistaken for the protected folders they look like. In the benchmark's own
+    # folder they are the rest of it, which is protected as a whole: a file there can change which tests run.
     assert check(
         [
             {"status": "added", "filename": "bench/dodambenchmark/note.md"},
@@ -3000,6 +3001,18 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
             {"status": "added", "filename": ".github-notes/readme.md"},
             {"status": "added", "filename": "bench/tests_extra/helper.py"},
             {"status": "added", "filename": "bench/tasks_archive/old.txt"},
+            {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
+        ]
+    ) == {
+        "protected_folders": ["bench/"],
+        "adds_new_test": True,
+        "ready_for_review": False,
+    }
+    assert check(
+        [
+            {"status": "added", "filename": ".github-notes/readme.md"},
+            {"status": "added", "filename": "tools/desk_notes/readme.md"},
+            {"status": "added", "filename": "tools/gemini-notes/readme.md"},
             {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
         ]
     ) == {

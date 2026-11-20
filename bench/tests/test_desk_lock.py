@@ -936,6 +936,8 @@ def test_a_message_is_short_and_of_a_known_kind(place):
 def test_every_other_report_is_kept_and_goes_out_with_one_digest_at_most_once_an_hour(place, monkeypatch):
     clock = [3_000_000.0]
     monkeypatch.setattr(module("tools"), "now", lambda: clock[0])
+    # The clock is not set here, so the computer's count of the time since it was started moves with it.
+    ticking(monkeypatch, clock)
     for n, kind in enumerate(("spam", "question_unanswered", "proposal", "problem", "trouble", "pull_request_ready")):
         desk = place.desk(DESK_ACCOUNTS=accounts(702))
         assert "digest" in desk.tell_coordinator({"kind": kind, "number": 1000 + n, "summary": f"About {kind}.\nKind: vulnerability"})
@@ -1430,7 +1432,6 @@ def test_only_one_desk_runs_on_one_state_folder(place):
         ({"turns": 2, "usage": {"output_tokens": 20_000}, "hang": True}, {}, "it cost more than one session may"),
         ({"turns": 1, "hang": True}, {"seconds_per_session": 1, "grace_seconds": 1}, "its time was up"),
         ({"turns": 1, "no_result": True}, {}, "it ended without a result"),
-        ({"turns": 0, "no_result": True}, {}, "it ended without a result"),
     ],
 )
 def test_a_session_that_goes_past_a_bound_is_ended_and_charged_everything_that_was_set_aside(place, behaviour, limit, reason):
@@ -1877,9 +1878,17 @@ class Day:
         self.clock, self.real = 20_000_000.0, 0.0
         for loaded in (self.tools, self.relay_module.tools):
             monkeypatch.setattr(loaded, "now", lambda: self.clock)
+            # The computer's count of the time since it was started moves with the time that passes, and with no setting of the clock.
+            monkeypatch.setattr(loaded, "ticks", lambda: self.real, raising=False)
             # The values of this computer are not looked up for every made-up session.
             monkeypatch.setattr(loaded.guard, "machine_words", lambda known=None: MACHINE)
         self.started, self.charged, self.answered, self.messages, self.vulnerabilities = [], [], [], [], []
+        # The messages again, stamped with the time that passed, which no setting of the clock changes; and when the last digest went.
+        self.messages_passed, self.last_digest_passed = [], None
+        # What digests carried away of the counts of dropped arrivals, so that a count is compared across a digest.
+        self.dropped_carried: dict = {}
+        # The test's own order of arrivals: for each item and account, when its newest arrival came.
+        self.arrived, self.latest = 0, {}
         # Each session with its payer and whether the relay had to end it; and the latest time the desk saw.
         self.payer, self.handles, self.shown, self.sessions, self.desk_time = None, [], set(), [], self.clock
         # The accounts whose arrivals were handled in the step that is being played, and what the units' share cost whom.
@@ -1945,6 +1954,11 @@ class Day:
                     if waiting["kind"] == "vulnerability" and not waiting["sent"] and not waiting["digested"]:
                         assert f"- vulnerability, item {waiting['number']}: " in body, body
             outer.messages.append((outer.desk_time, kind))
+            outer.messages_passed.append((outer.real, kind))
+            if kind == "digest":
+                outer.last_digest_passed = outer.real
+                for account, count in record["uncounted"].get("arrivals dropped", {}).items():
+                    outer.dropped_carried[account] = outer.dropped_carried.get(account, 0) + count
             outer.said.append(body)
 
         monkeypatch.setattr(self.tools.StandIn, "comment", comment)
@@ -2021,8 +2035,9 @@ class Day:
             assert 0 < written["charged"] <= written["reserved"] == self.relay_module.reservation(self.lock["spending"])
             if counts:
                 assert written["charged"] >= min(self.relay_module.units(counts, self.lock["spending"]["weights"]), written["reserved"])
-            # Stamped with the moment the session started, as the relay counts it.
-            self.charged.append((self.started[-1][0], written["charged"], written["account"]))
+            # Stamped with the moment the session started, as the relay counts it. A session that counts against no account's
+            # share is charged to the day only.
+            self.charged.append((self.started[-1][0], written["charged"], written["account"] if entry.get("let_in", True) else None))
 
         self.relay.settle = settled
 
@@ -2034,6 +2049,7 @@ class Day:
             # The watcher reports an arrival between two of the relay's steps at a session's end, from its own thread.
             if point == "end: the cost is written" and self.at_the_end:
                 events, self.at_the_end = self.at_the_end, None
+                self.note_the_order(events)
 
                 def arrive():
                     try:
@@ -2046,6 +2062,14 @@ class Day:
                 self.late.join(0.2)
 
         self.relay.at = at
+
+        def at_placing(point):
+            if point == self.stop_at:
+                # The desk is stopped inside a placing, as by a kill.
+                self.stop_at = None
+                raise Stopped(point)
+
+        self.relay.at_placing = at_placing
         place_one = self.relay.kept.place
 
         def placed(entries, events, held_back=(), *more):
@@ -2188,6 +2212,10 @@ class Day:
             # The newest arrival the session is told of is the payer's, and it is told of nobody it does not handle.
             lines = [json.loads(line) for line in text.splitlines()[1:]]
             assert lines[-1]["actor_id"] == self.payer and {line["actor_id"] for line in lines} == set(self.handles)
+            # The payer is the writer whose newest arrival came last, by the test's own order of arrivals, whether they came
+            # one by one or together.
+            newest = max(self.handles, key=lambda account: self.latest.get((number, account), -1))
+            assert self.payer == newest, (number, self.handles, {a: self.latest.get((number, a)) for a in self.handles})
             assert not set(self.handles) & set(json.loads(env["DESK_HELD_BACK"]))
             # The tools are told who is held back as the record says it, and the relay says the same while the session runs.
             assert json.loads(env["DESK_HELD_BACK"]) == self.the_relay_agrees()
@@ -2199,22 +2227,35 @@ class Day:
         if self.forced:
             # A session the test plays by hand, to reach a state the properties speak about.
             how = self.forced.pop(0)
-            self.refusals_in_a_row = 0
+            if how.get("not started"):
+                # Claude Code could not be started at all: nothing ran.
+                self.reach["a session that could not be started"] += 1
+                return {"counts": None, "ended_by": "it could not be started", "not_started": True, "refused_sign_in": False, "turns": 0, "reads": 0}
+            failures, self.refusals_in_a_row = self.refusals_in_a_row, 0
             self.pass_time(1)
             self.at_the_end = how.get("at the end")
             if how.get("during"):
                 self.take(how["during"])
                 self.reach["an arrival during a session"] += 1
                 self.the_relay_agrees()
+            if how.get("no response"):
+                # Claude Code ended without one response.
+                self.refusals_in_a_row = failures + 1
+                self.reach["a session that gave no response"] += 1
+                return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
             if number is not None:
                 self.act(number, env, how)
             if how.get("ended"):
                 return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
+            if how.get("no result"):
+                self.reach["a session that ended without a result after it responded"] += 1
+                return {"counts": [10, 0, 0, 10], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
             return {"counts": [how.get("units", 20), 0, 0, 0], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
         if rng.random() < 0.04 or self.refusals_in_a_row and rng.random() < 0.6:
+            # Sessions in a row that the service refused or that gave no response.
             self.refusals_in_a_row += 1
             return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
-        self.refusals_in_a_row = 0
+        failures, self.refusals_in_a_row = self.refusals_in_a_row, 0
         self.pass_time(rng.uniform(1, spending["seconds_per_session"] + spending["grace_seconds"]))
         if number is not None:
             if rng.random() < 0.08:
@@ -2235,8 +2276,14 @@ class Day:
         if self.cheap:
             # A day of the second kind: nearly every session ends by itself and costs little.
             how = 0.5 if how > 0.006 else how * 20
-        if how < 0.08:
+        if how < 0.04:
+            # No response at all: counted with the refusals in a row.
+            self.refusals_in_a_row = failures + 1
+            self.reach["a session that gave no response"] += 1
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
+        if how < 0.08:
+            self.reach["a session that ended without a result after it responded"] += 1
+            return {"counts": [rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
         if self.cheap:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
@@ -2335,10 +2382,28 @@ class Day:
     # -- what happens to the desk ---------------------------------------------------------------
 
     def dropped(self) -> dict:
-        return dict(self.record()["uncounted"].get("arrivals dropped", {}))
+        """The dropped arrivals counted for each account, with what digests have carried away of them."""
+        counts = dict(self.dropped_carried)
+        for account, count in self.record()["uncounted"].get("arrivals dropped", {}).items():
+            counts[account] = counts.get(account, 0) + count
+        return counts
+
+    def note_the_order(self, events: list) -> None:
+        """The test's own order of arrivals, and whether a batch holds an account's arrivals on one item before and after another's."""
+        closed = self.relay.closed_items()
+        on_item: dict = {}
+        for e in events:
+            if isinstance(e, dict) and isinstance(e.get("actor_id"), int) and isinstance(e.get("number"), int) and e["number"] not in closed:
+                self.arrived += 1
+                self.latest[(e["number"], e["actor_id"])] = self.arrived
+                on_item.setdefault(e["number"], []).append(e["actor_id"])
+        for writers in on_item.values():
+            again = [n for n in range(len(writers)) if writers[n] in writers[:n] and writers[n - 1] != writers[n]]
+            self.reach["a batch that holds an account's arrivals on one item before and after another account's"] += bool(again)
 
     def take(self, events: list) -> None:
         """Arrivals, as the watcher reports them. What arrives on a closed item is counted for its account and not kept."""
+        self.note_the_order(events)
         closed = self.relay.closed_items()
         on_closed = [e for e in events if isinstance(e, dict) and isinstance(e.get("actor_id"), int) and e.get("number") in closed]
         before = self.dropped()
@@ -2349,6 +2414,16 @@ class Day:
             for account in {e["actor_id"] for e in on_closed}:
                 assert after.get(str(account), 0) >= before.get(str(account), 0) + sum(1 for e in on_closed if e["actor_id"] == account), (account, before, after)
             assert not [p for p in self.relay.kept.entries() if p["number"] in closed]
+
+    def take_until_stopped(self, events: list, point: str) -> None:
+        """Arrivals whose placing the desk is stopped inside, at one of the points of a placing."""
+        self.stop_at = point
+        try:
+            self.take(events)
+        except Stopped:
+            self.reach["a stop inside a placing: " + point] += 1
+        else:
+            raise AssertionError(f"the desk was not stopped at {point}")
 
     def start(self) -> bool:
         """One look of the relay for something to start. When the session closed its item, what was kept on it is counted and named."""
@@ -2568,8 +2643,10 @@ class Day:
         kinds = [kind for _, kind in self.within(self.messages)]
         at_once = settings["at_once"]
         assert kinds.count("vulnerability") <= at_once["vulnerability_per_day"] and kinds.count("desk_down") <= at_once["desk_down_per_day"]
-        assert kinds.count("limit_reached") <= at_once["limit_notices_per_day"] and kinds.count("digest") <= self.DAY // settings["digest_seconds"]
-        assert len(kinds) <= 48 and set(kinds) <= {"vulnerability", "desk_down", "limit_reached", "digest"}
+        assert kinds.count("limit_reached") <= at_once["limit_notices_per_day"] and set(kinds) <= {"vulnerability", "desk_down", "limit_reached", "digest"}
+        # Digests are at least an hour apart by the time that passed, whatever the clock did: 24 in any 24 hours at most.
+        digests = [at for at, kind in self.messages_passed if kind == "digest" and self.real - at < self.DAY]
+        assert len(digests) <= self.DAY // settings["digest_seconds"] and len(kinds) - kinds.count("digest") + len(digests) <= 48
         waiting = self.relay.kept.entries()
         assert len(waiting) <= spending["arrivals_kept"] and len({(e["number"], e["account"]) for e in waiting}) == len(waiting)
         # A place holds its own account's arrivals and nobody else's: no account holds a place of another.
@@ -2605,6 +2682,18 @@ class Day:
             for account in entry["accounts"]:
                 per_label[account] = per_label.get(account, 0) + 1
         assert all(count <= lock["labels_per_account_per_day"] for count in per_label.values())
+        self.the_digest_is_neither_held_back_nor_sent_early()
+
+    def the_digest_is_neither_held_back_nor_sent_early(self) -> None:
+        """When something waits and an hour has passed since the last digest, a look at the digest's time sends one; never sooner."""
+        record = self.record()
+        waits = (any(not r["digested"] and not r["sent"] for r in record["reports"]) or any(record["uncounted"].values()) or record["closed"]
+                 or record["not_delivered"])  # fmt: skip
+        hour = self.lock["coordinator"]["digest_seconds"]
+        due = bool(waits) and (self.last_digest_passed is None or self.real - self.last_digest_passed >= hour)
+        clock_moved = self.clock != self.desk_time or self.ahead
+        assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time)
+        self.reach["a digest due while the computer's clock is not the desk's time"] += due and bool(clock_moved)
 
 
 # Accounts have numbers as long as GitHub's: ten digits, and nine for the quiet accounts of the random steps.
@@ -2628,6 +2717,10 @@ REACHED = [
     "an arrival between two of the relay's steps at the end of a session",
     "a closed item's line names fewer accounts than went, each number whole",
     "an item found closed at a start with arrivals still kept on it, after a stop", "a digest line cut where a number stands",
+    "a batch that holds an account's arrivals on one item before and after another account's", "a session that could not be started",
+    "a session that gave no response", "a session that ended without a result after it responded",
+    "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
+    "a digest due while the computer's clock is not the desk's time",
 ]  # fmt: skip
 
 
@@ -2709,6 +2802,10 @@ def the_opening(day) -> None:
     # The computer's clock is set two days ahead and put right again: the desk's time stays where it was until the clock has caught up.
     go(lambda: day.set_the_clock_ahead(2 * DAY))
     go(day.put_the_clock_right)
+    # While the clock is behind the desk's time, something waits for a digest and an hour passes: the digest goes.
+    go(lambda: day.relay.desk.count("arrivals that could not be read"))
+    go(lambda: day.pass_time(3600))
+    assert day.reach["a digest due while the computer's clock is not the desk's time"] >= 1
     go(lambda: day.pass_time(2 * DAY + 1))
     # An account that was charged earlier in the day holds two places, and every place is taken. While a session handles
     # the first of its places, two newcomers write: the account is not held back, the place in hand stays, and so does its other place.
@@ -2840,6 +2937,44 @@ def the_opening(day) -> None:
     go(lambda: day.relay.desk.digest(force=True))
     assert day.reach["a digest line cut where a number stands"] >= 1
     go(lambda: day.pass_time(DAY + 1))
+    # Arrivals on one item reach the relay together: an account's, another's, and the first account's again. The first
+    # account wrote last: it pays, and it waits after the session that had to be ended; the other does not.
+    go(lambda: day.take([ev(900_900, 42, "first"), ev(900_900, 43, "between"), ev(900_900, 42, "again")]))
+    day.forced.append({"ended": True})
+    go(day.start)
+    assert names(day.handles) == [42, 43] and held().get(42) == day.BY_WAIT and 43 not in held()
+    go(lambda: day.pass_time(DAY + 1))
+    # A session that could not be started: its arrival stays kept, nobody is charged for it or waits, and nothing more
+    # is started until the desk is started again. Then a session that gave no response, and one that ended without a
+    # result after it had responded: each time the arrival stays kept, and a fresh session handles it in the end.
+    go(lambda: day.take([ev(901_000, 44, "asks")]))
+    for how in ({"not started": True}, {"no response": True}, {"no result": True}):
+        day.forced.append(how)
+        go(day.start)
+        assert (901_000, 44) in kept_places() and 44 not in held(), how
+        if how.get("not started"):
+            assert day.relay.starts_nothing
+            go(day.restart)
+            day.reach["a restart between two steps"] += 1
+    assert one(44, 901_000) and (901_000, 44) not in kept_places()
+    go(lambda: day.pass_time(DAY + 1))
+    # Every place is taken, and a newcomer's arrival makes the oldest place of the account that holds the most go. The
+    # desk is stopped inside that placing: before what went is counted, and once after. Started again, the next start
+    # counts it, once.
+    for n, point in enumerate(day.relay_module.POINTS_AT_PLACING):
+        go(lambda n=n: day.take([ev(980_000 + 100 * n + 10 * (a - 700) + k, a, f"q{k}") for a in range(700, 720) for k in range(5)]))
+        assert len(day.relay.kept.entries()) == spending["arrivals_kept"]
+        before = day.dropped()
+        go(lambda n=n, point=point: day.take_until_stopped([ev(981_000 + n, 799, "a newcomer")], point))
+        go(day.restart)
+        day.reach["a restart between two steps"] += 1
+        day.forced.append({})
+        started = []
+        go(lambda: started.append(day.start()))
+        if not started[0]:
+            day.forced.pop()
+        assert counted_for(before, (700, 799)) == {700: 1, 799: 0}, point
+        all_that_is_kept_gets_its_session()
 
 
 # The states that the random steps of a kind of day reach by themselves in every seed of that kind; the opening reaches every state.
@@ -2853,6 +2988,8 @@ RANDOM_STEPS_REACH = {
         "the clock set a day or more ahead and put right again",
         "an arrival for a full list during the session of an account that was charged earlier in the day",
         "a digest line cut where a number stands",
+        "a batch that holds an account's arrivals on one item before and after another account's", "a session that gave no response",
+        "a session that ended without a result after it responded", "a digest due while the computer's clock is not the desk's time",
     ],
     True: [
         "an account held back: " + Day.BY_SESSIONS, "an account held back: " + Day.BY_WAIT, "a day closed: sessions in a day",
@@ -2860,7 +2997,8 @@ RANDOM_STEPS_REACH = {
         "an answer refused because no handled writer has room", "a label refused because no handled writer has room",
         "an account at its labels of a day", "an arrival on a closed item", "an item that opened again is closed again by one session",
         "an arrival during a session", "a restart between two steps", "the clock set back", "the clock set a day or more ahead and put right again",
-        "a digest line cut where a number stands",
+        "a digest line cut where a number stands", "a session that gave no response", "a session that ended without a result after it responded",
+        "a digest due while the computer's clock is not the desk's time",
     ],
 }  # fmt: skip
 # What the random steps of neither kind reach in every seed: for these the made-up days are the opening's one sequence.
@@ -2874,15 +3012,17 @@ def test_lock_md_says_which_states_only_the_opening_of_the_made_up_days_reaches(
         "an arrival for a full list while the place that would go by the rule is in hand",
         "an arrival between two of the relay's steps at the end of a session",
         "a closed item's line names fewer accounts than went, each number whole",
-        "an item found closed at a start with arrivals still kept on it, after a stop",
+        "an item found closed at a start with arrivals still kept on it, after a stop", "a session that could not be started",
+        "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
     ]  # fmt: skip
     said = " ".join((DESK / "LOCK.md").read_text(encoding="utf-8").split())
-    assert ("Eight of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a report "
-            "refused for want of room, an account at its twenty kept reports, an item that closes with other accounts' arrivals kept on it, "
-            "an arrival for a full list while the place that would go by the rule is in hand, an arrival between two of the relay's steps at "
-            "the end of a session, a closed item's line that names fewer accounts than went, and an item found closed at a start with "
-            "arrivals still kept on it after the desk was stopped.") in said
-    assert "For those eight the made-up days are one fixed sequence" in said
+    assert ("Eleven of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a "
+            "report refused for want of room, an account at its twenty kept reports, an item that closes with other accounts' arrivals kept on "
+            "it, an arrival for a full list while the place that would go by the rule is in hand, an arrival between two of the relay's steps "
+            "at the end of a session, a closed item's line that names fewer accounts than went, an item found closed at a start with arrivals "
+            "still kept on it after the desk was stopped, a session that could not be started, and a stop inside a placing at each of its two "
+            "points.") in said
+    assert "For those eleven the made-up days are one fixed sequence" in said
     # The opening stops the desk once and writes a line that a digest cuts where a number stands; every message is looked at.
     for phrase in ("the desk stopped right after the cost of the session that closed an item was written",
                    "a report longer than a digest's line, which the digest cuts where an account's number stands",
@@ -3266,6 +3406,7 @@ def run_hook(place, call, lock=DESK / "lock.json"):
 
 
 def test_the_check_as_claude_code_runs_it_refuses_with_exit_code_2(place):
+    (place.copy / "README.md").write_text("A file of the copy.\n", encoding="utf-8")
     assert run_hook(place, {"tool_name": "Read", "tool_input": {"file_path": "README.md", "limit": 50}}).returncode == 0
     for tool in ("Bash", "Write", "WebFetch", "Agent", "mcp__coworker__reply"):
         done = run_hook(place, {"tool_name": tool, "tool_input": {"command": "id"}})
@@ -4501,7 +4642,8 @@ def test_the_kept_reports_of_a_day_stay_under_their_cap_by_the_numbers_alone():
     # The reports of any 24 hours come from one session more than a day has, because sessions run one at a time.
     sessions = spending["sessions_per_day"] + 1
     # One session writes at most reports_per_session reports and one vulnerability report; the relay adds at most a
-    # line that the session was ended and a line that it cost more than was set aside.
+    # line that it ended the session and a line that the session closed its item. Its report that the desk itself is
+    # not working has a room of its own.
     assert sessions * (settings["reports_per_session"] + 2) <= settings["kept_per_day"]
     assert sessions <= settings["vulnerability_kept_per_day"]
     # LOCK.md states these numbers as they are worked out here.
@@ -4615,16 +4757,19 @@ def test_not_told_and_could_not_tell_are_judged_for_the_item_not_for_the_session
 
 
 def test_a_clock_set_back_does_not_hold_the_digest_up_or_bring_it_forward(place, monkeypatch):
-    clock = [5_000_000.0]
+    clock, elapsed = [5_000_000.0], [1_000.0]
     monkeypatch.setattr(module("tools"), "now", lambda: clock[0])
+    ticking(monkeypatch, elapsed)
     place.desk(DESK_ITEM="7").tell_coordinator({"kind": "spam", "number": 7, "summary": "First."})
     assert place.desk().digest() is True
     place.desk(DESK_ITEM="8").tell_coordinator({"kind": "spam", "number": 8, "summary": "Second."})
-    # Set back by less than the hour: the digest waits, as it would have.
+    # Set back by less than the hour, and by more: no time passed, and the digest waits.
     clock[0] -= 1800
     assert place.desk().digest() is False
-    # Set back by more than the hour: an hour lies between this moment and the last digest, and the report goes out.
     clock[0] -= 7200
+    assert place.desk().digest() is False
+    # An hour passes while the clock is still behind: the report goes out.
+    elapsed[0] += 3600
     assert place.desk().digest() is True and "item 8" in place.sent("coordinator")[-1]["body"]
 
 
@@ -5211,8 +5356,8 @@ def test_a_path_given_from_the_copy_is_charged_like_the_same_path_in_full(place,
     # A search in a folder of the copy, named from the copy, is a search inside the copy.
     (place.copy / "docs").mkdir(exist_ok=True)
     assert isinstance(guard.bytes_of(a_call("Grep", pattern="x", path="docs", output_mode="count", head_limit=1), lock_file(), place.copy), int)
-    # And a path that leaves the copy that way is still outside it.
-    assert guard.bytes_of(a_call("Read", file_path="../outside.md", limit=10), lock_file(), place.copy) == 0
+    # And a path that leaves the copy that way is still outside it: refused before it runs.
+    assert isinstance(guard.bytes_of(a_call("Read", file_path="../outside.md", limit=10), lock_file(), place.copy), str)
     assert isinstance(guard.bytes_of(a_call("Grep", pattern="x", path="..", output_mode="count", head_limit=1), lock_file(), place.copy), str)
 
 
@@ -5233,15 +5378,17 @@ def test_a_search_is_charged_the_lines_asked_for_and_the_two_of_claude_codes_own
 # out by hand from the list of files, with the tests and task folders that the recorded tip of main holds.
 REAL_PULLS = {
     # 71 files. It changes the workflow, the measuring tools, the images' notes, existing tests (conftest.py and three
-    # test files are modified; the files under bench/tests/runtimes/ are not tests directly in the folder) and a file
-    # of the existing task web-signup: all five protected folders. The files of the new task cli-csv-json are a new
-    # task and protect nothing. It adds new tests directly in bench/tests/ (test_attack_list.py and others).
-    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/"], "adds_new_test": True, "ready_for_review": False},
-    # 4 files, all added. It is merged, so the test it added (test_desk.py) is at the tip of main today: by today's
-    # answers it is a change to an existing test and not a new one.
-    17: {"protected_folders": ["bench/tests/"], "adds_new_test": False, "ready_for_review": False},
+    # test files are modified; the files under bench/tests/runtimes/ are not tests directly in the folder), a file
+    # of the existing task web-signup and the security experiments (bench/experiments/). The files of the new task
+    # cli-csv-json are a new task and protect nothing. It adds new tests directly in bench/tests/ (test_attack_list.py and others).
+    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/"], "adds_new_test": True,
+         "ready_for_review": False},
+    # 4 files, all added, the desk's watcher among them. It is merged, so the test it added (test_desk.py) is at the tip
+    # of main today: by today's answers it is a change to an existing test and not a new one.
+    17: {"protected_folders": ["bench/tests/", "tools/desk/"], "adds_new_test": False, "ready_for_review": False},
     # 14 files. test_desk.py is modified (an existing test); test_desk_lock.py is added and is not at the tip of main.
-    19: {"protected_folders": ["bench/tests/"], "adds_new_test": True, "ready_for_review": False},
+    # The rest are the desk's own tools.
+    19: {"protected_folders": ["bench/tests/", "tools/desk/"], "adds_new_test": True, "ready_for_review": False},
 }
 
 
@@ -5914,6 +6061,8 @@ def test_the_digests_time_is_looked_at_before_every_start_so_that_a_queue_does_n
     clock = [6_000_000.0]
     for loaded in (tools, relay.tools):
         monkeypatch.setattr(loaded, "now", lambda: clock[0])
+    # The clock is not set here, so the computer's count of the time since it was started moves with it.
+    ticking(monkeypatch, clock)
     order = []
     send = tools.StandIn.message
 
@@ -7329,4 +7478,473 @@ def test_after_a_stop_of_more_than_a_day_the_first_sessions_tools_are_told_who_i
     phrase = ("The tools of that first session are told who is held back from the same look, so for the length of that session they hold "
               "the stopped session's payer back when that count does, while placings during it no longer count the stopped session; by "
               "the closed list's numbers one session alone holds no account back, so the two agree.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
+
+
+# =================================================================================================
+# After the first attack look by a model of another company
+# =================================================================================================
+
+
+def ticking(monkeypatch, elapsed: list) -> None:
+    """The computer's count of the time since it was started, played by the test: it moves only when the test moves it."""
+    for loaded in (module("tools"), module("relay").tools):
+        monkeypatch.setattr(loaded, "ticks", lambda: elapsed[0], raising=False)
+
+
+# --- Who pays and who waits, whether arrivals come one by one or together ----------------------------
+
+# The arrivals on one item, in the order in which they arrived: the item's first writer, then a second account, then
+# one of the two again. They reach the relay one by one, all together, or two together and one alone.
+BATCHES = {"one by one": [[0], [1], [2]], "all together": [[0, 1, 2]], "the first two together": [[0, 1], [2]], "the last two together": [[0], [1, 2]]}
+
+
+@pytest.mark.parametrize("last", ["the first writer", "the second writer"])
+@pytest.mark.parametrize("batches", sorted(BATCHES))
+def test_the_payer_and_the_wait_are_the_same_whether_arrivals_come_one_by_one_or_together(place, monkeypatch, batches, last):
+    G = 1_400_000_000
+    first, second = G + 1, G + 2
+    writers = [first, second, first if last == "the first writer" else second]
+    names = ["opened", "between", "last"]
+    running, clock, ran = in_process(place, monkeypatch)
+    place.put(7, written(first, by(second, "Between."), by(writers[2], "Last.")))
+    for batch in BATCHES[batches]:
+        running.take(arrivals(*[event(7, writers[n], names[n]) for n in batch]))
+    told, answered = [], []
+
+    def session(text, env):
+        told.append([json.loads(line)["id"] for line in text.splitlines()[1:]])
+        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk.read_item({"number": 7})
+        answered.append(desk.answer(ANSWER | {"number": 7, "text": "Thank you for writing."}))
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | ENDED
+
+    running.run_session = session
+    assert running.start_one() is True and answered
+    # The newest writer pays, waits after the session that had to be ended, and is charged the answer; nobody else.
+    (entry,) = counted(place)["sessions"]
+    other = second if writers[2] == first else first
+    assert (entry["account"], entry["accounts"], entry["waits"]) == (writers[2], [writers[2], other], [writers[2]])
+    assert counted(place)["answers"][-1]["accounts"] == [writers[2]] and running.held_back() == [writers[2]]
+    # The session is told of the arrivals in the order in which they arrived.
+    assert told == [names]
+
+
+# --- Names that must not be posted ------------------------------------------------------------------
+
+SHORT_NAMES = ["홍길", "田中", "Al", "이수"]
+
+
+def test_a_known_value_is_kept_at_whatever_length_it_has(tmp_path):
+    start, guard = module("start"), module("guard")
+    # What a sign-in shows, as the start command writes it down for the tools.
+    assert [value for _, value in start.known_values(SHORT_NAMES, {})][: len(SHORT_NAMES)] == SHORT_NAMES
+    known = tmp_path / "known.json"
+    known.write_text(json.dumps([["what a sign-in shows about the account", name] for name in SHORT_NAMES]), encoding="utf-8")
+    # And as the tools and the check before every tool call read it back.
+    assert [value for kind, value in guard.machine_words(known) if kind == "what a sign-in shows about the account"] == SHORT_NAMES
+
+
+@pytest.mark.parametrize("value, text", [
+    ("홍길", "Ask 홍길 about it."), ("홍길", "홍길에게 물어보세요."), ("이수", "이수는 내일 옵니다."), ("田中", "田中さんに聞いてください。"),
+    ("田中", "田 中"), ("Al", "Ask Al about it."),
+    # Every form of the same letters: typed alone, set apart, doubled or joined.
+    ("홍길동", "이름은 ㅎㅗㅇㄱㅣㄹㄷㅗㅇ 입니다."), ("홍길동", "ㅎ ㅗ ㅇ ㄱ ㅣ ㄹ ㄷ ㅗ ㅇ"), ("김씨네", "ㄱㅣㅁㅆㅣㄴㅔ"), ("김씨네", "ㄱㅣㅁㅅㅅㅣㄴㅓㅣ"),
+    ("닭갈비", "ㄷㅏㄹㄱㄱㅏㄹㅂㅣ"), ("왜관역", "ㅇㅗㅏㅣㄱㅗㅏㄴㅇㅕㄱ"),
+])  # fmt: skip
+def test_a_known_value_of_any_length_is_found_in_every_form_of_its_letters(value, text):
+    assert module("guard").leaks(text, [("the made-up value", value)]) == ["the made-up value"], (value, text)
+
+
+def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_only():
+    guard = module("guard")
+    assert guard.leaks("Alice and Albert walk.", [("the made-up value", "Al")]) == []
+    phrase = ("A shorter value is refused as a whole word, also under the reductions and set apart in that way, unless it is written in "
+              "another alphabet than the Latin one: then it is refused wherever it stands, at any length.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
+
+
+# --- What a pull request from outside must not change ----------------------------------------------
+
+
+@pytest.mark.parametrize("path, folder", [
+    ("tools/desk/guard.py", "tools/desk/"), ("tools/desk/lock.json", "tools/desk/"), ("tools/gemini/job.py", "tools/gemini/"),
+    ("bench/harbor/requirements.txt", "bench/harbor/"), ("bench/experiments/protections.toml", "bench/experiments/"),
+    ("bench/records/pilot-2026-11-17.json", "bench/records/"), ("bench/pyproject.toml", "bench/"), ("bench/conftest.py", "bench/"),
+    (".github/workflows/site.yml", ".github/"),
+])  # fmt: skip
+@pytest.mark.parametrize("how", ["modified", "added", "moved out of it"])
+def test_an_outside_pull_request_does_not_change_the_desk_the_gemini_job_the_harness_the_security_tests_or_the_workflows(place, path, folder, how):
+    new_test = {"filename": "bench/tests/test_brand_new.py", "status": "added"}
+    changed = {"filename": path, "status": how} if how != "moved out of it" else {"filename": "docs/moved.md", "status": "renamed", "previous_filename": path}
+    assert verdict(place, [new_test, changed]) == {"protected_folders": [folder], "adds_new_test": True, "ready_for_review": False}
+
+
+class MovingPull(FakeGitHub):
+    """A pull request whose head stays where it is while something else of it changes between the two reads."""
+
+    def __init__(self, moved: dict):
+        super().__init__()
+        self.moved, self.reads = moved, 0
+
+    def __call__(self, backend, method, path, body=None):
+        answer = super().__call__(backend, method, path, body)
+        if path.endswith("/pulls/8"):
+            self.reads += 1
+            if self.reads == 2:
+                answer = answer | self.moved
+        return answer
+
+
+@pytest.mark.parametrize("moved", [{"base": {"ref": "release", "sha": "c" * 40}}, {"base": {"ref": "main", "sha": "c" * 40}}, {"draft": True}, {"changed_files": 4}])
+def test_a_pull_request_whose_base_draft_mark_or_number_of_files_changed_while_it_was_read_is_refused(place, monkeypatch, moved):
+    got, text = read_from_github(place, monkeypatch, MovingPull(moved))
+    assert got["pull_request_files"] == {"refused": True} and got["outside_text"]["title"] == "t"
+
+
+# --- Paths of this computer ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/var/tmp/dodam-desk-501/session/check", "/var/folders/dq/abc123/T/notes", "/VAR//TMP/x", "/private/var/folders/dq/x",
+                                  "/tmp/x", "/private/tmp/x", "/dev/shm/x", "C:/Windows/Temp/x", "c:\\Users\\x", "D:/data"])  # fmt: skip
+def test_every_folder_for_temporary_files_of_the_system_is_a_path_of_this_computer(path):
+    assert "a path outside the repository" in module("guard").leaks(f"It is kept in {path} for now.", [])
+
+
+def test_the_state_folders_own_path_is_refused_in_each_way_of_writing_it(place):
+    desk = place.desk(DESK_ITEM="7")
+    state = str(place.state)
+    for way in (state, state.upper(), state.replace("/", "//"), state.replace("/", "\\"), " / ".join(state.split("/")), state.replace("/", " ")):
+        assert "the state folder's path" in refused(desk, "answer", number=7, text=f"It is kept in {way} for now."), way
+
+
+# --- The clock and the digest ----------------------------------------------------------------------
+
+
+def test_a_clock_set_ahead_and_put_right_holds_no_digest_or_waiting_report_back(place, monkeypatch):
+    clock, elapsed = [5_000_000.0], [1_000.0]
+    monkeypatch.setattr(module("tools"), "now", lambda: clock[0])
+    ticking(monkeypatch, elapsed)
+    sent = []
+    for hour in range(30):
+        place.desk(DESK_ITEM=str(1000 + hour)).tell_coordinator({"kind": "spam", "number": 1000 + hour, "summary": f"Hour {hour}."})
+        if hour == 27:
+            # The vulnerability reports sent at once that day are used up: the eleventh waits for the next digest.
+            for n in range(11):
+                place.desk(DESK_ITEM=str(2000 + n), DESK_ACCOUNTS=accounts(3000 + n)).tell_coordinator({"kind": "vulnerability", "number": 2000 + n, "summary": "Made up."})
+        sent.append(place.desk().digest())
+        if hour == 2:
+            clock[0] += 3 * 86_400  # set three days ahead
+        if hour == 3:
+            clock[0] -= 3 * 86_400  # and put right again
+        clock[0] += 3600
+        elapsed[0] += 3600
+    # A digest every hour, whatever the clock did, and the waiting vulnerability report in the next one.
+    assert sent == [True] * 30
+    assert [body for body in notices(place, "digest") if "- vulnerability, item 2010: " in body]
+
+
+def test_a_clock_set_back_and_put_right_sends_no_second_digest_within_the_hour(place, monkeypatch):
+    clock, elapsed = [5_000_000.0], [1_000.0]
+    monkeypatch.setattr(module("tools"), "now", lambda: clock[0])
+    ticking(monkeypatch, elapsed)
+
+    def report_and_digest(n: int) -> bool:
+        place.desk(DESK_ITEM=str(n)).tell_coordinator({"kind": "spam", "number": n, "summary": "Made up."})
+        return place.desk().digest()
+
+    assert report_and_digest(1) is True
+    clock[0] -= 3600
+    elapsed[0] += 1
+    assert report_and_digest(2) is False
+    clock[0] += 3600 + 1
+    elapsed[0] += 1
+    assert report_and_digest(3) is False
+    elapsed[0] += 3600
+    assert report_and_digest(4) is True and len(notices(place, "digest")) == 2
+    # The computer was started again: its count begins anew, and the time since that start is taken.
+    elapsed[0] = 100.0
+    assert report_and_digest(5) is False
+    elapsed[0] = 3_700.0
+    assert report_and_digest(6) is True
+
+
+# --- A session that does not start, or ends without a result ---------------------------------------
+
+
+def test_a_session_that_could_not_be_started_keeps_its_arrival_charges_nobody_and_stops_the_desk(place, monkeypatch):
+    G = 1_410_000_000
+    running, clock, ran = in_process(place, monkeypatch)
+    # The real way of starting a session, with a program that is not there.
+    running.run_session = module("relay").Relay.run_session.__get__(running)
+    running.plan["argv"] = [str(place.copy.parent / "no-such-program")]
+    running.take(arrivals(event(7, G + 1)))
+    assert running.start_one() is True
+    assert [(e["number"], e["account"]) for e in kept(place)] == [(7, G + 1)]
+    (entry,) = counted(place)["sessions"]
+    # Nothing ran: nobody is charged, nobody waits, and nothing more is started until the desk is started again.
+    assert entry["charged"] <= 1 and entry.get("let_in") is False and entry["waits"] == [] and running.held_back() == []
+    assert running.starts_nothing and running.start_one() is False
+    (told,) = notices(place, "desk_down")
+    assert "could not be started" in told and "kept" in told
+
+
+def test_a_session_that_gave_no_response_keeps_its_arrival_and_counts_against_nobodys_share(place, monkeypatch):
+    G = 1_420_000_000
+    running, clock, ran = in_process(place, monkeypatch)
+    running.run_session = lambda text, env: {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
+    running.take(arrivals(event(7, G + 1)))
+    assert running.start_one() is True
+    assert [(e["number"], e["account"]) for e in kept(place)] == [(7, G + 1)]
+    (entry,) = counted(place)["sessions"]
+    # What it spent is not known: the day is charged everything that was set aside, and no account and no item.
+    assert entry["charged"] == entry["reserved"] and entry.get("let_in") is False and entry["ended"] is False
+    assert running.held_back() == [] and running.account_bound(counted(place)["sessions"], G + 1) is None
+    assert running.item_bound(counted(place), 7) is None
+    # Three in a row: nothing more is started, and the coordinator was told once.
+    assert running.start_one() is True and running.start_one() is True and running.starts_nothing and running.start_one() is False
+    assert len(notices(place, "desk_down")) == 1 and [(e["number"], e["account"]) for e in kept(place)] == [(7, G + 1)]
+
+
+def test_a_session_that_ended_without_a_result_after_it_responded_keeps_what_it_handled(place, monkeypatch):
+    G = 1_430_000_000
+    running, clock, ran = in_process(place, monkeypatch)
+    plain = running.run_session
+    running.run_session = lambda text, env: {"counts": [10, 0, 0, 10], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 1, "reads": 0}
+    running.take(arrivals(event(7, G + 1)))
+    assert running.start_one() is True
+    assert [(e["number"], e["account"]) for e in kept(place)] == [(7, G + 1)]
+    (entry,) = counted(place)["sessions"]
+    # Charged as a session without a count from the service is, to its payer; nobody waits.
+    assert entry["charged"] == entry["reserved"] and entry["account"] == G + 1 and entry.get("let_in", True) and entry["waits"] == []
+    assert running.held_back() == [] and notices(place, "desk_down") == []
+    (line,) = [r for r in counted(place)["reports"] if r["kind"] == "session_ended"]
+    assert "it ended without a result" in line["line"]
+    # A fresh session handles it again.
+    running.run_session = plain
+    assert running.start_one() is True and ran[-1][1] == "7" and kept(place) == []
+
+
+# --- Lock files made for the first time by calls at once --------------------------------------------
+
+
+def both_find_it_missing(monkeypatch, ending: str):
+    """The first look of each of two callers at a file with this ending that is not there waits for the other's look."""
+    module("tools")
+    import state as state_files  # The module the tools and the check load.
+
+    real, looked, gate = state_files.file, set(), threading.Barrier(2)
+
+    def file(path, what):
+        found = real(path, what)
+        if str(path).endswith(ending) and not found and threading.get_ident() not in looked:
+            looked.add(threading.get_ident())
+            try:
+                gate.wait(1)
+            except threading.BrokenBarrierError:
+                pass  # The other caller did not come in time: it waits for something this one holds.
+        return found
+
+    monkeypatch.setattr(state_files, "file", file)
+
+
+def at_once(*calls) -> list:
+    problems, threads = [], []
+    for call in calls:
+
+        def run(call=call):
+            try:
+                call()
+            except BaseException as problem:  # noqa: BLE001
+                problems.append(repr(problem))
+
+        threads.append(threading.Thread(target=run))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    return problems
+
+
+def test_two_checks_of_one_new_session_at_once_both_work(place, counting, monkeypatch):
+    both_find_it_missing(monkeypatch, ".lock")
+    read = a_call("Read", session="new-session", file_path=str(place.copy / "notes.md"), limit=10)
+    assert at_once(lambda: counting(read), lambda: counting(read)) == []
+    assert json.loads((place.state / "session" / "reads-new-session.json").read_text())["reads"] == 2
+
+
+def test_the_relay_and_a_tool_making_the_records_lock_at_once_both_work(place, monkeypatch):
+    both_find_it_missing(monkeypatch, ".lock")
+    seen = []
+
+    def look():
+        with place.desk().counts() as record:
+            seen.append(record["clock"])
+
+    assert at_once(look, look) == [] and len(seen) == 2
+
+
+def test_two_reading_calls_of_one_session_at_once_both_write_whose_text_was_shown(place, monkeypatch):
+    tools = module("tools")
+    import state as state_files
+
+    G = 1_440_000_000
+    # The item changes between the two reading calls: a comment of another account arrives.
+    answers = iter([written(G + 1, by(G + 3)), written(G + 1, by(G + 2))])
+    monkeypatch.setattr(tools.StandIn, "item", lambda backend, number: next(answers))
+    real, looked, gate = state_files.folder, set(), threading.Barrier(2)
+
+    def folder(path, what, make=False):
+        # Each call has worked out what it shows before either writes it down.
+        if path.name == "session" and threading.get_ident() not in looked:
+            looked.add(threading.get_ident())
+            try:
+                gate.wait(1)
+            except threading.BrokenBarrierError:
+                pass
+        return real(path, what, make)
+
+    monkeypatch.setattr(state_files, "folder", folder)
+    both_find_it_missing(monkeypatch, ".tmp")
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(G + 1, G + 2))
+    first = threading.Thread(target=lambda: desk.read_item({"number": 7}))
+    first.start()
+    time.sleep(0.2)
+    assert at_once(lambda: desk.read_item({"number": 7})) == []
+    first.join(30)
+    assert json.loads((place.state / "session" / "shown.json").read_text()) == [G + 1, G + 2, G + 3]
+
+
+# --- A stop inside placing ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stop", ["before what went is counted", "after what went is counted, before it leaves the list"])
+def test_a_stop_inside_placing_leaves_what_went_to_be_counted_and_named_at_the_next_start_once(place, monkeypatch, stop):
+    G = 1_450_000_000
+    running, clock, ran = in_process(place, monkeypatch)
+    import state as state_files
+
+    # Every place is taken: twenty accounts hold five each, the first of them the oldest.
+    running.take(arrivals(*[event(1000 + 10 * a + n, G + a, f"p{n}") for a in range(1, 21) for n in range(5)]))
+    assert len(kept(place)) == 100
+    real, written_now, stopped = state_files.write, [], []
+
+    def write(path, what, text):
+        # The desk is stopped, as by a kill, at the first write of the record after the kept list was written, or at the
+        # first write of the kept list after that. A desk that was stopped writes nothing more until it is started again.
+        if stopped == ["for good"]:
+            raise Stopped(path.name)
+        if not stopped and path.name == ("desk-counts.json" if stop.startswith("before") else "held-events.json") and (
+                "held-events.json" in written_now if stop.startswith("before") else "desk-counts.json" in written_now):  # fmt: skip
+            stopped.append("for good")
+            raise Stopped(path.name)
+        real(path, what, text)
+        if "held-events.json" in written_now or path.name == "held-events.json":
+            written_now.append(path.name)
+
+    monkeypatch.setattr(state_files, "write", write)
+    # A newcomer writes: the oldest place of the account that can give the most goes, and the desk is stopped.
+    with pytest.raises(Stopped):
+        running.take(arrivals(event(5000, G + 99, "a newcomer")))
+    places = [(e["number"], e["account"]) for e in kept(place) if "events" in e]
+    assert (5000, G + 99) in places and (1010, G + 1) not in places
+    # What went is written beside the places until it is counted.
+    assert [entry for entry in kept(place) if "events" not in entry]
+    # Started again: the next start counts what went, once, and the digest names it with its item.
+    stopped[:] = ["started again"]
+    again, clock_again, ran_again = in_process(place, monkeypatch, start_at=clock[0] + 60)
+    again.start_one()
+    again.start_one()
+    assert counted(place)["uncounted"]["arrivals dropped"] == {str(G + 1): 1} and counted(place)["went"][str(G + 1)] == [1010]
+    assert all("events" in entry for entry in json.loads((place.state / "held-events.json").read_text()))
+    assert len(notices(place)) == 1 and "arrivals kept for later" in notices(place)[0]
+    assert again.desk.digest(force=True) and f"account {G + 1}: 1 (on item 1010)" in notices(place, "digest")[-1]
+    phrase = ("A stop inside a placing leaves what went written beside the places; the next placing or start counts it, once, and tries "
+              "the notice then when the stop came before it was counted.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
+
+
+# --- The start command's bound on kept reports ---------------------------------------------------------
+
+
+def test_the_bound_on_kept_reports_counts_every_kind_a_day_can_hold(place, monkeypatch):
+    import re
+
+    tools = module("tools")
+    G = 1_460_000_000
+    lock = lock_file()
+    settings, writing = lock["coordinator"], lock["spending"]["sessions_per_day"] + 1
+    clock = [8_000_000.0]
+    monkeypatch.setattr(tools, "now", lambda: clock[0])
+    kinds = [kind for kind in settings["kinds"] if kind != "vulnerability"][: settings["reports_per_session"]]
+    # A closed list that keeps exactly what the start command lets the sessions of a day write.
+    most = writing * (settings["reports_per_session"] + 2)
+    for n in range(writing):
+        number = 10_000 + n
+        desk = place.desk(DESK_ITEM=str(number), DESK_ACCOUNTS=accounts(G + n))
+        desk.lock["coordinator"]["kept_per_day"] = most
+        # A session's own reports; the relay's line that it ended the session and the line of the item it closed; and the
+        # relay's report that the desk is not working, because the session cost more than was set aside.
+        for kind in kinds:
+            desk.tell_coordinator({"kind": kind, "number": number, "summary": "Made up."})
+        desk.note("session_ended", "The relay ended a session early (its time was up).", number)
+        desk.closed_items([(number, clock[0], [], "Closed until a made-up day.")])
+        desk.desk_down("One session cost more than what is set aside for a session.")
+        clock[0] += 60
+    record = counted(place)
+    assert "reports_not_kept" not in record["uncounted"]
+    assert {r["kind"] for r in record["reports"]} >= {"session_ended", "item_closed", "desk_down", *kinds}
+    # Every kind that the tools and the relay keep, besides a session's own reports, is one of the lines counted.
+    source = (DESK / "tools.py").read_text(encoding="utf-8") + (DESK / "relay.py").read_text(encoding="utf-8")
+    kept_kinds = set(re.findall(r'_keep\(record, "([a-z_]+)"', source)) | set(re.findall(r'note\("([a-z_]+)"', source))
+    assert kept_kinds == set(getattr(tools, "RELAY_LINES", ())) == {"session_ended", "item_closed"}
+
+
+# --- The three low ones ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, limit, kept_text", [("version 0.14", 11, "version "), ("count 1,234,567", 10, "count "), ("count 1,234,567", 9, "count "),
+                                                    ("in 2.1.327 now", 6, "in "), ("a 12 b", 3, "a "), ("a 12 b", 4, "a 12")])  # fmt: skip
+def test_no_cut_leaves_part_of_a_number_written_with_points_or_commas(text, limit, kept_text):
+    assert module("tools").cut(text, limit) == kept_text
+
+
+def test_a_refusal_the_session_is_told_is_cut_without_cutting_a_number(place):
+    tools = module("tools")
+    desk = place.desk()
+
+    def answer(arguments):
+        raise tools.Refused("x" * 120 + " 1,234,567 more.")
+
+    desk.answer = answer
+    text, refused_now = tools.call(desk, "answer", {})
+    assert refused_now and text == "x" * 120 + " "
+
+
+def test_a_session_that_counts_against_no_accounts_share_names_nobody_among_those_that_used_the_most():
+    tools = module("tools")
+    sessions = [{"account": 1, "reserved": 10, "charged": 10, "let_in": False} for _ in range(5)] + [{"account": 2, "reserved": 10, "charged": 5}]
+    assert tools.most_used(sessions) == [2] and tools.most_used(sessions, by_units=True) == [2]
+
+
+def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_before_they_run(place, counting):
+    guard = module("guard")
+    (place.copy / "picture.pdf").write_bytes(b"%PDF-1.4 without a zero byte\n" * 5)
+    (place.copy / "notes-link.md").symlink_to(place.copy / "picture.pdf")
+    assert "text files only" in counting(a_call("Read", file_path=str(place.copy / "notes-link.md"), limit=10))
+    for call in (a_call("Read", file_path=str(place.copy / "missing.md"), limit=10), a_call("Read", file_path=str(place.copy / "notes.md"), limit=10, offset=5000)):
+        assert isinstance(guard.bytes_of(call, lock_file(), place.copy), str) and isinstance(counting(call), str)
+    # None of them took anything from what the session may read.
+    assert json.loads((place.state / "session" / "reads-s1.json").read_text())["bytes"] == 0
+
+
+# --- What remains, said in place ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("phrase", [
+    "The line of a digest that names the accounts whose arrivals went names every one of them, so its length has no bound:",
+    "A session for what was typed in the desk's terminal handles no account:",
+    "What the watcher has printed and the relay has not yet placed is lost when the desk is stopped in between:",
+])  # fmt: skip
+def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
