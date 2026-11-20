@@ -1,0 +1,402 @@
+{
+ "what": "GitHub's answers to the requests the desk's reading tool makes for this pull request, recorded on 2026-11-19 and reduced to the fields the tool reads. No logins, no names, no text.",
+ "number": 13,
+ "issue": {
+  "state": "open",
+  "is_pull_request": true
+ },
+ "answers": {
+  "repos/BrilliantTiger/dodam/pulls/13": {
+   "status": 200,
+   "body": {
+    "changed_files": 71,
+    "draft": false,
+    "state": "open",
+    "merged": false,
+    "base": {
+     "ref": "main",
+     "sha": "e91dd2ba788f6c9b116d6cb0f4b8164c10811fb5"
+    },
+    "head": {
+     "sha": "978a2fb05cfa592b9d8a50f554fe0110eff6757b"
+    }
+   }
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=e91dd2ba788f6c9b116d6cb0f4b8164c10811fb5": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tests?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "conftest.py",
+     "type": "file"
+    },
+    {
+     "name": "harbor_exec_probe.py",
+     "type": "file"
+    },
+    {
+     "name": "test_convert.py",
+     "type": "file"
+    },
+    {
+     "name": "test_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_harbor_patch.py",
+     "type": "file"
+    },
+    {
+     "name": "test_judge.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_record.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_report.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_variants.py",
+     "type": "file"
+    },
+    {
+     "name": "test_proctable.py",
+     "type": "file"
+    },
+    {
+     "name": "test_repository.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_task_format.py",
+     "type": "file"
+    },
+    {
+     "name": "test_vet.py",
+     "type": "file"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/pulls/13/files?per_page=100&page=1": {
+   "status": 200,
+   "body": [
+    {
+     "filename": ".github/workflows/ci.yml",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/dodambench/convert.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/dodambench/dodam_cli.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/dodambench/judge.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/dodambench/languages.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/dodambench/task.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/dodambench/vet.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/experiments/attacks.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/experiments/check_protections.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/experiments/cli_separation.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/experiments/memory_overshoot.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/experiments/protections.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/images/README.md",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/cpp/build/src/main.cc",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/cpp/change-1/src/main.cc",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/csharp/build/Program.cs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/csharp/change-1/Program.cs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/go/build/main.go",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/go/change-1/main.go",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/java/build/src/main/java/app/App.java",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/java/change-1/src/main/java/app/App.java",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/python/build/main.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/python/change-1/main.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/rust/build/src/main.rs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/rust/change-1/src/main.rs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/typescript/build/src/main.ts",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/secure/typescript/change-1/src/main.ts",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/cpp.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/csharp.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/go.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/java.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/python.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/rust.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/solutions/variants/typescript.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/steps/build/instruction.md",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/steps/change-1/instruction.md",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/task.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/boundary/test_bad_input.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/boundary/test_split_rules.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/functional/test_convert.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/functional/test_split.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/lib/csvjson.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/manifest.toml",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_huge_input.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_link_escape.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_overwrite.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_path_escape.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_split_overwrite.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/cli-csv-json/tests/security/test_split_value.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tasks/web-signup/task.toml",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/conftest.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/runtimes/App.java",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/Program.cs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/main.cc",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/main.go",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/main.rs",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/main.ts",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/runtimes/python.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_attack_list.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_cli_convert.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_cli_format.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_cli_isolation.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_cli_judge.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_cli_runtimes.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_experiment_scripts.py",
+     "status": "added"
+    },
+    {
+     "filename": "bench/tests/test_judge.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/test_site_desk.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/test_vet.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/test_web_isolation.py",
+     "status": "added"
+    },
+    {
+     "filename": "docs/benchmark/command-line-tasks.en.md",
+     "status": "added"
+    },
+    {
+     "filename": "docs/benchmark/command-line-tasks.ko.md",
+     "status": "added"
+    }
+   ]
+  }
+ }
+}
