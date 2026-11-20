@@ -46,9 +46,10 @@ Every case has limits. In the verifier each has a line that holds whatever the p
   write only to memory-backed places.
 
 A case that broke a limit fails, whatever the test asserts and even when the test would have been
-left unjudged; so does a program that leaves processes behind, and a case whose folder cannot be
-removed. After every run nothing of the program is left running, and after every case its folder
-is removed.
+left unjudged; so does a case whose program was ended by a signal, a program that leaves processes
+behind, and a case whose folder cannot be removed. After every run nothing of the program is left
+running, and after every case its folder is removed. All removing in a case runner is done on the
+one time a step gives all walking and removing of what the program's side left.
 
 In the verifier the program runs as a user of its own that owns nothing, in no group, and that cannot
 gain privileges; the judge has taken away its write access everywhere but the case's folder. Without
@@ -69,7 +70,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:
     import dodam_judge as _judge   # in the verifier the judge sits next to this file under that name
@@ -165,7 +166,7 @@ class JudgeFault(Exception):
 
 
 class LimitBroken(AssertionError):
-    """The program broke a limit of the case, so the case fails."""
+    """The program broke a limit of the case, or was ended by a signal, so the case fails."""
 
 
 @dataclass
@@ -218,8 +219,9 @@ def config() -> dict:
 
 
 def fault(text: str) -> JudgeFault:
-    """Record a fault of the judge where the judge will find it, and return the error to raise."""
-    path = (_config or {}).get("fault_file") or os.environ.get("DODAM_CLI_FAULT_FILE")
+    """Record a fault of the judge where the judge will find it, and return the error to raise. Before
+    the runner has its settings, that is where it writes down the outcomes of its cases."""
+    path = (_config or {}).get("fault_file") or os.environ.get(_judge.PROGRESS_ENV)
     if path:
         try:
             with open(path, "a", encoding="utf-8") as f:
@@ -227,6 +229,35 @@ def fault(text: str) -> JudgeFault:
         except OSError:
             pass
     return JudgeFault(text)
+
+
+def _remove(path, keep_top: bool = False) -> None:
+    """Remove what the program's side left, on the one time a step gives all walking and removing of
+    it; the runner notes what it used, so that the judge takes it back."""
+    _judge.note_tree_clock(removing=True)
+    try:
+        _judge.remove_tree(path, keep_top=keep_top)
+    finally:
+        _judge.note_tree_clock()
+
+
+def _not_removed(exc: BaseException) -> str | None:
+    """Why what the program's side left was not removed, when that is the program's doing: it cannot
+    be removed whatever the judge does, or the step's time for removing is spent. None otherwise."""
+    if isinstance(exc, _judge.TooMuchLeft):
+        return str(exc)
+    if isinstance(exc, OSError) and exc.errno in _judge.UNREMOVABLE:
+        return exc.strerror or str(exc)
+    return None
+
+
+def _parts(rel) -> tuple[str, ...] | None:
+    """The names on the way to a place in one of the case's folders; None for a path that does not
+    name a place inside it."""
+    parts = PurePosixPath(str(rel)).parts
+    if not parts or parts[0] == "/" or any(part in ("", ".", "..") for part in parts):
+        return None
+    return parts
 
 
 def _collect() -> None:
@@ -254,6 +285,7 @@ class Case:
         self._limits = cfg["limits"]
         self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
         self._broken: list[str] = []
+        self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
         # the kernel's records: the last figure read, and the sum of every rise since the case began
@@ -266,7 +298,14 @@ class Case:
         self._side = _judge.Side(self._uid, self._gid) if self._uid is not None else None
         try:
             # cases run one after another, so whatever is in the cases' folder now is not this case's
-            _judge.remove_tree(cfg["work_root"], keep_top=True)
+            _remove(cfg["work_root"], keep_top=True)
+        except (OSError, _judge.TooMuchLeft) as exc:
+            why = _not_removed(exc)
+            if why is None or not os.path.isdir(cfg["work_root"]):
+                raise fault(f"cannot make the case's folder: {exc}") from None
+            # what an earlier case left cannot be taken back: this case is not judged on it
+            _judge.leave_undecided(self._key, f"the folder the cases live in cannot be emptied: {why}")
+        try:
             self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="case-", dir=cfg["work_root"])))
             os.chmod(self.root, 0o755)
             self.work, self.outside, self.home = self.root / "work", self.root / "outside", self.root / "home"
@@ -286,33 +325,69 @@ class Case:
         if self._uid is not None:
             os.lchown(path, self._uid, self._gid)
 
-    def _place(self, base: Path, rel: str) -> Path:
-        """Where a file of the case goes; never through a link the program left."""
-        path = base / rel
-        parent = path.parent
-        made = []
-        while not parent.exists() and not parent.is_symlink():
-            made.append(parent)
-            parent = parent.parent
-        for folder in reversed(made):
-            folder.mkdir()
-            self._give(folder)
-        real = os.path.realpath(path.parent)
-        if os.path.commonpath([real, os.path.realpath(self.root)]) != os.path.realpath(self.root):
-            raise AssertionError(f"the program left a link where the case's file {rel} goes")
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        return path
+    def _folder(self, base: Path, parts: tuple[str, ...], make: bool) -> int:
+        """Open the folder that `parts` name below `base`, one name at a time and never through a
+        link: where a folder of the way is a link or no folder, it raises. With `make`, a folder that
+        is not there is made and given to the program's user."""
+        here = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in parts:
+                try:
+                    below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+                except FileNotFoundError:
+                    if not make:
+                        raise
+                    os.mkdir(name, dir_fd=here)
+                    if self._uid is not None:
+                        os.chown(name, self._uid, self._gid, dir_fd=here, follow_symlinks=False)
+                    below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+                os.close(here)
+                here = below
+        except BaseException:
+            os.close(here)
+            raise
+        return here
 
-    def _write(self, base: Path, rel: str, data) -> Path:
-        path = self._place(base, rel)
+    def _place(self, base: Path, rel: str) -> tuple[int, str]:
+        """The open folder a file of the case goes into, and its name there; never through a link the
+        program left. What the program left with that name is removed when it is a link or a file."""
+        parts = _parts(rel)
+        if parts is None:
+            raise AssertionError(f"{rel} names no place in the case's folder")
+        try:
+            folder = self._folder(base, parts[:-1], make=True)
+        except OSError as exc:
+            raise AssertionError(f"the program left a link or no folder on the way to the case's file {rel}: "
+                                 f"{exc.strerror}") from None
+        try:
+            try:
+                info = os.stat(parts[-1], dir_fd=folder, follow_symlinks=False)
+            except FileNotFoundError:
+                info = None
+            if info is not None:
+                if not (stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise AssertionError(f"the program left something that is no file where the case's file {rel} goes")
+                os.unlink(parts[-1], dir_fd=folder)
+        except BaseException:
+            os.close(folder)
+            raise
+        return folder, parts[-1]
+
+    def _write(self, base: Path, rel: str, data, size: int | None = None) -> Path:
+        folder, name = self._place(base, rel)
         if isinstance(data, str):
             data = data.encode("utf-8")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=folder)
+        finally:
+            os.close(folder)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        self._give(path)
-        return path
+            if size is not None:
+                f.truncate(size)
+            if self._uid is not None:
+                os.fchown(f.fileno(), self._uid, self._gid)
+        return base / rel
 
     def write(self, rel: str, data) -> Path:
         """Put a file into the working folder."""
@@ -324,34 +399,52 @@ class Case:
 
     def sparse(self, rel: str, size: int) -> Path:
         """Put a file of the given size into the working folder that takes no disk space."""
-        path = self._write(self.work, rel, b"")
-        os.truncate(path, size)
-        return path
+        return self._write(self.work, rel, b"", size)
 
     def mkdir(self, rel: str) -> Path:
         """Put a folder into the working folder."""
-        return self._place(self.work, rel + "/-").parent
+        parts = _parts(rel)
+        if parts is None:
+            raise AssertionError(f"{rel} names no place in the case's folder")
+        try:
+            os.close(self._folder(self.work, parts, make=True))
+        except OSError as exc:
+            raise AssertionError(f"the program left a link or no folder on the way to the case's folder {rel}: "
+                                 f"{exc.strerror}") from None
+        return self.work / rel
 
     def symlink(self, rel: str, target) -> Path:
         """Put a symbolic link into the working folder."""
-        path = self._place(self.work, rel)
-        os.symlink(str(target), path)
-        self._give(path)
-        return path
+        folder, name = self._place(self.work, rel)
+        try:
+            os.symlink(str(target), name, dir_fd=folder)
+            if self._uid is not None:
+                os.chown(name, self._uid, self._gid, dir_fd=folder, follow_symlinks=False)
+        finally:
+            os.close(folder)
+        return self.work / rel
 
     def _read(self, base: Path, rel: str) -> bytes | None:
-        path = base / rel
-        try:
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                return None
-            real, root = os.path.realpath(path), os.path.realpath(self.root)
-            if os.path.commonpath([real, root]) != root:
-                return None
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except (OSError, ValueError):
+        parts = _parts(rel)
+        if parts is None:
             return None
-        with os.fdopen(fd, "rb") as f:
-            return f.read()
+        try:
+            folder = self._folder(base, parts[:-1], make=False)
+        except OSError:
+            return None
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        except OSError:
+            return None
+        finally:
+            os.close(folder)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None     # a folder, a named pipe or anything else that is no file
+            with os.fdopen(fd, "rb", closefd=False) as f:
+                return f.read()
+        finally:
+            os.close(fd)
 
     def read(self, rel: str) -> bytes | None:
         """The content of a regular file in the working folder; None when there is none. Links are not followed."""
@@ -426,9 +519,10 @@ class Case:
             proc = subprocess.Popen(argv, cwd=self.work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, preexec_fn=before_exec, close_fds=True)
         except subprocess.SubprocessError as exc:
-            raise fault(f"cannot start the program as its own user: {exc}") from None
+            raise fault(f"cannot start the program confined as its own user: {exc}") from None
         except OSError as exc:
-            if exc.errno in (errno.EAGAIN, errno.ENOMEM):
+            if exc.filename != argv[0] or exc.errno in (errno.EAGAIN, errno.ENOMEM):
+                # not the program's command that failed to run: the judge could not start it
                 raise fault(f"cannot start a process for the program: {exc}") from None
             # the program is not there or cannot be run as built: the program's failure
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
@@ -440,6 +534,10 @@ class Case:
             self._end(proc)
         if separated and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
+        if result.limit is None and result.signal is not None:
+            # the program the case runner started was ended by a signal: the case fails, whatever
+            # its test checks afterwards
+            self._signals.append(result.signal)
         high_now = _judge.highest_memory() if separated else 0
         above = _above_in_a_new_high(high_before, high_now, held_before["taken"],
                                      (limits["memory_mb"] + limits["disk_mb"]) * 2**20)
@@ -647,12 +745,20 @@ class Case:
         except OSError:
             pass
 
+    def failing(self) -> bool:
+        """Whether the case fails whatever its test says."""
+        return bool(self._broken or self._signals)
+
     def broken(self) -> LimitBroken:
-        limits = self._limits
-        return LimitBroken(f"the program broke a limit of the case: {', '.join(sorted(set(self._broken)))} "
-                           f"(limits: {limits['timeout_sec']} s, {limits['memory_mb']} MB of memory, "
-                           f"{limits['output_kb']} KB of output, {limits['processes']} processes and threads, "
-                           f"{limits['disk_mb']} MB of files)")
+        limits, said = self._limits, []
+        if self._signals:
+            said.append("the program was ended by signal " + ", ".join(str(n) for n in sorted(set(self._signals))))
+        if self._broken:
+            said.append(f"the program broke a limit of the case: {', '.join(sorted(set(self._broken)))} "
+                        f"(limits: {limits['timeout_sec']} s, {limits['memory_mb']} MB of memory, "
+                        f"{limits['output_kb']} KB of output, {limits['processes']} processes and threads, "
+                        f"{limits['disk_mb']} MB of files)")
+        return LimitBroken("; ".join(said))
 
     def close(self) -> None:
         """Give back what the case took. What cannot be removed fails the case: the program made it."""
@@ -660,9 +766,12 @@ class Case:
             raise fault("processes of the program could not be ended when its case closed")
         self._note_records()
         try:
-            _judge.remove_tree(self.root)
-        except OSError as exc:
-            self._broken.append(f"left what cannot be removed ({exc.strerror})")
+            _remove(self.root)
+        except (OSError, _judge.TooMuchLeft) as exc:
+            why = _not_removed(exc)
+            if why is None:
+                raise fault(f"cannot remove the case's folder: {exc}") from None
+            self._broken.append(f"left what cannot be removed ({why})")
 
 
 @contextmanager
@@ -674,9 +783,9 @@ def case(files: dict | None = None, outside: dict | None = None):
         yield c
     except BaseException:
         c.close()
-        if c._broken:
+        if c.failing():
             raise c.broken() from None
         raise
     c.close()
-    if c._broken:
+    if c.failing():
         raise c.broken()

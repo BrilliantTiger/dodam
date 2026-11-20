@@ -121,7 +121,7 @@ code=$?
 # was ended from outside leaves neither. Then nothing here may read as a judgement, and this says so.
 if [ "$code" -eq 0 ] && [ -f "$out/reward.json" ]; then exit 0; fi
 if [ "$code" -eq 3 ] && [ -f "$out/judge-fault.json" ]; then exit 3; fi
-rm -rf "$out/reward.json" "$out/reward.txt" "$out/judge-fault.json"
+rm -rf "$out/reward.json" "$out/reward.txt" "$out/details.json" "$out/judge-fault.json"
 set -C
 printf '{"judge_fault": "{\\"severity\\": \\"error\\", \\"file\\": \\"judge\\", \\"key\\": \\"ended\\", \\"message\\": \\"the judging ended without a result (exit code %s)\\"}"}\n' "$code" > "$out/judge-fault.json"
 if [ "$code" -eq 0 ]; then code=3; fi
