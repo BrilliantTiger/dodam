@@ -210,6 +210,7 @@ BOUNDS = {
     "max_answer_bytes": (1000, 50_000_000),
     "max_comment_pages": (1, 100),
     "max_quota_returns": (0, 20),
+    "container_seconds": (1, 600),
 }
 
 
@@ -227,6 +228,7 @@ class Settings:
     max_answer_bytes: int
     max_comment_pages: int
     max_quota_returns: int
+    container_seconds: int
     discussion_first_line: str
     model: str
     work_item_prefixes: tuple[str, ...]
@@ -895,7 +897,6 @@ def run_agy(
 # --- Containers an attack run leaves --------------------------------------------------------------------
 
 RUN_LABEL_KEY = "dodam-gemini-run"
-CONTAINER_SECONDS = 60
 # What the container tool needs to find where its containers run, beside the names agy gets.
 CONTAINER_NAMES = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
@@ -911,11 +912,11 @@ class ContainerFault(Exception):
         self.reason = reason
 
 
-def _container_tool(argv: list[str], env: dict[str, str]) -> str:
+def _container_tool(argv: list[str], env: dict[str, str], seconds: int) -> str:
     try:
         proc = subprocess.run(
             argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=CONTAINER_SECONDS, stdin=subprocess.DEVNULL,
+            timeout=seconds, stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         raise ContainerFault("container_tool_timeout") from exc
@@ -926,30 +927,35 @@ def _container_tool(argv: list[str], env: dict[str, str]) -> str:
     return proc.stdout
 
 
-def remove_run_containers(run_label: str, answer: Path) -> None:
+def remove_run_containers(run_label: str, answer: Path, seconds: int) -> None:
     """After an attack run, however it ended: remove the containers that carry this run's label, and no other.
     Two calls of the container tool at most, each within its bound of time. What happened is recorded in the
-    answer folder; a missing tool or a fault changes nothing else about the run."""
+    answer folder; a missing tool, a fault or a record that cannot be written changes nothing else about the run."""
     record: dict[str, object] = {"label": run_label, "found": [], "removed": [], "fault": None}
     try:
         program = shutil.which("docker", path=os.environ.get("PATH"))
         if program is None:
             raise ContainerFault("no_container_tool")
         env = {name: os.environ[name] for name in (*PASSED_THROUGH, *CONTAINER_NAMES) if name in os.environ}
-        listed = _container_tool([program, "ps", "--all", "--quiet", "--no-trunc", "--filter", f"label={run_label}"], env)
+        listed = _container_tool(
+            [program, "ps", "--all", "--quiet", "--no-trunc", "--filter", f"label={run_label}"], env, seconds,
+        )
         found = [line.strip() for line in listed.splitlines() if line.strip()]
         if not all(CONTAINER_ID_RE.fullmatch(name) for name in found):
             raise ContainerFault("container_listing")
         record["found"] = found
         if found:
-            _container_tool([program, "rm", "--force", *found], env)
+            _container_tool([program, "rm", "--force", *found], env, seconds)
             record["removed"] = found
     except ContainerFault as exc:
         record["fault"] = exc.reason
     except Exception as exc:  # noqa: BLE001 - recorded as a fixed word, and the run goes on as it was
         record["fault"] = f"internal_{type(exc).__name__}"
     finally:
-        _write_private(answer / "containers.json", json.dumps(record, indent=2) + "\n")
+        try:
+            _write_private(answer / "containers.json", json.dumps(record, indent=2) + "\n")
+        except OSError:
+            pass
 
 
 # The pages that were read do not say how a used-up quota shows; these words are a guess.
@@ -1334,7 +1340,7 @@ def _job(
         finally:
             # However the run ended (an answer, its time up, an error, a signal), its containers go.
             if kind == "attack" and result["ran"]:
-                remove_run_containers(run_label, answer)
+                remove_run_containers(run_label, answer, settings.container_seconds)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     status, reasons, response = interpret(run, settings.max_answer_bytes)

@@ -45,6 +45,10 @@ max_comment_pages = 10
 # error and counts in the day.
 max_quota_returns = 3
 
+# After an attack run, each call of the container tool that removes the run's containers may take at most this
+# long, in seconds; there are two calls at most.
+container_seconds = 60
+
 # A comment of the project's account that begins with this line is a question for a discussion.
 discussion_first_line = "Question for the Gemini job:"
 
