@@ -10,7 +10,7 @@ be started by hand in a plain terminal. It refuses to do anything inside a codin
 an agent can type into. It prints one JSON line on standard output, made of fixed words, numbers and the
 path of the private answer, and never any text of the model.
 
-Exit codes: 0 the answer was posted or held; 1 an error; 3 refused inside a coding agent; 4 settings,
+Exit codes: 0 a comment was posted or the answer was held; 1 an error; 3 refused inside a coding agent; 4 settings,
 private folder, an item that is not the project's own, or no question; 5 another job is running; 6 Google's
 quota is used up; 7 a sign-in is missing; 8 the run passed its time; 129, 130, 143 stopped by a signal.
 """
@@ -27,6 +27,7 @@ import math
 import os
 import pwd
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -70,6 +71,7 @@ PS_TIMEOUT_SECONDS = 20
 EXIT_CODES = {
     "posted": 0,
     "held": 0,
+    "no_public_part": 0,
     "error": 1,
     "refused": 3,
     "settings": 4,
@@ -552,9 +554,34 @@ def _comment_key(comment: dict[str, object]) -> tuple[str, int]:
     return (str(comment.get("created_at") or ""), raw_id if isinstance(raw_id, int) else 0)
 
 
-def build_prompt(settings: Settings, kind: str, item: Item, comments: list[dict[str, object]], head: str) -> Prompt | str:
+def duration(seconds: int) -> str:
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute" + ("" if minutes == 1 else "s")
+    return f"{seconds} second" + ("" if seconds == 1 else "s")
+
+
+def fill_template(settings: Settings, kind: str, run_label: str) -> str:
+    """The template for the kind, with the run's time from the settings and the run's own container label."""
+    text = (TEMPLATES / f"{kind}.md").read_text(encoding="utf-8").strip()
+    values = {
+        "run_time": duration(settings.job_seconds),
+        # The answer is to be written by two thirds of the run's time; nothing of a run that is ended is kept.
+        "answer_time": duration(settings.job_seconds * 2 // 3),
+        "run_label": run_label,
+    }
+    for name, value in values.items():
+        text = text.replace("{{" + name + "}}", value)
+    if "{{" in text or "}}" in text:
+        raise JobError("template")
+    return text
+
+
+def build_prompt(
+    settings: Settings, kind: str, item: Item, comments: list[dict[str, object]], head: str, run_label: str,
+) -> Prompt | str:
     """The prompt from the template, the done criteria and the project's own text; or a fixed word why not."""
-    template = (TEMPLATES / f"{kind}.md").read_text(encoding="utf-8").strip()
+    template = fill_template(settings, kind, run_label)
     project = settings.project_account_id
     # Entries oldest first: ("note", text) for comments, ("answer", text) for the job's own earlier answers.
     entries: list[tuple[str, str]] = []
@@ -716,7 +743,8 @@ def load_job_state(private: Path) -> dict[str, object]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise JobError("job_state") from exc
     if (
-        not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("days"), dict)
+        not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1
+        or not isinstance(data.get("days"), dict)
         or not isinstance(data.get("hold_until"), (int, float)) or isinstance(data.get("hold_until"), bool)
         or not math.isfinite(data["hold_until"]) or data["hold_until"] < 0
     ):
@@ -862,6 +890,66 @@ def run_agy(
         handle.seek(max(0, stderr_path.stat().st_size - 20000))
         tail = handle.read().decode("utf-8", errors="replace")
     return AgyRun(proc.returncode, timed_out, stdout, tail)
+
+
+# --- Containers an attack run leaves --------------------------------------------------------------------
+
+RUN_LABEL_KEY = "dodam-gemini-run"
+CONTAINER_SECONDS = 60
+# What the container tool needs to find where its containers run, beside the names agy gets.
+CONTAINER_NAMES = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
+CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def new_run_label() -> str:
+    return f"{RUN_LABEL_KEY}={secrets.token_hex(8)}"
+
+
+class ContainerFault(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _container_tool(argv: list[str], env: dict[str, str]) -> str:
+    try:
+        proc = subprocess.run(
+            argv, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=CONTAINER_SECONDS, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ContainerFault("container_tool_timeout") from exc
+    except OSError as exc:
+        raise ContainerFault("container_tool") from exc
+    if proc.returncode != 0:
+        raise ContainerFault("container_tool")
+    return proc.stdout
+
+
+def remove_run_containers(run_label: str, answer: Path) -> None:
+    """After an attack run, however it ended: remove the containers that carry this run's label, and no other.
+    Two calls of the container tool at most, each within its bound of time. What happened is recorded in the
+    answer folder; a missing tool or a fault changes nothing else about the run."""
+    record: dict[str, object] = {"label": run_label, "found": [], "removed": [], "fault": None}
+    try:
+        program = shutil.which("docker", path=os.environ.get("PATH"))
+        if program is None:
+            raise ContainerFault("no_container_tool")
+        env = {name: os.environ[name] for name in (*PASSED_THROUGH, *CONTAINER_NAMES) if name in os.environ}
+        listed = _container_tool([program, "ps", "--all", "--quiet", "--no-trunc", "--filter", f"label={run_label}"], env)
+        found = [line.strip() for line in listed.splitlines() if line.strip()]
+        if not all(CONTAINER_ID_RE.fullmatch(name) for name in found):
+            raise ContainerFault("container_listing")
+        record["found"] = found
+        if found:
+            _container_tool([program, "rm", "--force", *found], env)
+            record["removed"] = found
+    except ContainerFault as exc:
+        record["fault"] = exc.reason
+    except Exception as exc:  # noqa: BLE001 - recorded as a fixed word, and the run goes on as it was
+        record["fault"] = f"internal_{type(exc).__name__}"
+    finally:
+        _write_private(answer / "containers.json", json.dumps(record, indent=2) + "\n")
 
 
 # The pages that were read do not say how a used-up quota shows; these words are a guess.
@@ -1072,6 +1160,13 @@ def first_line(kind: str) -> str:
     return f"{FIRST_LINE_PREFIX} ({LOOKS[kind]} by Google's Gemini through the Antigravity CLI, started by a script of the project)."
 
 
+# The comment for a response without a public part: the project's own words, and nothing of the response.
+NOTHING_TO_POST = (
+    "This run gave nothing that can be posted: its answer had no public part in the form the job reads, so "
+    "nothing of it is used. Putting the mark on this item again starts another run."
+)
+
+
 # --- Private files and telling the coordinator ----------------------------------------------------------
 
 
@@ -1150,7 +1245,7 @@ def run_job(
 ) -> dict[str, object]:
     """Run one job and return its result: fixed words, numbers and the private answer's path only."""
     result: dict[str, object] = {
-        "kind": kind, "number": number, "status": "error", "verdict": "changes-needed",
+        "kind": kind, "number": number, "status": "error", "verdict": "none",
         "reasons": [], "private": None, "ran": False,
     }
     refusal = inside_agent_reasons()
@@ -1204,8 +1299,10 @@ def _job(
         result.update(status="not_eligible", reasons=[reason])
         return
     comments = gh_pages(f"repos/{settings.repo}/issues/{number}/comments", settings.max_comment_pages)
+    # The run's own label: the attack template asks for it on every container the run starts.
+    run_label = new_run_label()
     if kind == "discuss":
-        draft = build_prompt(settings, kind, item, comments, "0" * 40)
+        draft = build_prompt(settings, kind, item, comments, "0" * 40, run_label)
         if draft == "no_question":
             result.update(status="no_question", reasons=["no_question"])
             return
@@ -1215,7 +1312,7 @@ def _job(
             raise JobError("work_folder")
         env = signed_out_environment(work)
         repo, head = make_checkout(settings, item, work, env)
-        prompt = build_prompt(settings, kind, item, comments, head)
+        prompt = build_prompt(settings, kind, item, comments, head, run_label)
         if isinstance(prompt, str):
             result.update(status="no_question" if prompt == "no_question" else "error", reasons=[prompt])
             return
@@ -1232,7 +1329,12 @@ def _job(
             save_job_state(private, state)
             result["ran"] = True
 
-        run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run)
+        try:
+            run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run)
+        finally:
+            # However the run ended (an answer, its time up, an error, a signal), its containers go.
+            if kind == "attack" and result["ran"]:
+                remove_run_containers(run_label, answer)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     status, reasons, response = interpret(run, settings.max_answer_bytes)
@@ -1252,27 +1354,51 @@ def _job(
         return
     _write_private(answer / "answer.md", response)
     public, _private_part = split_answer(response)
+    if public is None:
+        # Nothing of the response is used, and there is no verdict: one fixed comment in the project's own words.
+        comment = f"{first_line(kind)}\n\n{NOTHING_TO_POST}\n"
+        _write_private(answer / "public.md", comment)
+        held = hold_reasons(comment, settings, private)
+        if held:
+            result.update(status="no_public_part", reasons=["no_public_part", *held])
+        elif post_as_project(settings, number, comment):
+            result.update(status="no_public_part", reasons=["no_public_part"])
+        else:
+            result.update(status="settings", reasons=["account"])
+        return
     verdict, verdict_reasons = verdict_of(public)
     result["verdict"] = verdict
-    if public is None:
-        result.update(status="held", reasons=["no_public_part"])
-        return
     public = normalize(public)
     comment = f"{first_line(kind)}\n\n{public}\n"
     _write_private(answer / "public.md", comment)
     if len(public) > settings.max_public_chars:
         result.update(status="held", reasons=["too_long", *verdict_reasons])
         return
+    held = hold_reasons(comment, settings, private)
+    if held:
+        result.update(status="held", reasons=[*held, *verdict_reasons])
+        return
+    if not post_as_project(settings, number, comment):
+        result.update(status="settings", reasons=["account"])
+        return
+    result.update(status="posted", reasons=verdict_reasons)
+
+
+def hold_reasons(comment: str, settings: Settings, private: Path) -> list[str]:
+    """Why a comment may not be posted: no list of names, or what the scan found; empty when it may."""
     names = read_names(private)
     if names is None:
-        result.update(status="held", reasons=["no_names_list", *verdict_reasons])
-        return
-    found = scan(comment, names, settings, known_values(private))
-    if found:
-        result.update(status="held", reasons=[*found, *verdict_reasons])
-        return
+        return ["no_names_list"]
+    return scan(comment, names, settings, known_values(private))
+
+
+def post_as_project(settings: Settings, number: int, comment: str) -> bool:
+    """Post the comment after confirming once more that the signed-in account is the project's; False, and
+    nothing posted, when it is another one."""
+    if user_id(gh("GET", "user")) != settings.project_account_id:
+        return False
     gh("POST", f"repos/{settings.repo}/issues/{number}/comments", {"body": comment})
-    result.update(status="posted", reasons=verdict_reasons)
+    return True
 
 
 # --- The command --------------------------------------------------------------------------------------
@@ -1302,7 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
     install_signal_handlers()
     args = parse_args(argv)
     result: dict[str, object] = {
-        "kind": args.kind, "number": args.number, "status": "error", "verdict": "changes-needed",
+        "kind": args.kind, "number": args.number, "status": "error", "verdict": "none",
         "reasons": [], "private": None, "ran": False,
     }
     refusal = inside_agent_reasons()

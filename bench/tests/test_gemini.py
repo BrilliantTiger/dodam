@@ -1084,7 +1084,10 @@ def test_no_text_of_another_account_reaches_the_prompt(world: World):
     [record] = world.agy_runs()
     prompt = prompt_of(record)
     template = (TEMPLATES / "verify.md").read_text(encoding="utf-8") if (TEMPLATES / "verify.md").is_file() else "\0"
-    assert prompt.startswith(template.strip()), "the prompt does not begin with the fixed template"
+    # The template's values (the run's time) are filled in on one line each; everything else is as it is.
+    pieces = re.split(r"\{\{[a-z_]+\}\}", template.strip())
+    fixed = "[^\n]+?".join(re.escape(piece) for piece in pieces)
+    assert re.match(fixed, prompt), "the prompt does not begin with the fixed template"
     for wanted in ("CRITERION-ONE", "PROJECT-NOTE-1", "PROJECT-NOTE-2", "PROJECT-NOTE-3", "PROJECT-NOTE-4",
                    "PROJECT-NOTE-5", "PROJECT-NOTE-6", "PROJECT-NOTE-7", "PROJECT-NOTE-8", "PROJECT-NOTE-9",
                    "PROJECT-NOTE-10", "PROJECT-NOTE-11", "PROJECT-NOTE-12", "PROJECT-NOTE-13", "PROJECT-NOTE-14",
