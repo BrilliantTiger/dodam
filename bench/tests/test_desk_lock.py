@@ -2289,7 +2289,7 @@ class Day:
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
         if how < 0.08:
             self.reach["a session that ended without a result after it responded"] += 1
-            return {"counts": [rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
+            return {"counts": [1 + rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
         if self.cheap:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
@@ -5047,7 +5047,8 @@ def verdict(place, files, **pull) -> dict:
     text = place.desk().read_item({"number": 8})
     got = json.loads(text)
     for one in files if isinstance(files, list) else []:
-        assert str(one.get("filename")) not in text or one.get("filename") in ("bench/tests/", ".github/")
+        # The names of the protected folders and files are fixed words of the tool, not names from outside.
+        assert str(one.get("filename")) not in text or one.get("filename") in ("bench/tests/", ".github/", *module("pr_files").PROTECTED_FOLDERS)
     assert "pull_request_files" in got, "the reading tool gives no verdict on a pull request's files yet"
     return got["pull_request_files"]
 

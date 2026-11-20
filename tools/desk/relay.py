@@ -874,7 +874,8 @@ class Relay:
             if sum(total) > sum(seen["counts"] or [0]):
                 seen["counts"] = total
             # Claude Code's own report of an error, not anything the model wrote.
-            if result.get("is_error") is True and not sum(seen["counts"] or [0]) and SIGN_IN_REFUSED.search(str(result.get("result", "")) + " ".join(said)):
+            seen["error"] = result.get("is_error") is True
+            if seen["error"] and not sum(seen["counts"] or [0]) and SIGN_IN_REFUSED.search(str(result.get("result", "")) + " ".join(said)):
                 seen["refused_sign_in"] = True
         elif seen["ended_by"] is None:
             seen["ended_by"] = WITHOUT_A_RESULT
@@ -928,10 +929,12 @@ class Relay:
             # The desk is being stopped in the middle of a session: the arrival stays kept, and nobody waits for it.
             self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             return False
-        if seen["ended_by"] == WITHOUT_A_RESULT and not seen["turns"]:
-            # Claude Code ended without one response: the desk itself is not working, as when the service refuses its
-            # sign-in. What it may have spent is not known, so the day is charged everything that was set aside, and no
-            # account and no item: it counts against nobody's share. The arrival stays kept.
+        responded = bool(counts) and sum(counts) > 0
+        if not responded and (seen["ended_by"] == WITHOUT_A_RESULT or seen.get("error")):
+            # Claude Code ended before the service counted any response, without a result or with its own report of an
+            # error (the service overloaded, a limit of use reached): the desk itself is not working, as when the service
+            # refuses its sign-in. What it may have spent is not known, so the day is charged everything that was set
+            # aside, and no account and no item: it counts against nobody's share. The arrival stays kept.
             entry["let_in"] = False
             self.end(entry, places, False, None, entry["reserved"])
             return self.failed("a session ended without any response", "A session of the desk ended without any response.")

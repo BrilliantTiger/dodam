@@ -120,6 +120,8 @@ JOINED_KOREAN = {
     "ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅏㅣ", "ㅚ": "ㅗㅣ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅓㅣ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ",
 }  # fmt: skip
 KOREAN_FORMS = ("HANGUL CHOSEONG ", "HANGUL JUNGSEONG ", "HANGUL JONGSEONG ", "HANGUL LETTER ", "HALFWIDTH HANGUL LETTER ")
+# Katakana and hiragana write the same sounds: a name in one is the same name in the other.
+KATAKANA_AS_HIRAGANA = {code: code - 0x60 for code in range(0x30A1, 0x30F7)} | {0x30FD: 0x309D, 0x30FE: 0x309E}
 
 
 def looks_like_a_secret(value: str) -> bool:
@@ -154,8 +156,10 @@ WORD_WITH_PATH = re.compile(r"[^\s`'\"()<>\[\],;]+")
 # about a web task or a container needs. Addresses that mean "this machine" on every machine (localhost,
 # 127.0.0.1, ::1, 0.0.0.0) say nothing about this computer and are not refused.
 PRIVATE_PLACES = (
-    # Every folder for temporary files of the system is one: /tmp, /var/tmp, /private/tmp, /var/folders, /dev/shm.
-    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+(?:users|home|root|var/+(?:root|tmp|folders)|private|volumes|tmp|etc|opt|library|dev/+shm)/+[^\s/]")),
+    # Every folder for temporary files of the system is one: /tmp, /var/tmp, /private/tmp, /var/folders, /dev/shm, /run/user.
+    # Spaces may stand round the slashes; other ways of writing the same folder are made plain first (see as_a_path).
+    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
+                                                r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")),
     # A drive of Windows, with either slash.
     ("a path outside the repository", re.compile(r"(?i)\b[a-z]:[\\/]")),
     ("a path outside the repository", re.compile(r"(?<![\w.])~/+[^\s/]")),
@@ -260,7 +264,7 @@ def _korean_letters(character: str) -> str:
 
 def _folded(text: str) -> str:
     """One case, one alphabet, no accents, every form of a Korean letter one; the separators are still there."""
-    folded = unicodedata.normalize("NFKC", text).casefold().translate(LOOK_ALIKE)
+    folded = unicodedata.normalize("NFKC", text).casefold().translate(LOOK_ALIKE).translate(KATAKANA_AS_HIRAGANA)
     return "".join(_korean_letters(character) for character in unicodedata.normalize("NFKD", folded) if unicodedata.category(character) != "Mn")
 
 
@@ -311,10 +315,14 @@ def holds(spelled: Spelled, value: str) -> bool:
     long = len(value) >= SHORTEST_REDUCED
     # A value in another alphabet than the Latin one is refused wherever it stands, at any length.
     anywhere = long or not value.isascii()
+    latin = value.isascii()
     start = letters.find(value)
     while start != -1:
         end = start + len(value)
-        whole = gaps[start] > 0 and (end == len(letters) or gaps[end] > 0)
+        # A word in Latin letters also begins and ends where a letter of another alphabet stands next to it: a Korean
+        # ending or a Japanese word attached to it.
+        whole = (gaps[start] > 0 or latin and not letters[start - 1].isascii()) and (
+            end == len(letters) or gaps[end] > 0 or latin and not letters[end].isascii())
         close = wide[end] == wide[start + 1]
         if (whole and close) or (anywhere and close) or (long and whole):
             return True
@@ -357,11 +365,23 @@ def _is_path_of_the_copy(word: str, copy: Path | None) -> bool:
         return False
 
 
+def as_a_path(text: str) -> str:
+    """The text with other ways of writing a path that the computer accepts made plain: backslashes as slashes, the data
+    volume of macOS left out, a part that is a dot left out, and a part followed by two dots left out with them."""
+    text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
+    before = None
+    while before != text:
+        before = text
+        text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*[^/\s.][^/\s]*[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+    return text
+
+
 def shapes(text: str, copy: Path | None = None) -> list[str]:
     plain = unicodedata.normalize("NFKC", text)
     found: list[str] = []
     for kind, shape in (*SECRET_SHAPES, *PRIVATE_PLACES):
-        if shape.search(plain) and kind not in found:
+        if (shape.search(plain) or kind.startswith("a path") and shape.search(as_a_path(plain))) and kind not in found:
             found.append(kind)
     if any(looks_like_a_secret(value) for value in LABELLED.findall(plain)):
         found.append("a password or key after its label")

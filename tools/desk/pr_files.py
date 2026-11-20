@@ -52,7 +52,9 @@ EXIT_REFUSED = 2
 
 # What an outside pull request must not change, as the project's rules name it: the measuring tools, the existing
 # benchmark tasks, the security tests and the approval locks; and with them the desk's own tools and its closed list,
-# the Gemini job, the measuring harness, the security experiments, the recorded measurements and the workflows.
+# the Gemini job, the measuring harness, the security experiments, the recorded measurements, the workflows, and the
+# check that the introduction page asks before it measures (a promise that only the owner may change) with the
+# packages that check runs with.
 # "bench/" stands for everything else in the benchmark's folder, such as its settings for the test runner, which
 # decide which tests run. New tests directly in bench/tests/ and new task folders in bench/tasks/ are welcome.
 PROTECTED_FOLDERS: tuple[str, ...] = (
@@ -66,6 +68,8 @@ PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/records/",
     "tools/desk/",
     "tools/gemini/",
+    "tools/site/sweep.py",
+    "tools/site/requirements.txt",
     "bench/",
 )
 ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
@@ -77,6 +81,8 @@ ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
     "bench/records/",
     "tools/desk/",
     "tools/gemini/",
+    "tools/site/sweep.py",
+    "tools/site/requirements.txt",
 )
 # The folder of the benchmark as a whole, for what lies in it outside every folder named above.
 REST_OF_BENCH = "bench/"
