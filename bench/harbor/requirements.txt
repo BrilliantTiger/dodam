@@ -1,10 +1,13 @@
-# Harbor 0.25.0 and everything it needs, pinned with hashes, at the versions of the pilot's own install.
+# Harbor 0.25.0 and everything it needs, pinned with hashes. Every version is the one of the pilot's own install,
+# except two: filelock 4.2.1, the first release outside every published advisory on filelock, and litellm 1.108.3,
+# the first release of litellm that accepts filelock 4.
 # CI installs it into a fresh virtual environment and applies Dodam's patch:
 #   python -m venv .harbor-venv
 #   .harbor-venv/bin/python -m pip install --require-hashes --only-binary=:all: -r harbor/requirements.txt
 #   python -m dodambench.harbor_patch apply
-# Made with `uv pip compile --generate-hashes --universal --only-binary :all:` from `harbor==0.25.0`,
-# constrained to the versions installed in that install.
+# The pilot's check refuses an install in which a package listed here has another version.
+# Made with `uv pip compile --generate-hashes --universal --only-binary :all: --no-annotate` from `harbor==0.25.0`,
+# constrained to the versions of that install with filelock==4.2.1 and litellm==1.108.3.
 aiohappyeyeballs==2.7.1 \
     --hash=sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d \
     --hash=sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472
@@ -622,9 +625,9 @@ fastuuid==0.14.0 \
     --hash=sha256:ec27778c6ca3393ef662e2762dba8af13f4ec1aaa32d08d77f71f2a70ae9feb8 \
     --hash=sha256:f54d5b36c56a2d5e1a31e73b950b28a0d83eb0c37b91d10408875a5a29494bad \
     --hash=sha256:f74631b8322d2780ebcf2d2d75d58045c3e9378625ec51865fe0b5620800c39d
-filelock==3.32.7 \
-    --hash=sha256:37b8a3d9811b0f9aef7e5ec5c71bb320de52df51e6ca9bcd6f5ad81187660da7 \
-    --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+filelock==4.2.1 \
+    --hash=sha256:7be2662e9e826b9bba28afc0f843a123280d799a2ea44bb5d35ccec67905ae44 \
+    --hash=sha256:c4c937ccac2a813cee448e662a56366cfb374c0f8702e75f295c412cc1c5d5a3
 frozenlist==1.8.0 \
     --hash=sha256:0325024fe97f94c41c08872db482cf8ac4800d80e79222c6b0b7b162d5b13686 \
     --hash=sha256:032efa2674356903cd0261c4317a561a6850f3ac864a63fc1583147fb05a79b0 \
@@ -948,15 +951,15 @@ jsonschema==4.26.0 \
 jsonschema-specifications==2025.9.1 \
     --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe \
     --hash=sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d
-litellm==1.108.0 \
-    --hash=sha256:1ca5da602631ca4e149e2aba01a5d87e59fda8ce6c66bb5622c06f7ba34f6fb6 \
-    --hash=sha256:3af9eccea1486a89c4f5c2216f728024114d6ae76b2efe9071f740b007e18706 \
-    --hash=sha256:49ecd810e6ab7d149f3174e0d45e333ae3765acbd12862b49a034b4e6ea533ba \
-    --hash=sha256:531b2088cd9b0e95518b450ed8fd7fac4cdd81529af7930a0b5180e67d2b0c04 \
-    --hash=sha256:63602ea1243b22775af8484b8ef2a7da73b6b275491ac943377cb2bee9d5af1c \
-    --hash=sha256:960c78e6fe047d90f105d687475831d9b93726129c9411a8eced77757a488733 \
-    --hash=sha256:9a101e628c14f277eee1f1083415c6578214d7944275e185e12173bcf01a32d2 \
-    --hash=sha256:d26bffd9c5562589873431e0dbcbb2f64b84d7d3f3a2cba049b6a3a186379fbf
+litellm==1.108.3 \
+    --hash=sha256:46a78bfe948a25cd678acc8a1ed442775688e2b60bda6ac2166ae5b48b747d08 \
+    --hash=sha256:4ac55c4a80be5b131659b1f42487de96fed69c6717745953c74fede1d6a5113c \
+    --hash=sha256:8267641fce3803bb7a56bd6ff046d4919bbd079c96c9d9c1c4c43fdf96d5244c \
+    --hash=sha256:9955cc7a29b3060bb791a90cefb6d10df2f0cf63ea720c9d3a26bc8d253eae43 \
+    --hash=sha256:b6ce7a78efbaff7214e731ba0769b156e05b150d05184def61913ee9ff0befb3 \
+    --hash=sha256:e74f7a0df27ac03eb2280e23c5a72a52a0d64260a96b0da3f95be60ae872469b \
+    --hash=sha256:efdd0d6c57c9814673ee9c491c428945fd58ffb84842557759d2209403dc033e \
+    --hash=sha256:ffd746c20138a078c451a851a68c85da43d67e114001e4a4cd4082953de5494d
 markdown-it-py==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
