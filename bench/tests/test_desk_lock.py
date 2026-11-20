@@ -6910,8 +6910,6 @@ def test_the_notice_for_an_items_sessions_of_a_day_is_sent_inside_the_start_and_
     for phrase in (
         "Inside its own steps the relay sends one message itself, and only at a start: the notice that the day's sessions, the day's "
         "units or one item's sessions of a day are used up, at most one in a start.",
-        "Each limit is noticed once in a day, and a day holds at most 8 notices that a limit was reached, one for each limit, so at most "
-        "three starts in a day send one.",
         "The line that a start or an end writes for a closed item would bring a notice only if the reports kept in a day were full, which "
         "the sessions of a day cannot do.",
     ):
@@ -7041,16 +7039,15 @@ def test_a_stop_in_a_session_that_had_to_be_ended_costs_its_payer_and_loses_its_
         assert kept(place) == [] and again.start_one() is False
         again.take(arrivals(event(50, payer, "again")))
         assert again.start_one() is True and ran_again == ["50"]
-    # The stopped session is charged everything that was set aside, and counts as one that ended by itself: nobody waits
-    # after it, and it is no step toward closing the item.
+    # The stopped session is charged everything that was set aside and nobody waits after it; the item's count toward
+    # closing stays as it was, here at nothing (a count of one is played by a test of its own).
     assert seen == {"stopped": [(True, False, [])], "in a row": {}, "held back": []}
     said = said_in_lock_md()
     phrase = {
         True: "A stop after a session did its work and before its end step leaves what it handled kept, so that a fresh session handles it "
-        "again after the start; the session then counts as one that ended by itself, so nobody waits after it and it is no step toward "
-        "closing its item, also when the digest already says that the relay ended it.",
-        False: "A stop between taking the handled places out of the list and writing the cost hands nothing out again; a session that the "
-        "relay had to end then counts as one that ended by itself, and its waits and its step toward closing its item are lost.",
+        "again after the start; nobody waits after the stopped session, also when the digest already says that the relay ended it.",
+        False: "A stop between taking the handled places out of the list and writing the cost hands nothing out again, and nobody waits after "
+        "that session either, so a session that the relay had to end loses its waits.",
     }[after_its_work]
     assert phrase in said, phrase
     assert "what the session was handling was not handled" not in said
@@ -7126,3 +7123,210 @@ def test_the_cost_of_a_session_the_desk_was_stopped_in_is_written_at_the_next_st
     # A day on, it counts for nothing: neither among the day's sessions nor in its payer's share.
     clock_again[0] += 86_400 + 1
     assert again.closed_items() == set() and counted(place)["sessions"] == [] and again.held_back() == []
+
+
+# --- A notice that could not be delivered; what a stop leaves of an item's count toward closing -------------------------
+
+
+def a_coordinator(monkeypatch) -> dict:
+    """The coordinator as the test plays it: it takes messages or does not, and every try to send one is written down."""
+    way = {"takes": True, "tried": []}
+    for loaded in {id(m): m for m in (module("tools"), module("relay").tools)}.values():
+
+        def message(backend, subject, body, receiver, loaded=loaded, send=loaded.StandIn.message):
+            way["tried"].append(body)
+            if not way["takes"]:
+                raise loaded.Refused("The message could not be sent to the coordinator.")
+            send(backend, subject, body, receiver)
+
+        monkeypatch.setattr(loaded.StandIn, "message", message)
+    return way
+
+
+NOT_DELIVERED = "- the notice that a limit was reached could not be delivered: "
+
+
+@pytest.mark.parametrize("limit", INSIDE_A_START)
+def test_a_notice_of_a_bound_that_could_not_be_delivered_is_tried_once_in_twenty_starts_and_named_in_the_next_digest(place, monkeypatch, limit):
+    B = 1_280_000_000
+    spending = lock_file()["spending"]
+    running, clock, ran = in_process(place, monkeypatch)
+    # The bound is used up by sessions of the last hour, each paid by another account.
+    done = {
+        "sessions in a day": [(100 + n, 10) for n in range(spending["sessions_per_day"])],
+        "what a day may cost": [(100 + n, 200_000) for n in range(3)],
+        "sessions for one item in a day": [(7, 10)] * spending["sessions_per_item_per_day"],
+    }[limit]
+    record = module("tools").empty_record()
+    record["sessions"] = [{"t": clock[0] - 3600, "id": n + 1, "number": number, "account": B + n, "accounts": [B + n], "ended": False,
+                           "waits": [], "let_in": True, "reserved": module("relay").reservation(spending), "charged": charged, "counts": None}
+                          for n, (number, charged) in enumerate(done)]  # fmt: skip
+    (place.state / "desk-counts.json").write_text(json.dumps(record))
+    (place.state / "desk-counts.json").chmod(0o600)
+    coordinator = a_coordinator(monkeypatch)
+    coordinator["takes"] = False
+    running.take(arrivals(event(7, B + 900, "waits")))
+    for _ in range(20):
+        assert running.start_one() is False
+        clock[0] += 60
+    # Twenty starts met the bound while the coordinator took nothing: its notice was tried once, not twenty times.
+    tries = [body for body in coordinator["tried"] if "Kind: limit_reached" in body]
+    assert len(tries) == 1 and f"Limit: {limit}" in tries[0], tries
+    assert ran == [] and [(e["number"], e["account"]) for e in kept(place)] == [(7, B + 900)]
+    # The coordinator takes messages again. The notice is not tried again that day; the next digest names it, and no later message does.
+    coordinator["takes"] = True
+    for _ in range(3):
+        assert running.start_one() is False
+        clock[0] += 60
+    assert running.desk.digest(force=True)
+    for _ in range(3):
+        clock[0] += 3600
+        assert running.start_one() is False
+        running.desk.digest()
+    assert len([body for body in coordinator["tried"] if "Kind: limit_reached" in body]) == 1
+    naming = [body for body in notices(place, "digest") if NOT_DELIVERED + limit in body.split("\n")]
+    assert len(naming) == 1 and naming[0] == notices(place, "digest")[0]
+    said = said_in_lock_md()
+    for phrase in (
+        "Each limit is noticed once in a day: its notice is tried once and written down as tried whether it was delivered or not, so no "
+        "start tries the same notice again, and one that could not be delivered is named in the next digest.",
+        "A day holds at most 8 tries of a notice that a limit was reached, one for each limit, so at most three starts in a day send one.",
+    ):
+        assert phrase in said, phrase
+
+
+def test_a_notice_of_the_tools_that_could_not_be_delivered_is_tried_once_and_named_in_the_next_digest(place, monkeypatch):
+    place.facts.write_text(FACTS.replace("answers_per_day = 30", "answers_per_day = 2"), encoding="utf-8")
+    coordinator = a_coordinator(monkeypatch)
+    for n in range(2):
+        place.put(500 + n, item(author=f"account-{n}"))
+        place.desk().answer(ANSWER | {"number": 500 + n, "text": "An answer."})
+    coordinator["takes"] = False
+    for n in range(20):
+        place.put(600 + n, item(author=f"late-{n}"))
+        refused(place.desk(), "answer", number=600 + n, text="Too late today.")
+    tries = [body for body in coordinator["tried"] if "Kind: limit_reached" in body]
+    assert len(tries) == 1 and "Limit: answers in a day" in tries[0], tries
+    coordinator["takes"] = True
+    refused(place.desk(), "answer", number=600, text="Still too late.")
+    assert place.desk().digest(force=True)
+    assert NOT_DELIVERED + "answers in a day" in notices(place, "digest")[-1].split("\n")
+    assert len([body for body in coordinator["tried"] if "Kind: limit_reached" in body]) == 1
+
+
+def test_lock_md_says_what_is_counted_and_what_is_tried_again_when_a_sending_fails():
+    said = said_in_lock_md()
+    for phrase in (
+        "How many sendings a day delivers follows from the limits: the day's answers, 100 labels and 48 messages to the coordinator.",
+        "These count what was delivered, and a sending that failed is not counted: an answer or a label that GitHub did not take can be "
+        "tried again by its session, each try one of the session's 30 tool calls; a digest that could not be delivered is tried again at "
+        "the relay's next look at the digest's time, which it makes every minute or so; a vulnerability report or the relay's report that "
+        "the desk is not working that could not be delivered at once waits for the next digest.",
+        "Each such try is given its 60 seconds under the record's lock, as the first was.",
+    ):
+        assert phrase in said, phrase
+    assert "How many sendings a day holds follows from the limits" not in said
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["ended by itself", "had to be ended"])
+@pytest.mark.parametrize("when", ["after the session did its work, before its end step", "between taking out the handled places and writing the cost"])
+def test_a_stop_leaves_the_items_count_toward_closing_as_it_was_also_from_a_count_of_one(place, monkeypatch, when, ended):
+    G = 1_300_000_000
+    running, clock, ran = in_process(place, monkeypatch)
+    place.put(60, written(G + 13, body="Ends every session."))
+    # One session on item 60 had to be ended and was shown its text: the item's count toward closing stands at one.
+    running.run_session = reading(place, ENDED)
+    running.take(arrivals(event(60, G + 13, "opened")))
+    assert running.start_one() is True and counted(place)["ended_in_a_row"] == {"60": 1}
+    clock[0] += 86_400 + 1
+    # The next session on it ends by itself, or has to be ended; the desk is stopped before its cost is written.
+    running.run_session = reading(place, ENDED if ended else None)
+    running.take(arrivals(event(60, G + 14, "asked")))
+    after_its_work = when.startswith("after")
+    stop_at(running, "end: before the first step" if after_its_work else "end: the handled places are out of the list")
+    with pytest.raises(Stopped):
+        running.start_one()
+    again, clock_again, ran_again = in_process(place, monkeypatch, start_at=clock[0] + 60)
+    again.run_session = reading(place, ENDED)
+    if not after_its_work:
+        assert kept(place) == [] and again.start_one() is False
+        again.take(arrivals(event(60, G + 14, "again")))
+    # The count stands where it stood before the stopped session: it is neither a step toward closing nor begun anew.
+    assert counted(place)["ended_in_a_row"] == {"60": 1} and again.closed_items() == set()
+    # So the next session that has to be ended and is shown the item's text closes it.
+    assert again.start_one() is True and again.closed_items() == {60}
+    said = said_in_lock_md()
+    for phrase in (
+        "A stop after a session did its work and before its end step leaves what it handled kept, so that a fresh session handles it "
+        "again after the start; nobody waits after the stopped session, also when the digest already says that the relay ended it.",
+        "A stop between taking the handled places out of the list and writing the cost hands nothing out again, and nobody waits after "
+        "that session either, so a session that the relay had to end loses its waits.",
+        "After either stop the item's count toward closing stays as it was: the stopped session is neither a step toward closing nor a new "
+        "beginning of the count, whether it ended by itself or had to be ended.",
+        "A session that was not ended begins the count anew; one whose cost a stop left unwritten leaves it as it was.",
+    ):
+        assert phrase in said, phrase
+    assert "counts as one that ended by itself" not in said
+
+
+def test_a_stop_that_lasts_until_a_closed_item_opens_again_after_its_arrivals_were_counted_names_them_as_gone_and_handles_them(place, monkeypatch):
+    G = 1_310_000_000
+    days = lock_file()["spending"]["item_closed_days"]
+    running, clock = an_item_that_closes_with_two_other_writers_kept_on_it(place, monkeypatch, G)
+    stop_at(running, "end: what is kept on a closed item is counted")
+    with pytest.raises(Stopped):
+        running.start_one()
+    # Counted and named, and still kept.
+    assert sorted(e["account"] - G for e in kept(place)) == [701, 702]
+    again, clock_again, ran_again = in_process(place, monkeypatch, start_at=clock[0] + days * 86_400 + 60)
+    handled = []
+
+    def session(text, env):
+        handled.append((env["DESK_ITEM"], sorted(a - G for a in json.loads(env["DESK_ACCOUNTS"]))))
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    again.run_session = session
+    # The item opened again: what was still kept on it is handled like any other arrival.
+    assert again.closed_items() == set() and again.start_one() is True and handled == [("50", [701, 702])] and kept(place) == []
+    # And the next digest names those arrivals as gone, with the item's line.
+    assert again.desk.digest(force=True)
+    digest = notices(place, "digest")[-1]
+    assert f"- not handled (arrivals dropped): account {G + 701}: 1 (on item 50), account {G + 702}: 2 (on item 50)" in digest
+    assert [line for line in digest.split("\n") if line.startswith("- item_closed, item 50: ")]
+    phrase = ("When that stop came after they were counted and before they were taken out, the next digest names them as gone, with the "
+              "item's line, although they are then handled.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
+
+
+@pytest.mark.parametrize("share", ["the closed list's", "one that the set-aside of one session reaches"])
+def test_after_a_stop_of_more_than_a_day_the_first_sessions_tools_are_told_who_is_held_back_by_the_look_that_counts_the_stopped_session(
+    place, monkeypatch, share
+):
+    G = 1_320_000_000
+    spending = lock_file()["spending"]
+    running, clock, ran = in_process(place, monkeypatch)
+    payer, other = G + 1, G + 2
+    running.take(arrivals(event(7, payer, "asked")))
+    stop_at(running, "end: the handled places are out of the list")
+    with pytest.raises(Stopped):
+        running.start_one()
+    again, clock_again, ran_again = in_process(place, monkeypatch, start_at=clock[0] + 86_400 + 60)
+    if share != "the closed list's":
+        again.spending["units_per_account_per_day"] = module("relay").reservation(spending)
+    seen = {}
+
+    def session(text, env):
+        seen["told"], seen["placing"] = json.loads(env["DESK_HELD_BACK"]), again.held_back()
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    again.run_session = session
+    again.take(arrivals(event(7, other, "asked too")))
+    assert again.start_one() is True
+    # The tools are told from the look that counts the stopped session; a placing during the session no longer counts it.
+    assert seen == {"told": [] if share == "the closed list's" else [payer], "placing": []}
+    # By the closed list's numbers one session alone holds no account back.
+    assert spending["sessions_per_account_per_day"] > 1 and spending["units_per_account_per_day"] > module("relay").reservation(spending)
+    phrase = ("The tools of that first session are told who is held back from the same look, so for the length of that session they hold "
+              "the stopped session's payer back when that count does, while placings during it no longer count the stopped session; by "
+              "the closed list's numbers one session alone holds no account back, so the two agree.")  # fmt: skip
+    assert phrase in said_in_lock_md(), phrase
