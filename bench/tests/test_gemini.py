@@ -282,6 +282,10 @@ if answer.get("containers"):
         held.append({"id": "%064x" % (0xC0FFEE000 + len(held)), "labels": labels})
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(held, handle)
+if answer.get("block_record"):
+    answers = os.path.join(BASE, "private", "answers")
+    for name in os.listdir(answers):
+        os.mkdir(os.path.join(answers, name, "containers.json"))
 with open(os.path.join(DATA, "runs.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 limit = None
@@ -310,9 +314,10 @@ sys.stdout.write('{"ok": true}\n')
 '''
 
 # The container tool: it lists the made-up containers whose label matches a filter, and removes the ones it is
-# named. With a file named "fail" beside its records it fails, as a tool whose daemon cannot be reached does.
+# named. With a file named "fail" beside its records it fails, as a tool whose daemon cannot be reached does; with
+# "hang" it does not answer; with "odd" its listing holds a line that is not a container's id.
 DOCKER_STANDIN = r'''
-import json, os, sys
+import json, os, sys, time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(BASE, "docker")
@@ -324,8 +329,12 @@ held = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
 if os.path.exists(os.path.join(DATA, "fail")):
     sys.stderr.write("Cannot connect to the Docker daemon. Is the docker daemon running?\n")
     sys.exit(1)
+if os.path.exists(os.path.join(DATA, "hang")):
+    time.sleep(120)
 if args[:1] == ["ps"] and "--filter" in args:
     key, _, value = args[args.index("--filter") + 1].removeprefix("label=").partition("=")
+    if os.path.exists(os.path.join(DATA, "odd")):
+        sys.stdout.write("a-container-name\n")
     sys.stdout.write("".join(c["id"] + "\n" for c in held if c["labels"].get(key) == value))
 elif args[:2] == ["rm", "--force"]:
     named = set(args[2:])
@@ -446,6 +455,7 @@ def settings_text(source: Source, **overrides: object) -> str:
         "max_answer_bytes": 2_000_000,
         "max_comment_pages": 10,
         "max_quota_returns": 3,
+        "container_seconds": 60,
         "discussion_first_line": QUESTION_LINE,
         "model": "gemini-test-model",
         "work_item_prefixes": ["DOD"],
@@ -501,10 +511,10 @@ class World:
         self.settings.write_text(settings_text(self.source, **overrides), encoding="utf-8")
 
     def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False,
-               containers: int = 0) -> None:
+               containers: int = 0, block_record: bool = False) -> None:
         (self.agy_dir / "answer.json").write_text(
             json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep, "child": child,
-                        "containers": containers}),
+                        "containers": containers, "block_record": block_record}),
             encoding="utf-8",
         )
 
@@ -761,6 +771,7 @@ def test_inside_claude_code_or_an_orca_terminal_the_job_starts_nothing(world: Wo
     run = world.run_job("verify", 7, extra_env={mark: value})
     result = result_of(run)
     assert result.get("status") == "refused", f"the job did not refuse with {mark} set: {run}"
+    assert result.get("verdict") == "none", "a job that never ran gave a verdict"
     assert mark in result.get("reasons", []), "the refusal does not name the mark it found"
     assert world.agy_runs() == [], "agy was started inside a coding agent"
     assert world.gh_calls() == [], "the job asked GitHub before refusing"
@@ -965,10 +976,13 @@ def test_the_watcher_confirms_the_signed_in_account_in_every_round(world: World)
     assert sum("labels=" in request for request in asked) == len(KINDS), asked
 
 
+@pytest.mark.parametrize("answer", ["with a public part", "without a public part"])
 @pytest.mark.parametrize("program", ["job", "watcher"])
-def test_the_account_is_confirmed_again_right_before_the_job_posts(world: World, program: str):
+def test_the_account_is_confirmed_again_right_before_the_job_posts(world: World, program: str, answer: str):
     today = time.strftime("%Y-%m-%d", time.gmtime())
     event = world.label(world.pull(7), "verify")
+    if answer == "without a public part":
+        world.answer(envelope("Only free text, with no parts.\nVerdict: approve\n"))
     # The account turns into another one while agy runs, after the last confirmation before it.
     if program == "job":
         world.state_extra["users"] = [PROJECT, OUTSIDER_B]
@@ -1845,6 +1859,7 @@ DAMAGED_JOB_STATES = {
     "a wait that is a word": '{"version": 1, "days": {}, "hold_until": "soon"}',
     "a wait that is not a number": '{"version": 1, "days": {}, "hold_until": NaN}',
     "a version that is true": '{"version": true, "days": {}, "hold_until": 0}',
+    "a version that is not a whole number": '{"version": 1.0, "days": {}, "hold_until": 0}',
 }
 
 
@@ -1873,6 +1888,7 @@ DAMAGED_WATCH_STATES = {
     "a handled mark whose value is a number": '{"version": 2, "handled": {"5001": 1}, "ignored": {}, "quota_returns": {}}',
     "an ignored mark whose key is not a number": '{"version": 2, "handled": {}, "ignored": {"x": "account"}, "quota_returns": {}}',
     "a version that is true": '{"version": true, "handled": {}, "ignored": {}, "quota_returns": {}}',
+    "a version that is not a whole number": '{"version": 2.0, "handled": {}, "ignored": {}, "quota_returns": {}}',
 }
 
 
@@ -2087,6 +2103,7 @@ def test_the_settings_file_holds_every_bound_at_its_decided_value():
         "max_answer_bytes": 2000000,
         "max_comment_pages": 10,
         "max_quota_returns": 3,
+        "container_seconds": 60,
         "discussion_first_line": QUESTION_LINE,
         "model": "gemini-4-carbon-medium",
         "work_item_prefixes": ["DOD"],
@@ -2108,6 +2125,7 @@ RANGES = {
     "max_answer_bytes": (1000, 50_000_000),
     "max_comment_pages": (1, 100),
     "max_quota_returns": (0, 20),
+    "container_seconds": (1, 600),
 }
 
 
@@ -2250,7 +2268,8 @@ OTHER_CONTAINERS = [
 @pytest.mark.parametrize(
     "case",
     ["an attack look", "an attack look past its time", "an attack look stopped by a signal", "a fault of the container tool",
-     "no container tool", "a verification look", "a discussion"],
+     "a container tool that does not answer", "a listing that is not of ids", "no container tool",
+     "a record that cannot be written", "a verification look", "a discussion"],
 )
 def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world: World, case: str):
     kind = {"a verification look": "verify", "a discussion": "discuss"}.get(case, "attack")
@@ -2262,10 +2281,16 @@ def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world
     slow = case in ("an attack look past its time", "an attack look stopped by a signal")
     if case == "an attack look past its time":
         world.write_settings(job_seconds=2)
-    world.answer(envelope(answer_text()), containers=2, sleep=60 if slow else 0)
+    world.answer(envelope(answer_text()), containers=2, sleep=60 if slow else 0,
+                 block_record=case == "a record that cannot be written")
     env = world.env()
     if case == "a fault of the container tool":
         (world.docker_dir / "fail").touch()
+    elif case == "a container tool that does not answer":
+        world.write_settings(container_seconds=1)
+        (world.docker_dir / "hang").touch()
+    elif case == "a listing that is not of ids":
+        (world.docker_dir / "odd").touch()
     elif case == "no container tool":
         # A folder with git and the stand-ins only, so that no container tool of the computer is found.
         (world.bin / "docker").unlink()
@@ -2287,9 +2312,13 @@ def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world
         folder = Path(finished.read_text(encoding="utf-8").splitlines()[-1].rsplit("private=", 1)[1])
         result = json.loads((folder / "result.json").read_text(encoding="utf-8"))
     else:
+        began = time.monotonic()
         out, _ = world.start(world.job_argv(kind, 7), env)
         run = World.wait(out)
         result = result_of(run)
+        elapsed = time.monotonic() - began
+        if case == "a container tool that does not answer":
+            assert elapsed < 30, f"the container tool was waited for {elapsed:.0f} seconds with a bound of 1"
     expected = {"an attack look past its time": "timeout", "an attack look stopped by a signal": "stopped"}.get(case, "posted")
     assert result.get("status") == expected, f"{case}: {run}"
     if expected == "posted":
@@ -2307,6 +2336,10 @@ def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world
     assert isinstance(label, str) and label.startswith(RUN_LABEL_KEY + "="), f"{case}: the prompt names no label"
     theirs = {str(c["id"]) for c in world.containers() if c["labels"].get(RUN_LABEL_KEY) == label.split("=", 1)[1]}
     record_path = answer_folder(result) / "containers.json"
+    if case == "a record that cannot be written":
+        # The record cannot be written; the containers go all the same, and nothing else changes.
+        assert record_path.is_dir() and left == others, f"{case}: {left}"
+        return
     assert record_path.is_file(), f"{case}: the job kept no record of the run's containers"
     kept = json.loads(record_path.read_text(encoding="utf-8"))
     assert kept.get("label") == label, kept
@@ -2316,9 +2349,11 @@ def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world
             assert call[call.index("--filter") + 1] == f"label={label}", call
         else:
             assert call[:2] == ["rm", "--force"] and not set(call[2:]) & others, call
-    if case in ("a fault of the container tool", "no container tool"):
+    if case in ("a fault of the container tool", "a container tool that does not answer", "a listing that is not of ids",
+                "no container tool"):
         assert left == others | theirs and len(theirs) == 2, f"{case}: {left}"
         assert kept.get("fault"), f"{case}: the fault was not recorded: {kept}"
+        assert not any(call[:1] == ["rm"] for call in calls), f"{case}: a container was removed: {calls}"
         if case == "no container tool":
             assert calls == [], calls
         else:
@@ -2327,6 +2362,19 @@ def test_the_containers_of_an_attack_run_are_removed_by_its_own_label_only(world
         assert left == others, f"{case}: the run's containers were not all removed, or others were: {left}"
         assert any(call[:2] == ["rm", "--force"] for call in calls), calls
         assert not kept.get("fault"), kept
+
+
+def test_each_attack_run_has_a_label_of_its_own(world: World):
+    for number in (7, 12):
+        world.label(world.pull(number), "attack")
+        world.answer(envelope(answer_text()), containers=1)
+        assert result_of(world.run_job("attack", number)).get("status") == "posted"
+    labels = [str(record.get("run_label")) for record in world.agy_runs()]
+    assert all(re.fullmatch(RUN_LABEL_KEY + r"=[0-9a-f]{16}", label) for label in labels), labels
+    assert labels[0] != labels[1], "two attack runs had the same label"
+    asked = [call[call.index("--filter") + 1] for call in world.docker_calls() if call[:1] == ["ps"]]
+    assert asked == [f"label={label}" for label in labels], asked
+    assert world.containers() == [], "a run's container was left"
 
 
 # --- It runs only while its terminal is open, and installs nothing -------------------------------------
