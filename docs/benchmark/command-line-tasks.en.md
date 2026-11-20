@@ -681,7 +681,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | Walking gives up before a folder it enters once the step's time is spent | a tree of empty folders is walked with each opening slowed down |
 | A cases' folder that cannot be emptied in the step's time fails the step, with a result | a test leaves files in the cases' folder in the last file of tests while the step gives no time for removing |
 | No file of tests runs after the cases' folder could not be emptied | the same with a file of tests after it |
-| The search for places any user may write ends at its time, also while it still finds some | the search is given one second and finds places without a pause for eight |
+| The search for places any user may write ends at its time, also while it still finds some | the search is given one second and finds places without a pause for three, which always wait to be read |
 | The format checker refuses settings that would give the build another time limit | the settings the judge is handed for a language name another time for the build |
 | A file whose cases cannot be listed gets two case runners and no more | every runner of a file is ended before it lists the cases |
 | The format checker counts two case runners for a file whose cases cannot be listed | the format checker's count for such a file is read |

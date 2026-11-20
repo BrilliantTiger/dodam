@@ -1358,21 +1358,23 @@ def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_resu
 def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some(tmp_path, monkeypatch):
     """The search is given its time whether or not what it found so far waits to be read: one that
     still finds places when its time is up gives up all the same. Here it has one second, and the
-    search, a stand-in, finds places without a pause for eight."""
+    search, a stand-in, finds places without a pause for three, which always wait to be read."""
     much = judge_module.TooMuchLeft
     monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 1)
     monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 10**12)
     start = subprocess.Popen
-    finds = ("import sys, time\nend = time.monotonic() + 8\nwhile time.monotonic() < end:\n"
+    finds = ("import sys, time\nend = time.monotonic() + 3\nwhile time.monotonic() < end:\n"
              "    sys.stdout.buffer.write(b'/nowhere\\0' * 1000)\n")
     monkeypatch.setattr(judge_module.subprocess, "Popen", lambda args, **kwargs: start([sys.executable, "-c", finds], **kwargs))
+    # what the search found waits to be read whenever the judge asks, however fast this machine reads
+    monkeypatch.setattr(judge_module.select, "select", lambda read, write, special, timeout=None: (list(read), [], []))
     mounts = tmp_path / "mounts"
     mounts.write_text(f"none {tmp_path} tmpfs rw 0 0\n")
     began = time.monotonic()
     with pytest.raises(much):
         for _ in judge_module.writable_by_others(mounts):
             pass
-    assert time.monotonic() - began < 5, "the search went on past its time"
+    assert time.monotonic() - began < 2.5, "the search went on past its time"
 
 
 def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):
