@@ -35,7 +35,7 @@ case_disk_mb = 64        # what can be written in the case's whole folder, and t
 
 [limits]
 agent_timeout_sec = 3600
-verifier_timeout_sec = 1800
+verifier_timeout_sec = 5400
 cpus = 2
 memory_mb = 1408         # at least the case's memory + its files + 256 for the judge
 
@@ -119,7 +119,7 @@ Nothing about the judging is on the command line of any process, because every u
 
 What a plain user can still see of the judge's processes is that they exist, the name of their program (`python3`), their state (running or waiting), how much memory they hold, when they started, how much processor time they have used and how often the kernel switched them in and out, and the kernel limits they run under. It can also read the list of file systems mounted in the container. None of that names a test or says which test is being run.
 
-**Whatever the program's side left as files** (in `/app`, where the dependency folders go, in the temporary folders, in a case's folder, in a served program's data folder) the judge removes, hands over, opens for reading or searches with routines that take one step per entry, hold two folders open at a time however deep the tree is, and follow no link out of it. They give up after 500,000 entries, and the search for places any user may write gives up after 10,000 such places or 300 seconds. When they give up, the step fails with that reason and a result is written. When it is a served program's data folder, the program is not started again on what was left, and the files of tests after it are judged as for a program that does not start. A writable place so deep that no path can name it is closed all the same: the judge closes the folder above it that a path can still name to other users, who then reach nothing below it.
+**Whatever the program's side left as files** (in `/app`, where the dependency folders go, in the temporary folders, in a case's folder, in a served program's data folder) the judge removes, hands over, opens for reading or searches with routines that take one step per entry, hold two folders open at a time however deep the tree is, and follow no link out of it. They give up after 500,000 entries, and the search for places any user may write gives up after 10,000 such places or 300 seconds. When they give up, the step fails with that reason and a result is written. When it is a served program's data folder, the program is not started again on what was left, and the files of tests after it are judged as for a program that does not start. When no file of tests comes after it, the result gets one more entry with that reason, which counts for no kind of test; the result also names what was left in a field of its own (`served_program_left` in `details.json`). A writable place so deep that no path can name it is closed all the same: the judge closes the folder above it that a path can still name to other users, who then reach nothing below it.
 
 ## When something is ended while a case runs
 
@@ -133,7 +133,7 @@ Whatever is ended, by the kernel because the container's memory ran out or by an
 | The build | The build has failed and the result says by what it was ended. Functional and boundary tests of the step fail, and its security tests are unjudged |
 | The judge itself, or the whole container | Nothing inside can write a result any more. The judge removed the result files of any earlier judging before it ran anything, and it writes a result under another name and moves it into place only when it is complete, so no file reads as a judgement. The exit code is not zero. The script that starts the judge outlives it where the container does, and then writes `judge-fault.json` saying that the judging ended without a result |
 
-The outcomes of a test file do not wait for the file to finish: each is written down when its case ends, in a place only root can enter. A process that runs the cases and is ended twice in a row without any case being decided costs the next case, which fails with that reason, so the judging always ends.
+The outcomes of a test file do not wait for the file to finish: each is written down when its case ends, in a place only root can enter. A process that runs the cases and is ended twice in a row without any case being decided costs the next case, which fails with that reason, so the judging always ends. The processes that run the cases of one file share its time: one that is started again gets what is left of it.
 
 On the path the real measurement uses, a step without a result file is a step with an error and no reward: Harbor records the error for that step and goes on to the next step. The measurement's runner reads the step's reward as missing, lists the step among the missing ones and gives the run a status other than "ok". It does not count such a step as passed. Harbor's own number for the whole run is the mean over the steps that have a result, so it leaves the step out; the runner's status is what tells that a step is missing.
 
@@ -249,7 +249,22 @@ What this record cannot show. A run is in it only when it made a new high for th
 
 **The build.** The build is no case, so it runs under the container's caps, not under a case's limits: 900 seconds, and the container's memory and process caps. A build that forks without end, one that fills every process the container may hold, one that eats more memory than the container has and one that prints 400 MB are tests, and in all of them the judge delivers a result. The total a build writes into `/app` has no cap; only the size of one file and the build's time bound it.
 
-The format checker adds up, for each step, 900 seconds for the build, 30 seconds for every test file, and for every test its case's time limit plus 2 seconds, and refuses a task whose time limit for judging is below the largest such sum. Beyond that sum the judge can spend in a step up to 300 seconds on the search for places any user may write, and a case runner that is started again gets the whole time of its file of tests once more. For the sample task the sum is 1,550 seconds and the time limit for judging is 1,800 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
+The format checker adds up every wait and every time limit the judge has in a step of a command-line task, and refuses a task whose time limit for judging is below the largest such sum. A file of tests needs at most two processes that run its cases for each of its cases, since one that is ended twice in a row without deciding a case costs the next case, and those processes share the file's time. The terms, and what they come to in the sample task's longest step (10 files, 50 tests, a time limit of 5 seconds):
+
+| Term | Seconds | In the sample |
+|---|---|---|
+| ending what the working user left running (at most 500 rounds, each with a pause of 0.01 seconds) | 5 | 5 |
+| the build | 900 | 900 |
+| ending the build's processes | 5 | 5 |
+| waiting for the ended build | 30 | 30 |
+| the search for places any user may write | 300 | 300 |
+| starting every process that runs cases, with the judge's work around it | 30 for each, two for each test | 3,000 |
+| every case at its full time limit, with the judge's work around it | the time limit and 2 for each test | 350 |
+| taking back what each of those processes left | 5 for each | 500 |
+| taking back at the end | 5 | 5 |
+| Sum | | 5,095 |
+
+The sample task's time limit for judging is 5,400 seconds. If every process that is started again got the whole time of its file once more, the sum for the same step would be 9,589 seconds; the processes of a file share its time instead. Walking and removing what the program's side left is bounded by entries, not by seconds, and is not in the sum: at most 500,000 entries each time before the cases (the program's folder, the dependency folders, the memory-backed folder) and at most 20,000 each time the cases' folder is emptied. In one run on the measuring computer on 20 November the judge removed 500,000 entries that a served program left in 4.8 seconds. The format checker also refuses a task whose container memory is below the case's memory limit, plus its file limit (the files live in memory), plus 256 MB for the judge.
 
 ## The container's caps, and the path the real measurement uses
 
@@ -638,6 +653,9 @@ For every protection there is one variant of the code without it (`bench/experim
 | A served program's data folder that the judge cannot remove fails the step, with a result | a served program writes more into its data folder than the judge removes: after a file of tests with a program of its own, before the next start, and at the last stop of the step |
 | A served program is not started again on what an earlier start left | the same; the program notes each of its starts |
 | The last stop of a step that cannot remove the data folder fails the step | the same at the last stop of the step, after a file of tests that passed |
+| The last stop gives the data folder's reason also when no start of the program came up | a served program fills its data folder and ends before it opens its port, or stays up without opening it |
+| The cases after a case runner that was ended get the data folder's reason | a case ends its own case runner; the case after it meets the program's restart on what it left |
+| The case runners of one file share its time | runners that are ended one after another are timed: each gets what is left of the file's time |
 | A case during which the kernel ended a process fails, whatever its test says | a served program takes memory until the kernel ends it, in a test that would pass by itself |
 | The case that was running when its runner was ended fails with that reason | a case runner is ended in the middle of the second of three cases |
 | Before a new runner starts, what the last one left is taken back and a served program is started afresh | a case runner is ended while its program runs; a served program is ended by the kernel |

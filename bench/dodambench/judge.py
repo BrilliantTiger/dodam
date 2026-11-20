@@ -505,7 +505,7 @@ class Side:
     def end(self) -> bool:
         """End every process of this user: as that user, signal everything it may signal. Needs no
         new process when none can be made: then the judge signals them one by one, as root."""
-        for _ in range(500):
+        for _ in range(ENDING_ROUNDS):
             if not self.alive():
                 return True
             try:
@@ -543,7 +543,7 @@ class Side:
                         os.kill(other, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-            time.sleep(0.01)
+            time.sleep(ENDING_PAUSE)
         return not self.alive()
 
 
@@ -593,7 +593,7 @@ def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str
     if side and not side.end():
         raise JudgeFault("processes of the build could not be ended")
     try:
-        proc.wait(timeout=30)
+        proc.wait(timeout=BUILD_ENDING_SECONDS)
     except subprocess.TimeoutExpired:
         raise JudgeFault("the build did not end after it was killed") from None
     proc.stdout.close()
@@ -612,9 +612,40 @@ CLI_LIMITS = {"timeout_sec": "CASE_TIMEOUT_SEC", "memory_mb": "CASE_MEMORY_MB", 
               "processes": "CASE_PROCESSES", "disk_mb": "CASE_DISK_MB"}
 FIRST_CASE_USER_ID, LAST_CASE_USER_ID = 200_000, 2_000_000_000
 NO_FILES = {"proc", "sysfs", "cgroup", "cgroup2", "devpts", "securityfs", "debugfs", "tracefs", "pstore", "bpf"}
-# What a file of hidden tests may take besides the time of its cases: starting Python and the judge's own work.
+# What a case runner may take besides the time of its cases, starting Python and the judge's own work, and what
+# the judge's work around one case may take.
 FILE_SECONDS, CASE_SECONDS = 30, 2
 BUILD_SECONDS = 900
+BUILD_ENDING_SECONDS = 30          # how long the judge waits for a build it has ended
+ENDING_ROUNDS, ENDING_PAUSE = 500, 0.01   # ending a user's processes: at most so many rounds, each with this pause
+
+
+def runners_at_most(tests: int) -> int:
+    """The most case runners one file of tests can need. A runner that ends without deciding a case
+    is started again, and the second time in a row it costs the next case: so a case needs at most
+    two runners, and a file whose cases cannot be listed needs two."""
+    return max(2 * tests, 2)
+
+
+def file_seconds(tests: int, case_seconds: int) -> int:
+    """The time one file of tests is given, shared by every case runner it needs: each runner's start
+    with the judge's work around it, and every case at its full time limit."""
+    return runners_at_most(tests) * FILE_SECONDS + tests * (case_seconds + CASE_SECONDS)
+
+
+def step_terms(tests_per_file: list[int], case_seconds: int) -> dict[str, float]:
+    """Every wait and every time limit the judge has in one step of a command-line task, in seconds,
+    term by term: what the format checker adds up."""
+    ending, runners = ENDING_ROUNDS * ENDING_PAUSE, sum(runners_at_most(tests) for tests in tests_per_file)
+    return {"ending what the working user left running": ending,
+            "the build": BUILD_SECONDS,
+            "ending the build's processes": ending,
+            "waiting for the ended build": BUILD_ENDING_SECONDS,
+            "the search for places any user may write": SEARCH_SECONDS,
+            "starting every case runner the files can need": runners * FILE_SECONDS,
+            "every case at its full time limit": sum(tests_per_file) * (case_seconds + CASE_SECONDS),
+            "taking back what every case runner left": runners * ending,
+            "taking back at the end": ending}
 ARGS_ENV = "DODAM_JUDGE_ARGS"
 RESULT_FILES = ("reward.json", "reward.txt", "details.json", "judge-fault.json")
 
@@ -793,7 +824,7 @@ class CliRun:
 
     def run_file(self, path: Path, ended: list[dict]) -> list[dict]:
         tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
-        timeout = FILE_SECONDS + tests * (self.limits["timeout_sec"] + CASE_SECONDS)
+        timeout = file_seconds(tests, self.limits["timeout_sec"])
         cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
         self.note_records(cases)
         if self.fault_file.exists():
@@ -1052,17 +1083,20 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
     case that was running fails with that reason, the cases before it keep their outcome, and a new
     runner goes on with the cases after it. Before a new runner starts, give_back() takes back what
     the last one left; when it returns an outcome and a message, the cases that are left get those.
-    Every time a runner did not end by itself, `ended` gets a record of how."""
+    The runners share `timeout`: one that is started again gets what is left of it. Every time a
+    runner did not end by itself, `ended` gets a record of how."""
     private = Path(tempfile.mkdtemp(prefix="dodam-run-"))
     progress, said = str(private / "progress.jsonl"), str(private / "errors.txt")
     env = {**env, PROGRESS_ENV: progress}
     whole = lambda message: [{"name": test_path.name, "outcome": "failed", "message": message}]
-    fruitless = 0
+    fruitless, spent = 0, 0.0
     try:
         while True:
             known = sum("outcome" in r for r in read_progress(progress))
             kills = killed_for_memory()
-            code = run_pytest(test_path, env, timeout, said)
+            began = time.monotonic()
+            code = run_pytest(test_path, env, timeout - spent, said) if spent < timeout else None
+            spent += time.monotonic() - began
             how = ""
             if code is None:
                 how = TIMED_OUT
@@ -1237,12 +1271,14 @@ def judge(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as: str 
             report["tests"].append({**c, "file": t["file"], "kind": t.get("kind"), "step": t.get("step"),
                                     "weakness": t.get("weakness")})
     app.stop()
+    if app.left:
+        report["served_program_left"] = app.left
     if app.left and served is not None and all(c["message"] != app.left for c in report["tests"]):
         # the last stop of the step could not give back what the program wrote, and no file of tests
-        # came after it: the step fails with that reason all the same
+        # came after it: the step fails with that reason all the same. The entry is of this step and of
+        # no kind of test, so it counts neither as unjudged nor as a weakness or an earlier step broken
         report["tests"].append({"name": Path(served["file"]).name, "message": app.left, "file": served["file"],
-                               "outcome": "skipped" if served.get("kind") == "security" else "failed",
-                               "kind": served.get("kind"), "step": served.get("step"), "weakness": served.get("weakness")})
+                               "outcome": "failed", "kind": None, "step": step, "weakness": None})
     highs = cli.highs() if cli is not None else None
     if cli is not None and run_as:
         records["highest_in_a_case"] = cli.records_highest

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import sys
@@ -10,7 +11,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .judge import BUILD_SECONDS, CASE_ENTRIES, CASE_SECONDS, CASES_DIR, FILE_SECONDS, JUDGE_ROOM_MB
+from .judge import CASE_ENTRIES, CASES_DIR, JUDGE_ROOM_MB, step_terms
 from .languages import LANGUAGES
 
 DOMAINS = {"web", "cli", "data", "net", "sys"}
@@ -351,21 +352,20 @@ def cases_mount(task: "Task") -> str:
 
 
 def judging_seconds(task: Task) -> int:
-    """What the format checker adds up for one step of a command-line task: the build, and for every
-    file of tests its own allowance plus every test's full time limit. Beyond that sum the judge can
-    spend up to SEARCH_SECONDS on the search for places any user may write, and a case runner that
-    is started again gets the whole time of its file of tests once more."""
+    """What the format checker adds up for the longest step of a command-line task: every wait and
+    every time limit the judge has in a step, term by term as the judge's step_terms gives them, so
+    that nothing the judge can spend in a step lies beyond the sum."""
     timeout = task.cli.get("case_timeout_sec")
     if not _whole(timeout) or task.manifest_problem:
         return 0
     longest = 0
     for step in task.steps:
-        total = BUILD_SECONDS
+        tests_per_file = []
         for t in task.tests_for(step.name):
             path = task.root / "tests" / t.file
             text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-            total += FILE_SECONDS + len(re.findall(r"^def test_", text, flags=re.M)) * (timeout + CASE_SECONDS)
-        longest = max(longest, total)
+            tests_per_file.append(len(re.findall(r"^def test_", text, flags=re.M)))
+        longest = max(longest, math.ceil(sum(step_terms(tests_per_file, timeout).values())))
     return longest
 
 
@@ -404,8 +404,8 @@ def cli_problems(task: Task) -> list[dict]:
     needed, given = judging_seconds(task), task.limits.get("verifier_timeout_sec")
     if needed and _whole(given) and given < needed:
         found.append(problem("task.toml", "limits.verifier_timeout_sec",
-                             f"[limits] verifier_timeout_sec must be at least {needed}: the build and every "
-                             "test at its full time limit, so a program that hangs in every case still gets a result"))
+                             f"[limits] verifier_timeout_sec must be at least {needed}: every wait and "
+                             "time limit of a step, so a program that hangs in every case still gets a result"))
     tests = task.root / "tests"
     for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
         rel = f"tests/{path.relative_to(tests).as_posix()}"

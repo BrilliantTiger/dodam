@@ -878,6 +878,39 @@ find = '''    if app.left and served is not None and all(c["message"] != app.lef
 put = '''    if False:'''
 
 [[protection]]
+what = "The last stop gives the data folder's reason also when no start of the program came up"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
+[[protection.change]]
+find = '''            served = t
+            if not up:
+'''
+put = '''            if not up:
+'''
+[[protection.change]]
+find = '''            else:
+                def again() -> tuple[str, str] | None:'''
+put = '''            else:
+                served = t
+                def again() -> tuple[str, str] | None:'''
+
+[[protection]]
+what = "The cases after a case runner that was ended get the data folder's reason"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_the_judge_cannot_remove_fails_the_step_with_a_result"]
+[[protection.change]]
+find = '''                    return None if up else (not_run, app.left or "program did not start")'''
+put = '''                    return None if up else (not_run, "program did not start")'''
+
+[[protection]]
+what = "The case runners of one file share its time"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_the_case_runners_of_one_file_share_its_time"]
+[[protection.change]]
+find = '''            code = run_pytest(test_path, env, timeout - spent, said) if spent < timeout else None'''
+put = '''            code = run_pytest(test_path, env, timeout, said)'''
+
+[[protection]]
 what = "A case during which the kernel ended a process fails, whatever its test says"
 file = "dodambench/judge.py"
 tests = ["tests/test_web_isolation.py::test_a_served_program_the_kernel_ends_fails_that_case_and_the_rest_meet_a_fresh_program"]
