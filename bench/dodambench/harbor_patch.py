@@ -16,8 +16,10 @@ virtual environment that does not also load the system's site-packages. Harbor's
 their environment but build no command lines. Their files are pinned by hash when installed, from
 bench/harbor/requirements.txt, and the check pins their versions: every installed package that the file lists must
 have the version the file gives, so an install made from an earlier file, with a dependency since moved off a known
-vulnerability, is refused. Out of scope, for the same reason as above: the dependencies' files after installing, the
-Python interpreter, compiled files in __pycache__, and anything else that needs write access to the install.
+vulnerability, is refused. The installed packages are found and read as Python's own metadata reader finds and reads
+them, and a package record whose name or version cannot be read is refused. Out of scope, for the same reason as
+above: the dependencies' files after installing, the Python interpreter, compiled files in __pycache__, and anything
+else that needs write access to the install.
 
 Set up the install once, from bench/ (to move from an earlier version of the patch, install again first):
 
@@ -34,6 +36,7 @@ import hashlib
 import re
 import sys
 from dataclasses import dataclass
+from importlib.metadata import distributions
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
@@ -202,25 +205,26 @@ def pinned_versions(requirements: Path) -> dict[str, str]:
 
 
 def package_problems(site: Path, pins: dict[str, str]) -> list[str]:
-    """Installed packages that the pinned file lists with another version, and metadata that cannot be read."""
+    """Installed packages that the pinned file lists with another version, and package records whose name or version
+    cannot be read. The records (.dist-info and .egg-info) are found and read by Python's own metadata reader, as the
+    Python that runs Harbor finds and reads them."""
     problems = []
-    for info in sorted(Path(site).glob("*.dist-info")):
-        fields: dict[str, str] = {}
+    for dist in distributions(path=[str(site)]):
+        record = getattr(dist, "_path", site)  # the record's folder or file, only to name it
         try:
-            for line in (info / "METADATA").read_text(encoding="utf-8").splitlines():
-                if not line:
-                    break  # the headers end at the first empty line
-                key, _, value = line.partition(":")
-                fields.setdefault(key, value.strip())
-        except (OSError, UnicodeDecodeError):
-            problems.append(f"the metadata of {info} cannot be read")
+            metadata = dist.metadata
+            names = [] if metadata is None else [v.strip() for v in metadata.get_all("Name") or []]
+            versions = [] if metadata is None else [v.strip() for v in metadata.get_all("Version") or []]
+        except (OSError, ValueError):  # ValueError covers bytes that are not UTF-8
+            names = versions = []
+        if len(names) != 1 or len(versions) != 1 or not names[0] or not versions[0]:
+            problems.append(f"the package record {record} has no single readable name and version")
             continue
-        name, installed = fields.get("Name", ""), fields.get("Version")
-        want = pins.get(normalized(name))
-        if want is not None and installed != want:
-            problems.append(f"{name} {installed} is installed in {site}, "
+        want = pins.get(normalized(names[0]))
+        if want is not None and versions[0] != want:
+            problems.append(f"{names[0]} {versions[0]} is installed in {site}, "
                             f"where bench/harbor/requirements.txt pins {want}")
-    return problems
+    return sorted(problems)
 
 
 def check(harbor: Path, version: str = PINNED_VERSION, original_sha256: str = ORIGINAL_SHA256,
