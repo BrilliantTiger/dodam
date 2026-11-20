@@ -298,28 +298,49 @@ def test_two_cases_in_one_test_do_not_share_a_folder_either():
 
 
 def test_the_test_reads_no_link_the_program_left(tmp_path):
+    """A link the program left is followed neither where a file of the case is read or written nor
+    on the way there, whether it points out of the case, at the folder next to the working folder,
+    at a folder inside it, or at nothing."""
     secret = tmp_path / "expected-answer.txt"
     secret.write_text("the expected answer")
     program = f'''
 import os
 os.symlink({str(secret)!r}, "out.txt")
 os.symlink({str(tmp_path)!r}, "folder")
+os.symlink("../outside", "beside")
+os.symlink("inner", "again")
+os.symlink("nowhere", "dangling")
 '''
     result = judge_program(tmp_path, program, {"security/test_links.py": '''
+def refused(attempt):
+    try:
+        attempt()
+    except AssertionError:
+        return True
+    return False
+
+
 def test_a_link_left_by_the_program_is_not_followed():
-    with case() as c:
+    with case(files={"inner/mine.txt": "the case's own"}, outside={"neighbour.txt": "next to the case"}) as c:
         assert c.run([]).exit_code == 0
         assert c.read("out.txt") is None
         assert c.read("folder/expected-answer.txt") is None
-        try:
-            c.write("folder/planted.txt", "x")
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError("wrote through the program's link")
+        assert c.read("beside/neighbour.txt") is None
+        assert c.read("again/mine.txt") is None
+        assert c.read("inner/mine.txt") == b"the case's own"
+        for folder in ("folder", "beside", "again", "dangling"):
+            assert refused(lambda: c.write(folder + "/planted.txt", "x")), folder
+            assert refused(lambda: c.sparse(folder + "/planted.txt", 10)), folder
+            assert refused(lambda: c.mkdir(folder + "/planted")), folder
+            assert refused(lambda: c.symlink(folder + "/planted", "inner")), folder
+        assert c.files_outside() == ["neighbour.txt"], c.files_outside()
+        assert sorted(os.listdir(c.work / "inner")) == ["mine.txt"]
+        c.write("out.txt", "the case's own file")
+        assert c.read("out.txt") == b"the case's own file"
 '''})
     assert outcomes(result) == {"test_a_link_left_by_the_program_is_not_followed": "passed"}, result["report"]
-    assert not (tmp_path / "planted.txt").exists()
+    assert not (tmp_path / "planted.txt").exists() and not (tmp_path / "planted").exists()
+    assert secret.read_text() == "the expected answer"
 
 
 KINDS = {
@@ -403,6 +424,38 @@ def test_a_test_file_that_runs_out_of_time_is_the_judges_fault(tmp_path, monkeyp
     assert "timed out" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
 
 
+@pytest.mark.parametrize("spoiled", ["not its settings", "gone"])
+def test_a_case_runner_that_cannot_read_its_settings_is_a_fault_of_the_judge(tmp_path, capsys, spoiled):
+    """The case runner learns from a file of the judge's how to run the program. When that cannot be
+    read, the judge has failed, before it knows where faults go."""
+    spoil = ("    with open(os.environ['DODAM_CLI_CONFIG'], 'w') as f:\n        f.write('not json')\n"
+             if spoiled == "not its settings" else "    os.unlink(os.environ['DODAM_CLI_CONFIG'])\n")
+    tests = {"functional/test_settings.py": "def test_settings():\n" + spoil
+                                            + "    with case() as c:\n        assert c.run([]).out == 'ok\\n'\n"}
+    code, out = judge_command(tmp_path, "print('ok')\n", tests)
+    assert code == 3 and not (out / "reward.json").exists() and not (out / "details.json").exists(), capsys.readouterr()
+    assert "settings" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
+
+def test_a_program_the_judge_cannot_start_in_its_working_folder_is_a_fault_of_the_judge(tmp_path, capsys):
+    """Only a program that is not there or cannot be run as built is the program's failure when it
+    cannot be started. Here the judge cannot enter the case's working folder to start it."""
+    tests = {"functional/test_closed.py": "def test_closed():\n    with case() as c:\n"
+                                         "        os.chmod(c.work, 0)\n        c.run([])\n"}
+    code, out = judge_command(tmp_path, "print('ok')\n", tests)
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert "start" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
+
+@pytest.mark.parametrize("source, said", [("def test_broken(:\n    pass\n", "could not be listed"),
+                                          ("NOTHING = 0\n", "no tests collected")],
+                         ids=["a file that cannot be listed", "a file without tests"])
+def test_a_file_of_tests_that_cannot_be_listed_or_holds_no_test_is_a_fault_of_the_judge(tmp_path, capsys, source, said):
+    code, out = judge_command(tmp_path, "print('ok')\n", {"functional/test_odd.py": source})
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert said in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
+
 def test_a_hidden_test_finds_no_word_about_the_language_around_it(tmp_path):
     result = judge_program(tmp_path, "print('ok')\n", {"functional/test_env.py": '''
 def test_nothing_names_the_language():
@@ -436,6 +489,19 @@ def test_the_program_gets_none_of_the_judges_own_settings(tmp_path, monkeypatch)
     result = judge_program(tmp_path, "import os\nprint(sorted(k for k in os.environ if k.startswith(('DODAM', 'PYTEST', 'PYTHONPATH'))))\n",
                            {"security/test_env.py": "def test_env():\n    with case() as c:\n        assert c.run([]).out == '[]\\n'\n"})
     assert outcomes(result) == {"test_env": "passed"}, result["report"]
+
+
+def test_the_build_gets_none_of_the_judges_own_settings(tmp_path, monkeypatch):
+    """The build is the program's side as well: it is started with the environment the program gets,
+    without anything of the judge's own settings."""
+    monkeypatch.setenv("DODAM_APP_USER", "someone")
+    monkeypatch.setenv("PYTHONPATH", "/judge/only")
+    look = (f"{sys.executable} -c \"import json, os; "
+            "json.dump(sorted(os.environ), open('seen-by-the-build.json', 'w'))\"")
+    result = judge_program(tmp_path, "print('ok')\n", {"functional/test_ok.py": OK_TEST}, BUILD_CMD=look)
+    assert result["reward"]["build_ok"] == 1.0, result["report"]
+    seen = json.loads((tmp_path / "app/seen-by-the-build.json").read_text())
+    assert [key for key in seen if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], seen
 
 
 def test_vet_judges_every_solution_of_a_command_line_task(cli_task_dir, tmp_path):
@@ -563,6 +629,22 @@ def test_a_limit_broken_before_a_test_is_left_unjudged_fails_it(tmp_path):
     assert result["reward"]["vulns_found"] == 1.0 and result["reward"]["unjudged"] == 0.0
 
 
+def test_a_program_ended_by_a_signal_fails_its_case_whatever_the_test_checks(tmp_path):
+    """The program the case runner started ends by a signal: its case fails and says by which signal,
+    whether its test looks only at the output or would be left unjudged."""
+    program = "import os, signal, sys\nprint('started', flush=True)\nos.kill(os.getpid(), getattr(signal, sys.argv[1]))\n"
+    tests = {"functional/test_output.py": "def test_looks_at_the_output_only():\n    with case() as c:\n"
+                                          "        assert c.run(['SIGSEGV']).out == 'started\\n'\n",
+             "security/test_needed.py": "def test_needs_the_feature():\n    with case() as c:\n"
+                                        "        need(c.run(['SIGKILL']).exit_code == 0, 'the feature')\n"}
+    result = judge_program(tmp_path, program, tests)
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert said["test_looks_at_the_output_only"][0] == "failed", said
+    assert "signal 11" in said["test_looks_at_the_output_only"][1], said
+    assert said["test_needs_the_feature"][0] == "failed" and "signal 9" in said["test_needs_the_feature"][1], said
+    assert result["reward"]["unjudged"] == 0.0 and result["reward"]["reward"] == 0.0
+
+
 # ---------------------------------------------------------------------------------------------
 # The judge survives whatever a case leaves
 # ---------------------------------------------------------------------------------------------
@@ -609,6 +691,36 @@ def test_removing_what_a_case_left_follows_no_link_and_needs_no_depth(tmp_path):
     (tmp_path / "again/x").write_text("1")
     remove_tree(tmp_path / "again", keep_top=True)
     assert (tmp_path / "again").is_dir() and list((tmp_path / "again").iterdir()) == []
+
+
+def test_removing_follows_no_link_that_takes_the_place_of_a_folder_it_listed(tmp_path, monkeypatch):
+    """Removing lists a folder, removes its files and then enters the folders it listed. A link that
+    takes the place of a listed folder before removing enters it is removed, not followed: what it
+    points at keeps its permissions and everything in it."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "kept.txt").write_text("stays")
+    elsewhere.chmod(0o755)
+    top = tmp_path / "left"
+    (top / "listed").mkdir(parents=True)
+    (top / "listed/inner.txt").write_text("x")
+    (top / "file.txt").write_text("x")
+    unlink, swapped = os.unlink, []
+
+    def swap_then_unlink(*args, **kwargs):
+        if not swapped:
+            swapped.append(True)
+            os.rename(top / "listed", tmp_path / "moved-away")
+            os.symlink(elsewhere, top / "listed")
+        return unlink(*args, **kwargs)
+    monkeypatch.setattr(judge_module.os, "unlink", swap_then_unlink)
+    try:
+        judge_module.remove_tree(top)
+    finally:
+        monkeypatch.undo()
+    assert swapped, "the folder was never swapped"
+    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755, "removing changed what a link points at"
+    assert (elsewhere / "kept.txt").read_text() == "stays" and not top.exists()
 
 
 def test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge(tmp_path):
@@ -1334,6 +1446,95 @@ def test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result(
         assert not any(t["name"] == "test_ok" for t in told), f"a file of tests ran after the time ran out: {told}"
     clock = getattr(judge_module, "TREE_CLOCK", None)
     assert clock is None or clock.left is None, "walking and removing are still timed after the step"
+
+
+# a program that leaves twenty files in its working folder
+LEAVES_IN_ITS_FOLDER = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('ok')\n"
+# a file of tests in whose case runner every file is removed slowly, about 0.6 seconds for what that program leaves
+SLOW_REMOVAL = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
+                "def _slowly(*args, **kwargs):\n    time.sleep(0.03)\n    return _unlink(*args, **kwargs)\n\n\n"
+                "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+
+
+def said_of(result: dict) -> dict[str, tuple[str, str]]:
+    return {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+
+
+def test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_removing(tmp_path, monkeypatch):
+    """A case runner removes each case's folder and empties the cases' folder before each case, and
+    it does so on the one time the step gives all walking and removing. Here the step gives none: the
+    first case whose folder holds what the program left fails, the cases after it are no pass, no
+    later file of tests runs, and a result is written."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 0, raising=False)
+    tests = {"functional/test_a.py": RUNS_OK.replace("test_ok", "test_first") + "\n\n" + RUNS_OK.replace("test_ok", "test_second"),
+             "functional/test_b.py": RUNS_OK.replace("test_ok", "test_in_a_later_file")}
+    result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
+    said = said_of(result)
+    for name in ("test_first", "test_second", "test_in_a_later_file"):
+        assert said[name][0] == "failed" and "seconds" in said[name][1], said
+    assert "seconds" in result["report"].get("left_behind", ""), result["report"]
+    assert (tmp_path / "out/reward.json").is_file() and result["reward"]["reward"] == 0.0
+
+
+def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatch):
+    """Each case runner is given what is left of the step's time for walking and removing, and what it
+    used is taken back. Here the step gives one second, and removing what one case left takes about
+    0.6 of it: the case of the first file passes, and the case of the second finds too little left."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
+    tests = {"functional/test_a.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
+             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
+    result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
+    said = said_of(result)
+    assert said["test_in_the_first_file"] == ("passed", ""), said
+    assert said["test_in_the_second_file"][0] == "failed" and "seconds" in said["test_in_the_second_file"][1], said
+
+
+def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
+    """What a case runner spends removing what the program left is drawn from the step's time for
+    walking and removing, not from the time of its file of tests. Here the file has about three
+    seconds and removing what its one case left takes about five."""
+    monkeypatch.setattr(judge_module, "FILE_SECONDS", 1, raising=False)
+    monkeypatch.setattr(judge_module, "CASE_SECONDS", 0, raising=False)
+    program = "import os\nfor n in range(50):\n    open(f'left-{n}', 'w').close()\nprint('ok')\n"
+    slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.1)")
+    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": slow + RUNS_OK}, CASE_TIMEOUT_SEC="1")
+    assert code == 0 and (out / "reward.json").is_file(), capsys.readouterr()
+    report = json.loads((out / "details.json").read_text())
+    assert [(t["name"], t["outcome"]) for t in report["tests"]] == [("test_ok", "passed")], report["tests"]
+
+
+def test_no_case_runner_starts_on_a_cases_folder_the_judge_could_not_empty(tmp_path, monkeypatch):
+    """A case runner is ended while what a case left lies in the cases' folder, and the step's time for
+    walking and removing is spent, so the judge cannot empty it. No new runner starts on it: the
+    cases that are left are no pass with that reason."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 0, raising=False)
+    ran = tmp_path / "ran"
+    ran.mkdir()
+    tests = {"functional/test_ended.py": f'''
+def test_leaves_and_ends_its_runner():
+    root = json.load(open(os.environ["DODAM_CLI_CONFIG"]))["work_root"]
+    for n in range(20):
+        open(os.path.join(root, f"left-{{n}}"), "w").close()
+    os.kill(os.getpid(), 9)
+
+
+def test_second():
+    open(os.path.join({str(ran)!r}, "second"), "w").close()
+    with case() as c:
+        assert c.run([]).out == "ok\\n"
+
+
+def test_third():
+    open(os.path.join({str(ran)!r}, "third"), "w").close()
+    with case() as c:
+        assert c.run([]).out == "ok\\n"
+'''}
+    result = judge_program(tmp_path, "print('ok')\n", tests)
+    said = said_of(result)
+    assert said["test_leaves_and_ends_its_runner"][0] == "failed", said
+    for name in ("test_second", "test_third"):
+        assert said[name][0] == "failed" and "seconds" in said[name][1], said
+    assert sorted(path.name for path in ran.iterdir()) == [], "a case runner started on what the judge could not empty"
 
 
 def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):

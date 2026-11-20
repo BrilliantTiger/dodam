@@ -464,3 +464,79 @@ def test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgem
                          "file": "functional/test_two.py", "weakness": None}]}
     problems = judgement_problems("broken", None, report)
     assert problems and "data folder" in problems[0], problems
+
+
+SERVES_ITS_ENVIRONMENT = """
+import http.server, json, os
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps(sorted(os.environ)).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
+"""
+
+
+def test_the_served_program_gets_none_of_the_judges_own_settings(tmp_path: Path, monkeypatch):
+    """A served program is the program's side as well: it is started with the environment the
+    program gets, without anything of the judge's own settings."""
+    monkeypatch.setenv("DODAM_APP_USER", "someone")
+    monkeypatch.setenv("PYTHONPATH", "/judge/only")
+    tests = tmp_path / "tests"
+    write(tests, "manifest.toml", '[[test]]\nfile = "functional/test_env.py"\nkind = "functional"\nstep = "build"\n')
+    write(tests, "functional/test_env.py", """
+        import json, os, urllib.request
+
+
+        def test_env():
+            with urllib.request.urlopen(os.environ["BASE_URL"] + "/", timeout=20) as response:
+                seen = json.loads(response.read())
+            assert [key for key in seen if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], seen
+    """)
+    write(tmp_path / "app", "main.py", SERVES_ITS_ENVIRONMENT)
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    result = judge(tests, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    assert {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]} == {"test_env": ("passed", "")}
+
+
+class Unconfinable:
+    """A stand-in for the program's side whose new process cannot be confined: what becomes the
+    program's side fails before anything of it runs."""
+    uid, gid = os.getuid(), os.getgid()
+
+    def entering(self, limits=None):
+        def enter():
+            raise OSError(1, "the process could not be confined")
+        return enter
+
+    def environment(self, env):
+        return env
+
+    def end(self):
+        return True
+
+
+def test_a_build_the_judge_cannot_start_as_the_builds_user_is_a_fault_of_the_judge(tmp_path: Path):
+    """Whatever stops the judge from starting the build is the judge's: it is never written down as a
+    build that failed."""
+    with pytest.raises(judge_module.JudgeFault):
+        judge_module.run_build("true", tmp_path, Unconfinable(), {"PATH": os.environ.get("PATH", "")}, 10)
+
+
+def test_a_served_program_the_judge_cannot_start_as_its_user_is_a_fault_of_the_judge(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(judge_module.Side, "named", classmethod(lambda cls, user: Unconfinable()))
+    app = App(tmp_path, "true", free_port(), "someone", {})
+    try:
+        with pytest.raises(judge_module.JudgeFault):
+            app.start(timeout=5)
+    finally:
+        app.stop()
