@@ -23,6 +23,7 @@ import hashlib
 import html
 import ipaddress
 import json
+import math
 import os
 import pwd
 import re
@@ -372,10 +373,15 @@ def gh(method: str, endpoint: str, body: object = None) -> object:
 def gh_pages(endpoint: str, max_pages: int) -> list[dict[str, object]]:
     found: list[dict[str, object]] = []
     joiner = "&" if "?" in endpoint else "?"
-    for page in range(1, max_pages + 1):
+    for page in range(1, max_pages + 2):
         data = gh("GET", f"{endpoint}{joiner}per_page=100&page={page}")
         if not isinstance(data, list):
             raise GitHubError("github")
+        if page > max_pages:
+            # The bound's pages were all full: one more page tells whether anything lies past them.
+            if data:
+                raise GitHubError("too_many_pages")
+            return found
         found.extend(entry for entry in data if isinstance(entry, dict))
         if len(data) < 100:
             return found
@@ -712,8 +718,15 @@ def load_job_state(private: Path) -> dict[str, object]:
     if (
         not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("days"), dict)
         or not isinstance(data.get("hold_until"), (int, float)) or isinstance(data.get("hold_until"), bool)
+        or not math.isfinite(data["hold_until"]) or data["hold_until"] < 0
     ):
         raise JobError("job_state")
+    for day, count in data["days"].items():
+        if (
+            not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)
+            or not isinstance(count, int) or isinstance(count, bool) or count < 0
+        ):
+            raise JobError("job_state")
     return data
 
 
@@ -949,7 +962,9 @@ TOKEN_RES = (
 )
 LONG_RUN_RE = re.compile(r"(?<![A-Za-z0-9_+=-])[A-Za-z0-9_+=-]{32,}(?![A-Za-z0-9_+=-])")
 # A secret access key: 40 characters of base 64 that hold a slash or a plus.
-SECRET40_RE = re.compile(r"(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
+# A run of 40 that holds a slash or a plus, whatever its mix, also before "="; not when it goes on from a word, a
+# path or a host name (after a letter, a digit, "/", "+", "." or "-").
+SECRET40_RE = re.compile(r"(?<![A-Za-z0-9/+.\-])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])")
 TAG_RE = re.compile(r"<[^<>\n]*>")
 
 
@@ -1044,11 +1059,12 @@ def _scan_once(text: str, names: list[str], settings: Settings, known: dict[str,
         found.add("work_item")
     if any(pattern.search(text) for pattern in TOKEN_RES):
         found.add("token")
-    for match in [*LONG_RUN_RE.finditer(text), *SECRET40_RE.finditer(text)]:
+    for match in LONG_RUN_RE.finditer(text):
         run = match.group(0)
-        mixed = re.search(r"[A-Z]", run) and re.search(r"[a-z]", run) and re.search(r"\d", run)
-        if mixed and (match.re is LONG_RUN_RE or re.search(r"[/+]", run)):
+        if re.search(r"[A-Z]", run) and re.search(r"[a-z]", run) and re.search(r"\d", run):
             found.add("token")
+    if any(re.search(r"[/+]", match.group(0)) for match in SECRET40_RE.finditer(text)):
+        found.add("token")
     return sorted(found)
 
 
