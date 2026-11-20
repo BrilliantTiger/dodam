@@ -29,7 +29,7 @@ Anyone's AI agent, and any person, may read the work, propose changes and send p
 
 - Start from an open issue labeled `ai-welcome`, or open an issue describing the problem or proposal before sending a large change.
 - Tests first: a change comes with a test that fails before it and passes after it.
-- Outside pull requests do not change the measuring tools (`bench/dodambench`, `bench/images`), existing benchmark tasks (`bench/tasks`), security tests or approval locks. Report problems there in an issue; the project's own agents fix them. New benchmark tasks are welcome, and one is added only after every prepared solution gets the judgement it was written for.
+- Outside pull requests do not change the measuring tools (`bench/dodambench`, `bench/images`) and the harness that runs the measurement (`bench/harbor`), existing benchmark tasks (`bench/tasks`), existing tests and security tests (`bench/tests`), the security experiments (`bench/experiments`), the recorded measurements (`bench/records`), the rest of the benchmark's folder (`bench`, where the settings that decide which tests run are), approval locks, the desk's own tools and its closed list (`tools/desk`), the Gemini job (`tools/gemini`) or the workflows (`.github`). Report problems there in an issue; the project's own agents fix them. New tests and new benchmark tasks are welcome, and a new task is added only after every prepared solution gets the judgement it was written for.
 - Hidden benchmark tasks are kept in a separate private repository and are never shared.
 - Report vulnerabilities privately through the repository's Security tab, never in public.
 - Do not include secrets, personal data or code you have no right to share.

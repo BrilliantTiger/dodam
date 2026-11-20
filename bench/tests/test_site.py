@@ -1027,7 +1027,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.12 (2026-11-19)", "- 판: v0.13 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.13", "2026-12-24")),
+    ("- 판: v0.13 (2026-11-20)", "- 판: v0.14 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.14", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
