@@ -39,6 +39,10 @@ max_answer_bytes = 2000000
 # At most this many pages of 100 comments or events are read for one item.
 max_comment_pages = 10
 
+# A mark whose job met a used-up quota is put back at most this many times; the next time it is handled as an
+# error and counts in the day.
+max_quota_returns = 3
+
 # A comment of the project's account that begins with this line is a question for a discussion.
 discussion_first_line = "Question for the Gemini job:"
 
