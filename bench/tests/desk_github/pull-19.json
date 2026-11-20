@@ -1,0 +1,174 @@
+{
+ "what": "GitHub's answers to the requests the desk's reading tool makes for this pull request, recorded on 2026-11-19 and reduced to the fields the tool reads. No logins, no names, no text.",
+ "number": 19,
+ "issue": {
+  "state": "open",
+  "is_pull_request": true
+ },
+ "answers": {
+  "repos/BrilliantTiger/dodam/pulls/19": {
+   "status": 200,
+   "body": {
+    "changed_files": 14,
+    "draft": false,
+    "state": "open",
+    "merged": false,
+    "base": {
+     "ref": "main",
+     "sha": "e91dd2ba788f6c9b116d6cb0f4b8164c10811fb5"
+    },
+    "head": {
+     "sha": "1eff4576b80a353904649166de08ddc5e382efd0"
+    }
+   }
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=e91dd2ba788f6c9b116d6cb0f4b8164c10811fb5": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tests?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "conftest.py",
+     "type": "file"
+    },
+    {
+     "name": "harbor_exec_probe.py",
+     "type": "file"
+    },
+    {
+     "name": "test_convert.py",
+     "type": "file"
+    },
+    {
+     "name": "test_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_harbor_patch.py",
+     "type": "file"
+    },
+    {
+     "name": "test_judge.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_record.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_report.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_variants.py",
+     "type": "file"
+    },
+    {
+     "name": "test_proctable.py",
+     "type": "file"
+    },
+    {
+     "name": "test_repository.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_task_format.py",
+     "type": "file"
+    },
+    {
+     "name": "test_vet.py",
+     "type": "file"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/pulls/19/files?per_page=100&page=1": {
+   "status": 200,
+   "body": [
+    {
+     "filename": "bench/tests/test_desk.py",
+     "status": "modified"
+    },
+    {
+     "filename": "bench/tests/test_desk_lock.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/LOCK.md",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/brief.md",
+     "status": "modified"
+    },
+    {
+     "filename": "tools/desk/check_lock.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/facts.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/guard.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/lock-check.json",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/lock.json",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/pr_files.py",
+     "status": "modified"
+    },
+    {
+     "filename": "tools/desk/relay.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/start.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/state.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/tools.py",
+     "status": "added"
+    }
+   ]
+  }
+ }
+}

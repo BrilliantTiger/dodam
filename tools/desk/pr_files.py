@@ -338,7 +338,6 @@ def classify_pr_files(
         is_pure_add = (status == "added") and (not has_earlier_path)
 
         if has_earlier_path:
-            assert isinstance(prev_filename, str)
             for folder in PROTECTED_FOLDERS:
                 if _matches_folder(prev_filename, folder):
                     touched.add(folder)
@@ -405,7 +404,6 @@ def _split_streamed_input(
     allowed_header_keys = set(meta)
     while idx < len(values) and isinstance(values[idx], dict):
         hdr = values[idx]
-        assert isinstance(hdr, dict)
         if not hdr or not set(hdr).issubset(allowed_header_keys):
             raise PRFilesError("Unexpected JSON object in pull request check input.")
         for key, val in hdr.items():

@@ -1,0 +1,134 @@
+{
+ "what": "GitHub's answers to the requests the desk's reading tool makes for this pull request, recorded on 2026-11-19 and reduced to the fields the tool reads. No logins, no names, no text.",
+ "number": 17,
+ "issue": {
+  "state": "closed",
+  "is_pull_request": true
+ },
+ "answers": {
+  "repos/BrilliantTiger/dodam/pulls/17": {
+   "status": 200,
+   "body": {
+    "changed_files": 4,
+    "draft": false,
+    "state": "closed",
+    "merged": true,
+    "base": {
+     "ref": "main",
+     "sha": "de6c7d249db1122f0ddb8f12d5f99834301e4a6d"
+    },
+    "head": {
+     "sha": "c8376ec615fcab4046f6f8cdfb04a56ccacbd8aa"
+    }
+   }
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=de6c7d249db1122f0ddb8f12d5f99834301e4a6d": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tasks?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "web-signup",
+     "type": "dir"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/contents/bench/tests?ref=main": {
+   "status": 200,
+   "body": [
+    {
+     "name": "conftest.py",
+     "type": "file"
+    },
+    {
+     "name": "harbor_exec_probe.py",
+     "type": "file"
+    },
+    {
+     "name": "test_convert.py",
+     "type": "file"
+    },
+    {
+     "name": "test_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_harbor_patch.py",
+     "type": "file"
+    },
+    {
+     "name": "test_judge.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_record.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_report.py",
+     "type": "file"
+    },
+    {
+     "name": "test_pilot_variants.py",
+     "type": "file"
+    },
+    {
+     "name": "test_proctable.py",
+     "type": "file"
+    },
+    {
+     "name": "test_repository.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site.py",
+     "type": "file"
+    },
+    {
+     "name": "test_site_desk.py",
+     "type": "file"
+    },
+    {
+     "name": "test_task_format.py",
+     "type": "file"
+    },
+    {
+     "name": "test_vet.py",
+     "type": "file"
+    }
+   ]
+  },
+  "repos/BrilliantTiger/dodam/pulls/17/files?per_page=100&page=1": {
+   "status": 200,
+   "body": [
+    {
+     "filename": "bench/tests/test_desk.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/brief.md",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/pr_files.py",
+     "status": "added"
+    },
+    {
+     "filename": "tools/desk/watch.py",
+     "status": "added"
+    }
+   ]
+  }
+ }
+}
