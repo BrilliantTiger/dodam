@@ -248,8 +248,8 @@ def load_settings(path: Path) -> Settings:
     line = data.get("discussion_first_line")
     if not isinstance(line, str) or not line.strip() or "\n" in line or len(line) > 200:
         raise SettingsError("discussion_first_line")
-    model = data.get("model", "")
-    if not isinstance(model, str) or (model and not MODEL_RE.fullmatch(model)):
+    model = data.get("model")
+    if not isinstance(model, str) or not MODEL_RE.fullmatch(model):
         raise SettingsError("model")
     prefixes = data.get("work_item_prefixes", [])
     if not isinstance(prefixes, list) or not all(isinstance(p, str) and re.fullmatch(r"[A-Za-z]{1,10}", p) for p in prefixes):
@@ -456,18 +456,41 @@ def eligibility(settings: Settings, item: Item) -> str | None:
 
 # --- The prompt -----------------------------------------------------------------------------------------
 
-BLOCKQUOTE_RE = re.compile(r"(?is)<blockquote\b.*?(?:</blockquote\s*>|\Z)")
-INLINE_QUOTE_RE = re.compile(r"(?is)<q\b.*?(?:</q\s*>|\Z)")
+QUOTE_TAG_RE = re.compile(r"(?is)<(/?)(blockquote|q)\b[^>]*>")
 # A quote line: `>` at the start, also after the marks of list items (`- >`, `1. >`).
 QUOTE_LINE_RE = re.compile(r"^\s*(?:(?:[-*+]|\d+[.)])\s+)*>")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+
+
+def _drop_html_quotes(text: str) -> str:
+    """Leave out HTML block and inline quotes whole, nested ones too. When the tags do not balance,
+    everything from the first opening tag to the end of the text is left out."""
+    kept: list[str] = []
+    position = 0
+    depth = 0
+    first_open: int | None = None
+    for match in QUOTE_TAG_RE.finditer(text):
+        if match.group(1) != "/":
+            if depth == 0:
+                kept.append(text[position:match.start()])
+                if first_open is None:
+                    first_open = match.start()
+            depth += 1
+        elif depth > 0:
+            depth -= 1
+            if depth == 0:
+                position = match.end()
+    if depth > 0:
+        return text[: first_open if first_open is not None else len(text)]
+    kept.append(text[position:])
+    return "".join(kept)
 
 
 def strip_quotes(text: str) -> str:
     """Leave out quoted text, which is how text of others is quoted: HTML block and inline quotes, Markdown
     quote lines (also inside list items), and the lines that continue a quote up to the next blank line."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = INLINE_QUOTE_RE.sub("", BLOCKQUOTE_RE.sub("", text))
+    text = _drop_html_quotes(text)
     kept: list[str] = []
     in_quote = False
     for line in text.split("\n"):
@@ -512,31 +535,31 @@ def build_prompt(settings: Settings, kind: str, item: Item, comments: list[dict[
     """The prompt from the template, the done criteria and the project's own text; or a fixed word why not."""
     template = (TEMPLATES / f"{kind}.md").read_text(encoding="utf-8").strip()
     project = settings.project_account_id
-    notes: list[str] = []
-    answers: list[str] = []
+    # Entries oldest first: ("note", text) for comments, ("answer", text) for the job's own earlier answers.
+    entries: list[tuple[str, str]] = []
     question = ""
-    question_note = -1
+    question_entry = -1
     for comment in sorted(comments, key=_comment_key):
         if user_id(comment.get("user")) != project:
             continue
         body = str(comment.get("body") or "").replace("\r\n", "\n").replace("\r", "\n")
         stamp = str(comment.get("created_at") or "")
         if body.startswith(FIRST_LINE_PREFIX):
-            answers.append(f"[your answer of {stamp}]\n{strip_quotes(body.partition(chr(10))[2])}")
+            entries.append(("answer", f"[your answer of {stamp}]\n{strip_quotes(body.partition(chr(10))[2])}"))
             continue
         text = strip_quotes(body)
         first, _, rest = body.partition("\n")
         if first.strip() == settings.discussion_first_line:
             question = strip_quotes(rest)
-            question_note = len(notes) if text else -1
+            question_entry = len(entries) if text else -1
         if text:
-            notes.append(f"[comment of {stamp}]\n{text}")
+            entries.append(("note", f"[comment of {stamp}]\n{text}"))
     if kind == "discuss":
         if not question:
             return "no_question"
         # The question is given once, in its own section, and not again among the notes.
-        if question_note >= 0:
-            del notes[question_note]
+        if question_entry >= 0:
+            del entries[question_entry]
     description = strip_quotes(item.body)
     criteria = done_criteria(description)
     title = " ".join(item.title.split())
@@ -571,15 +594,14 @@ def build_prompt(settings: Settings, kind: str, item: Item, comments: list[dict[
 
     left_out = 0
     while True:
+        notes = [text for what, text in entries if what == "note"]
+        answers = [text for what, text in entries if what == "answer"]
         text = compose(notes, answers, left_out)
         if len(text.encode("utf-8")) <= settings.max_prompt_bytes:
             return Prompt(text=text, left_out=left_out)
-        if notes:
-            notes.pop(0)
-        elif answers:
-            answers.pop(0)
-        else:
+        if not entries:
             return "prompt_too_long"
+        entries.pop(0)  # the oldest entry, a comment or an earlier answer; never the question or the criteria
         left_out += 1
 
 
@@ -764,19 +786,20 @@ def run_agy(
     program = shutil.which("agy", path=os.environ.get("PATH"))
     if program is None:
         raise JobError("agy_missing")
-    argv = [program, "-p", prompt, "--output-format", "json", "--print-timeout", f"{settings.job_seconds}s"]
+    grace = max(1, min(30, settings.job_seconds // 20))
+    # The job's own limit decides (status timeout); agy's own limit is a second line, set later than it.
+    argv = [program, "-p", prompt, "--output-format", "json", "--print-timeout", f"{settings.job_seconds + grace}s"]
     if settings.sandbox[kind]:
         argv.append("--sandbox")
-    if settings.model:
-        argv += ["--model", settings.model]
+    argv += ["--model", settings.model]
     record = program_record(program)
     record["arguments"] = ["<the prompt, kept in prompt.txt>" if a == prompt else a for a in argv[1:]]
     record["environment_names"] = sorted(env)
+    record["model"] = settings.model
     _write_private(answer / "agy.json", json.dumps(record, indent=2) + "\n")
     refusal = inside_agent_reasons()
     if refusal:
         raise JobError("inside_agent", refusal)
-    grace = max(1, min(30, settings.job_seconds // 20))
     stdout_path = answer / "agy-stdout.json"
     stderr_path = answer / "agy-stderr.txt"
     with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
@@ -790,7 +813,7 @@ def run_agy(
         timed_out = False
         try:
             try:
-                proc.wait(timeout=settings.job_seconds + grace)
+                proc.wait(timeout=settings.job_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 _stop_group(proc, wait_first=5)
@@ -847,18 +870,19 @@ def interpret(run: AgyRun, max_answer_bytes: int) -> tuple[str, list[str], str |
 
 # --- The answer, the scan and the comment ---------------------------------------------------------------
 
-VERDICT_RE = re.compile(r"(?im)^[\s*_>#-]*verdict:\s*(approve|changes needed)[\s*_.]*$")
+# The verdict is read only from a line that starts with it.
+VERDICT_RE = re.compile(r"(?im)^verdict: (approve|changes needed)[ \t]*$")
 
 
 def split_answer(response: str) -> tuple[str | None, str]:
     lines = response.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     public = [i for i, line in enumerate(lines) if line.strip() == PUBLIC_MARK]
     private = [i for i, line in enumerate(lines) if line.strip() == PRIVATE_MARK]
-    if len(public) != 1 or len(private) > 1 or (private and private[0] < public[0]):
+    # Exactly one line of each mark, the public one first; anything else is held.
+    if len(public) != 1 or len(private) != 1 or private[0] < public[0]:
         return None, ""
-    end = private[0] if private else len(lines)
-    text = "\n".join(lines[public[0] + 1 : end]).strip()
-    return (text or None), "\n".join(lines[end + 1 :]).strip() if private else ""
+    text = "\n".join(lines[public[0] + 1 : private[0]]).strip()
+    return (text or None), "\n".join(lines[private[0] + 1 :]).strip()
 
 
 def verdict_of(public: str | None) -> tuple[str, list[str]]:
@@ -910,7 +934,7 @@ TOKEN_RES = (
 )
 LONG_RUN_RE = re.compile(r"(?<![A-Za-z0-9_+=-])[A-Za-z0-9_+=-]{32,}(?![A-Za-z0-9_+=-])")
 # A secret access key: 40 characters of base 64 that hold a slash or a plus.
-SECRET40_RE = re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
+SECRET40_RE = re.compile(r"(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])")
 TAG_RE = re.compile(r"<[^<>\n]*>")
 
 
@@ -922,7 +946,7 @@ def _word_pattern(value: str) -> re.Pattern[str]:
 
 
 def unmarked(text: str) -> str:
-    """A copy as GitHub shows it: character references resolved, code, tags and emphasis marks taken out."""
+    """A copy with character references resolved, and code, tags on one line and the marks * and ~ taken out."""
     for _ in range(3):
         resolved = html.unescape(text)
         if resolved == text:
@@ -951,7 +975,7 @@ def known_values() -> dict[str, list[str]]:
 
 def scan(text: str, names: list[str], settings: Settings, known: dict[str, list[str]]) -> list[str]:
     """The kinds of things in `text` that must not be public; empty when it may be posted. The text is scanned
-    as it is, and a second time as GitHub would show it."""
+    as it is, and a second time on the copy that unmarked() makes."""
     return sorted(set(_scan_once(text, names, settings, known)) | set(_scan_once(unmarked(text), names, settings, known)))
 
 
@@ -964,7 +988,7 @@ def _scan_once(text: str, names: list[str], settings: Settings, known: dict[str,
         if name.isascii():
             if _word_pattern(name).search(flat):
                 found.add("name")
-        elif " ".join(name.split()).lower() in flat.lower():
+        elif re.search("(?i)" + r"[\W_]*".join(re.escape(word) for word in normalize(name).split()), flat):
             found.add("name")
     if HONORIFIC_RE.search(text) or MENTION_RE.search(CODE_RE.sub(" ", text)):
         found.add("name")
@@ -1137,8 +1161,10 @@ def _job(
         if draft == "no_question":
             result.update(status="no_question", reasons=["no_question"])
             return
-    work = Path(tempfile.mkdtemp(prefix="dodam-gemini-"))
+    work = Path(tempfile.mkdtemp(prefix="dodam-gemini-")).resolve()
     try:
+        if work.is_relative_to(ROOT.resolve()) or work.is_relative_to(private.resolve()):
+            raise JobError("work_folder")
         env = signed_out_environment(work)
         repo, head = make_checkout(settings, item, work, env)
         prompt = build_prompt(settings, kind, item, comments, head)
@@ -1241,6 +1267,21 @@ def main(argv: list[str] | None = None) -> int:
         run_id = tell_run(args.tell)
     except SettingsError as exc:
         result.update(status="settings", reasons=[exc.reason])
+        print(json.dumps(result), flush=True)
+        return EXIT_CODES["settings"]
+    try:
+        me = gh("GET", "user")
+    except SignedOut as exc:
+        result.update(status="signed_out", reasons=[exc.reason])
+        print(json.dumps(result), flush=True)
+        return EXIT_CODES["signed_out"]
+    except GitHubError as exc:
+        result.update(status="error", reasons=[exc.reason])
+        print(json.dumps(result), flush=True)
+        return EXIT_CODES["error"]
+    if user_id(me) != settings.project_account_id:
+        # As the watcher does: the job posts with the signed-in account, which must be the project's.
+        result.update(status="settings", reasons=["account"])
         print(json.dumps(result), flush=True)
         return EXIT_CODES["settings"]
     result = run_job(args.kind, args.number, settings, private, run_id)

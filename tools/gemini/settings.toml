@@ -42,9 +42,10 @@ max_comment_pages = 10
 # A comment of the project's account that begins with this line is a question for a discussion.
 discussion_first_line = "Question for the Gemini job:"
 
-# The model the command-line tool is asked for. Empty: the tool's own default. A name the tool does not
-# know makes the run fail at once, by the tool's own rule.
-model = ""
+# The model the command-line tool is asked for, always: a run without a model named starts nothing. The name is
+# the one Google's page on headless mode lists beside "Gemini 4 Carbon (Medium)", the model that answered the
+# first run. A name the tool does not know makes the run fail at once, by the tool's own rule.
+model = "gemini-4-carbon-medium"
 
 # Prefixes of work item numbers that never appear in a public part.
 work_item_prefixes = ["DOD"]
