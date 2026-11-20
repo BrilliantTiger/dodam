@@ -178,6 +178,8 @@ def serve(state, args, stdin_text):
                     time.sleep(0.02)
             return 0, page(item.get("comments", []), query), ""
         if tail[0] == "issues" and tail[2:] == ["comments"] and method == "POST":
+            if state.get("fail_post"):
+                return 1, None, "gh: Server Error (HTTP 500)"
             body = json.loads(stdin_text)["body"]
             cid = new_id(state)
             item.setdefault("comments", []).append(
@@ -1112,7 +1114,8 @@ def test_the_whole_answer_stays_private_and_only_the_public_part_is_posted_under
     item = world.pull(7)
     world.label(item, "verify")
     public = (f"{FIRST_LINE_PREFIX} by Gemini itself, it says.\n" + ANSWER_PUBLIC +
-              "\nCommit 0123456789abcdef0123456789abcdef01234567 and https://github.com/BrilliantTiger/dodam/pull/7 are fine.")
+              "\nCommit 0123456789abcdef0123456789abcdef01234567 and https://github.com/BrilliantTiger/dodam/pull/7 are fine."
+              "\nThe policy is at https://github.com/BrilliantTiger/dodam/security/policy for everyone.")
     world.answer(envelope(answer_text(public=public)))
     run = world.run_job("verify", 7)
     result = result_of(run)
@@ -1237,6 +1240,10 @@ SCAN_CASES = [
     # Paths in any case of letters.
     ("local_path", "It was written to /users/shared/dodam-gemini-501/x."),
     ("local_path", "It lies under /VOLUMES/data/x."),
+    # A 40-character run with a slash or a plus, whatever its mix of letters and digits, also before an equals sign.
+    ("token", "KEY=wJalrXUtnFEMI/KaMDENG/bPxRfiCYEXAMPLEKEY"),
+    ("token", "The value wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY= was given."),
+    ("token", "The value abcdefghijklmnopqrst/uvwxyzabcdefghijklm was given."),
 ]
 
 
@@ -1631,8 +1638,136 @@ def test_a_mark_put_back_for_a_used_up_quota_three_times_is_then_handled_as_an_e
     assert len(world.agy_runs()) == 4
 
 
-def test_without_the_private_list_of_names_nothing_is_posted(world: World):
-    (world.private / "names.txt").unlink()
+def test_a_second_watcher_on_the_same_private_folder_ends_at_once(world: World):
+    world.label(world.pull(7), "verify")
+    with open(world.private / "watch.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        run = world.run_watch()
+    assert run["code"] == 5, run
+    assert "another watcher is using this private folder" in str(run["stderr"]), run
+    assert world.gh_calls() == [] and world.agy_runs() == []
+
+
+DAMAGED_JOB_STATES = {
+    "not JSON": "{",
+    "a day's count that is a word": '{"version": 1, "days": {"TODAY": "eight"}, "hold_until": 0}',
+    "a day's count that is true": '{"version": 1, "days": {"TODAY": true}, "hold_until": 0}',
+    "a day that is not a date": '{"version": 1, "days": {"soon": 1}, "hold_until": 0}',
+    "a wait that is a word": '{"version": 1, "days": {}, "hold_until": "soon"}',
+    "a wait that is not a number": '{"version": 1, "days": {}, "hold_until": NaN}',
+}
+
+
+@pytest.mark.parametrize("program", ["job", "watcher"])
+@pytest.mark.parametrize("case", sorted(DAMAGED_JOB_STATES))
+def test_a_damaged_state_file_of_the_job_is_left_as_it_is_and_stops_it(world: World, case: str, program: str):
+    world.label(world.pull(7), "verify")
+    path = world.private / "job-state.json"
+    text = DAMAGED_JOB_STATES[case].replace("TODAY", time.strftime("%Y-%m-%d", time.gmtime()))
+    path.write_text(text, encoding="utf-8")
+    if program == "job":
+        result = result_of(world.run_job("verify", 7))
+        assert result.get("status") == "error" and "job_state" in result.get("reasons", []), result
+    else:
+        run = world.run_watch()
+        assert run["code"] == 4 and "damaged" in str(run["stderr"]) and "Traceback" not in str(run["stderr"]), run
+    assert path.read_text(encoding="utf-8") == text, "the damaged state file was changed"
+    assert world.agy_runs() == []
+
+
+DAMAGED_WATCH_STATES = {
+    "not JSON": "{",
+    "handled marks that are not a table": '{"version": 2, "handled": [], "ignored": {}, "quota_returns": {}}',
+    "a count of returns that is a word": '{"version": 2, "handled": {}, "ignored": {}, "quota_returns": {"5001": "x"}}',
+    "a count of returns that is true": '{"version": 2, "handled": {}, "ignored": {}, "quota_returns": {"5001": true}}',
+}
+
+
+@pytest.mark.parametrize("case", sorted(DAMAGED_WATCH_STATES))
+def test_a_damaged_state_file_of_the_watcher_is_left_as_it_is_and_stops_it(world: World, case: str):
+    world.label(world.pull(7), "verify")
+    path = world.private / "watch-state.json"
+    path.write_text(DAMAGED_WATCH_STATES[case], encoding="utf-8")
+    run = world.run_watch()
+    assert run["code"] == 4 and "damaged" in str(run["stderr"]) and "Traceback" not in str(run["stderr"]), run
+    assert path.read_text(encoding="utf-8") == DAMAGED_WATCH_STATES[case], "the damaged state file was changed"
+    assert world.gh_calls() == [] and world.agy_runs() == []
+
+
+def test_an_item_with_as_many_comments_and_events_as_the_bound_allows_is_read(world: World):
+    world.write_settings(max_comment_pages=1)
+    item = world.pull(7)
+    events = item["events"]
+    assert isinstance(events, list)
+    events.extend({"id": 100 + n, "event": "mentioned", "actor": OUTSIDER_A} for n in range(99))
+    world.label(item, "verify")
+    for n in range(100):
+        world.comment(item, PROJECT, f"Note {n}.")
+    assert len(events) == 100 and len(item["comments"]) == 100  # type: ignore[arg-type]
+    run = world.run_watch()
+    assert [r.get("status") for r in results_of(run)] == ["posted"], run
+
+
+@pytest.mark.parametrize("cause", ["time up", "answer too long", "no JSON", "an error", "a fault while posting"])
+def test_a_job_that_fails_after_agy_started_is_handled_without_a_comment_and_counts(world: World, cause: str):
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    item = world.pull(7)
+    event = world.label(item, "verify")
+    if cause == "time up":
+        world.write_settings(job_seconds=2)
+        world.answer(envelope(answer_text()), sleep=60)
+    elif cause == "answer too long":
+        world.write_settings(max_answer_bytes=1000)
+        world.answer(envelope(answer_text(public=ANSWER_PUBLIC + " word" * 400)))
+    elif cause == "no JSON":
+        world.answer("this is not JSON", exit_code=1)
+    elif cause == "an error":
+        world.answer(envelope("", status="ERROR", error="the run broke"), exit_code=1)
+    else:
+        world.state_extra["fail_post"] = True
+    run = world.run_watch()
+    statuses = [r.get("status") for r in results_of(run)]
+    assert statuses in (["timeout"], ["error"]), f"{cause}: {run}"
+    state = world.github_state()
+    assert state.get("removed") == [{"number": 7, "label": LABELS["verify"]}], f"{cause}: the mark was not taken off"
+    assert state.get("posted") is None
+    saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+    assert str(event) in saved["handled"], f"{cause}: the mark was not handled"
+    assert world.job_state().get("days") == {today: 1}, f"{cause}: the run did not count in the day"
+
+
+SEARCHED_WORDS = [
+    ("quota", "quota"), ("quota", "rate limit"), ("quota", "ratelimit"), ("quota", "rate-limit"),
+    ("quota", "resource exhausted"), ("quota", "RESOURCE_EXHAUSTED"), ("quota", "too many requests"),
+    ("quota", "HTTP 429"), ("quota", "usage limit"), ("quota", "limit reached"), ("quota", "out of credits"),
+    ("signed_out", "authentication"), ("signed_out", "not signed in"), ("signed_out", "please sign in"),
+    ("signed_out", "login required"), ("signed_out", "log in required"), ("signed_out", "unauthorized"),
+    ("signed_out", "unauthorised"),
+]
+
+
+@pytest.mark.parametrize("status,word", SEARCHED_WORDS, ids=[w for _, w in SEARCHED_WORDS])
+def test_each_word_searched_in_a_failed_run_reads_as_quota_or_signed_out(world: World, status: str, word: str):
+    world.label(world.pull(7), "verify")
+    world.answer("no answer", exit_code=1, stderr=f"the run ended: {word}\n")
+    result = result_of(world.run_job("verify", 7))
+    assert result.get("status") == status, f"{word}: {result}"
+
+
+@pytest.mark.parametrize("case", ["missing", "a link", "empty", "only comments"])
+def test_without_the_private_list_of_names_nothing_is_posted(world: World, case: str):
+    names = world.private / "names.txt"
+    if case == "missing":
+        names.unlink()
+    elif case == "a link":
+        real = world.root / "names-elsewhere.txt"
+        real.write_text(names.read_text(encoding="utf-8"), encoding="utf-8")
+        names.unlink()
+        names.symlink_to(real)
+    elif case == "empty":
+        names.write_text("", encoding="utf-8")
+    else:
+        names.write_text("# names that must never be posted\n\n", encoding="utf-8")
     item = world.pull(7)
     world.label(item, "verify")
     result = result_of(world.run_job("verify", 7))
@@ -1896,6 +2031,11 @@ def test_closing_the_terminal_stops_the_program_and_agy(world: World, program: s
     folder = Path(lines[0].rsplit("private=", 1)[1])
     assert json.loads((folder / "result.json").read_text(encoding="utf-8")).get("status") == "stopped"
     assert sum(world.job_state().get("days", {}).values()) == 1  # type: ignore[union-attr]
+    if program == "watcher":
+        assert LABELS["verify"] in world.github_state()["items"]["7"]["labels"], "the mark was taken off"  # type: ignore[index]
+        watch_state = world.private / "watch-state.json"
+        saved = json.loads(watch_state.read_text(encoding="utf-8")) if watch_state.is_file() else {"handled": {}}
+        assert saved["handled"] == {}, "a job stopped by a signal was handled"
 
 
 def test_nothing_is_installed_to_keep_running_and_only_the_standard_library_is_used():
