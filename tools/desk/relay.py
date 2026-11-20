@@ -151,10 +151,11 @@ def reservation(spending: dict) -> int:
 
 # The points between two of the relay's own steps at the start and at the end of a session, in their order. Between the
 # first and the last point of each the relay holds its one lock: nothing else of the relay happens there.
-POINTS_AT_START = ("start: before the first step", "start: the kept list is read", "start: the session is counted and its places are in hand",
-                   "start: the step is over")  # fmt: skip
+POINTS_AT_START = ("start: before the first step", "start: what is kept on a closed item is counted", "start: what is kept on a closed item is out of the list",
+                   "start: the kept list is read", "start: the session is counted and its places are in hand", "start: the step is over")  # fmt: skip
 POINTS_AT_END = ("end: before the first step", "end: the handled places are out of the list", "end: the cost is written",
-                 "end: the places of a closed item are out of the list", "end: nothing is in hand and no session runs", "end: the step is over")  # fmt: skip
+                 "end: what is kept on a closed item is counted", "end: the places of a closed item are out of the list",
+                 "end: nothing is in hand and no session runs", "end: the step is over")  # fmt: skip
 
 
 def marked(env: dict[str, str], number: int | None = None, accounts=(), held_back=()) -> dict[str, str]:
@@ -581,6 +582,35 @@ class Relay:
         except tools.Refused:
             return {}
 
+    def closed_line(self, number: int, since: float, gone: list[tuple[int, int]]) -> str:
+        """The digest's line for an item that closed: the day it opens again, how many arrivals went, and whose."""
+        opens = time.strftime("%Y-%m-%d UTC", time.gmtime(since + self.spending["item_closed_days"] * tools.DAY))
+        line = (f"Closed until {opens}: two sessions in a row that were shown it had to be ended. "
+                f"{sum(arrivals for _, arrivals in gone)} arrival(s) kept on it went")  # fmt: skip
+        if gone:
+            # The accounts by number, up to eight of them and as many as the line holds, each number whole.
+            room = self.desk.lock["coordinator"]["digest_line_chars"] - len(line) - len(", of accounts .")
+            line += ", of accounts " + tools.named([account for account, _ in gone], room, 8)
+        return line + "."
+
+    def let_go(self, closed: dict[int, float], point: str) -> None:
+        """Every arrival kept on these closed items goes, whoever wrote it.
+
+        First each is counted for the account that wrote it and the item's line is written, in one look at the record
+        and once for each closing; then the places go from the kept list. A stop between the two leaves them counted
+        and kept, and the next start only takes them out. Called at the end of the session that closed an item, and at
+        every start, which finds what a stop left kept on a closed item or a closing whose line was not written.
+        """
+        kept, items = self.kept.entries(), []
+        for number, since in sorted(closed.items()):
+            gone = [(place["account"], len(place["events"])) for place in kept if place["number"] == number]
+            items.append((number, since, gone, self.closed_line(number, since, gone)))
+        if items:
+            self.desk.closed_items(items)
+        self.at(point)
+        for number in sorted({place["number"] for place in kept if place["number"] in closed}):
+            self.kept.forget(number)
+
     def start_one(self) -> bool:
         """Start one session: for what was typed, or for the oldest kept arrival that the bounds leave room for."""
         if self.starts_nothing:
@@ -608,27 +638,32 @@ class Relay:
         return True
 
     def begin(self, typed: bool = False) -> tuple[dict | None, str | None, list[dict], dict[int, int]]:
-        """The one step at a session's start: the kept list is read, the session is chosen and counted, its places are in hand."""
+        """The one step at a session's start: what is still kept on a closed item goes, the kept list is read, the
+        session is chosen and counted, its places are in hand."""
         self.at(POINTS_AT_START[0])
         with self.turn:
+            # What a stop left: arrivals kept on an item that closed, or a closing whose line was not written. Done as
+            # the end of the session that closed the item would have done it, and counted once.
+            self.let_go(self.closed_since(), POINTS_AT_START[1])
+            self.at(POINTS_AT_START[2])
             kept = None if typed else self.kept.entries()
-            self.at(POINTS_AT_START[1])
+            self.at(POINTS_AT_START[3])
             entry, reached, places, waiting = self.admit(kept=kept)
             if not typed and waiting != self.waiting_written:
                 # Arrivals that wait for an account's share are counted for the next digest.
                 self.desk.count_as(WAITING, waiting)
                 self.waiting_written = waiting
-            self.at(POINTS_AT_START[2])
-        self.at(POINTS_AT_START[3])
+            self.at(POINTS_AT_START[4])
+        self.at(POINTS_AT_START[5])
         return entry, reached, places, waiting
 
     def end(self, entry: dict, places: list[dict], dealt_with: bool, counts: list[int] | None, charged: float | None, **how) -> None:
         """The one step at a session's end, for everything else the relay does.
 
         The places the session dealt with go out of the kept list, then its cost is written, then what is kept on its
-        item goes if the item closed, and then nothing is in hand and no session is running. On disk the handled
-        places go before the cost: a stop between the two leaves a session without a cost, which counts as ended and
-        charged everything set aside, and never an arrival that was handled and is handled again.
+        item is counted and goes if the item closed, and then nothing is in hand and no session is running. On disk
+        the handled places go before the cost: a stop between the two leaves a session without a cost, which counts as
+        one that ended and was charged everything set aside, and never an arrival that was handled and is handled again.
         """
         self.at(POINTS_AT_END[0])
         with self.turn:
@@ -640,24 +675,13 @@ class Relay:
                 self.at(POINTS_AT_END[2])
                 number = entry["number"]
                 closed = self.closed_since() if dealt_with and number is not None else {}
-                if number in closed:
-                    # Every arrival kept on the item goes with it, whoever wrote it: each is counted for its account, and the digest names them.
-                    gone = self.kept.forget(number)
-                    for account, arrivals in gone:
-                        self.desk.count(tools.DROPPED, account=account, by=arrivals, item=number)
-                    opens = time.strftime("%Y-%m-%d UTC", time.gmtime(closed[number] + self.spending["item_closed_days"] * tools.DAY))
-                    line = (f"Closed until {opens}: two sessions in a row that were shown it had to be ended. "
-                            f"{sum(arrivals for _, arrivals in gone)} arrival(s) kept on it went")  # fmt: skip
-                    if gone:
-                        # The accounts by number, up to eight of them and as many as the line holds, each number whole.
-                        room = self.desk.lock["coordinator"]["digest_line_chars"] - len(line) - len(", of accounts .")
-                        line += ", of accounts " + tools.named([account for account, _ in gone], room, 8)
-                    self.desk.note("item_closed", line + ".", number)
-                self.at(POINTS_AT_END[3])
+                # Every arrival kept on the item goes with it, whoever wrote it: each is counted for its account, and the digest names them.
+                self.let_go({number: closed[number]} if number in closed else {}, POINTS_AT_END[3])
+                self.at(POINTS_AT_END[4])
             finally:
                 self.running, self.in_hand = None, []
-            self.at(POINTS_AT_END[4])
-        self.at(POINTS_AT_END[5])
+            self.at(POINTS_AT_END[5])
+        self.at(POINTS_AT_END[6])
 
     # -- one session for one message ----------------------------------------
 

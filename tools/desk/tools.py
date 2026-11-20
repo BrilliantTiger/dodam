@@ -481,8 +481,10 @@ class Desk:
                 # An item that was closed opens again by itself, so many days after the session that closed it.
                 closed_for = self.lock["spending"]["item_closed_days"] * DAY
                 record["closed_items"] = {number: at for number, at in record["closed_items"].items() if moment - at < closed_for}
-                # A report is kept until a digest has carried it, however old it is.
-                record["reports"] = [entry for entry in record["reports"] if not entry["digested"] or moment - entry["t"] < DAY]
+                # A report is kept until a digest has carried it, however old it is; the line of a closed item for as long
+                # as the item is closed, so that the relay can see that the closing was counted and named.
+                record["reports"] = [entry for entry in record["reports"] if not entry["digested"] or moment - entry["t"] < DAY
+                                     or entry["kind"] == "item_closed" and str(entry["number"]) in record["closed_items"]]  # fmt: skip
                 try:
                     yield record
                 finally:
@@ -582,14 +584,36 @@ class Desk:
         """Count something that was not kept, to be named in the next digest: for an account, and with the item it was on."""
         try:
             with self.counts() as record:
-                if account is None:
-                    record["uncounted"][what] = record["uncounted"].get(what, 0) + by
-                else:
-                    per_account = record["uncounted"].setdefault(what, {})
-                    per_account[str(account)] = per_account.get(str(account), 0) + by
-                    items = record["went"].setdefault(str(account), [])
-                    if item is not None and item not in items and len(items) < WENT_ITEMS:
-                        items.append(item)
+                self._count(record, what, account, by, item)
+        except Refused:
+            pass
+
+    @staticmethod
+    def _count(record: dict, what: str, account: int | None, by: int, item: int | None) -> None:
+        if account is None:
+            record["uncounted"][what] = record["uncounted"].get(what, 0) + by
+        else:
+            per_account = record["uncounted"].setdefault(what, {})
+            per_account[str(account)] = per_account.get(str(account), 0) + by
+            items = record["went"].setdefault(str(account), [])
+            if item is not None and item not in items and len(items) < WENT_ITEMS:
+                items.append(item)
+
+    def closed_items(self, items: list[tuple[int, float, list[tuple[int, int]], str]]) -> None:
+        """What goes with items that closed, each given with the moment it closed, what was kept on it and its line.
+
+        Every arrival kept on such an item is counted for the account that wrote it, and the line that names the item
+        is written for the next digest, in one look at the record and once for each closing: a closing whose line is
+        in the record was counted and named already, and nothing is counted again.
+        """
+        try:
+            with self.counts() as record:
+                for number, since, gone, line in items:
+                    if any(entry["kind"] == "item_closed" and entry["number"] == number and entry["t"] >= since for entry in record["reports"]):
+                        continue
+                    for account, arrivals in gone:
+                        self._count(record, DROPPED, account, arrivals, number)
+                    self._keep(record, "item_closed", number, [], line)
         except Refused:
             pass
 
