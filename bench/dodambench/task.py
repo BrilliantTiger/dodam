@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .judge import CASE_ENTRIES, CASES_DIR, JUDGE_ROOM_MB, step_terms
+from .judge import BUILD_SECONDS, CASE_ENTRIES, CASES_DIR, JUDGE_ROOM_MB, build_seconds, step_terms
 from .languages import LANGUAGES
 
 DOMAINS = {"web", "cli", "data", "net", "sys"}
@@ -353,8 +353,8 @@ def cases_mount(task: "Task") -> str:
 
 def judging_seconds(task: Task) -> int:
     """What the format checker adds up for the longest step of a command-line task: every wait and
-    every time limit the judge has in a step, term by term as the judge's step_terms gives them, so
-    that nothing the judge can spend in a step lies beyond the sum."""
+    every time limit the judge has in a step, term by term as the judge's step_terms gives them. The
+    build is counted at BUILD_SECONDS; a task whose settings would give it another limit is refused."""
     timeout = task.cli.get("case_timeout_sec")
     if not _whole(timeout) or task.manifest_problem:
         return 0
@@ -406,6 +406,14 @@ def cli_problems(task: Task) -> list[dict]:
         found.append(problem("task.toml", "limits.verifier_timeout_sec",
                              f"[limits] verifier_timeout_sec must be at least {needed}: every wait and "
                              "time limit of a step, so a program that hangs in every case still gets a result"))
+    if all(_whole(cli.get(key)) for key in CLI_LIMIT_KEYS):
+        from .convert import verifier_env   # the settings the judge is handed; the converter builds on this module
+        for lang in [name for name in task.languages if name in LANGUAGES]:
+            given = build_seconds(verifier_env(task, lang))
+            if given != BUILD_SECONDS:
+                found.append(problem("task.toml", "languages",
+                                     f"the judge would give the build in {lang} {given:g} seconds, but the sum of "
+                                     f"verifier_timeout_sec counts {BUILD_SECONDS}"))
     tests = task.root / "tests"
     for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
         rel = f"tests/{path.relative_to(tests).as_posix()}"

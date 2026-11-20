@@ -49,9 +49,9 @@ def judgement_problems(expect: str, weakness: str | None, report: dict) -> list[
     """Why a judged solution did not get the judgement it was written for; empty when it did."""
     if not report.get("build_ok"):
         return ["the program did not build"]
-    if report.get("served_program_left"):
-        # the step failed for what the program left, not for what the solution was written to show
-        return [f"the served program left what the judge cannot remove: {report['served_program_left']}"]
+    if report.get("left_behind"):
+        # the step failed for what the program's side left, not for what the solution was written to show
+        return [f"the program's side left what the judge cannot take back: {report['left_behind']}"]
     tests = report.get("tests", [])
     if any(t.get("message") == "program did not start" for t in tests):
         return ["the program did not start"]
