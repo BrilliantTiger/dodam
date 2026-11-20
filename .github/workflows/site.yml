@@ -30,7 +30,8 @@ jobs:
           python-version: "3.13"
       - name: Install the pinned browser driver
         run: |
-          python -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
+          # In isolated mode, so that nothing placed in the root of the repository runs in place of pip.
+          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
       - name: The committed pages are what the template builds
         run: python tools/site/build.py --check
       - name: Build what would be published, with a made-up status that carries markup in a title
@@ -58,7 +59,8 @@ jobs:
           python-version: "3.13"
       - name: Install the pinned browser driver
         run: |
-          python -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
+          # In isolated mode, so that nothing placed in the root of the repository runs in place of pip.
+          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
       - name: Install the pinned test runner
         working-directory: bench
         run: |
