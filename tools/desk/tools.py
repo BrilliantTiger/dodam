@@ -142,19 +142,22 @@ def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
 
 def empty_record() -> dict:
     return {"answers": [], "labels": [], "reports": [], "sent": [], "sessions": [], "uncounted": {}, "last_digest": 0.0, "clock": 0.0,
-            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}}  # fmt: skip
+            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}, "not_delivered": []}  # fmt: skip
 
 
 def checked_record(data) -> dict:
     """The record as it was written, or an error when it is not what the tools write."""
     # The desk's time was added later; a record written before it starts at nothing.
-    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed", "closed_items", "went") else data[key] for key, default in empty_record().items()}
+    record = {key: data.get(key, default) if key in ("clock", "ended_in_a_row", "closed", "closed_items", "went", "not_delivered") else data[key]
+              for key, default in empty_record().items()}  # fmt: skip
     if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict) or not isinstance(record["closed_items"], dict):
         raise ValueError("items")
     if not isinstance(record["went"], dict) or not all(isinstance(items, list) for items in record["went"].values()):
         raise ValueError("items")
     if not all(isinstance(at, (int, float)) for at in record["closed_items"].values()):
         raise ValueError("items")
+    if not isinstance(record["not_delivered"], list) or not all(isinstance(name, str) for name in record["not_delivered"]):
+        raise ValueError("not_delivered")
     for key in ("answers", "labels", "reports", "sent", "sessions"):
         if not isinstance(record[key], list) or not all(isinstance(entry, dict) and isinstance(entry["t"], (int, float)) for entry in record[key]):
             raise ValueError(key)
@@ -526,7 +529,12 @@ class Desk:
         return True
 
     def limit_reached(self, record: dict, name: str) -> None:
-        """Tell the coordinator, once in a day for each limit, that it was reached. No outsider's count is used for it."""
+        """Tell the coordinator, once in a day for each limit, that it was reached. No outsider's count is used for it.
+
+        The notice is tried once, and written down as tried whether it was delivered or not, so that nothing tries it
+        again that day: a start that meets the same bound sends nothing. One that could not be delivered is named in
+        the next digest.
+        """
         settings = self.lock["coordinator"]["at_once"]
         notices = [entry for entry in record["sent"] if entry["what"].startswith("limit: ")]
         if any(entry["what"] == "limit: " + name for entry in notices):
@@ -534,7 +542,10 @@ class Desk:
         if len(notices) >= settings["limit_notices_per_day"]:
             record["uncounted"]["limits"] = record["uncounted"].get("limits", 0) + 1
             return
-        self._send(record, "limit: " + name, "Desk: limit reached", ["Kind: limit_reached", f"Limit: {name}", "Written by the desk's tools, not by a session."])
+        if not self._send(record, "limit: " + name, "Desk: limit reached", ["Kind: limit_reached", f"Limit: {name}", "Written by the desk's tools, not by a session."]):
+            record["sent"].append({"t": record["clock"], "what": "limit: " + name, "delivered": False})
+            if name not in record["not_delivered"]:
+                record["not_delivered"].append(name)
 
     def day_closed(self, record: dict, name: str, accounts: list[int]) -> None:
         """Write down, for the next digest, that a day's bound closed the desk for everyone, and who used the most of it."""
@@ -697,10 +708,11 @@ class Desk:
                 waiting = [entry for entry in record["reports"] if not entry["digested"] and not entry["sent"]]
                 uncounted = {key: value for key, value in record["uncounted"].items() if value}
                 closed = record["closed"]
+                not_delivered = record["not_delivered"]
                 # A clock that was set back does not bring the next digest forward.
                 since = abs(moment - record["last_digest"])
                 digests = sum(1 for entry in record["sent"] if entry["what"] == "digest")
-                if not (waiting or uncounted or closed) or digests >= DAY // settings["digest_seconds"] or (since < settings["digest_seconds"] and not force):
+                if not (waiting or uncounted or closed or not_delivered) or digests >= DAY // settings["digest_seconds"] or (since < settings["digest_seconds"] and not force):
                     return False
                 # A vulnerability never waits for more than one digest: every one that waits is carried, before anything else.
                 # The rest follows in the order it arrived, up to the number of lines.
@@ -731,6 +743,9 @@ class Desk:
                         lines.append(f"- not handled ({key}): " + ", ".join(parts))
                     else:
                         lines.append(f"- not handled ({key}): {value}")
+                # A notice that a limit was reached is tried once; one that could not be delivered is named here.
+                for name in not_delivered:
+                    lines.append(f"- the notice that a limit was reached could not be delivered: {name}")
                 if not self._send(record, "digest", "Desk: digest", lines):
                     return False
                 for entry in carried:
@@ -738,6 +753,7 @@ class Desk:
                 record["uncounted"] = {}
                 record["closed"] = {}
                 record["went"] = {}
+                record["not_delivered"] = []
                 record["last_digest"] = moment
                 return True
         except Refused:
