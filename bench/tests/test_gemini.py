@@ -1680,6 +1680,8 @@ DAMAGED_WATCH_STATES = {
     "handled marks that are not a table": '{"version": 2, "handled": [], "ignored": {}, "quota_returns": {}}',
     "a count of returns that is a word": '{"version": 2, "handled": {}, "ignored": {}, "quota_returns": {"5001": "x"}}',
     "a count of returns that is true": '{"version": 2, "handled": {}, "ignored": {}, "quota_returns": {"5001": true}}',
+    "a handled mark whose value is a number": '{"version": 2, "handled": {"5001": 1}, "ignored": {}, "quota_returns": {}}',
+    "an ignored mark whose key is not a number": '{"version": 2, "handled": {}, "ignored": {"x": "account"}, "quota_returns": {}}',
 }
 
 
