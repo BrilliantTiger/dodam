@@ -26,6 +26,14 @@ if mode == "temp":
     with open(made.name, "rb") as back:
         assert back.read() == b"temp"
     print(os.path.dirname(os.path.realpath(made.name)))
+elif mode == "semaphore":
+    # a lock of Python's processes needs a named semaphore in /dev/shm
+    import multiprocessing
+    try:
+        multiprocessing.Lock()
+        print("made")
+    except OSError as error:
+        print(f"refused: {type(error).__name__}")
 elif mode == "copy":
     shutil.copyfile("in.bin", "out.bin")
 elif mode == "send":

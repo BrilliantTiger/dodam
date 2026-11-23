@@ -69,6 +69,12 @@ STARTS_SOMETHING = {
     "opening a file": "X = open('/tests/manifest.toml').read()\n",
     "a name the file does not define": "X = os.getpid()\n",
     "a relative import": "from . import helper\n",
+    "a module reached through an allowed module": "import json\n\nX = json.codecs\n",
+    "a built-in name bound by a parameter": "def f(open=None):\n    return open\n",
+    "a built-in name bound in a class": "class K:\n    getattr = None\n",
+    "a built-in name bound by a loop": "for eval in ():\n    pass\n",
+    "a built-in name bound where it never runs": "if False:\n    exec = None\n",
+    "storing an attribute": "case.x = 1\n",
 }
 
 # Ways a test could learn which language it judges, or anything else of the judge's settings.
@@ -94,6 +100,13 @@ LEARNS_SOMETHING = {
     "the system module beside the line for the helper folder": (
         "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
         "X = sys.argv\n"),
+    "a name with two underscores bound": "__all__ = []\n",
+    "a path the case gives, kept in a name": (
+        "def look():\n    with case() as c:\n        p = c.outside / 'x'\n        return str(p)\n"),
+    "a path a method of the case returns, used": (
+        "def look():\n    with case() as c:\n        return c.write('a', 'b').name\n"),
+    "a path the case gives, asked about": (
+        "def look():\n    with case() as c:\n        return sorted(c.work.parts)\n"),
     "a path beside the line for the helper folder": (
         "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
         "X = str(Path('x'))\n"),
@@ -115,6 +128,11 @@ MULTIPLIES = {
     "a hook of pytest by its name": "def pytest_collection_modifyitems(items):\n    items.reverse()\n",
     "a class pytest would collect, even an empty one": "class TestNothing:\n    pass\n",
     "a test name bound by a pattern": "match test_upper:\n    case test_alias:\n        pass\n",
+    "a class named like a test": "class test_more:\n    pass\n",
+    "a test that yields": "def test_yields():\n    with case() as c:\n        c.run([])\n    yield\n",
+    "a mark for the whole file": "pytestmark = 1\n",
+    "a test stored on a class": "class Holder:\n    pass\n\n\nHolder.test_m = test_upper\n",
+    "a class bound to a name pytest collects": "class Holder:\n    pass\n\n\nTestHolder = Holder\n",
     "a test bound twice": "test_again = test_upper\n",
     "a test name bound by a loop": "for test_each in range(2):\n    pass\n",
     "a test name bound by an import": "from json import loads as test_load\n",
@@ -198,7 +216,8 @@ def test_every_python_file_of_the_tests_is_held_to_the_same_rules(cli_task_dir):
 @pytest.mark.parametrize("rel", ["tests/conftest.py", "tests/functional/conftest.py", "tests/pytest.ini",
                                  "tests/functional/pytest.ini", "tests/pyproject.toml", "tests/tox.ini",
                                  "tests/setup.cfg", "tests/lib/fast.so", "tests/functional/__pycache__/x.pyc",
-                                 "tests/lib/sitecustomize.py", "tests/lib/json.py", "tests/functional/dodam_cli.py"])
+                                 "tests/lib/sitecustomize.py", "tests/lib/json.py", "tests/functional/dodam_cli.py",
+                                 "tests/lib/anyio.py", "tests/lib/httpx.py", "tests/lib/pluggy.py"])
 def test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused(cli_task_dir, rel):
     """pytest runs a conftest.py and obeys its settings files without a test asking for them, and
     Python loads compiled files and files named like its own modules in their place."""
@@ -262,3 +281,75 @@ def test_the_sample_counts_what_pytest_collects():
     counts = [collected(SAMPLE / "tests" / t.file) for t in task.tests_for("change-1")]
     assert sum(counts) == 50
     assert judging_seconds(task) == summed(counts, task.cli["case_timeout_sec"])
+
+
+PATH_LINE = "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
+
+
+def test_a_helper_is_a_file_of_the_helper_folder_only(cli_task_dir):
+    """A test imports a helper from the task's helper folder and nowhere else: not a Python file in
+    another folder of the tests, not a file of tests, and the line for the search path names the
+    helper folder only."""
+    write(cli_task_dir, "tests/data/extra.py", "def value():\n    return 1\n")
+    head = "import sys\nfrom pathlib import Path\n\n" + PATH_LINE
+    assert with_added(cli_task_dir, TEST, head + "import extra  # noqa: E402\n")
+    assert with_added(cli_task_dir, TEST, head + "import test_usage as other  # noqa: E402\n")
+    for folder in ("'data'", "'/opt'", "'lib.zip'"):
+        line = PATH_LINE.replace("'lib'", folder)
+        assert with_added(cli_task_dir, TEST, "import sys\nfrom pathlib import Path\n\n" + line), folder
+    write(cli_task_dir, "tests/lib/expected.py", "def value():\n    return 1\n")
+    assert with_added(cli_task_dir, TEST, head + "from expected import value  # noqa: E402\n") == []
+
+
+def test_a_link_in_the_tests_folder_is_refused(cli_task_dir, tmp_path):
+    """The checker reads what the converter copies: a link in the tests folder would bring in files the
+    checker never read."""
+    import os
+    outside = tmp_path / "extra"
+    write(outside, "loose.py", "X = 1\n")
+    os.symlink(outside, cli_task_dir / "tests/more")
+    assert [p for p in problems(cli_task_dir) if p["file"].startswith("tests/more")]
+    (cli_task_dir / "tests/more").unlink()
+    os.symlink(outside / "loose.py", cli_task_dir / "tests/lib-loose.py")
+    assert [p for p in problems(cli_task_dir) if p["file"].startswith("tests/lib-loose.py")]
+
+
+DANGEROUS = {eval, exec, compile, open, getattr, setattr, delattr, globals, locals, vars, __import__, breakpoint, input}
+
+
+def accepted_lines(root: Path, head: str, lines: list[str]) -> list[bool]:
+    """Which of these lines the checker accepts, each added after `head` at the end of a test file."""
+    path = root / TEST
+    original = path.read_text(encoding="utf-8")
+    before = original + "\n\n" + head
+    path.write_text(before + "".join(f"{line}\n" for line in lines), encoding="utf-8")
+    try:
+        said = {p["key"] for p in cli_problems(load_task(root)) if p["file"] == TEST}
+    finally:
+        path.write_text(original, encoding="utf-8")
+    first = before.count("\n") + 1
+    return [f"line {first + i}" not in said for i in range(len(lines))]
+
+
+def test_from_what_a_test_may_import_and_reach_no_module_or_dangerous_function_is_reached(cli_task_dir):
+    """The modules a test may import and the attributes it may reach are lists. Asked of every module
+    of the standard library, and of every attribute of what is reached to a depth of three, the
+    checker admits no chain that leads to a module or to a built-in function a test may not use."""
+    import importlib
+    import sys as system
+    names = sorted(n for n in system.stdlib_module_names if not n.startswith("_") and n.isidentifier())
+    allowed = [n for n, ok in zip(names, accepted_lines(cli_task_dir, "", [f"import {n}" for n in names])) if ok]
+    assert allowed, "no module of the standard library may be imported at all"
+    head = "".join(f"import {n}\n" for n in allowed)
+    level = [(n, importlib.import_module(n)) for n in allowed]
+    reached = []
+    for _ in range(3):
+        candidates = [(f"{expr}.{a}", getattr(obj, a)) for expr, obj in level for a in dir(obj)
+                      if a.isidentifier() and hasattr(obj, a)]
+        if not candidates:
+            break
+        flags = accepted_lines(cli_task_dir, head, [f"X = {expr}" for expr, _ in candidates])
+        level = [pair for pair, ok in zip(candidates, flags) if ok]
+        reached += level
+    bad = [expr for expr, obj in reached if type(obj).__name__ == "module" or any(obj is d for d in DANGEROUS)]
+    assert not bad, bad[:20]

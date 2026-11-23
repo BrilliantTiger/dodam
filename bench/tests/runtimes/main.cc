@@ -5,6 +5,7 @@
 #include <drogon/drogon.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +17,12 @@
 
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "";
+    if (mode == "tmpfile") {
+        // the C library's temporary file goes to the system's temporary folder, whatever the environment says
+        std::FILE* made = std::tmpfile();
+        std::cout << (made ? "made" : "refused: no file") << std::endl;
+        return 0;
+    }
     if (mode == "temp") {
         // a temporary file, made where the runtime makes one
         const auto folder = std::filesystem::temp_directory_path();

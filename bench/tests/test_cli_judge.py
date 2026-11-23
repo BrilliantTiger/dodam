@@ -1622,8 +1622,9 @@ def test_javas_temporary_folder_is_the_cases_own(tmp_path):
 
 def test_a_test_gives_no_more_standard_input_than_the_cases_file_limit(tmp_path):
     """What the case runner keeps of the standard input a test gives is one term of the container's
-    memory, bounded by the case's file limit. Up to it the input reaches the program; a test that
-    gives more is a fault of the task's tests, and no result is written."""
+    memory, bounded by the case's file limit. Up to it the input reaches the program. More is not
+    given: the program does not run and the case fails, as for a broken limit, whoever made the
+    input, since a test may hand a program's own output back. The judging goes on."""
     program = "import sys\nprint(len(sys.stdin.buffer.read()))\n"
     limit = 8 * 1024 * 1024
     (tmp_path / "within").mkdir()
@@ -1633,7 +1634,19 @@ def test_a_test_gives_no_more_standard_input_than_the_cases_file_limit(tmp_path)
         f"        assert r.out == '{limit}\\n', r\n")}
     assert outcomes(judge_program(tmp_path / "within", program, tests)) == {"test_up_to_the_limit": "passed"}
     tests = {"functional/test_input.py": (
-        f"def test_above_the_limit():\n    with case() as c:\n        c.run([], stdin=b'x' * {limit + 1})\n")}
+        f"def test_above_the_limit():\n    with case() as c:\n        c.run([], stdin=b'x' * {limit + 1})\n\n\n"
+        "def test_after():\n    with case() as c:\n        assert c.run([], stdin=b'x').out == '1\\n'\n")}
+    result = judge_program(tmp_path / "above", program, tests)
+    assert outcomes(result) == {"test_above_the_limit": "failed", "test_after": "passed"}, result["report"]
+    assert "input" in message(result, "test_above_the_limit")
+
+
+def test_a_file_whose_cases_are_fewer_than_the_judge_counted_is_the_judges_fault(tmp_path):
+    """The other way round: a test the judge counted that pytest does not collect."""
+    tests = {"functional/test_fewer.py": (
+        "def test_kept():\n    with case() as c:\n        assert c.run(['x'], stdin='a').exit_code == 0\n\n\n"
+        "def test_gone():\n    with case() as c:\n        assert c.run(['x'], stdin='a').exit_code == 0\n\n\n"
+        "test_gone = None\n")}
     with pytest.raises(judge_module.JudgeFault) as fault:
-        judge_program(tmp_path / "above", program, tests)
-    assert "standard input" in str(fault.value)
+        judge_program(tmp_path, ECHO, tests)
+    assert "test_fewer.py" in str(fault.value)

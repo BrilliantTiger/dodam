@@ -140,6 +140,7 @@ def test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container():
     assert cmd[:8] == ["docker", "create", "--name", "name", "--network", "none", "--user", "0"]
     assert cmd[cmd.index("--memory") + 1] == "768m" and cmd[cmd.index("--memory-swap") + 1] == "768m"
     assert cmd[cmd.index("--pids-limit") + 1] == str(room["processes"]) and "--tmpfs" not in cmd
+    assert cmd[cmd.index("--cpus") + 1] == str(task.limits["cpus"])
     env = verifier_env(task, "go")
     assert set(env) == {"STEPS", "BUILD_CMD", "START_CMD", "PORT", "APP_DB", "APP_SECRET_NEEDED", "DEPS_DIR", "DEPS_LINKS"}
     made = to_harbor(task, "go", Path(__import__("tempfile").mkdtemp()))
@@ -239,6 +240,16 @@ def restricted_calls_in_the_document() -> set[str]:
     return set(re.findall(r"\(`([a-z]+)`\)", paragraph))
 
 
+def closed_in_the_document() -> list[str]:
+    """What the document says a program can run into besides the four calls: the folders closed to
+    it and the calls that need them."""
+    import re
+    text = (BENCH.parent / "docs/benchmark/command-line-tasks.en.md").read_text(encoding="utf-8")
+    start = text.index("**What a program can run into where it runs.**")
+    paragraph = text[start:text.index("\n", start)]
+    return re.findall(r"`([^`]+)`", paragraph)
+
+
 def restrictions_told(instruction: str) -> list[str]:
     return [line for line in instruction.splitlines() if "sendfile" in line]
 
@@ -259,6 +270,9 @@ def test_the_agent_is_told_the_restrictions_a_correct_program_can_run_into(cli_t
                 told.add(lines[0])
     assert len(told) == 1, told
     sentence = told.pop()
-    assert set(re.findall(r"`([a-z]+)`", sentence)) == calls, sentence
+    assert calls <= set(re.findall(r"`([a-z]+)`", sentence)), sentence
+    # the closed folders and what needs them, as the document lists them
+    listed = closed_in_the_document()
+    assert listed and all(f"`{name}`" in sentence for name in listed), (listed, sentence)
     for word in ("memory", "count", "judge", "measure", "limit"):
         assert word not in sentence.lower(), (word, sentence)

@@ -2870,11 +2870,12 @@ stop.set()
 '''
 
 
-def test_the_judge_needs_no_more_processes_than_the_checker_leaves_it(tmp_path):
+@pytest.mark.parametrize("limit", [16, 64])
+def test_the_judge_needs_no_more_processes_than_the_checker_leaves_it(tmp_path, limit):
     """While a case runs, the container holds the case's processes and the judge's own: the verifier's
     script, the judge and the case runner, three, and when a program left processes, one more that
     ends them. The checker leaves the judge eight above a case's limit. With the container's cap
-    there, a program that makes processes until it is refused reaches its own limit of 16."""
+    there, a program that makes processes until it is refused reaches its own limit, of 16 and of 64."""
     tests = {"functional/test_fill.py": '''
 def test_fill():
     with case() as c:
@@ -2883,8 +2884,8 @@ def test_fill():
             f.write(r.out)
         assert r.exit_code == 0, r
 '''}
-    result = judge_attack(tmp_path, FILLS_ITS_LIMIT, tests, {"processes": 16 + 8}, CASE_PROCESSES="16")
+    result = judge_attack(tmp_path, FILLS_ITS_LIMIT, tests, {"processes": limit + 8}, CASE_PROCESSES=str(limit))
     assert result["exit_code"] == 0 and outcomes(result) == {"test_fill": "passed"}, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
-    note_figures("processes while a case holds its limit of 16", own=seen["own"], judge=seen["others"])
-    assert seen["own"] == 16 and seen["others"] <= 3 and seen["container"] <= 16 + 3, seen
+    note_figures(f"processes while a case holds its limit of {limit}", own=seen["own"], judge=seen["others"])
+    assert seen["own"] == limit and seen["others"] <= 3 and seen["container"] <= limit + 3, seen

@@ -438,3 +438,21 @@ def test_the_lowered_memory_cap_says_what_the_code_does():
     said = room["adjusted"]["message"]
     assert room["memory_mb"] == 1469 and "1600" in said and "1959" in said and "1469" in said, said
     assert "three quarters" in said, said
+
+
+def test_a_container_that_left_only_part_of_a_result_is_a_fault(tmp_path, fake_docker, monkeypatch):
+    from dodambench.judge import JudgeFault
+    (fake_docker / "reward.json").write_text(json.dumps({"reward": 1.0}), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, tmp_path / "out")
+
+
+def test_a_run_that_left_some_solutions_unchecked_is_no_success_and_says_how_many(tmp_path, cli_task_dir, monkeypatch, capsys):
+    import dodambench.vet as vetting
+    monkeypatch.setattr(vetting, "_missing_tools", lambda lang_env, *args, **kwargs:
+                        ["go"] if lang_env.get("BUILD_CMD", "").startswith("go ") else [])
+    code = vetting.main([str(cli_task_dir), "--unseparated", "--out", str(tmp_path / "vet")])
+    said = capsys.readouterr().out
+    checked = [line for line in said.splitlines() if line.startswith("ok ")]
+    assert checked and code != 0 and "not checked" in said and "nothing was checked" not in said, (code, said)

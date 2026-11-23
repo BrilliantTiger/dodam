@@ -342,3 +342,46 @@ def test_every_task_of_the_repository_fits_both_sums():
     for root in sorted((BENCH / "tasks").iterdir()):
         if (root / "task.toml").is_file():
             assert errors_of(root) == [], root.name
+
+
+def test_a_replaced_file_that_is_not_utf8_is_a_problem_and_no_trace_of_an_error(cli_task_dir):
+    (cli_task_dir / "solutions/secure/python/change-1/data.bin").write_bytes(b"\xff\xfe upper \x80")
+    edit(cli_task_dir / "solutions/variants/python.toml", 'file = "main.py"\nold = ".upper()"',
+         'file = "data.bin"\nold = "upper"')
+    done = check(cli_task_dir)
+    assert "Traceback" not in done.stderr and done.returncode == 1, done.stderr[-1500:]
+    assert [p for p in report_of(done)["problems"] if p.get("key") == "variant[1].replace[0].file"], report_of(done)
+
+
+def test_a_test_superseded_at_the_variants_own_step_does_not_count_for_it(cli_task_dir):
+    """A security test that a step supersedes is not judged at that step, so it does not count as a test
+    of the variant's weakness at its own step."""
+    edit(cli_task_dir / "tests/manifest.toml", 'step = "change-1"\nweakness = "path-traversal"',
+         'step = "change-1"\nweakness = "path-traversal"\nsuperseded_in = ["change-1"]')
+    errors = errors_of(cli_task_dir)
+    assert any("copies-anywhere" in e and "change-1" in e for e in errors), errors
+
+
+def test_what_the_case_runner_keeps_of_the_output_is_four_times_its_limit_and_one_mb(cli_task_dir):
+    toml = cli_task_dir / "task.toml"
+    edit(toml, "case_output_kb = 64", "case_output_kb = 8192")
+    terms = memory_terms(256, 8, 8192)
+    whole = int(sum(terms.values()))
+    assert terms["what the case runner keeps of the program's output"] == 33
+    given = toml.read_text(encoding="utf-8")
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {whole - 1}"), encoding="utf-8")
+    assert memory_refusals(cli_task_dir)
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {whole}"), encoding="utf-8")
+    assert not memory_refusals(cli_task_dir)
+
+
+def test_an_output_limit_above_the_file_limit_is_refused(cli_task_dir):
+    """A test may hand a run's output back as standard input, which the case runner bounds by the file
+    limit: the whole output has to fit in it."""
+    from dodambench.task import cli_problems
+    toml = cli_task_dir / "task.toml"
+    given = toml.read_text(encoding="utf-8")
+    for output_kb, refused in ((8 * 1024 + 1, True), (8 * 1024, False)):
+        toml.write_text(given.replace("case_output_kb = 64", f"case_output_kb = {output_kb}"), encoding="utf-8")
+        said = [p for p in cli_problems(load_task(cli_task_dir)) if p["key"] == "cli.case_output_kb"]
+        assert bool(said) == refused, (output_kb, said)

@@ -32,6 +32,8 @@ WORKS = {"python": ("copy", "send", "relay"), "typescript": ("copy", "send", "re
          "java": ("copy", "send", "receive", "relay"), "csharp": ("copy", "relay"),
          "go": ("copy", "send", "relay"), "rust": ("copy", "send", "relay"),
          "cpp": ("copy",)}
+# what needs the system's temporary folder or /dev/shm, both closed to a case, and so is refused
+CLOSED = {"python": ("semaphore",), "cpp": ("tmpfile",)}
 # the library calls that send a file over a socket and have no way of copying it instead
 DOES_NOT_WORK = {"csharp": ("send", "send-async", "send-packets")}
 # what is served, by which way of starting the server, at which path, and whether every byte arrives
@@ -48,7 +50,7 @@ TESTS = '''
 import http.client, threading, urllib.error, urllib.request
 
 DATA = bytes(range(256)) * 8192 + b"the end"
-WORKS, DOES_NOT_WORK, SERVED = WORKS_HERE, DOES_NOT_WORK_HERE, SERVED_HERE
+WORKS, DOES_NOT_WORK, SERVED, CLOSED = WORKS_HERE, DOES_NOT_WORK_HERE, SERVED_HERE, CLOSED_HERE
 
 
 def note(name, value):
@@ -74,6 +76,15 @@ def test_temp():
         r = c.run(["temp"])
         note("temp", {"exit_code": r.exit_code, "out": r.out[-300:], "err": r.err[-1200:]})
         assert r.exit_code == 0 and r.out.splitlines()[:1] == [os.path.realpath(c.home / "tmp")] and r.err == "", r
+
+
+def test_closed():
+    need(CLOSED, "this language's runtime has no call here that needs a closed folder")
+    for mode in CLOSED:
+        with case() as c:
+            r = c.run([mode])
+            note(mode, {"exit_code": r.exit_code, "out": r.out[-300:], "err": r.err[-600:]})
+            assert r.exit_code == 0 and r.out.startswith("refused"), (mode, r)
 
 
 def test_copy():
@@ -176,7 +187,7 @@ def test_each_runtime_copies_sends_relays_and_serves_a_file_whole_under_the_judg
     source, place = PLACE[lang]
     (tmp_path / "solution" / place).parent.mkdir(parents=True)
     shutil.copy(RUNTIMES / source, tmp_path / "solution" / place)
-    tests = TESTS.replace("WORKS_HERE", repr(WORKS[lang])).replace("DOES_NOT_WORK_HERE", repr(DOES_NOT_WORK.get(lang, ()))).replace("SERVED_HERE", repr(SERVED[lang]))
+    tests = TESTS.replace("WORKS_HERE", repr(WORKS[lang])).replace("DOES_NOT_WORK_HERE", repr(DOES_NOT_WORK.get(lang, ()))).replace("SERVED_HERE", repr(SERVED[lang])).replace("CLOSED_HERE", repr(CLOSED.get(lang, ())))
     result = judge_attack(tmp_path, (RUNTIMES / "python.py").read_text(encoding="utf-8"), {"functional/test_runtime.py": tests},
                           {"seconds": 1200}, RUN_CMD=language.run_cmd, BUILD_CMD=language.build_cmd,
                           CASE_TIMEOUT_SEC="90", CASE_PROCESSES="128", CASE_MEMORY_MB="512", CASE_DISK_MB="64")
@@ -189,7 +200,7 @@ def test_each_runtime_copies_sends_relays_and_serves_a_file_whole_under_the_judg
         for path, whole in paths.items():
             assert seen[f"{mode} {path}"]["same"] == whole, f"{language.name}, {mode}, {path}: {seen[f'{mode} {path}']}"
     assert seen["temp"]["exit_code"] == 0 and seen["temp"]["err"] == "", f"{language.name}, temp: {seen['temp']}"
-    wanted = {"test_temp": "passed", "test_copy": "passed", "test_send": "passed" if "send" in WORKS[lang] or lang in DOES_NOT_WORK else "skipped",
+    wanted = {"test_temp": "passed", "test_closed": "passed" if lang in CLOSED else "skipped", "test_copy": "passed", "test_send": "passed" if "send" in WORKS[lang] or lang in DOES_NOT_WORK else "skipped",
               "test_receive": "passed" if "receive" in WORKS[lang] else "skipped",
               "test_relay": "passed" if "relay" in WORKS[lang] else "skipped", "test_serve": "passed",
               "test_what_does_not_work": "passed"}
