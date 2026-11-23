@@ -7,7 +7,9 @@ program named gh that serves made-up items of the repository and records every r
 repository in place of the project's repository. No check calls the real model or the real repository.
 
 The programs are started through a small runner that leaves its own parent first, so that the processes
-above the job are the runner alone, as in a plain terminal, and not whatever started the tests.
+above the job are the runner alone, as in a plain terminal, and not whatever started the tests. Some checks
+start them inside a terminal like one of Orca's instead: a program that holds a terminal, starts a shell in it
+and types into it, as a person or an agent would.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -67,13 +70,29 @@ CLAUDE_CODE_MARKS = {
 }
 # Marks the job takes for two other coding agents (not seen at work: a guess on the safe side).
 OTHER_AGENT_MARKS = {"CODEX_SANDBOX": "seatbelt", "OPENCODE": "1"}
-# What Orca puts into the shells of its terminals: a session of the project can type into those.
-ORCA_MARKS = {
+# What Orca puts into the shells of its terminals (names seen in Orca 1.4.266; the values are made up). A
+# terminal of Orca that holds no coding agent is where the job and the watcher run.
+ORCA_TERMINAL = {
     "ORCA_TERMINAL_HANDLE": "term_00000000",
     "ORCA_PANE_KEY": "made-up",
     "ORCA_AGENT_PANE": "made-up",
+    "ORCA_TAB_ID": "00000000-0000-4000-8000-000000000001",
+    "ORCA_WORKSPACE_ID": "made-up",
+    "ORCA_WORKTREE_ID": "made-up",
+    "ORCA_APP_VERSION": "9.9.9",
+    "ORCA_CLI_BIN_DIR": "/Applications/Orca.app/Contents/Resources/bin",
+    "ORCA_PROVIDER_HOST": "1",
     "TERM_PROGRAM": "Orca",
+    "TERM_PROGRAM_VERSION": "9.9.9",
+    "__CFBundleIdentifier": "com.example.orca",
+    "COLORTERM": "truecolor",
 }
+ORCA_BIN = "/Applications/Orca.app/Contents/Resources/bin"
+# The program that holds Orca's terminals, by the names it was seen with: "Orca Agents" in Orca 1.4.266, and
+# "orca-terminal-host" before.
+ORCA_HOSTS = ["Orca Agents", "orca-terminal-host"]
+# A value marks Orca or a coding agent when it holds one of these names standing alone.
+MARK_RE = re.compile(r"(?i)(?<![a-z0-9])(?:orca|claude|claude-code|codex|opencode|cursor-agent|aider|goose)(?![a-z0-9])")
 
 ANSWER_PUBLIC = "The change does what its done criteria ask. PUBLIC-SENTENCE-5c1"
 ANSWER_PRIVATE = "Notes for the owner only. PRIVATE-SENTENCE-8d2"
@@ -238,7 +257,7 @@ sys.exit(main())
 '''
 
 AGY_STANDIN = r'''
-import json, os, re, subprocess, sys, time
+import json, os, re, select, subprocess, sys, time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(BASE, "agy")
@@ -252,9 +271,39 @@ def run(cmd):
         return {"code": -1, "out": "", "err": type(exc).__name__}
 
 
+def input_of(pid):
+    """What a process reads as its input: the file its descriptor 0 names, or "closed"."""
+    if os.path.isdir("/proc/self/fd"):
+        try:
+            return os.readlink("/proc/%d/fd/0" % pid)
+        except OSError:
+            return "closed"
+    found = run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "0", "-Fn"])
+    names = [line[1:] for line in found["out"].splitlines() if line.startswith("n")]
+    return names[0] if names else "closed"
+
+
 with open(os.path.join(DATA, "answer.json"), encoding="utf-8") as handle:
     answer = json.load(handle)
 record = {"argv": sys.argv[1:], "env": dict(os.environ), "cwd": os.getcwd(), "pid": os.getpid()}
+if answer.get("terminal"):
+    # What reaches this process from a terminal: what it reads, the session it is in, whether it has a
+    # terminal; and what its parent reads as its input.
+    facts = {"input_is_terminal": os.isatty(0), "own_session": os.getsid(0) == os.getpid(),
+             "own_group": os.getpgrp() == os.getpid()}
+    try:
+        ready = select.select([0], [], [], 0.5)[0]
+        facts["input_read"] = os.read(0, 4096).decode("utf-8", "replace") if ready else None
+    except OSError:
+        facts["input_read"] = "closed"
+    try:
+        os.close(os.open("/dev/tty", os.O_RDWR))
+        facts["controlling_terminal"] = True
+    except OSError:
+        facts["controlling_terminal"] = False
+    facts["terminal_descriptors"] = [fd for fd in range(256) if os.isatty(fd)]
+    facts["parent_input"] = input_of(os.getppid())
+    record["terminal"] = facts
 if answer.get("child"):
     # A process that stays in agy's process group, as a command the model starts would.
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], stdin=subprocess.DEVNULL,
@@ -384,6 +433,86 @@ os.replace(spec["out"] + ".part", spec["out"])
 os._exit(0)
 '''
 
+# A terminal like one of Orca's: it holds the controlling side of a terminal, starts a shell on the other side in
+# a session of its own (the terminal is that session's controlling terminal and the shell's input and output),
+# types what the check gives it, as a person or an agent would, and records what the terminal shows and whether
+# the terminal's process ended by itself.
+TERMINAL = r'''
+import json, os, pty, select, signal, sys, time
+
+spec = json.load(open(sys.argv[1], encoding="utf-8"))
+pid, master = pty.fork()
+if pid == 0:
+    try:
+        os.chdir(spec["cwd"])
+        os.execv(spec["shell"], [spec["shell"]])
+    finally:
+        os._exit(127)
+screen = bytearray()
+status = []
+
+
+def ended():
+    if not status:
+        done, code = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status.append(code)
+    return bool(status)
+
+
+def show(seconds):
+    until = time.monotonic() + seconds
+    while True:
+        left = until - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            ready = select.select([master], [], [], min(left, 0.05))[0]
+            data = os.read(master, 65536) if ready else None
+        except OSError:
+            data = b""
+        if data:
+            screen.extend(data)
+        elif data == b"":
+            time.sleep(min(left, 0.05))
+
+
+def wait(seconds, path=None):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until and not ended() and not (path and os.path.exists(path)):
+        show(0.05)
+
+
+typed = []
+for step in spec["steps"]:
+    if "type" in step:
+        show(0.5)
+        try:
+            os.write(master, step["type"].encode("utf-8"))
+            typed.append(True)
+        except OSError:
+            typed.append(False)
+    elif "until" in step:
+        wait(step["seconds"], step["until"])
+    elif "until_end" in step:
+        wait(step["until_end"])
+    elif "touch" in step:
+        open(step["touch"], "a").close()
+    elif "show" in step:
+        show(step["show"])
+by_itself = ended()
+os.close(master)
+deadline = time.monotonic() + 5
+while not ended() and time.monotonic() < deadline:
+    time.sleep(0.05)
+if not ended():
+    os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+with open(spec["out"] + ".part", "w", encoding="utf-8") as handle:
+    json.dump({"ended_by_itself": by_itself, "screen": screen.decode("utf-8", "replace"), "typed": typed}, handle)
+os.replace(spec["out"] + ".part", spec["out"])
+'''
+
 
 def _write_program(path: Path, source: str) -> None:
     path.write_text(f"#!{sys.executable} -I\n{source}", encoding="utf-8")
@@ -498,6 +627,7 @@ class World:
         _write_program(self.bin / "orca", ORCA_STANDIN)
         _write_program(self.bin / "docker", DOCKER_STANDIN)
         (self.root / "runner.py").write_text(RUNNER, encoding="utf-8")
+        (self.root / "terminal.py").write_text(TERMINAL, encoding="utf-8")
         self.items: dict[str, dict[str, object]] = {}
         self.state_extra: dict[str, object] = {}
         self.write_settings()
@@ -511,10 +641,10 @@ class World:
         self.settings.write_text(settings_text(self.source, **overrides), encoding="utf-8")
 
     def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False,
-               containers: int = 0, block_record: bool = False) -> None:
+               containers: int = 0, block_record: bool = False, terminal: bool = False) -> None:
         (self.agy_dir / "answer.json").write_text(
             json.dumps({"stdout": stdout, "exit": exit_code, "stderr": stderr, "sleep": sleep, "child": child,
-                        "containers": containers, "block_record": block_record}),
+                        "containers": containers, "block_record": block_record, "terminal": terminal}),
             encoding="utf-8",
         )
 
@@ -699,10 +829,45 @@ class World:
         out, _ = self.start(self.under(parent, argv), self.env(extra_env), no_new_processes=no_new_processes)
         return self.wait(out)
 
+    def orca_env(self, **more: str) -> dict[str, str]:
+        """The environment of a shell in a terminal of Orca: Orca's names, and Orca's folder first in PATH."""
+        env = self.env({**ORCA_TERMINAL, **more})
+        env["PATH"] = os.pathsep.join([ORCA_BIN, env["PATH"]])
+        return env
+
+    def run_in_terminal(self, command: str, env: dict[str, str], host: str, agent: str | None = None,
+                        typed_while_reading: str | None = None, typed_after: str | None = None) -> dict[str, object]:
+        """Type `command` into the shell of a terminal held by a program named `host` (with `agent` between, when
+        given). `typed_while_reading` is typed while the job reads the item's comments, which wait for it;
+        `typed_after` once the terminal's process has ended, or after 20 seconds. Returns what the terminal
+        recorded."""
+        marker, release = self.root / "reading-comments", self.root / "go-on"
+        self.state_extra["pause_comments"] = {"marker": str(marker), "release": str(release)}
+        steps: list[dict[str, object]] = [{"type": command + "\r"}]
+        if typed_while_reading is not None:
+            steps += [{"until": str(marker), "seconds": 20}, {"type": typed_while_reading + "\r"}, {"show": 0.5}]
+        steps += [{"touch": str(release)}, {"until_end": 20}]
+        if typed_after is not None:
+            steps += [{"type": typed_after + "\r"}, {"show": 2}]
+        stamp = f"{time.monotonic_ns()}"
+        spec = {"cwd": str(ROOT), "shell": "/bin/sh", "steps": steps, "out": str(self.root / f"terminal-{stamp}.json")}
+        spec_path = self.root / f"terminal-{stamp}.spec.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        # The terminal host is above the terminal; a coding agent, when there is one, is between them.
+        argv = self.under(agent, [sys.executable, "-I", str(self.root / "terminal.py"), str(spec_path)])
+        argv = self.under(host, argv)
+        out, _ = self.start(argv, env)
+        run = self.wait(out)
+        recorded = Path(spec["out"])
+        assert recorded.is_file(), f"the terminal recorded nothing: {run}"
+        return json.loads(recorded.read_text(encoding="utf-8"))
+
 
 @pytest.fixture
-def world(tmp_path: Path, source: Source) -> World:
-    made = World(tmp_path, source)
+def world(tmp_path_factory, source: Source) -> World:
+    # A folder of its own whose name does not come from the check's name, which may hold a word that marks Orca
+    # or a coding agent.
+    made = World(tmp_path_factory.mktemp("world"), source)
     # No check may reach the real model or the real repository: the names agy and gh resolve to the stand-ins.
     path = made.env()["PATH"]
     assert shutil.which("agy", path=path) == str(made.bin / "agy")
@@ -763,11 +928,11 @@ def no_model_text_in(run: dict[str, object], *texts: str) -> None:
 # --- Inside a coding agent, nothing starts --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mark", sorted({**CLAUDE_CODE_MARKS, **ORCA_MARKS, **OTHER_AGENT_MARKS}))
-def test_inside_claude_code_or_an_orca_terminal_the_job_starts_nothing(world: World, mark: str):
+@pytest.mark.parametrize("mark", sorted({**CLAUDE_CODE_MARKS, **OTHER_AGENT_MARKS}))
+def test_inside_claude_code_or_another_coding_agent_the_job_starts_nothing(world: World, mark: str):
     item = world.pull(7)
     world.label(item, "verify")
-    value = {**CLAUDE_CODE_MARKS, **ORCA_MARKS, **OTHER_AGENT_MARKS}[mark]
+    value = {**CLAUDE_CODE_MARKS, **OTHER_AGENT_MARKS}[mark]
     run = world.run_job("verify", 7, extra_env={mark: value})
     result = result_of(run)
     assert result.get("status") == "refused", f"the job did not refuse with {mark} set: {run}"
@@ -779,7 +944,7 @@ def test_inside_claude_code_or_an_orca_terminal_the_job_starts_nothing(world: Wo
         assert value not in str(run["stdout"]) + str(run["stderr"]), "the refusal printed the mark's value"
 
 
-@pytest.mark.parametrize("parent", ["claude", "codex", "opencode", "cursor-agent", "aider", "goose", "orca-terminal-host"])
+@pytest.mark.parametrize("parent", ["claude", "codex", "opencode", "cursor-agent", "aider", "goose"])
 def test_a_coding_agent_among_the_parent_processes_stops_the_job(world: World, parent: str):
     item = world.pull(7)
     world.label(item, "verify")
@@ -832,6 +997,160 @@ def test_the_watcher_inside_claude_code_asks_github_for_nothing(world: World):
     assert "refused" in str(run["stderr"]), "the watcher did not say that it refused"
     assert secret_like not in str(run["stdout"]) + str(run["stderr"]), "the watcher printed a mark's value"
     assert world.gh_calls() == [] and world.agy_runs() == []
+
+
+# --- In a terminal of Orca: the job runs, and nothing typed into the terminal reaches the model or a shell -------
+
+
+def _screen_result(seen: dict[str, object]) -> dict[str, object]:
+    """The program's last JSON line among what the terminal showed."""
+    return result_of({"stdout": str(seen.get("screen") or "")})
+
+
+@pytest.mark.parametrize("agent", [None, "claude"], ids=["no agent", "an agent"])
+@pytest.mark.parametrize("host", ORCA_HOSTS)
+def test_in_a_terminal_of_orca_the_job_runs_unless_an_agent_holds_it_and_agy_gets_no_input_and_no_terminal(
+    world: World, host: str, agent: str | None,
+):
+    item = world.pull(7)
+    world.label(item, "verify")
+    world.answer(envelope(answer_text()), terminal=True)
+    typed = "TYPED-INTO-THE-TERMINAL"
+    command = shlex.join(["exec", *world.job_argv("verify", 7)])
+    seen = world.run_in_terminal(command, world.orca_env(), host, agent=agent, typed_while_reading=typed)
+    result = _screen_result(seen)
+    if agent is not None:
+        # A coding agent's own shell inside a terminal of Orca: nothing starts, as anywhere else.
+        assert result.get("status") == "refused" and f"parent:{agent}" in result.get("reasons", []), seen
+        assert world.agy_runs() == [] and world.gh_calls() == []
+        return
+    assert result.get("status") == "posted", f"the job did not run in a terminal of Orca held by {host}: {seen}"
+    [record] = world.agy_runs()
+    facts = record.get("terminal")
+    assert isinstance(facts, dict), record
+    # Its input is closed: it reads nothing, and not what was typed into the terminal.
+    assert facts["input_is_terminal"] is False and facts["input_read"] == "", facts
+    assert typed not in json.dumps(record), "what was typed into the terminal reached agy"
+    # A session of its own, and no terminal: none of its descriptors is one, and it has no controlling terminal.
+    assert facts["own_session"] is True and facts["own_group"] is True, facts
+    assert facts["controlling_terminal"] is False and facts["terminal_descriptors"] == [], facts
+
+
+PASSED_THROUGH = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ")
+
+
+@pytest.mark.parametrize("case", ["marks in every value", "a temporary folder that marks"])
+def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_an_agent(world: World, case: str):
+    world.label(world.pull(7), "verify")
+    home = world.root / ".claude"
+    home.mkdir()
+    if case == "marks in every value":
+        planted = {"HOME": str(home), "USER": "orca", "LOGNAME": "claude", "SHELL": "/opt/codex/bin/sh",
+                   "LANG": "orca.UTF-8", "LC_ALL": "claude", "LC_CTYPE": "codex", "TERM": "xterm-orca",
+                   "TZ": "Orca/Island"}
+    else:
+        tmp = world.root / "orca-tmp"
+        tmp.mkdir()
+        planted = {"TMPDIR": str(tmp)}
+    env = world.orca_env(**planted)
+    env["PATH"] = os.pathsep.join([env["PATH"], "/opt/claude-code/bin", "/opt/tools/.codex/bin"])
+    env["OTHER_TOOL_DIR"] = "/opt/orca/tools"
+    run = world.run_watch(extra_env=env, parent="Orca Agents")
+    if case == "a temporary folder that marks":
+        # The folders the job makes for the run would carry the mark: nothing starts.
+        assert run["code"] == 4 and "temporary_folder" in str(run["stderr"]), run
+        assert world.agy_runs() == [] and world.gh_calls() == []
+        return
+    [result] = results_of(run)
+    assert result.get("status") == "posted", run
+    [record] = world.agy_runs()
+    got = record["env"]
+    assert isinstance(got, dict)
+    assert set(got) <= ALLOWED_AGY_ENV, sorted(set(got) - ALLOWED_AGY_ENV)
+    for name, value in got.items():
+        assert not MARK_RE.search(f"{name}={value}"), f"agy got {name} with a value that marks Orca or an agent"
+    # What is passed on is the watcher's own value, PATH without its entries that mark, and nothing that marks.
+    for name in PASSED_THROUGH:
+        expected = env.get(name)
+        if name == "PATH":
+            expected = os.pathsep.join(e for e in env["PATH"].split(os.pathsep) if not MARK_RE.search(e))
+        elif expected is not None and MARK_RE.search(expected):
+            expected = None
+        assert got.get(name) == expected, f"{name}: {got.get(name)!r}, not {expected!r}"
+    kept = json.loads((answer_folder(result) / "agy.json").read_text(encoding="utf-8"))
+    assert set(kept["environment_names"]) == set(got) - {"__CF_USER_TEXT_ENCODING"}
+
+
+def _start_line(program: str) -> str:
+    text = DOCUMENT.read_text(encoding="utf-8") if DOCUMENT.is_file() else ""
+    script = "watch" if program == "watcher" else "job"
+    lines = re.findall(rf"(?m)^(?:exec )?python3 tools/gemini/{script}\.py[^\n]*$", text)
+    assert lines, f"the document gives no line that starts the {program}"
+    return lines[0]
+
+
+@pytest.mark.parametrize("program", ["watcher", "job"])
+def test_the_start_line_leaves_no_shell_to_read_what_is_typed_and_the_watcher_closes_its_input(world: World, program: str):
+    line = _start_line(program)
+    python = world.bin / "python3"
+    python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    python.chmod(0o755)
+    number = int(re.search(r"--number (\d+)", line).group(1)) if program == "job" else 7  # type: ignore[union-attr]
+    world.label(world.pull(number), "verify")
+    world.answer(envelope(answer_text()), terminal=True)
+    options = ["--settings", str(world.settings), "--private", str(world.private)]
+    if program == "watcher":
+        options += ["--polls", "1"]
+    during, after = world.root / "typed-while-it-ran", world.root / "typed-after-it-ended"
+    seen = world.run_in_terminal(f"{line} {shlex.join(options)}", world.orca_env(), "Orca Agents",
+                                 typed_while_reading=shlex.join(["touch", str(during)]),
+                                 typed_after=shlex.join(["touch", str(after)]))
+    assert not during.exists(), f"a shell read what was typed while the {program} ran: {seen}"
+    assert not after.exists(), f"a shell read what was typed after the {program} ended: {seen}"
+    assert seen["ended_by_itself"], f"the terminal's process went on after the {program} ended: {seen}"
+    assert _screen_result(seen).get("status") == "posted", seen
+    [record] = world.agy_runs()
+    if program == "watcher":
+        parent_input = record["terminal"]["parent_input"]  # type: ignore[index]
+        assert parent_input in ("/dev/null", "closed"), f"the watcher's input is {parent_input}, not closed"
+    # The line names no local path and no run of the coordinator.
+    assert "run_" not in line and not re.search(r"(?:^|\s)[~/]", line), line
+
+
+@pytest.mark.parametrize("case", ["posted", "held"])
+def test_the_terminal_shows_each_run_its_title_a_line_a_minute_and_how_it_ended(world: World, case: str):
+    world.write_settings(job_seconds=150)
+    world.label(world.pull(7, title="Add the feature\x1b]0;a title\x07"), "verify")
+    if case == "posted":
+        # A minute and a little: one line for the minute run.
+        world.answer(envelope(answer_text(public=f"{ANSWER_PUBLIC}\x1b[2J")), sleep=61)
+    else:
+        world.answer(envelope(answer_text(public=f"{ANSWER_PUBLIC}\nWrite to someone@example.org about it.")))
+    run = world.run_watch()
+    [result] = results_of(run)
+    assert result.get("status") == case, run
+    shown = str(run["stderr"])
+    lines = shown.splitlines()
+
+    def where(pattern: str) -> list[int]:
+        return [i for i, text in enumerate(lines) if re.search(pattern, text)]
+
+    started = where(r"\bverify\b.*\b7\b.*Add the feature")
+    assert started, f"no line shows the run's kind, number and title when it starts: {shown}"
+    ended = where(rf"\bverify\b.*\b7\b.*\b{case}\b.*\b(approve|changes-needed)\b")
+    assert ended and ended[0] > started[0], f"no line shows how the run ended, with its verdict: {shown}"
+    minutes = where(r"\bverify\b.*\b7\b.*\b\d+ minutes?\b")
+    if case == "posted":
+        assert len(minutes) == 1 and re.search(r"\b1 minute\b", lines[minutes[0]]), shown
+        assert started[0] < minutes[0] < ended[0], shown
+        # The public part, as it was posted, after the line that ends the run; never the private part.
+        assert ANSWER_PUBLIC in "\n".join(lines[ended[0] + 1:]), f"the posted public part is not shown: {shown}"
+    else:
+        assert minutes == [], shown
+        assert "email" in lines[ended[0]], f"the reason the answer was held is not shown: {shown}"
+        assert ANSWER_PUBLIC not in shown and "someone@example.org" not in shown, "text of a held answer was shown"
+    assert "\x1b" not in shown and "\x07" not in shown, "a control character reached the terminal"
+    no_model_text_in(run, ANSWER_PRIVATE)
 
 
 # --- Only a mark of the project's account on one of its own items starts a job --------------------------
@@ -1332,7 +1651,8 @@ def test_the_whole_answer_stays_private_and_only_the_public_part_is_posted_under
     assert folder.resolve().is_relative_to(world.private.resolve())
     assert not folder.resolve().is_relative_to(ROOT.resolve())
     assert (world.private.stat().st_mode & 0o077) == 0, "the private folder is open to other accounts"
-    no_model_text_in(run, ANSWER_PUBLIC, ANSWER_PRIVATE)
+    # The terminal shows the public part once it is posted; the private part never.
+    no_model_text_in(run, ANSWER_PRIVATE)
 
 
 CUTS = {
@@ -2065,7 +2385,7 @@ def test_the_coordinator_hears_a_fixed_line_that_carries_no_text_of_the_model(wo
     assert logged == [line]
     for text in (ANSWER_PUBLIC, ANSWER_PRIVATE, "PUBLIC-SENTENCE", "PRIVATE-SENTENCE"):
         assert text not in json.dumps(call) and text not in "\n".join(logged)
-    no_model_text_in(run, ANSWER_PUBLIC, ANSWER_PRIVATE)
+    no_model_text_in(run, ANSWER_PRIVATE)
 
 
 def test_without_a_run_to_tell_the_line_goes_only_to_the_private_file(world: World):
