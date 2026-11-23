@@ -1459,16 +1459,24 @@ what = "What a case may read of what the build or the working phase left shows t
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next"]
 [[protection.change]]
-find = '''            self.settled = settle_access_times(time.time() if since is None else since, app_dir, deadline=deadline)'''
+find = '''            self.settled = settle_access_times(min(began), deadline=deadline)'''
 put = '''            self.settled = 0'''
 
 [[protection]]
-what = "Every entry of the program's folder gets a later time of last reading, what the working phase left included"
+what = "What changed since the container started gets a later time of last reading, not only what changed since the build began"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next"]
 [[protection.change]]
-find = '''    settled = 1 + walk_tree(app_dir, settle)'''
-put = '''    settled = 1'''
+find = '''            began = [moment for moment in (container_started(), since, time.time()) if moment is not None]'''
+put = '''            began = [moment for moment in (since, time.time()) if moment is not None]'''
+
+[[protection]]
+what = "Every entry of a file system other than the image's own layers gets a later time of last reading"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_container_was_given_shows_nothing_to_the_next"]
+[[protection.change]]
+find = '''lambda kind: ["-newerct", f"@{int(since) - 1}"] if kind == IMAGE_LAYERS else []'''
+put = '''lambda kind: ["-newerct", f"@{int(since) - 1}"]'''
 
 [[protection]]
 what = "A time of change the build set in the future is set back to the moment the times of last reading are settled"
@@ -1591,3 +1599,26 @@ tests = ["tests/test_judge.py::test_a_build_or_a_served_program_the_judge_cannot
 [[protection.change]]
 find = '''            raise JudgeFault(f"cannot start the served program: {exc}") from None'''
 put = '''            return False'''
+
+[[protection]]
+what = "What the build left in the container's memory-backed folder that cannot be removed fails the step"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_the_build_left_in_the_memory_folder_and_cannot_be_removed[refused whatever the judge does]"]
+[[protection.change]]
+find = '''                    # what cannot be removed whatever the judge does is what the build left
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
+'''
+put = '''                    raise
+'''
+
+[[protection]]
+what = "The container's memory-backed folder that the judge cannot empty for a reason no program causes is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_the_build_left_in_the_memory_folder_and_cannot_be_removed[an error no program causes]"]
+[[protection.change]]
+find = '''                    if exc.errno not in UNREMOVABLE:
+                        raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+'''
+put = '''                    if False:
+                        pass
+'''

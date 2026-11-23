@@ -546,7 +546,7 @@ def step_terms(tests_per_file: list[int], limit: int) -> dict[str, int]:
             "the build": judge_module.BUILD_SECONDS,
             "ending the build's processes": ending,
             "waiting for the ended build": 30,
-            "the searches for places any user may write and for what the build changed": judge_module.SEARCH_SECONDS,
+            "the searches for places any user may write and for what the image does not hold": judge_module.SEARCH_SECONDS,
             "walking and removing what the program's side left": 120,
             "starting every case runner the files can need": runners * judge_module.FILE_SECONDS,
             "every case at its full time limit": sum(tests_per_file) * (limit + judge_module.CASE_SECONDS),

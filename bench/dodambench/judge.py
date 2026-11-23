@@ -217,7 +217,7 @@ CASE_ENTRIES = 20000               # how many files and folders a case may hold
 TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
 TREE_SECONDS = 120                 # how long all walking and removing of what it left may take in one step
 WRITABLE_PLACES = 10_000           # how many places any user may write a build may leave
-SEARCH_SECONDS = 300               # how long the searches for such places and for what the build changed may take
+SEARCH_SECONDS = 300               # how long the searches for such places and for what the image does not hold may take
 LATER_NS = 86_400 * 10**9          # how far after the judge sets them the access times of what a case may read lie
 KERNEL_ENDED = "the kernel ended a process because the container ran out of memory"
 # The kind of the entry that says the step failed for what the program's side left and the judge
@@ -765,7 +765,7 @@ def step_terms(tests_per_file: list[int], case_seconds: int) -> dict[str, float]
             "the build": BUILD_SECONDS,
             "ending the build's processes": ending,
             "waiting for the ended build": BUILD_ENDING_SECONDS,
-            "the searches for places any user may write and for what the build changed": SEARCH_SECONDS,
+            "the searches for places any user may write and for what the image does not hold": SEARCH_SECONDS,
             "walking and removing what the program's side left": TREE_SECONDS,
             "starting every case runner the files can need": runners * FILE_SECONDS,
             "every case at its full time limit": sum(tests_per_file) * (case_seconds + CASE_SECONDS),
@@ -798,13 +798,15 @@ def _mounted(mounts: Path) -> list[tuple[str, str, set[str]]]:
     return found
 
 
-def _search(mounts: Path, condition: list[str], most: int, what: str, deadline: float | None):
+def _search(mounts: Path, condition, most: int, what: str, deadline: float | None):
     """Every entry on every file system mounted here that `condition` of `find` picks, one at a
-    time; it gives up after `most` of them, and at `deadline` (SEARCH_SECONDS from now by default)."""
+    time; `condition` is a list, or says one for each kind of file system. It gives up after `most`
+    of them, and at `deadline` (SEARCH_SECONDS from now by default)."""
     deadline = time.monotonic() + SEARCH_SECONDS if deadline is None else deadline
     found = 0
-    for top in sorted({where for where, _, _ in _mounted(mounts)}):
-        search = subprocess.Popen(["find", top, "-xdev", *condition, "-print0"],
+    for top, kind in sorted({(where, kind) for where, kind, _ in _mounted(mounts)}):
+        picked = condition(kind) if callable(condition) else condition
+        search = subprocess.Popen(["find", top, "-xdev", *picked, "-print0"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         rest = b""
         try:
@@ -840,13 +842,29 @@ def writable_by_others(mounts: Path = Path("/proc/self/mounts"), deadline: float
                        WRITABLE_PLACES, "places any user may write", deadline)
 
 
-def changed_since(since: float, mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None):
-    """Every entry whose status changed since `since` (seconds of the clock of the machine), on
-    every file system mounted here: everything the build made or changed, and the folders it made
-    or changed them in. It shares the time of the search for places any user may write and is
-    given TREE_ENTRIES entries."""
-    yield from _search(mounts, ["-newerct", f"@{int(since) - 1}"], TREE_ENTRIES, "entries the build changed",
-                       deadline)
+IMAGE_LAYERS = "overlay"           # the kind of file system that lays the container's own changes over the image's
+
+
+def not_of_the_image(since: float, mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None):
+    """Every entry the image's own layers do not hold, on every file system mounted here: on the
+    one laid over the image, whatever changed since `since` (seconds of the clock of the machine);
+    on every other one, all of it. The image's own entries are read from its layers, which keep
+    their times whatever is read. It shares the time of the search for places any user may write
+    and is given TREE_ENTRIES entries."""
+    yield from _search(mounts, lambda kind: ["-newerct", f"@{int(since) - 1}"] if kind == IMAGE_LAYERS else [],
+                       TREE_ENTRIES, "entries the image does not hold", deadline)
+
+
+def container_started(proc: Path = Path("/proc")) -> float | None:
+    """When the container's first process started, in seconds of the clock of the machine; None
+    where that cannot be read."""
+    try:
+        fields = (proc / "1/stat").read_text().rsplit(")", 1)[1].split()
+        booted = next(int(line.split()[1]) for line in (proc / "stat").read_text().splitlines()
+                      if line.startswith("btime "))
+        return booted + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
 
 
 def where_every_read_counts(mounts: Path = Path("/proc/self/mounts"), devices: Path = Path("/dev")) -> list[str]:
@@ -870,14 +888,14 @@ def where_every_read_counts(mounts: Path = Path("/proc/self/mounts"), devices: P
     return found
 
 
-def settle_access_times(since: float, app_dir: Path, mounts: Path = Path("/proc/self/mounts"),
-                        deadline: float | None = None) -> int:
-    """Nothing a case may read of what the build or the working phase left shows the next case
-    whether it was read. Reading a file or listing a folder moves when it was last read only while
-    that time is not later than when it was last changed; so every entry of the program's folder and
-    every entry that changed since the build began gets a time of last reading a day after both the
-    moment this runs and its time of change. A time of change the build set in the future is set to
-    the moment this runs. Says how many entries it settled."""
+def settle_access_times(since: float, mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None) -> int:
+    """Nothing a case may read that the image's own layers do not hold shows the next case whether
+    it was read: what the build or the working phase left, and what the container was given. Reading
+    a file or listing a folder moves when it was last read only while that time is not later than
+    when it was last changed; so every such entry, on the file system laid over the image whatever
+    changed since `since` and on every other file system all of it, gets a time of last reading a day
+    after both the moment this runs and its time of change. A time of change set in the future is
+    set to the moment this runs. Says how many entries it settled."""
     now = time.time_ns()
 
     def settle(folder: int | None, name, info: os.stat_result | None = None) -> None:
@@ -890,9 +908,8 @@ def settle_access_times(since: float, app_dir: Path, mounts: Path = Path("/proc/
             if exc.errno != 30:  # a read-only file system keeps its times
                 raise JudgeFault(f"cannot settle when what the build left was last read: {exc}") from None
 
-    settle(None, str(app_dir))
-    settled = 1 + walk_tree(app_dir, settle)
-    for path in changed_since(since, mounts, deadline):
+    settled = 0
+    for path in not_of_the_image(since, mounts, deadline):
         if len(path) < 4000:
             settle(None, path)
         else:
@@ -1009,8 +1026,13 @@ class CliRun:
             if MEMORY_FOLDER.is_dir() and not MEMORY_FOLDER.is_symlink():
                 try:
                     remove_tree(MEMORY_FOLDER, keep_top=True)
+                except TooMuchLeft as exc:
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
                 except OSError as exc:
-                    raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+                    if exc.errno not in UNREMOVABLE:
+                        raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+                    # what cannot be removed whatever the judge does is what the build left
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
             # the cases live in the folder the container caps; it is closed to others above
             self.work_root = CASES_DIR
             try:
@@ -1018,8 +1040,10 @@ class CliRun:
             except OSError as exc:
                 # nothing of the program's side could write there yet
                 raise JudgeFault(f"cannot empty the folder the cases live in before the first case: {exc}") from None
-            # no case shows the next what it read of what the build or the working phase left
-            self.settled = settle_access_times(time.time() if since is None else since, app_dir, deadline=deadline)
+            # no case shows the next what it read of what the image does not hold: what the container
+            # was given since it started, and what the working phase and the build left
+            began = [moment for moment in (container_started(), since, time.time()) if moment is not None]
+            self.settled = settle_access_times(min(began), deadline=deadline)
         else:
             self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
         self.fault_file = self.private / "faults.jsonl"
