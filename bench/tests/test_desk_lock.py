@@ -9822,3 +9822,100 @@ def test_a_pull_request_that_changes_a_file_of_any_protected_folder_is_not_ready
         got = classified([how])
         assert got.get("ready_for_review") is False and folder in got.get("protected_folders", []), (folder, how, got)
     assert folder in pr_files.PROTECTED_FOLDERS
+
+
+# --- Additions for the round: counts and generated variants ---------------------------------------------
+
+
+def test_a_session_on_the_desks_own_sign_in_is_given_no_hidden_value_when_it_starts(start):
+    """A count, not a sentence: everything a session is given when it starts (its environment, its arguments, its working
+    folder, the first text it is shown) holds no hidden value in the form the lock uses."""
+    start.own_sign_in()
+    planned = start.plan()
+    guard, relay = module("guard"), module("relay")
+    known = MACHINE + [tuple(pair) for pair in json.loads((start.state / "session" / "known.json").read_text())]
+    given = [*planned["argv"], *planned["env"].values(), planned["cwd"], relay.news_message([event(7, 1001, "e1")])]
+    found = {piece[:80]: guard.names(piece, known, ("BrilliantTiger", "dodam")) for piece in given}
+    assert {piece: kinds for piece, kinds in found.items() if kinds} == {}
+
+
+def main_says_told(text: str) -> bool:
+    """The told check as the desk had it before this round, word for word: whatever it refused, the desk still refuses."""
+    passing = module("tools").PASSING_ON
+    return any(passing.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+
+
+@pytest.mark.parametrize("seed", [121, 122, 123])
+def test_every_told_claim_the_earlier_check_refused_is_refused_on_generated_forms(seed):
+    tools, rng = module("tools"), random.Random(seed)
+    stems = ["agent", "maintainer", "coordinat", "team", "owner", "staff", "agente", "mantenedor", "responsable", "equipo", "coordinador"]
+    endings = ["", "s", "e", "es", "a", "as", "ion", "ed", "ing", "or", "ors", "ores", "ora", "oras"]
+    verbs = ["I've passed this on to the", "I informed the", "He avisado a las", "Se lo he comunicado a la", "We told the", "Lo he notificado al"]
+    particles = ["", "에게", "께", "に", "へ", "님"]
+    missed = []
+    for _ in range(600):
+        word = rng.choice(stems) + rng.choice(endings) + rng.choice(particles)
+        text = f"{rng.choice(verbs)} {word}{rng.choice(['.', ' today.', ' del proyecto.', '!'])}"
+        if main_says_told(text) and not tools.says_agents_were_told(text):
+            missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [131, 132])
+def test_no_point_of_a_short_form_or_of_one_or_two_letters_or_before_a_small_letter_splits_the_told_claim(seed):
+    """Generated from the rule: a point that a space and a small letter or a digit follow ends no sentence, nor does the
+    point of one or two letters (also as a pair, as in a time of day or a country), nor the point of a short form of the
+    tool's list, whatever follows it, nor an ellipsis."""
+    tools, rng = module("tools"), random.Random(seed)
+    table = getattr(tools, "SHORT_FORMS", []) + ["Prof.", "Ud.", "Uds.", "Vd.", "St.", "Jr.", "dpto."]
+    letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    missed = []
+    for _ in range(300):
+        kind = rng.randrange(5)
+        if kind == 0:
+            inside = rng.choice(letters) + rng.choice(["", rng.choice(letters)]) + ". " + rng.choice(["the", "a", "3", "los", "el"])
+        elif kind == 1:
+            inside = "".join(rng.choice(letters) + rng.choice(["", rng.choice(letters)]) + "." + rng.choice(["", " "]) for _ in range(rng.choice([1, 2]))) + " Kim's"
+        elif kind == 2:
+            inside = rng.choice(table) + " " + rng.choice(["Kim's", "the", "Louis", "3"])
+        elif kind == 3:
+            inside = "word" + rng.choice(["...", "…", ". . ."]) + " then"
+        else:
+            inside = "pidió" + ". " + rng.choice(["al", "a la", "3"])
+        for text in (f"I've passed this on, {inside}, to the maintainers.", f"Lo he comunicado, {inside}, al equipo."):
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The names under which the three agent tools that the project uses read a file as rules, by their documentation at the
+# installed versions (Claude Code, Codex CLI, the Antigravity CLI), each with its local variants.
+RULE_FILE_TABLE = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "AGENT.md", "GEMINI.md"]
+
+
+def test_the_rule_file_names_of_the_three_tools_are_refused_in_every_open_folder_and_other_names_are_not():
+    rng = random.Random(141)
+    for name in RULE_FILE_TABLE:
+        for place in ("", "docs/", "docs/benchmark/", "bench/tasks/a-brand-new-task/steps/build/"):
+            got = classified([{"filename": place + spelled_otherwise(name, rng), "status": "added"}])
+            assert got.get("ready_for_review") is False, (place, name, got)
+    for name in ("README.md", "notes.md", "guide.ko.md", "claudette.md"):
+        assert classified([{"filename": "docs/" + name, "status": "added"}]).get("ready_for_review") is True, name
+
+
+WORKFLOW_METACHARACTERS = re.compile(r"[;&|`<>]|\$\(|\\$")
+
+
+def test_every_line_a_workflow_runs_is_one_simple_command():
+    """Anything longer is a script in a protected folder, so the closed list reads every start with nothing left to parse.
+    The one exception is a step's output written to GitHub's own file for it."""
+    complex_lines = []
+    for step in steps_of_the_workflows():
+        for line in step["run"]:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            bare = line.removesuffix(' >> "$GITHUB_OUTPUT"')
+            if WORKFLOW_METACHARACTERS.search(bare):
+                complex_lines.append((step["workflow"], line))
+    assert complex_lines == [], complex_lines
