@@ -353,6 +353,8 @@ def _empty_state() -> dict[str, object]:
         "initialized": False,
         "seen_ids": [],
         "pending": [],
+        # How many looks at GitHub the watcher has made: the first part of the one order of arrivals.
+        "poll_seq": 0,
         "etags": {},
         "watermarks": {
             "max_issue_id": 0,
@@ -498,7 +500,7 @@ def _load_state(path: Path) -> dict[str, object]:
     base["seen_ids"] = dedup_seen[-MAX_SEEN_IDS:]
 
     pending = raw.get("pending", [])
-    allowed_ev_keys = {"id", "kind", "number", "actor", "actor_id", "time", "url"}
+    allowed_ev_keys = {"id", "kind", "number", "actor", "actor_id", "time", "url", "poll"}
     if not isinstance(pending, list) or len(pending) > MAX_PENDING_EVENTS:
         raise StateReadError("State file has invalid or oversized pending events.")
     for ev in pending:
@@ -515,9 +517,14 @@ def _load_state(path: Path) -> dict[str, object]:
             or not isinstance(ev.get("time"), str)
             or not isinstance(ev.get("url"), str)
             or ("actor" in ev and not isinstance(ev["actor"], str))
+            or ("poll" in ev and (isinstance(ev["poll"], bool) or not isinstance(ev["poll"], int) or ev["poll"] < 0))
         ):
             raise StateReadError("State file has invalid pending event item.")
     base["pending"] = list(pending)
+    poll_seq = raw.get("poll_seq", 0)
+    if isinstance(poll_seq, bool) or not isinstance(poll_seq, int) or poll_seq < 0:
+        raise StateReadError("State file has an invalid count of looks.")
+    base["poll_seq"] = poll_seq
 
     for str_map in ("etags", "pull_heads", "pull_baseline_updated_at", "pull_reviews_checked"):
         val = raw.get(str_map, {})
@@ -980,11 +987,15 @@ def _build_event(
 
 
 def arrival_order(event: dict[str, object]) -> tuple:
-    """The one order of arrivals, decided here and nowhere else: the time GitHub gives, to the second, and within one second
-    the number GitHub gave the comment, review or pull request, compared as a number, after its kind. The relay numbers the
-    arrivals in the order printed, and the payer, the wait and the place in its queue follow from that number alone."""
+    """The one order of arrivals, decided here and nowhere else, with no clock of the desk's own: first the look of the
+    watcher that found the arrival (an arrival found in an earlier look is older than one found in a later look); within
+    one look the time GitHub gives, to the second, an arrival that GitHub gives no time of its own (new commits, a pull
+    request marked ready) first; then the number GitHub gave the comment, review or pull request, after its kind, compared
+    as a number. The relay numbers the arrivals in the order printed, and the payer, the wait and the place in its queue
+    follow from that number alone."""
     parts = [part for part in re.split(r"(\d+)", str(event.get("id", ""))) if part]
-    return (str(event.get("time", "")), tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in parts))
+    look = event.get("poll", 0)
+    return (look if isinstance(look, int) else 0, str(event.get("time", "")), tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in parts))
 
 
 def _extract_number_from_urls(primary: object, primary_re: re.Pattern[str], fallback_html: object) -> int:
@@ -1436,10 +1447,9 @@ def _poll_once(
     # 1. Pull requests (processed oldest-updated first so stopping on full queue never skips earlier PR updates)
     prev_max_pull_id = int(wm["max_pull_id"])  # type: ignore[arg-type]
     prev_max_pull_upd = str(wm["max_pull_updated_at"])
-    # GitHub gives no time for a push or for marking a pull request ready, and the time of a pull request's last update
-    # is moved by whatever anyone does on it later. Such an arrival counts from the last look at the pull requests, in which
-    # it had not happened yet: never later than it happened, and at a time that nothing another account does can move.
-    unseen_since = prev_max_pull_upd
+    # GitHub gives no time for a push or for marking a pull request ready, and the time of a pull request's last update is
+    # moved by whatever anyone does on it later: such an arrival has no time of its own, and the order of looks says how old it is.
+    unseen_since = ""
     prs_with_updated_timestamp: set[int] = set()
     prs_to_check_reviews: list[int] = []
     valid_pulls_seen: dict[int, str] = {}
@@ -1539,7 +1549,7 @@ def _poll_once(
                                     number,
                                     actor,
                                     actor_id,
-                                    unseen_since or updated_at,
+                                    unseen_since,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
                             )
@@ -1563,7 +1573,7 @@ def _poll_once(
                                     number,
                                     actor,
                                     actor_id,
-                                    unseen_since or updated_at,
+                                    unseen_since,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
                             )
@@ -2017,6 +2027,10 @@ def _poll_once(
         etags.pop("pulls", None)
         wm["max_pull_updated_at"] = prev_max_pull_upd
 
+    # This look's number, carried by every arrival it found.
+    working["poll_seq"] = look = int(working.get("poll_seq", 0)) + 1  # type: ignore[arg-type]
+    for event in discovered:
+        event["poll"] = look
     if discovered:
         discovered.sort(key=arrival_order)
         pending_list.extend(discovered)
@@ -2063,8 +2077,9 @@ def _emit_and_save(state_path: Path, state: dict[str, object], max_events: int) 
     # Validate capacity bounds BEFORE printing anything so StateFullError exits 8 cleanly.
     payload = _serialize_state(next_state)
 
-    # Print and flush BEFORE replacing the state file so a crash can repeat an event, never drop it.
-    sys.stdout.write(json.dumps({"events": batch}, ensure_ascii=True) + "\n")
+    # Print and flush BEFORE replacing the state file so a crash can repeat an event, never drop it. The number of the look
+    # that found an arrival is the watcher's own and is not printed.
+    sys.stdout.write(json.dumps({"events": [{key: value for key, value in ev.items() if key != "poll"} for ev in batch]}, ensure_ascii=True) + "\n")
     sys.stdout.flush()
     try:
         _write_serialized_state(state_path, payload)

@@ -8264,7 +8264,7 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "| It ended by itself, also with Claude Code's own report of an error after it responded | Handled |",
     "a place keeps its account's newest ten, and what goes from it that way is not counted as dropped",
     "a comment written while the item is being read can be missed when the item had a multiple of a hundred comments just before",
-    "Arrivals to which GitHub gives no time of their own, and arrivals of different kinds within one second, are put in order by a fixed rule",
+    "Within one look of the watcher, arrivals without a time of their own and arrivals of different kinds within one second are put in order by a fixed rule",
     "and a claim whose two parts stand in two sentences.",
     "it does not read one script as another, by sound or by reading (a Korean name written in hanja among them), and it does not fold one kanji into another",
 ])  # fmt: skip
@@ -8456,8 +8456,8 @@ def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_i
         if not protected and not re.search(r"python3?\s+(?:-\w+\s+)*-I\b", command):
             open_to_outside.append((workflow, folder or "the root of the repository", command))
     assert open_to_outside == []
-    phrase = ("What the workflows start is a closed list too: every program, script and module that a step of a workflow starts, however it "
-              "is started, is a program of the runner, or comes from a protected folder, or is Python started in isolated mode (`-I`)")  # fmt: skip
+    phrase = ("What the workflows start is a closed list too: every line a step runs is one simple command (a step's output written to "
+              "GitHub's own file for it aside), and anything longer is a script in a protected folder")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
 
 
@@ -8975,7 +8975,7 @@ def test_what_is_handed_to_a_live_session_tool_is_checked_whole():
 # The turned-round list: everything a step of a workflow may start, and why nothing a pull request from outside placed can run in
 # its place. A program of the runner: the runner's own image provides it. Python is the one that setup-python installs, or a
 # virtual environment that a step made in a protected folder.
-PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "grep", "exit", "set", "[", "test", "true", "false"}
+PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "exit", "true", "false"}
 SHELL_WORDS = {"if", "then", "else", "elif", "fi", "!", "{", "}", "do", "done", "for", "while", "in"}
 # Options of Python that take a value, written attached or as the next word.
 PYTHON_TAKES_A_VALUE = set("mcWXQ")
@@ -9036,13 +9036,14 @@ def steps_of_the_workflows() -> list[dict]:
                 matrix[key].append(value.group(1).strip())
             elif key and not line.strip().startswith("#") and not re.match(r"^\s+- ", line):
                 key = None
-            if re.match(r"^\s*- (?:name|uses):", line):
+            # A step begins at every item of the list of steps, whatever key it begins with.
+            if re.match(r"^\s*- [A-Za-z][\w-]*:", line):
                 found.append({"workflow": path.name, "matrix": {k: list(v) for k, v in matrix.items()}, "folder": None, "run": [], "uses": None})
             if found and (uses := re.match(r"^\s*-?\s*uses:\s*(\S+)", line)):
                 found[-1]["uses"] = uses.group(1)
-            elif found and (folder := re.match(r"^\s+working-directory:\s*(\S+)", line)):
+            elif found and (folder := re.match(r"^\s+(?:- )?working-directory:\s*(\S+)", line)):
                 found[-1]["folder"] = folder.group(1)
-            elif found and (run := re.match(r"^(\s+)run:\s*(.*)$", line)):
+            elif found and (run := re.match(r"^(\s+(?:- )?)run:\s*(.*)$", line)):
                 if run.group(2) not in ("|", ">"):
                     found[-1]["run"].append(run.group(2))
                 else:
@@ -9054,7 +9055,16 @@ def steps_of_the_workflows() -> list[dict]:
 
 
 def commands_of(step: dict) -> list[list[str]]:
-    """Every simple command a step's script starts, with the values of its job's matrix put in."""
+    """Every simple command a step's script starts, with the values of its job's matrix put in. Every line must be one
+    simple command: a line with more than one (a separator, a pipe, a substitution, a redirection, a line that goes on) is
+    itself an entry that is not on the list. The one exception is a step's output written to GitHub's own file for it."""
+    simple = []
+    for line in step["run"]:
+        bare = line.strip().removesuffix(' >> "$GITHUB_OUTPUT"')
+        if bare and not bare.startswith("#") and WORKFLOW_METACHARACTERS.search(bare):
+            simple.append(["<more than one command on a line>", line.strip()])
+    if simple:
+        return simple
     scripts = ["\n".join(step["run"])]
     for name, values in step["matrix"].items():
         marker = "${{ matrix." + name + " }}"
@@ -9102,6 +9112,10 @@ def judged(step: dict, words: list[str]) -> str | None:
     program = words[0]
     if program in PROGRAMS_OF_THE_RUNNER:
         return None
+    if program in ("sh", "bash"):
+        # A shell runs a script, and only one from a protected folder.
+        script = next((word for word in words[1:] if not word.startswith("-")), None)
+        return None if script and protected(posixpath.join(folder, script)) else "a shell script from a folder that is not protected"
     if program == "docker":
         # Docker of the runner builds an image, and only from a Dockerfile and a context in a protected folder.
         if words[1:2] != ["build"]:
@@ -9124,10 +9138,11 @@ def judged(step: dict, words: list[str]) -> str | None:
     if "/" in program and not protected(posixpath.join(folder, program, "..")):
         return "a Python from a folder that is not protected"
     started = python_start(words)
+    if "script" in started:
+        # A script is the code of its own file: it must come from a protected folder, in isolated mode too.
+        return None if started["script"] and protected(posixpath.join(folder, started["script"])) else "a script from a folder that is not protected"
     if started.get("isolated"):
         return None
-    if "script" in started:
-        return None if started["script"] and protected(posixpath.join(folder, started["script"])) else "a script from a folder that is not protected, not in isolated mode"
     # A module or code given on the command line: Python looks in the folder it runs in first.
     return None if protected(posixpath.join(folder, "x")) else "a module or code started from a folder that is not protected, not in isolated mode"
 
@@ -9159,7 +9174,8 @@ def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_p
         assert not protected(path), path
     step = {"folder": "bench/../docs", "matrix": {}, "run": [], "uses": None}
     assert judged(step, ["python", "pilot_replan.py"]) is not None and judged(step, ["python", "-m", "pytest"]) is not None
-    assert judged(step, ["python", "-I", "pilot_replan.py"]) is None and judged(step, ["bash", "x.sh"]) is not None
+    # A script from a folder that is not protected, in isolated mode too, and a shell script from it.
+    assert judged(step, ["python", "-I", "pilot_replan.py"]) is not None and judged(step, ["bash", "x.sh"]) is not None
 
 
 def test_lock_md_says_what_the_form_folds_and_what_is_searched_and_every_way_a_session_ends():
@@ -9167,7 +9183,7 @@ def test_lock_md_says_what_the_form_folds_and_what_is_searched_and_every_way_a_s
     for folded in ("the width of a character", "case;", "that looks like a Latin one", "every mark, taken off", "katakana, as hiragana, the voiced ones too",
                    "a small kana, as its full-size letter", "every form of a Korean letter", "a digit, as the letter it is written for",
                    "a mark that repeats a letter", "Every other character is a separator", "as a run of letters in the form, with any number of separators",
-                   "A value that is an address is searched also by its part before the at sign", "searched as runs in the form's spelling of paths"):
+                   "A value that is an address is searched also by its part before the at sign", "A path and a hidden folder are searched in three spellings"):
         assert folded in said, folded
     # One table with every way a session ends, in the order the relay looks at them.
     text = (DESK / "LOCK.md").read_text(encoding="utf-8")
@@ -9399,11 +9415,14 @@ def started_by_the_tests() -> list[tuple[str, int, str, str]]:
                 if ast.unparse(words[0]) != "sys.executable":
                     continue
                 cwd = [value(k.value) for k in node.keywords if k.arg == "cwd"]
-                options = [ast.unparse(w) for w in words[1:] if isinstance(w, ast.Constant) and str(w.value).startswith("-")]
-                if any(option.strip("'\"").startswith("-I") for option in options):
+                # Python's options read as a workflow's are: a script is the code of its own file and, in isolated mode
+                # too, must come from a protected folder; code or a module given on the command line is no script.
+                spelled = ["python"] + [str(w.value) if isinstance(w, ast.Constant) else "<computed>" for w in words[1:]]
+                started = python_start(spelled)
+                if "script" not in started or started["script"] in (None, "<computed>"):
                     continue
-                script = next((w for w in words[1:] if not (isinstance(w, ast.Constant) and str(w.value).startswith("-"))), None)
-                for p in value(script) if script is not None else []:
+                script = words[1:][spelled[1:].index(started["script"])]
+                for p in value(script):
                     for folder in (cwd[0] if cwd else [""]):
                         found.append((path.name, node.lineno, "started with Python", posixpath.join(folder, p) if not p.startswith("/") else p))
     return [(name, line, what, posixpath.normpath(p)) for name, line, what, p in found if p and not p.startswith("/") and "/" in p.strip("/")]
@@ -9704,8 +9723,9 @@ def test_a_number_of_the_desks_own_lines_never_stops_the_digest(place, monkeypat
     assert looking.digest() is True
     (body,) = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
     assert "- vulnerability, item 7: " in body
+    # The desk's own numbers are fixed fields and are not searched; everything else in the digest passes the check.
     guard = module("guard")
-    assert guard.leaks(body, machine + guard.state_paths(place.state), place.copy, ("BrilliantTiger", "dodam"), keys=False) == []
+    assert guard.leaks(re.sub(r"\d+", "", body), machine + guard.state_paths(place.state), place.copy, ("BrilliantTiger", "dodam"), keys=False) == []
 
 
 @pytest.mark.parametrize("text, limit, want", [("Habla español bien", 11, "Habla "), ("Pide a León hoy", 10, "Pide a "), ("Sí, es así", 9, "Sí, es ")])

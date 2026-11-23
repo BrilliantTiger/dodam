@@ -699,7 +699,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "number": 6,
                 "actor": "nia",
                 "actor_id": 2106,
-                "time": "2026-11-17T01:00:00Z",
+                "time": "",
                 "url": f"https://github.com/{REPO}/pull/6",
             },
         ),
@@ -736,7 +736,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "number": 5,
                 "actor": "grace",
                 "actor_id": 2108,
-                "time": "2026-11-17T01:00:00Z",
+                "time": "",
                 "url": f"https://github.com/{REPO}/pull/5",
             },
         ),
@@ -2953,7 +2953,8 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "bench/tests/subdir/test_nested.py",
     ):
         assert check([{"status": "added", "filename": helper_path}]) == {
-            "protected_folders": ["bench/tests/"],
+            # A name that begins with an underscore is also a case of that class.
+            "protected_folders": ["bench/tests/"] + (["a file or folder whose name begins with an underscore"] if helper_path.split("/")[-1].startswith("_") else []),
             "adds_new_test": False,
             "ready_for_review": False,
         }
@@ -3032,19 +3033,12 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "ready_for_review": False,
     }
 
-    # 9. File names with a line break, with a tab, and with quotes:
+    # 9. File names with a line break, with a tab, or with a backslash could be read as other paths: such a list is refused,
+    # never classified, and the refusal names no part of the name.
     faked_second_line = [{"status": "modified", "filename": "docs/a.md\nadded\tbench/tests/test_fake.py"}]
-    assert check(faked_second_line) == {
-        "protected_folders": [],
-        "adds_new_test": False,
-        "ready_for_review": False,
-    }
-    for bad_test_name in ("bench/tests/test_line\nbreak.py", "bench/tests/test_with\ttab.py"):
-        assert check([{"status": "added", "filename": bad_test_name}]) == {
-            "protected_folders": ["bench/tests/"],
-            "adds_new_test": False,
-            "ready_for_review": False,
-        }
+    assert check(faked_second_line).get("refused") is True
+    for bad_test_name in ("bench/tests/test_line\nbreak.py", "bench/tests/test_with\ttab.py", "bench\\tests\\test_back.py"):
+        assert check([{"status": "added", "filename": bad_test_name}]).get("refused") is True, bad_test_name
 
     weird_protected = [
         {"status": "added", "filename": 'bench/images/evil\nline\ttab"quotes"@owner'},
@@ -3054,12 +3048,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         monkeypatch,
         _stream_pr_check_stdin([weird_protected], changed_files=2, draft=False, task_folders=["web-signup"]),
     )
-    assert code_w == 0 and err_w == ""
-    assert json.loads(out_w) == {
-        "protected_folders": ["bench/images/"],
-        "adds_new_test": False,
-        "ready_for_review": False,
-    }
+    assert json.loads(out_w).get("refused") is True
     for leaked_piece in ("evil", "quotes", "@owner", "\t"):
         assert leaked_piece not in out_w
 

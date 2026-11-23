@@ -94,8 +94,10 @@ ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
 # gives (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md), each with any local variant after a point, a hyphen or an underscore
 # (CLAUDE.local.md, AGENTS.override.md), in any case of its letters. These are fixed words of the tool, as the folders are.
 HIDDEN = "a file or folder whose name begins with a dot"
+# One of the agent tools also reads folders whose names begin with an underscore.
+UNDERSCORE = "a file or folder whose name begins with an underscore"
 RULES = "a file that an agent tool reads as rules"
-PROTECTED_KINDS: tuple[str, ...] = (HIDDEN, RULES)
+PROTECTED_KINDS: tuple[str, ...] = (HIDDEN, UNDERSCORE, RULES)
 RULE_FILE = re.compile(r"(?:claude|agents?|gemini)(?:[._-][^/]*)?\.md")
 # The folder of the benchmark as a whole, for what lies in it outside every folder named above.
 REST_OF_BENCH = "bench/"
@@ -275,6 +277,8 @@ def _protected_by_place(path: str) -> set[str]:
         parts = [_norm_segment(part) for part in candidate.split("/") if part not in ("", ".", "..")]
         if any(part.startswith(".") for part in parts):
             found.add(HIDDEN)
+        if any(part.startswith("_") for part in parts):
+            found.add(UNDERSCORE)
         if parts and RULE_FILE.fullmatch(parts[-1]):
             found.add(RULES)
     named_in_bench = [folder for folder in PROTECTED_FOLDERS if folder.startswith("bench/") and folder != REST_OF_BENCH]
@@ -394,6 +398,9 @@ def classify_pr_files(
             return _refusal("File entry is missing a string filename.")
         if prev_filename is not None and not isinstance(prev_filename, str):
             return _refusal("File entry has an invalid previous_filename.")
+        # A name with a backslash or a control character could be read as another path: refused, never classified.
+        if any(_has_control_or_backslash(name) for name in (filename, prev_filename) if isinstance(name, str)):
+            return _refusal("File entry has a name with a backslash or a control character.")
 
         has_earlier_path = isinstance(prev_filename, str) and prev_filename != ""
         # Strictly case-sensitive comparison on "added": any other spelling (such as "Added" or

@@ -165,9 +165,10 @@ PRIVATE_PLACES = (
     ("a path outside the repository", re.compile(r"(?i)(?<![A-Za-z0-9_.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
                                                 r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")),
     # A drive of Windows, with either slash.
-    ("a path outside the repository", re.compile(r"(?i)\b[a-z]:[\\/]")),
-    # A home folder: ~ alone, or followed by the name of an account.
-    ("a path outside the repository", re.compile(r"(?<![A-Za-z0-9_.])~[A-Za-z0-9._-]*[ \t]*/+[^\s/]")),
+    # Also when a letter of another alphabet stands right before it.
+    ("a path outside the repository", re.compile(r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")),
+    # A home folder: ~ alone, or followed by the name of an account; spaces may stand round its slash.
+    ("a path outside the repository", re.compile(r"(?<![A-Za-z0-9_.])~[A-Za-z0-9._-]*[ \t]*/+[ \t]*[^\s/]")),
     # A hidden folder whose name begins with one of these names, in any case, with either slash and spaces round it.
     ("a hidden folder of this computer", re.compile(r"(?i)(?<![A-Za-z0-9_-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)[\w.-]*[ \t]*/+[ \t]*[^\s/]")),
     (
@@ -291,26 +292,31 @@ class Form:
     The letters are folded by the tables above: widths (NFKC), case, letters of other alphabets that look like Latin ones,
     marks (accents and the voicing marks of kana), katakana as hiragana, small kana as their full size, every form of a
     Korean letter as the single letters it is made of, and a digit as the letter it is written for. A mark that repeats a
-    letter is the letter before it again. Every other character is a separator: it may stand between the parts of a name,
-    any number of them. The other characters are counted as they are written.
+    letter of Korean or Japanese is that letter again; after a Latin letter or a digit it repeats nothing and stays a
+    letter of its own, so it keeps the edge of the Latin word before it. Every other character is a separator: it may
+    stand between the parts of a name, any number of them. The other characters are counted as they are written. For each
+    letter the form keeps the place of the character it was written with (source), so that a hit can be told apart by
+    where its letters came from.
     """
 
     def __init__(self, text: str):
         letters: list[str] = []
         self.gaps: list[int] = []
+        self.source: list[int] = []
         gap = 1  # The text begins where a word begins.
         before = ""
-        for character in composed(text):
+        for at, character in enumerate(composed(text)):
             found = _letters_of(character)
             if found is None:
                 continue  # An accent written by itself belongs to its letter.
-            if found in REPEATS and before:
+            if found in REPEATS and before and not before.isascii():
                 found = before
             if not found:
                 gap += 1
                 continue
             letters.append(found)
             self.gaps += [gap] + [0] * (len(found) - 1)
+            self.source += [at] * len(found)
             gap, before = 0, found
         self.letters = "".join(letters)
         self.text = text
@@ -327,24 +333,29 @@ def reduced(text: str) -> str:
     return form(text).letters
 
 
-def holds(spelled: Form, value: str) -> bool:
-    """Whether the text holds a known value, given as its letters in the form: as a run of the text's letters, with any
-    characters that are not letters or digits between them."""
+def hits(spelled: Form, value: str) -> list[tuple[int, int]]:
+    """Where the text holds a known value, given as its letters in the form: the runs of the text's letters, with any
+    characters that are not letters or digits between them, as (first letter, after the last)."""
+    found: list[tuple[int, int]] = []
     if not value:
-        return False
+        return found
     letters, gaps = spelled.letters, spelled.gaps
     # A long value, and a value in another alphabet than the Latin one, is refused wherever the run stands.
-    if len(value) >= SHORTEST_REDUCED or not value.isascii():
-        return value in letters
+    anywhere = len(value) >= SHORTEST_REDUCED or not value.isascii()
     start = letters.find(value)
     while start != -1:
         end = start + len(value)
         # A short value in Latin letters: where a word begins and ends. A word in Latin letters also begins and ends where
         # a letter of another alphabet stands next to it: a Korean ending or a Japanese word attached to it.
-        if (gaps[start] > 0 or not letters[start - 1].isascii()) and (end == len(letters) or gaps[end] > 0 or not letters[end].isascii()):
-            return True
+        if anywhere or (gaps[start] > 0 or not letters[start - 1].isascii()) and (end == len(letters) or gaps[end] > 0 or not letters[end].isascii()):
+            found.append((start, end))
         start = letters.find(value, start + 1)
-    return False
+    return found
+
+
+def holds(spelled: Form, value: str) -> bool:
+    """Whether the text holds a known value, given as its letters in the form."""
+    return bool(hits(spelled, value))
 
 
 def state_paths(state: str | os.PathLike) -> list[tuple[str, str]]:
@@ -363,8 +374,9 @@ def values_of(word: str) -> list[str]:
     found = [reduced(word)]
     if "@" in word:
         local = word.split("@", 1)[0]
-        # The part before the at sign, and that part before a plus sign, which adds a tag to the same address.
-        found += [reduced(local), reduced(local.split("+", 1)[0])]
+        # The part before the at sign, and every part of it split at a plus sign: a tag, or a number before the name in
+        # GitHub's private addresses.
+        found += [reduced(local)] + [reduced(part) for part in local.split("+")]
     return [value for value in dict.fromkeys(found) if value]
 
 
@@ -406,6 +418,54 @@ def _is_path_of_the_copy(word: str, copy: Path | None) -> bool:
     return True
 
 
+def main_path_spelling(text: str) -> str:
+    """How the desk made other spellings of a path plain before this round, kept word for word and searched too, so that
+    whatever it found, the desk still finds."""
+    text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
+    before = None
+    while before != text:
+        before = text
+        text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![\w./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
+    return text
+
+
+def _plain_path(token: str) -> str:
+    """One path, split at its slashes and walked part by part: a dot leaves the place as it is, two dots go up one part,
+    above the root they stay at the root, and a relative path that climbs above where it starts leaves the copy and is
+    read as one that begins at the root. The data volume of macOS is left out. A relative path that does not climb out
+    stays relative."""
+    parts = token.split("/")
+    absolute = parts[0] == ""
+    head = parts[0] if not absolute and (parts[0].startswith("~") or re.fullmatch(r"[a-z]:", parts[0])) else None
+    stack: list[str] = []
+    for part in parts[1:] if absolute or head is not None else parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if stack and stack[-1] != "..":
+                stack.pop()
+            elif not absolute and head is None:
+                stack.append("..")
+            continue
+        stack.append(part)
+    climbed = not absolute and head is None and bool(stack) and stack[0] == ".."
+    stack = [part for part in stack if part != ".."] if climbed else stack
+    while (absolute or climbed) and stack[:3] == ["system", "volumes", "data"]:
+        stack = stack[3:]
+    if absolute or climbed:
+        return "/" + "/".join(stack)
+    return (head + "/" if head is not None else "") + "/".join(stack)
+
+
+def stack_path_spelling(text: str) -> str:
+    """Every path of the text walked by _plain_path: in one width and one case, backslashes as slashes, spaces round a
+    slash taken out, and each path between the spaces and the marks that stand round a word."""
+    text = re.sub(r"[ \t]*/[ \t]*", "/", unicodedata.normalize("NFKC", text).casefold().replace("\\", "/"))
+    return " ".join(_plain_path(word.strip("'\"`()[]<>,;")) if "/" in word else word for word in text.split())
+
+
 def path_spelling(text: str) -> str:
     """The form's spelling of paths: every way of writing a path that the computer accepts made plain. One width, one case;
     backslashes as slashes; slashes written twice or more, also with spaces between them, as one; a part that is a dot left
@@ -435,8 +495,10 @@ def shapes(text: str | Form, copy: Path | None = None, keys: bool = True) -> lis
     spelled = text if isinstance(text, Form) else form(text)
     plain = unicodedata.normalize("NFKC", text if isinstance(text, str) else spelled.text)
     found: list[str] = []
+    # The text as written, the earlier rendering of its paths, and every path walked part by part.
+    renderings = (plain, spelled.path, main_path_spelling(plain), stack_path_spelling(plain))
     for kind, shape in (*(SECRET_SHAPES if keys else ()), *PRIVATE_PLACES):
-        if (shape.search(plain) or shape.search(spelled.path)) and kind not in found:
+        if any(shape.search(rendering) for rendering in renderings) and kind not in found:
             found.append(kind)
     if not keys:
         return found
@@ -473,6 +535,37 @@ def leaks(text: str, machine: list[tuple[str, str]] | None = None, copy: Path | 
 
 
 outgoing = leaks
+
+
+def leaks_in(parts: list[tuple[str, bool]], machine: list[tuple[str, str]] | None = None, copy: Path | None = None, public: tuple[str, ...] = (),
+             keys: bool = True) -> list[str]:  # fmt: skip
+    """What must not leave in a text made of parts, each fixed (the desk's own numbers, kinds and fixed words) or variable
+    (what a session wrote, or a line of the relay's). The whole is put into the form once. A hit counts when one of its
+    letters comes from a variable part; a hit made only of fixed parts is none. Characters and shapes are searched in each
+    variable part."""
+    texts = [plain(text) for text, _ in parts]
+    variable = [(text, flag) for text, (_, flag) in zip(texts, parts, strict=True)]
+    if any(not_allowed(text) for text, flag in variable if flag):
+        return [NOT_ALLOWED]
+    spans, at = [], 0
+    for text, flag in variable:
+        if flag:
+            spans.append((at, at + len(text)))
+        at += len(text)
+    spelled = form("".join(texts))
+
+    def touches(start: int, end: int) -> bool:
+        return any(a <= spelled.source[n] < b for n in range(start, end) for a, b in spans)
+
+    open_values = {reduced(value) for value in public}
+    found: list[str] = []
+    for kind, word in machine_words() if machine is None else machine:
+        if kind not in found and any(touches(*hit) for value in values_of(word) if value not in open_values for hit in hits(spelled, value)):
+            found.append(kind)
+    for text, flag in variable:
+        if flag:
+            found += [kind for kind in shapes(text, copy, keys) if kind not in found]
+    return found
 
 
 def _strings(value) -> list[str]:

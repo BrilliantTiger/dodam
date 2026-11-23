@@ -269,8 +269,9 @@ class Kept:
         if len(entries) >= self.most:
             if account in held_back:
                 return went(account, number, len(events), "held back")
-            # A place in hand does not go, and is not counted among the places its account can give.
-            can_go = [e for e in entries if (e["number"], e["account"]) not in in_hand]
+            # A place in hand does not go, and is not counted among the places its account can give. Oldest first by the order
+            # of arrivals: a place cut to its newest arrivals earlier in this batch is as old as what it keeps.
+            can_go = sorted((e for e in entries if (e["number"], e["account"]) not in in_hand), key=lambda e: min(event.get("seq", 0) for event in e["events"]))
             gives: dict[int, int] = {}
             for entry in can_go:
                 gives[entry["account"]] = gives.get(entry["account"], 0) + 1

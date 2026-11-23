@@ -56,6 +56,10 @@ import tools  # noqa: E402
 
 
 
+# The project's name on GitHub and the repository's name: public, and never refused in a path.
+PUBLIC = ("BrilliantTiger", "dodam")
+
+
 def default_state() -> Path:
     """Not in the home folder: a session is shown paths of the state folder, and the home folder's path names the account."""
     shared = Path("/Users/Shared")
@@ -344,7 +348,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     environ = dict(os.environ) if environ is None else environ
     # Claude Code tells a session the path of its working folder. A path with the account's or the computer's name
     # in it would put that name into every session, so the desk does not start from such a path.
-    found = guard.names(str(copy), guard.machine_words() if machine is None else machine)
+    found = guard.names(str(copy), guard.machine_words() if machine is None else machine, PUBLIC)
     if found:
         raise Problem("The path of the desk's copy holds " + ", ".join(found) + ". Put the copy in a folder whose path names neither.")
     desk_folder = copy / "tools" / "desk"
@@ -450,8 +454,9 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         except OSError:
             pointer = ""
         target = pointer.strip().removeprefix("gitdir:").strip()
-        if target and not target.startswith("/"):
-            pointer += "\n" + os.path.normpath(os.path.join(str(copy), target))
+        if target:
+            # Where the computer resolves it, through every link: a link with a plain name can lead to a folder whose path names someone.
+            pointer += "\n" + os.path.realpath(os.path.join(str(copy), target))
         # Ignored files are looked for too: a session can read them like any other file.
         code, output = run(["git", "-C", str(copy), "status", "--porcelain", "--ignored"])
         if code != 0 or output.strip():
@@ -478,7 +483,7 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     values = (guard.machine_words() if machine is None else list(machine)) + [(kind, value) for kind, value in known]
     for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook),
                        ("the copy's git folder", pointer)):
-        found = guard.names(path, values)
+        found = guard.names(path, values, PUBLIC)
         if found:
             raise Problem(f"The path of {what} holds " + ", ".join(found) + ". A session is shown this path. Use a folder whose path names none of them.")
     live = lock["live_server"]
@@ -532,6 +537,12 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env.update(own_sign_in)
+    if own_sign_in:
+        # On the desk's own sign-in a session is given nothing that names the owner: a home folder and a folder for
+        # temporary files of its own in the state folder, and a name of the desk's own for the account.
+        env["HOME"] = str(state_files.folder(state / "session-home", "The session's home folder in the state folder", make=True))
+        env["TMPDIR"] = str(state_files.folder(state / "session-tmp", "The session's folder for temporary files in the state folder", make=True))
+        env["USER"] = env["LOGNAME"] = "desk"
     # The watcher gets the same sign-in to GitHub as the tools: the desk's own token when there is one.
     if stand_in is not None:
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}
