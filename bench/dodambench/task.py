@@ -12,6 +12,7 @@ import builtins
 import importlib.machinery
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -454,7 +455,8 @@ def _variant_problems(task: Task, step_names: list[str]) -> list[dict]:
                 found.append(problem(where, f"{at}.weakness",
                                      f"vulnerable variant {v.name} needs a known weakness, got {v.weakness!r}"))
             elif task.manifest_problem is None and not any(
-                    t.kind == "security" and t.weakness == v.weakness and t.step == v.step for t in task.tests):
+                    t.kind == "security" and t.weakness == v.weakness and t.step == v.step
+                    for t in task.tests_for(v.step)):
                 # a test of the same weakness at an earlier step does not do: the variant is written for its step
                 found.append(problem(where, f"{at}.weakness", f"variant {v.name} is vulnerable to {v.weakness}, "
                                                                f"but no security test checks {v.weakness} at step {v.step}"))
@@ -471,7 +473,13 @@ def _variant_problems(task: Task, step_names: list[str]) -> list[dict]:
                 found.append(problem(where, f"{at}.replace[{j}].file",
                                      f"variant {v.name} replaces text in {r.file!r}, which the secure solution lacks"))
                 continue
-            count = path.read_text(encoding="utf-8").count(r.old) if r.old else 0
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                found.append(problem(where, f"{at}.replace[{j}].file",
+                                     f"variant {v.name} replaces text in {r.file!r}, which is not UTF-8 text"))
+                continue
+            count = text.count(r.old) if r.old else 0
             if count == 0:
                 found.append(problem(where, f"{at}.replace[{j}].old",
                                      f"variant {v.name}: text to replace not found in {r.file}"))
@@ -551,6 +559,12 @@ def cli_problems(task: Task) -> list[dict]:
                                  f"({PROCESS_CAP}) holds the case's processes and the judge's own ({JUDGE_PROCESSES})"))
         elif value > most:
             found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} must be at most {most}"))
+    output, disk = cli.get("case_output_kb"), cli.get("case_disk_mb")
+    if _whole(output) and _whole(disk) and 0 < disk and output > disk * 1024:
+        # a test may hand a run's output back as standard input, which the case runner bounds by the file limit
+        found.append(problem("task.toml", "cli.case_output_kb",
+                             f"[cli] case_output_kb must be at most the file limit, {disk * 1024}: a test may give "
+                             "a program's whole output back to it as standard input"))
     for key in cli:
         if key not in CLI_LIMIT_KEYS:
             found.append(problem("task.toml", f"cli.{key}", f"[cli] {key} is not a limit of a case"))
@@ -580,45 +594,90 @@ def cli_problems(task: Task) -> list[dict]:
 
 
 # --- the code of a command-line task's tests, read as Python reads it ---
+#
+# Everything here is a list of what a test may use; whatever is not on a list is refused.
 
-# The modules of Python's standard library a test may import: they start nothing, open no file by its
-# path and reach no attribute by a name given as text.
-TEST_MODULES = {"base64", "binascii", "collections", "datetime", "decimal", "fractions", "hashlib", "itertools",
-                "json", "math", "random", "re", "struct", "textwrap", "unicodedata", "zlib"}
+# The modules of Python's standard library a test may import.
+TEST_MODULES = {"base64", "binascii", "collections", "hashlib", "itertools", "json", "math", "re", "string",
+                "struct", "textwrap", "zlib"}
 CASE_RUNNER_NAMES = {"case", "need"}
-# The names a test may use without defining them: built-in functions and types that start nothing,
-# open no file and reach nothing by a name given as text, and the built-in exceptions.
+# The built-in names a test may use: functions and types that start nothing, open no file and reach
+# nothing by a name given as text, and the built-in exceptions.
 TEST_BUILTINS = {
-    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr", "classmethod", "dict",
-    "divmod", "enumerate", "filter", "float", "frozenset", "hash", "hex", "int", "isinstance", "issubclass", "iter",
-    "len", "list", "map", "max", "min", "next", "object", "oct", "ord", "pow", "print", "property", "range", "repr",
-    "reversed", "round", "set", "slice", "sorted", "staticmethod", "str", "sum", "super", "tuple", "zip",
-    "True", "False", "None", "NotImplemented", "Ellipsis",
+    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr", "dict", "divmod",
+    "enumerate", "filter", "float", "frozenset", "hash", "hex", "int", "isinstance", "issubclass", "iter", "len",
+    "list", "map", "max", "min", "next", "object", "oct", "ord", "pow", "print", "range", "repr", "reversed",
+    "round", "set", "slice", "sorted", "str", "sum", "tuple", "zip", "True", "False", "None",
 } | {name for name, value in vars(builtins).items() if isinstance(value, type) and issubclass(value, BaseException)}
-# Attributes a test may not reach: a running function's frame or code, attributes reached by a name in a
-# format string, the modules a module has loaded, a path's ways of reading, listing, changing or asking
-# about the files it names, and making several tests out of one.
-REFUSED_ATTRIBUTES = {
-    "gi_frame", "gi_code", "gi_yieldfrom", "cr_frame", "cr_code", "cr_await", "ag_frame", "ag_code", "ag_await",
-    "tb_frame", "tb_next", "f_back", "f_globals", "f_locals", "f_builtins", "f_code", "with_traceback",
-    "format", "format_map", "vformat",
-    "modules",
-    "read_text", "read_bytes", "write_text", "write_bytes", "open", "iterdir", "glob", "rglob", "walk", "exists",
-    "is_file", "is_dir", "is_symlink", "is_mount", "is_socket", "is_fifo", "is_block_device", "is_char_device",
-    "is_junction", "stat", "lstat", "readlink", "resolve", "absolute", "samefile", "chmod", "lchmod", "unlink",
-    "rmdir", "rename", "touch", "symlink_to", "hardlink_to", "link_to", "expanduser", "cwd", "copy", "copy_into",
-    "move", "move_into", "info",
-    "parametrize",
+# The attribute names a test may reach, on whatever object: of the case and its results, of strings,
+# bytes, lists, dicts and sets, of a match of a pattern, and the functions of the modules above.
+TEST_ATTRIBUTES = {
+    # the case and the result of a run
+    "run", "read", "files", "read_outside", "files_outside", "write", "write_outside", "sparse", "mkdir", "symlink",
+    "work", "outside", "exit_code", "stdout", "stderr", "out", "err", "limit", "seconds",
+    # strings and bytes
+    "capitalize", "casefold", "center", "count", "decode", "encode", "endswith", "expandtabs", "find", "fromhex",
+    "hex", "index", "isalnum", "isalpha", "isascii", "isdecimal", "isdigit", "islower", "isnumeric", "isspace",
+    "istitle", "isupper", "join", "ljust", "lower", "lstrip", "partition", "removeprefix", "removesuffix",
+    "replace", "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith",
+    "strip", "swapcase", "title", "upper", "zfill",
+    # lists, dicts, sets and the containers of collections
+    "add", "append", "appendleft", "clear", "copy", "difference", "discard", "elements", "extend", "get",
+    "intersection", "issubset", "issuperset", "items", "keys", "most_common", "pop", "popleft", "remove",
+    "reverse", "setdefault", "sort", "union", "update", "values",
+    # a pattern and its match
+    "compile", "escape", "findall", "finditer", "fullmatch", "group", "groupdict", "groups", "match", "search",
+    "span", "start", "end", "sub", "subn", "pattern", "ASCII", "DOTALL", "IGNORECASE", "MULTILINE", "VERBOSE",
+    # the functions of the modules a test may import
+    "loads", "dumps",
+    "ceil", "comb", "factorial", "floor", "fsum", "gcd", "inf", "isclose", "isfinite", "isinf", "isnan", "log",
+    "log10", "log2", "nan", "pi", "prod", "sqrt", "trunc",
+    "b16decode", "b16encode", "b32decode", "b32encode", "b64decode", "b64encode", "urlsafe_b64decode",
+    "urlsafe_b64encode", "crc32", "hexlify", "unhexlify",
+    "blake2b", "md5", "sha1", "sha256", "sha512", "digest", "hexdigest",
+    "accumulate", "chain", "combinations", "cycle", "dropwhile", "from_iterable", "groupby", "islice",
+    "pairwise", "permutations", "product", "repeat", "starmap", "takewhile", "zip_longest",
+    "Counter", "OrderedDict", "defaultdict", "deque", "namedtuple",
+    "ascii_letters", "ascii_lowercase", "ascii_uppercase", "digits", "hexdigits", "octdigits", "printable",
+    "punctuation", "whitespace",
+    "calcsize", "iter_unpack", "pack", "unpack", "unpack_from",
+    "dedent", "fill", "indent", "shorten", "wrap",
+    "adler32", "compress", "decompress",
 }
+# The case's methods that give back a path, and the case's folders as paths. A path may only be made a
+# string, put into an f-string or given to the case's symlink: the value of such a method is not used,
+# and a folder is reached only there.
+GIVES_A_PATH = {"write", "write_outside", "sparse", "mkdir", "symlink"}
+CASE_FOLDERS = {"work", "outside"}
 # Files pytest runs or obeys on its own, without a test asking for them.
 PYTEST_FILES = {"conftest.py", "pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"}
 # Files Python loads in place of a source file of the same name.
 COMPILED = tuple({".pyc", ".pyo", ".pyd", ".so", *importlib.machinery.EXTENSION_SUFFIXES})
-# Names a helper may not have: Python would load the module of that name in its place, or run it on its own.
-NOT_A_HELPER = set(sys.stdlib_module_names) | {"dodam_cli", "dodam_judge", "conftest", "sitecustomize",
-                                               "usercustomize", "pytest", "_pytest", "pluggy", "iniconfig",
-                                               "packaging", "py"}
-# The one line that puts the task's helper folder on the search path, with any number and folder name.
+HELPERS = "lib"                    # the task's helper folder, inside its tests folder
+JUDGE_REQUIREMENTS = Path(__file__).resolve().parents[1] / "images" / "judge" / "requirements.txt"
+
+
+def _judge_packages() -> set[str]:
+    """The top-level names of the packages in the judge's own Python, which a case runner may have
+    loaded before a test runs."""
+    names = {"_pytest", "py"}
+    try:
+        lines = JUDGE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return names
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith(("#", "-")):
+            names.add(re.split(r"[=<>;\[ ]", line, maxsplit=1)[0].lower().replace("-", "_"))
+    return names
+
+
+# Names a Python file of the tests may not have: Python would load the module of that name in its place,
+# or run it on its own.
+NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages()
+                | {"dodam_cli", "dodam_judge", "conftest", "sitecustomize", "usercustomize"})
+# The one line that puts the task's helper folder on the search path, with any number and folder name;
+# the number and the name are checked apart.
 PATH_LINE = ast.dump(ast.parse("sys.path.insert(0, str(Path(__file__).resolve().parents[0] / 'x'))").body[0])
 WHY = ("a test of a cli task runs the program only through dodam_cli, learns nothing about the language "
        "and the judge's settings, and is one case")
@@ -634,6 +693,21 @@ def _shape(node: ast.AST) -> str:
     return ast.dump(copy)
 
 
+def _path_line(node: ast.stmt, depth: int) -> bool:
+    """Whether a statement is the line that puts the task's helper folder on the search path: from a
+    file `depth` folders below the tests folder, the folder `lib` of the tests folder."""
+    if not isinstance(node, ast.Expr) or _shape(node) != PATH_LINE:
+        return False
+    numbers = [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, int)]
+    folders = [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return numbers == [0, depth] and folders == [HELPERS]
+
+
+def _is_test_name(name: str) -> bool:
+    """A name pytest would collect a test or a class of tests by."""
+    return name.startswith(("test", "Test"))
+
+
 class _TestCode(ast.NodeVisitor):
     """The rules on one Python file of a command-line task's tests."""
 
@@ -641,6 +715,7 @@ class _TestCode(ast.NodeVisitor):
         self.rel, self.helpers, self.path_lines = rel, helpers, path_lines
         self.found: list[dict] = []
         self.defined: set[str] = set()
+        self.parents: dict[ast.AST, ast.AST] = {}
         self.depth = 0                      # how many functions and lambdas the visitor is inside
         self.calls_case = False
         self.imports_case = False
@@ -653,17 +728,26 @@ class _TestCode(ast.NodeVisitor):
             return                         # the one line that puts the helper folder on the search path
         super().generic_visit(node)
 
+    # every binding of a name, wherever it is
+    def bound(self, node: ast.AST, name: str, at_top: bool, by_def: bool = False) -> None:
+        if name in vars(builtins):
+            self.refuse(node, f"binds {name}, a built-in name")
+        elif name.startswith("__"):
+            self.refuse(node, f"binds {name}")
+        elif name.startswith("pytest"):
+            self.refuse(node, f"binds {name}, a name pytest reads")
+        elif _is_test_name(name) and at_top and not by_def:
+            self.refuse(node, f"binds {name} at the top of the file in another way than by the def of a test")
+
     # imports
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             top = alias.name.split(".")[0]
-            if top == "sys" and alias.name == "sys" and not alias.asname and self.path_lines:
+            if alias.name == "sys" and not alias.asname and self.path_lines:
                 pass
-            elif top in TEST_MODULES or (top in self.helpers and "." not in alias.name):
-                pass
-            else:
+            elif not (top in TEST_MODULES and "." not in alias.name) and not (alias.name in self.helpers):
                 self.refuse(node, f"imports {alias.name}")
-            self.binds(node, alias.asname or top)
+            self.bound(node, alias.asname or top, True)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
@@ -674,7 +758,6 @@ class _TestCode(ast.NodeVisitor):
             if alias.name == "*":
                 self.refuse(node, f"imports every name of {module}")
                 continue
-            top = module.split(".")[0]
             if module == "dodam_cli":
                 if alias.name not in CASE_RUNNER_NAMES or alias.asname:
                     self.refuse(node, f"imports {alias.name} from dodam_cli")
@@ -682,61 +765,80 @@ class _TestCode(ast.NodeVisitor):
                     self.imports_case = True
             elif module == "pathlib" and alias.name == "Path" and not alias.asname and self.path_lines:
                 pass
-            elif not (top in TEST_MODULES or (top in self.helpers and "." not in module)):
-                self.refuse(node, f"imports {alias.name} from {module}")
-            self.binds(node, alias.asname or alias.name)
-
-    def binds(self, node: ast.AST, name: str) -> None:
-        self.defined.add(name)
-        if name.startswith("test") or name.startswith("pytest_"):
-            self.refuse(node, f"binds {name} by an import")
+            elif module in TEST_MODULES:
+                if alias.name not in TEST_ATTRIBUTES:
+                    self.refuse(node, f"imports {alias.name} from {module}, a name not on the list a test may reach")
+            elif module in self.helpers:
+                if alias.name.startswith("_"):
+                    self.refuse(node, f"imports {alias.name}, a hidden name, from {module}")
+            else:
+                self.refuse(node, f"imports {alias.name} from {module}, a module a test may not import")
+            self.bound(node, alias.asname or alias.name, True)
 
     # names
     def visit_Name(self, node: ast.Name) -> None:
         name = node.id
+        if not isinstance(node.ctx, ast.Load):
+            self.bound(node, name, self.depth == 0 or isinstance(node.ctx, ast.Del))
+            return
         if name.startswith("__"):
             self.refuse(node, f"uses {name}")
-        elif isinstance(node.ctx, ast.Load):
-            if name in ("sys", "Path") and self.path_lines:
-                self.refuse(node, f"uses {name} beyond the line that puts the helper folder on the search path")
-            elif name not in self.defined and name not in TEST_BUILTINS:
-                self.refuse(node, f"uses {name}, which the file does not define and which is no name a test may use")
-        else:
-            if name.startswith("pytest_"):
-                self.refuse(node, f"binds {name}")
-            elif name.startswith("test") and (self.depth == 0 or isinstance(node.ctx, ast.Del)):
-                self.refuse(node, f"binds {name} at the top of the file in another way than by a def")
+        elif name in ("sys", "Path") and self.path_lines:
+            self.refuse(node, f"uses {name} beyond the line that puts the helper folder on the search path")
+        elif name in vars(builtins):
+            if name not in TEST_BUILTINS:
+                self.refuse(node, f"uses the built-in name {name}, which is no name a test may use")
+        elif name not in self.defined:
+            self.refuse(node, f"uses {name}, which the file does not define")
 
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Name) and node.func.id == "case":
             self.calls_case = True
+        if isinstance(node.func, ast.Attribute) and node.func.attr in GIVES_A_PATH \
+                and not isinstance(self.parents.get(node), ast.Expr):
+            self.refuse(node, f"uses the path .{node.func.attr} gives back")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if node.attr.startswith("_") or node.attr in REFUSED_ATTRIBUTES:
+        if not isinstance(node.ctx, ast.Load):
+            self.refuse(node, f"stores or deletes the attribute .{node.attr}")
+        elif node.attr not in TEST_ATTRIBUTES:
             self.refuse(node, f"reaches .{node.attr}")
+        elif node.attr in CASE_FOLDERS and not self.made_a_string(node):
+            self.refuse(node, f"uses the folder .{node.attr} as a path")
         self.generic_visit(node)
+
+    def made_a_string(self, node: ast.AST) -> bool:
+        """Whether a path is only made a string, put into an f-string or given to the case's symlink."""
+        up = self.parents.get(node)
+        while isinstance(up, ast.BinOp) and isinstance(up.op, ast.Div):
+            node, up = up, self.parents.get(up)
+        if isinstance(up, ast.FormattedValue):
+            return True
+        return isinstance(up, ast.Call) and node in up.args and (
+            (isinstance(up.func, ast.Name) and up.func.id == "str" and len(up.args) == 1 and not up.keywords)
+            or (isinstance(up.func, ast.Attribute) and up.func.attr == "symlink"))
 
     def visit_Global(self, node: ast.Global) -> None:
         for name in node.names:
-            if name.startswith(("test", "pytest_")) or name.startswith("__"):
-                self.refuse(node, f"makes {name} global")
+            self.bound(node, name, True)
 
     visit_Nonlocal = visit_Global
 
     # definitions
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.defined.add(node.name)
-        if node.name.startswith("pytest_"):
-            self.refuse(node, f"defines {node.name}")
-        if node.name.startswith("test"):
-            if self.depth or not self.at_top(node):
+        at_top = any(node is top for top in self.top)
+        self.bound(node, node.name, self.depth == 0, by_def=at_top)
+        if _is_test_name(node.name):
+            if not at_top:
                 self.refuse(node, f"defines {node.name} elsewhere than at the top of the file")
             args = node.args
             if args.posonlyargs or args.args or args.kwonlyargs or args.vararg or args.kwarg:
                 self.refuse(node, f"gives {node.name} parameters")
             if node.decorator_list:
                 self.refuse(node, f"decorates {node.name}")
+            if self.yields(node):
+                self.refuse(node, f"makes {node.name} yield")
         # what is worked out when the function is defined: its decorators, defaults and annotations
         for part in node.decorator_list:
             self.visit(part)
@@ -750,10 +852,23 @@ class _TestCode(ast.NodeVisitor):
             self.visit(statement)
         self.depth -= 1
 
+    @staticmethod
+    def yields(function: ast.FunctionDef) -> bool:
+        """Whether a function's own body yields, which pytest does not collect as a test."""
+        found, todo = False, list(function.body)
+        while todo:
+            node = todo.pop()
+            if isinstance(node, (ast.Yield, ast.YieldFrom)):
+                found = True
+            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                todo.extend(ast.iter_child_nodes(node))
+        return found
+
+    def visit_arg(self, node: ast.arg) -> None:
+        self.bound(node, node.arg, False)
+        self.generic_visit(node)
+
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs, node.args.vararg, node.args.kwarg):
-            if arg is not None:
-                self.defined.add(arg.arg)
         self.depth += 1
         self.generic_visit(node)
         self.depth -= 1
@@ -762,25 +877,31 @@ class _TestCode(ast.NodeVisitor):
         self.refuse(node, f"defines {node.name} as asynchronous")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.defined.add(node.name)
-        if node.name.startswith("Test"):
-            self.refuse(node, f"defines the class {node.name}, which pytest would collect")
+        self.bound(node, node.name, self.depth == 0)
+        if _is_test_name(node.name):
+            self.refuse(node, f"defines the class {node.name}, whose name pytest collects tests by")
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name:
+            self.bound(node, node.name, self.depth == 0)
         self.generic_visit(node)
 
     def visit_match_case(self, node: ast.match_case) -> None:
-        # a name a pattern captures at the top of the file is a name of the module, as an assignment's is
+        # a name a pattern captures is bound like an assignment's
         for part in ast.walk(node.pattern):
             name = getattr(part, "name", None) or getattr(part, "rest", None)
-            if isinstance(name, str) and name.startswith(("test", "pytest_")) and self.depth == 0:
-                self.refuse(part, f"binds {name} by a pattern")
+            if isinstance(name, str):
+                self.bound(part, name, self.depth == 0)
         self.generic_visit(node)
 
-    def at_top(self, node: ast.AST) -> bool:
-        return node in self.top
-
     def check(self, tree: ast.Module) -> None:
-        self.top = set(tree.body)
-        # every name the file defines, wherever it does: a name used before its definition is no problem here
+        self.top = list(tree.body)
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                self.parents[child] = node
+        # every name the file binds, wherever it does: a name used before its binding is no problem here,
+        # and a binding of a built-in name is refused, so a built-in name always means the built-in
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
                 self.defined.add(node.id)
@@ -794,10 +915,31 @@ class _TestCode(ast.NodeVisitor):
                 self.defined.add(node.name)
             elif isinstance(node, ast.MatchMapping) and node.rest:
                 self.defined.add(node.rest)
-        names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test")]
+        names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and _is_test_name(n.name)]
         for name in sorted({n for n in names if names.count(n) > 1}):
             self.found.append(problem(self.rel, "", f"defines {name} more than once: {WHY}"))
         self.visit(tree)
+
+
+def _tests_tree(tests: Path) -> tuple[list[Path], list[dict]]:
+    """Every file of the tests folder, and a problem for every link and for whatever is neither a
+    file nor a folder: the converter copies what a link points at, which the checker would not read."""
+    files, found = [], []
+    if tests.is_symlink():
+        return files, [problem("tests", "", "the tests folder is a link")]
+    for folder, dirs, names in os.walk(tests, followlinks=False):
+        here = Path(folder)
+        for name in sorted(dirs + names):
+            path = here / name
+            rel = f"tests/{path.relative_to(tests).as_posix()}"
+            if path.is_symlink():
+                found.append(problem(rel, "", f"is a link: {WHY}"))
+            elif name in names and not path.is_file():
+                found.append(problem(rel, "", f"is neither a file nor a folder: {WHY}"))
+            elif name in names:
+                files.append(path)
+        dirs[:] = [d for d in dirs if not (here / d).is_symlink()]
+    return sorted(files), found
 
 
 def test_code_problems(task: Task) -> list[dict]:
@@ -805,14 +947,12 @@ def test_code_problems(task: Task) -> list[dict]:
     tests = task.root / "tests"
     if not tests.is_dir():
         return []
-    found: list[dict] = []
-    every = sorted(p for p in tests.rglob("*") if p.is_file() or p.is_dir())
-    helpers = {p.stem for p in every if p.is_file() and p.suffix == ".py" and p.stem != "__init__"} - NOT_A_HELPER
+    every, found = _tests_tree(tests)
+    helpers = {p.stem for p in every if p.parent == tests / HELPERS and p.suffix == ".py" and p.stem != "__init__"
+               and not _is_test_name(p.stem) and not p.stem.startswith("_")} - NOT_A_HELPER
     listed = {f"tests/{t.file}" for t in task.tests}
     for path in every:
         rel = f"tests/{path.relative_to(tests).as_posix()}"
-        if path.is_dir():
-            continue
         if path.name in PYTEST_FILES:
             found.append(problem(rel, "", f"pytest runs or obeys {path.name} without a test asking for it: {WHY}"))
             continue
@@ -829,7 +969,8 @@ def test_code_problems(task: Task) -> list[dict]:
         except (SyntaxError, ValueError) as exc:
             found.append(problem(rel, f"line {getattr(exc, 'lineno', 0) or 0}", f"cannot be read as Python: {exc}"))
             continue
-        path_lines = [node for node in tree.body if isinstance(node, ast.Expr) and _shape(node) == PATH_LINE]
+        depth = len(path.relative_to(tests).parts) - 1
+        path_lines = [node for node in tree.body if _path_line(node, depth)]
         code = _TestCode(rel, helpers, path_lines)
         code.check(tree)
         found += code.found

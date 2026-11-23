@@ -58,7 +58,9 @@ The rest is as in a web task.
 | `solutions/secure/<language>/<step>` | the right solution | only the check of the judge |
 | `solutions/variants/<language>.toml` | the vulnerable and the broken solutions, written as exact replacements of text in the right solution | only the check of the judge |
 
-Together with the requirements the AI is told: the language and where the sources go, the packages it may use, that in `/app` the build command runs once and then, for every case, the run command followed by the case's arguments, that every case starts in a fresh working folder holding the case's input files, as a plain user without network, the values of the five limits, and that where the program runs the calls that hand a file's pages to a pipe or a socket without copying them (`sendfile`, `splice`, `tee` and `vmsplice`) fail with "invalid argument", so that a program sends or copies a file by reading it and writing it. A web task's instruction carries the same sentence. It is not told the hidden tests, the expected answers or the prepared solutions.
+Together with the requirements the AI is told: the language and where the sources go, the packages it may use, that in `/app` the build command runs once and then, for every case, the run command followed by the case's arguments, that every case starts in a fresh working folder holding the case's input files, as a plain user without network, the values of the five limits, and what a program can run into where it runs (the next paragraph). A web task's instruction carries the same sentence about that. It is not told the hidden tests, the expected answers or the prepared solutions.
+
+**What a program can run into where it runs.** A case's program may not write the system's temporary folders `/tmp` and `/var/tmp`, nor `/dev/shm`: the C library's `tmpfile` and the locks and pools of Python's `multiprocessing` need them, and fail. The calls `sendfile`, `splice`, `tee` and `vmsplice` answer "invalid argument"; the section on the limits says why. A correct program can run into these and cannot find out by itself, so the AI is told them, in one sentence that names everything this paragraph names, the same for both kinds of task; a test pins that. A web task's served program is not closed off from the temporary folders today, so the sentence says they may be closed.
 
 The run command of each language is below. The build commands are those of web tasks.
 
@@ -72,7 +74,7 @@ The run command of each language is below. The build commands are those of web t
 | Rust | `/app/target/release/app` |
 | C++ | `/app/build/app` |
 
-Every runtime but Java's takes its temporary folder from the environment, which gives each case a temporary folder of its own. Java's takes it from a setting of its own, so its run command names the case's temporary folder, `../home/tmp` from the working folder; a temporary file of a Java program then goes where those of the other six go, and the runtime prints nothing about it. A served program of a web task makes its temporary files in the same folder in Java as in Python.
+The usual call of every runtime but Java's for a temporary file takes its folder from the environment, which gives each case a temporary folder of its own. Java's runtime takes it from a setting of its own, so its run command names the case's temporary folder, `../home/tmp` from the working folder; a temporary file of a Java program then goes where those of the other six go, and the runtime prints nothing about it. The C library's `tmpfile`, and so C++'s `std::tmpfile`, does not take its folder from the environment: it writes into the system's temporary folder, which is closed to a case, and fails; the locks and pools of Python's `multiprocessing` need `/dev/shm` and fail. Tests in the images pin both. A served program of a web task makes its temporary files in the same folder in Java as in Python; the other five were not compared as served programs.
 
 ## How a hidden test is written
 
@@ -102,13 +104,13 @@ What `case` gives:
 - Running: `run(list of arguments, stdin=…)`. The result has `exit_code`, `stdout`, `stderr` and `limit`, the name of the limit that was broken. When the program did not end by itself there is no `exit_code`. A case that broke a limit fails whatever its test asserts, and also when `need` was about to leave it unjudged.
 - Looking: `read` (the content of a file), `files` (what the working folder holds), `read_outside`, `files_outside`. A symbolic link the program left is never followed.
 
-The format checker reads every Python file in a command-line task's tests folder, helpers as well, as Python reads it, so that a word in a comment or a string is no code. Each file of tests the manifest lists imports `case` from `dodam_cli` and calls it itself; a helper may use it too, but does not do it for the file. A file is refused when it:
+The format checker reads every Python file in a command-line task's tests folder, helpers as well, as Python reads it, so that a word in a comment or a string is no code; a file that cannot be read as Python is refused. Each file of tests the manifest lists imports `case` from `dodam_cli` and calls it itself; a helper may use it too, but does not do it for the file. What a test may use is a list, and whatever is not on a list is refused:
 
-- imports anything but `case` and `need` from `dodam_cli` under their own names, the task's own helpers, and these modules of Python's standard library: `base64`, `binascii`, `collections`, `datetime`, `decimal`, `fractions`, `hashlib`, `itertools`, `json`, `math`, `random`, `re`, `struct`, `textwrap`, `unicodedata` and `zlib`; or imports relatively, or every name of a module. `sys` and `Path` of `pathlib` serve only the one line that puts the task's helper folder on the search path, `sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))` with any number and folder name;
-- uses a name it does not define itself other than the built-in functions and types that start nothing, open no file and reach nothing by a name given as text, and the built-in exceptions; or any name that begins with two underscores;
-- reaches an attribute whose name begins with an underscore, one that reaches the frame or the code of a running function, `format`, `format_map` or `vformat`, `modules`, `parametrize`, or one of a path's ways of reading, listing, changing or asking about the files it names (`read_text`, `iterdir`, `exists`, `stat` and the others the checker lists);
-- defines a test, a function whose name begins with `test`, anywhere but at the top of the file, with parameters, with a decorator, as asynchronous, or twice; binds a name that begins with `test` at the top of the file in any other way (an assignment, a loop, an import, a pattern, `del` or `global`); or defines a class whose name begins with `Test`, or a function or a name that begins with `pytest_`;
-- is a `conftest.py`, a settings file of pytest (`pytest.ini`, `.pytest.ini`, `pyproject.toml`, `tox.ini` or `setup.cfg`), a file Python loads in place of a source file (compiled code or a native module), or a helper named like a module of Python's standard library, of the case runner, of the judge, of pytest, or like a file Python runs when it starts.
+- Imports: `case` and `need` from `dodam_cli` under their own names; the task's helpers, which are the Python files of the folder `tests/lib`; and these modules of Python's standard library: `base64`, `binascii`, `collections`, `hashlib`, `itertools`, `json`, `math`, `re`, `string`, `struct`, `textwrap` and `zlib`, from which a name is imported only when it is on the list of attributes. No relative import, and no import of every name of a module. `sys` and `Path` of `pathlib` serve only the one line that puts the helper folder on the search path, `sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))`, whose number is how deep the file lies below the tests folder.
+- Names: the built-in names `abs`, `all`, `any`, `ascii`, `bin`, `bool`, `bytearray`, `bytes`, `callable`, `chr`, `dict`, `divmod`, `enumerate`, `filter`, `float`, `frozenset`, `hash`, `hex`, `int`, `isinstance`, `issubclass`, `iter`, `len`, `list`, `map`, `max`, `min`, `next`, `object`, `oct`, `ord`, `pow`, `print`, `range`, `repr`, `reversed`, `round`, `set`, `slice`, `sorted`, `str`, `sum`, `tuple`, `zip`, `True`, `False` and `None`, and the built-in exceptions. Every other name a test uses is one the file binds, and no file binds a built-in name or a name that begins with two underscores, so a built-in name always means the built-in.
+- Attributes: only the names the checker lists, read and never stored or deleted, on whatever object: those of the case (`run`, `read`, `files`, `read_outside`, `files_outside`, `write`, `write_outside`, `sparse`, `mkdir`, `symlink`, `work` and `outside`) and of a run's result (`exit_code`, `stdout`, `stderr`, `out`, `err`, `limit` and `seconds`), the ways of strings, bytes, lists, dicts, sets and a pattern's match, and the functions of the modules above. The case's folders `work` and `outside` are paths: a path is only made a string with `str`, put into an f-string, or given to `symlink`, and the value of `write`, `write_outside`, `sparse`, `mkdir` and `symlink` is not used. A test of the checker walks from every module of the standard library the checker admits along every attribute it admits, three steps deep, and reaches no module and no built-in function a test may not use.
+- Tests: a test is a function whose name begins with `test`, defined once at the top of the file, without parameters, decorators or `yield`. No other name that begins with `test` or `Test` is bound at the top of the file (by an assignment, a loop, an import, a pattern, `del` or `global`); no class has such a name; no name begins with `pytest`; nothing is asynchronous.
+- Files: no `conftest.py`, no settings file of pytest (`pytest.ini`, `.pytest.ini`, `pyproject.toml`, `tox.ini` or `setup.cfg`), no file Python loads in place of a source file (compiled code or a native module), no link and nothing but files and folders, and no Python file named like a module of Python's standard library, of the case runner, of the judge, of a package of the judge's own Python, or like a file Python runs when it starts.
 
 Under these rules the tests pytest collects from a file are exactly the functions at the top of the file whose names begin with `test`, and that number is what the sum of time counts.
 
@@ -300,7 +302,7 @@ The format checker also adds up what the container of a command-line task must h
 | the judge's own room, half of which is the line below which the judge ends a program | 256 | 256 |
 | Sum | | 913 |
 
-The case runner keeps of a program's output no more than four times the output limit and 1 MB; a test floods both outputs until the program is ended and measures it. It refuses to give a program more standard input than the case's file limit: a test that gives more is a fault of the task's tests, and no result is written. The other half of the judge's own room holds the judge's and the case runner's processes, about 32 MB and about 51 MB. The sample asks for 1,408 MB, 495 MB above the sum.
+The case runner keeps of a program's output no more than four times the output limit and 1 MB; a test floods both outputs until the program is ended and measures it. More standard input than the case's file limit is not given: the program does not run and the case fails, as for a broken limit, since a test may hand a program's own output back to it. A task whose own tests give more fails vetting, as its right solution then fails, and the checker refuses an output limit above the file limit, so that a program's whole output fits. The other half of the judge's own room holds the judge's and the case runner's processes, about 32 MB and about 51 MB; the about 45 MB left of it cover the at most 20 MB a passing case can hold beyond the judge's count in the ways the tests know. The sample asks for 1,408 MB, 495 MB above the sum.
 
 The checker also keeps processes for the judge. The container's cap of 1,024 processes holds a case's processes and the judge's own. While a case runs the judge's own are three, the verifier's script, the judge and the case runner, as measured in the Python image while a program held its limit of 16 and of 64; when a program left processes, the judge starts one more that ends them. The checker keeps twice those four, 8, so a case's limit on processes is at most 1,016. A test in the image caps the container at a case's limit and 8, has a program make processes until it is refused, and reads that the program reached its own limit and the judge held 3. Every task of the repository fits both sums; none had to change.
 
@@ -325,7 +327,7 @@ The caps bound each container, not their sum. On the path through Harbor the con
 
 ## A fault of the judge
 
-A problem that is not the program's is a fault of the judge: it cannot make the case's folder, cannot start the program as the judging user, cannot end the processes of the program's side, the task's settings are incomplete, the container has no caps that hold, the cases of a command-line test file cannot be listed, pytest lists another number of cases in such a file than the judge counted, a test gives a program more standard input than the case's file limit, or such a file does not finish in its time. The judge then writes no result file (and removes one that is there), says what failed in `judge-fault.json` and ends with exit code 3. Without a result file the measuring harness treats the run as a failed judging and does not count it as a score of the program. The tool that checks prepared solutions also reports it separately, as "the judge itself failed", and so it reports a container that ended without a result.
+A problem that is not the program's is a fault of the judge: it cannot make the case's folder, cannot start the program as the judging user, cannot end the processes of the program's side, the task's settings are incomplete, the container has no caps that hold, the cases of a command-line test file cannot be listed, pytest lists another number of cases in such a file than the judge counted, or such a file does not finish in its time. The judge then writes no result file (and removes one that is there), says what failed in `judge-fault.json` and ends with exit code 3. Without a result file the measuring harness treats the run as a failed judging and does not count it as a score of the program. The tool that checks prepared solutions also reports it separately, as "the judge itself failed", and so it reports a container that ended without a result.
 
 A problem that comes from what the program left is no fault of the judge. If the case's folder cannot be removed, that case fails, and what is left is removed again when the next case starts. If what the program's side left holds more than the judge handles, or takes longer to walk and remove than a step gives, the step fails and a result is written.
 
@@ -357,9 +359,9 @@ JSON comes first, and the lines a person reads are made from that JSON. The exit
 
 Each problem is an entry of its own, with its file, its key and its message. The key is the place in the file: a key of TOML in TOML's own notation (`limits.memory_mb`, `steps[1].instruction`, `test[2].superseded_in`), `line <n>` in a Python file, and empty for a whole file. A value of the wrong kind is such a problem too, never a trace of an error.
 
-For every task it checks the fields of `task.toml`, of the manifest and of the variants; that the task names at least one language and that every language of the task has its right solution at every step (`solutions/secure/<language>/<step>`); that every vulnerable variant has a security test of its own weakness at its own step, since a change step runs the earlier steps' tests again and a test of the same weakness there does not do; and that every test file is listed and carries the canary.
+For every task it checks the fields of `task.toml`, of the manifest and of the variants; that the task names at least one language and that every language of the task has its right solution at every step (`solutions/secure/<language>/<step>`); that every vulnerable variant has a security test of its own weakness at its own step and judged there, since a change step runs the earlier steps' tests again and a test of the same weakness there, or one the step supersedes, does not do; and that every test file is listed and carries the canary.
 
-What it checks in addition for a command-line task: that `[cli]` has all five limits as positive whole numbers and no unknown one, that a case's limit on processes leaves the judge its processes, that the container's memory holds the sum in "The limits", that there are no server settings `[app]`, that the time limit for judging is at least the sum of time in "The limits", and the rules on the code of the tests in "How a hidden test is written".
+What it checks in addition for a command-line task: that `[cli]` has all five limits as positive whole numbers and no unknown one, that a case's limit on processes leaves the judge its processes, that the output limit is not above the file limit, that the container's memory holds the sum in "The limits", that there are no server settings `[app]`, that the time limit for judging is at least the sum of time in "The limits", and the rules on the code of the tests in "How a hidden test is written".
 
 ## The sample task — CSV to JSON
 
@@ -588,23 +590,26 @@ A kernel limit on address space would need a different value for each language. 
 
 ### How the format checker reads a test
 
-Two ways were compared on the same files: the check before, which looked for words in a file's raw text, and Python's own reading of the code with the rules in "How a hidden test is written". The inputs are what the checker's tests add to a test file: 58 ways of starting something, of learning the language or the judge's settings, and of becoming several cases, and one file whose comment and string hold the words the check before refused.
+Three ways were compared on the same files: the check of the first commit, which looked for words in a file's raw text; a first reading of the code as Python reads it, which refused what was on lists of refusals; and the reading with lists of what a test may use, in "How a hidden test is written". The inputs are what the checker's tests add to a test file: 80 ways of starting something, of learning the language or the judge's settings, and of becoming several cases, and one file whose comment and string hold the words the first check refused.
 
-| | Ways refused (of 58) | The file with the words in a comment and a string |
+| | Ways refused (of 80) | The file with the words in a comment and a string |
 |---|---|---|
-| Words in the raw text (chosen before) | 1 | refused |
-| **Chosen**: Python's reading, with lists of the imports and names a test may use | 58 | accepted |
+| Words in the raw text (before) | 1 | refused |
+| Python's reading with lists of refusals | 62 | accepted |
+| **Chosen**: Python's reading with lists of what a test may use | 80 | accepted |
+
+A list of refusals misses what nobody listed: a module reached through an allowed one, a built-in made usable by binding its name where the binding never runs, a helper named like a package the judge's Python holds. The lists of what a test may use close these, and a test walks them.
 
 ### How the tests of a file are counted
 
-The sum of time and the judge's time for a file count the file's tests. Over 19 ways a file can hold tests, each count was set against what pytest collects:
+The sum of time and the judge's time for a file count the file's tests. Over 26 ways a file can hold tests, each count was set against what pytest collects:
 
-| | Ways where the count differs from pytest (of 19) |
+| | Ways where the count differs from pytest (of 26) |
 |---|---|
-| Lines that begin with `def test_` (chosen before) | 10 |
-| **Chosen**: the functions at the top of the file whose names begin with `test` | 9, and the rules on a test's code refuse each of them |
+| Lines that begin with `def test_` (chosen before) | 12 |
+| **Chosen**: the functions at the top of the file whose names begin with `test` | 11, and the rules on a test's code refuse each of them |
 
-In every file the checker accepts, the chosen count and pytest agree. Should they still differ when a file is judged, the judge does not judge it with the time of the other number: before, with a case time limit of 2 seconds, a file with one test counted and three listed got 64 seconds where the document promises 192 for three; now that is a fault of the judge, and no result is written. The other way, giving a file the time of what pytest listed, would have the judge list every file once before it runs it; it was not taken, since a difference can only come from a task's own tests, which the checker reads first.
+In every file the checker accepts, the chosen count and pytest agree. Should they still differ when a file is judged, more cases or fewer, the judge does not judge it with the time of the other number: before, with a case time limit of 2 seconds, a file with one test counted and three listed got 64 seconds where the document promises 192 for three; now that is a fault of the judge, and no result is written. The other way, giving a file the time of what pytest listed, would have the judge list every file once before it runs it; it was not taken, since a difference can only come from a task's own tests, which the checker reads first.
 
 ### Java's temporary folder
 
@@ -618,7 +623,7 @@ Three ways of giving a Java program the case's temporary folder were judged in t
 
 ### What the AI is told about the calls that are refused
 
-Before the sentence was added to what the AI is told, the prepared solutions were counted: of the 148 of both tasks, none calls a library routine that tries one of the four calls first, and none calls one that has no way of copying. The routines that have no way of copying are, in the repository's tests of the runtimes, C#'s calls that send a file over a socket and the C++ framework's file responses above about 200 KB; the others copy when the call is refused. The sentence names the four calls and what to do instead, the same in both kinds of task, and a test pins that it names the calls this document lists.
+Before the sentence was added to what the AI is told, the prepared solutions were counted. Of the 148 of both tasks, none calls a library routine that tries one of the four calls first, and none calls one that has no way of copying; none names the system's temporary folders or `/dev/shm`, calls the C library's `tmpfile`, or uses Python's `multiprocessing` or POSIX's named semaphores or shared files. What meets these restrictions, in the repository's tests of the runtimes: C#'s calls that send a file over a socket and the C++ framework's file responses above about 200 KB, which have no way of copying; the C library's `tmpfile`; and the locks and pools of Python's `multiprocessing`. The sentence names all of it and what to do instead, the same in both kinds of task, and a test pins that it names what this document lists.
 
 ### What the chosen design does not stop
 
@@ -677,6 +682,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | A result without separation says so | a result judged without separation is read |
 | Vetting without an image must be asked for | the checking tool is called without an image and without the request |
 | Every vetting container is capped in processes | the command that makes the container is looked at |
+| Every vetting container is capped in processors | the command that makes the container is looked at |
 | Every vetting container is capped in memory | the command that makes the container is looked at |
 | A vetting container gets no swap beyond its memory cap | the command that makes the container is looked at |
 | A vetting container of a command-line task gives the cases their capped folder | the command that makes a command-line task's container is looked at |
@@ -763,18 +769,10 @@ For every protection there is one variant of the code without it (`bench/experim
 | The format checker refuses a test that imports anything of the case runner but case and need | a test imports the case runner's settings |
 | The format checker refuses a relative import in a test | a test imports relatively |
 | The format checker refuses a test that imports every name of a module | a test imports every name of a module |
-| The format checker refuses a name a test does not define and may not use | a test evaluates text |
 | The format checker refuses a name of a test that begins with two underscores | a test reads the built-in names |
 | The format checker refuses sys and Path beyond the line that puts the helper folder on the search path | beside the line that puts the helper folder on the search path, a test reads the system module |
-| The format checker refuses an attribute a test may not reach | a test reads a hidden attribute of the case runner |
 | The format checker refuses a test name bound at the top of a file in another way than by a def | a test binds a test function to a second name |
-| The format checker refuses a test name bound by an import | a test imports a function under a name that begins with test |
-| The format checker refuses a test name bound by a pattern | a pattern captures a test under a second name |
-| The format checker refuses a test name made global | a function makes a name that begins with test global and binds it |
-| The format checker refuses a function named like a hook of pytest | a test defines a hook of pytest by its name |
-| The format checker refuses a name bound like a setting of pytest | a test names plug-ins for pytest |
-| The format checker refuses a test defined elsewhere than at the top of a file | a test is defined inside a condition |
-| The format checker refuses a class pytest would collect | a test defines an empty class whose name begins with Test |
+| The format checker refuses a test defined elsewhere than at the top of a file | a test is defined inside a function |
 | The format checker refuses a test that takes parameters | a test asks for a fixture |
 | The format checker refuses a decorated test | a test is decorated |
 | The format checker refuses asynchronous code in a test | a test is asynchronous |
@@ -784,6 +782,24 @@ For every protection there is one variant of the code without it (`bench/experim
 | The format checker refuses a helper named like a module Python would load or run in its place | the helper folder holds a file named like the module Python runs when it starts |
 | The format checker holds every Python file of a command-line task's tests to the rules of a test | a helper imports the operating system module |
 | Each file of tests of a command-line task imports case from the case runner and calls it | a file of tests names the case runner only in a comment, imports it without calling it, or leaves calling it to a helper |
+| The format checker refuses a name imported from an allowed module that is not on the list a test may reach | a test imports a module from a module it may import |
+| The format checker refuses a built-in name that is not on the list a test may use | a test evaluates text |
+| The format checker refuses a name a test does not define | a test uses a name nothing binds |
+| The format checker refuses a binding of a built-in name | a parameter takes the name of a built-in a test may use |
+| The format checker refuses a binding of a name with two underscores | a test binds a name with two underscores |
+| The format checker refuses a name that begins with pytest | a test marks the whole file for pytest |
+| The line that puts the helper folder on the search path names that folder only | the line puts another folder on the search path |
+| A helper of a test is a file of the helper folder | a test imports a Python file of another folder of the tests |
+| The format checker refuses a Python file named like a package of the judge's environment | the helper folder holds a file named like a package of the judge's Python |
+| The format checker refuses a link in a command-line task's tests folder | the tests folder holds a link to a folder and to a file outside it |
+| The format checker refuses an attribute that is not on the list a test may reach | a test reads a hidden attribute of the case runner; the lists are walked from every module they admit |
+| The format checker refuses a test that stores or deletes an attribute | a test stores an attribute on the case runner |
+| The format checker refuses a folder of the case used as a path | a test keeps a folder of the case in a name |
+| The format checker refuses the use of a path a method of the case gives back | a test makes a string of the path a method of the case gave back |
+| The format checker refuses a class whose name pytest collects tests by | a function defines a class whose name begins with Test |
+| The format checker refuses a test that yields | a test yields |
+| The format checker refuses an output limit above the file limit | a task's output limit is one KB above its file limit |
+| A test superseded at a vulnerable variant's own step does not count for it | the only security test of a change step's variant's weakness is superseded at that step |
 | The smallest container memory the format checker accepts holds the case's memory | a task's container memory is the sum less the case's memory |
 | The smallest container memory the format checker accepts holds the case's files | a task's container memory is the sum less the case's files |
 | The smallest container memory the format checker accepts holds what the case runner keeps of a program's output | a task's container memory is the sum less what the case runner keeps of the output |
@@ -795,7 +811,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | The format checker refuses a vulnerable variant without a security test of its weakness at its own step | the only security test of the weakness of a change step's variant is moved to the build step |
 | The judge and the format checker count a file's tests as pytest collects them | a file holds a test whose name has no underscore after test: the judge judges it, and the checker's sum counts it |
 | A file of tests whose cases are not as many as the judge counted is the judge's fault | a file holds a class with two tests besides the test the judge counts |
-| A test gives no more standard input than the case's file limit | a test gives one byte more standard input than the file limit |
+| A test gives no more standard input than the case's file limit | a test gives one byte more standard input than the file limit: that case fails and the next is judged |
 | A file whose cases cannot be listed gets two case runners and no more | every runner of a file is ended before it lists the cases |
 | The format checker counts two case runners for a file whose cases cannot be listed | the format checker's count for such a file is read |
 | A case during which the kernel ended a process fails, whatever its test says | a served program takes memory until the kernel ends it, in a test that would pass by itself |
@@ -848,7 +864,7 @@ python experiments/memory_overshoot.py                                 # how far
 - **The filter that refuses the calls for what outlives a process is known for two kinds of machine:** this repository's measuring machine (ARM) and the machine of the automatic check (x86). On any other kind the judge refuses.
 - **The way the container's memory is counted fits the kernel's current way (the second version of its group hierarchy).** On a machine with another way the judge cannot read its caps and refuses.
 - **No real AI was run.** That the task can be solved from what the AI is told rests only on the prepared solutions having been written to that text.
-- **The rules on a test's code are lists, not a sandbox.** The case runner runs a task's tests as root. That a test starts nothing itself, learns nothing about the language or the judge's settings and is one case rests on the format checker's rules, which read the code as Python does and refuse what is not on their lists; it is not shown that no other way is left, and no test can show it. A task from outside is also reviewed by an agent that did not write it.
+- **The rules on a test's code are lists of what a test may use, not a sandbox.** The case runner runs a task's tests as root. That a test starts nothing itself, learns nothing about the language or the judge's settings and is one case rests on the format checker's rules, which read the code as Python does and refuse what is not on their lists. A test walks the lists three steps deep from every module they admit; it is not shown that nothing deeper or nothing through the objects a call gives back is left, and no test can show all of it. A task from outside is also reviewed by an agent that did not write it.
 - **What a test holds of its own is not bounded.** The sum of memory counts what the case runner keeps of a program's output and of the standard input a test gives; data a test builds for itself beyond that takes from the judge's own room.
 - **The sample is one task.** Checks another subject needs, such as input reaching a shell in a log analyzer or a configuration checker, are added when that task is made.
 - **The Rust image holds one file under its toolchain that any user can write.** The judge closes it when it judges. The image was not changed.

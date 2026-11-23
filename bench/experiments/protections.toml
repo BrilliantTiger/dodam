@@ -391,8 +391,8 @@ what = "Every vetting container is capped in processes"
 file = "dodambench/vet.py"
 tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
 [[protection.change]]
-find = '''"--cpus", str(room["cpus"]), "--pids-limit", str(room["processes"])]'''
-put = '''"--cpus", str(room["cpus"])]'''
+find = ''', "--pids-limit", str(room["processes"])]'''
+put = ''']'''
 
 [[protection]]
 what = "A memory cap above three quarters of the Docker machine's memory is lowered and reported"
@@ -469,6 +469,14 @@ find = '''        if not [t for t in own if t.get("step") == step]:
 '''
 put = '''        if not own:
 '''
+
+[[protection]]
+what = "Every vetting container is capped in processors"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
+[[protection.change]]
+find = '''"--cpus", str(room["cpus"]), '''
+put = ''''''
 
 [[protection]]
 what = "Every vetting container is capped in memory"
@@ -1140,16 +1148,6 @@ put = '''                pass
 '''
 
 [[protection]]
-what = "The format checker refuses a test that imports a name from a module it may not use"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a name of the operating system module]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"imports {alias.name} from {module}")
-'''
-put = '''                pass
-'''
-
-[[protection]]
 what = "The format checker refuses a test that imports anything of the case runner but case and need"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the case runner's settings]"]
@@ -1180,16 +1178,6 @@ put = '''                pass
 '''
 
 [[protection]]
-what = "The format checker refuses a name a test does not define and may not use"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[evaluating text]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"uses {name}, which the file does not define and which is no name a test may use")
-'''
-put = '''                pass
-'''
-
-[[protection]]
 what = "The format checker refuses a name of a test that begins with two underscores"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the built-in names]"]
@@ -1200,103 +1188,13 @@ put = '''            pass
 '''
 
 [[protection]]
-what = "The format checker refuses sys and Path beyond the line that puts the helper folder on the search path"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the system module beside the line for the helper folder]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"uses {name} beyond the line that puts the helper folder on the search path")
-'''
-put = '''                pass
-'''
-
-[[protection]]
-what = "The format checker refuses an attribute a test may not reach"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a hidden attribute]"]
-[[protection.change]]
-find = '''            self.refuse(node, f"reaches .{node.attr}")
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a test name bound at the top of a file in another way than by a def"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test bound twice]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"binds {name} at the top of the file in another way than by a def")
-'''
-put = '''                pass
-'''
-
-[[protection]]
-what = "The format checker refuses a test name bound by an import"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name bound by an import]"]
-[[protection.change]]
-find = '''            self.refuse(node, f"binds {name} by an import")
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a test name bound by a pattern"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name bound by a pattern]"]
-[[protection.change]]
-find = '''                self.refuse(part, f"binds {name} by a pattern")
-'''
-put = '''                pass
-'''
-
-[[protection]]
-what = "The format checker refuses a test name made global"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name made global]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"makes {name} global")
-'''
-put = '''                pass
-'''
-
-[[protection]]
-what = "The format checker refuses a function named like a hook of pytest"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a hook of pytest by its name]"]
-[[protection.change]]
-find = '''            self.refuse(node, f"defines {node.name}")
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a name bound like a setting of pytest"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[plug-ins named by the file]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"binds {name}")
-'''
-put = '''                pass
-'''
-
-[[protection]]
 what = "The format checker refuses a test defined elsewhere than at the top of a file"
 file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test defined only sometimes]"]
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test defined inside a function]"]
 [[protection.change]]
 find = '''                self.refuse(node, f"defines {node.name} elsewhere than at the top of the file")
 '''
 put = '''                pass
-'''
-
-[[protection]]
-what = "The format checker refuses a class pytest would collect"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a class pytest would collect, even an empty one]"]
-[[protection.change]]
-find = '''            self.refuse(node, f"defines the class {node.name}, which pytest would collect")
-'''
-put = '''            pass
 '''
 
 [[protection]]
@@ -1392,6 +1290,220 @@ put = '''        if False:
 '''
 
 [[protection]]
+what = "The format checker refuses a test that imports a name from a module it may not use"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a name of the operating system module]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"imports {alias.name} from {module}, a module a test may not import")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name imported from an allowed module that is not on the list a test may reach"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a module imported from an allowed module]"]
+[[protection.change]]
+find = '''                    self.refuse(node, f"imports {alias.name} from {module}, a name not on the list a test may reach")
+'''
+put = '''                    pass
+'''
+
+[[protection]]
+what = "The format checker refuses a built-in name that is not on the list a test may use"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[evaluating text]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"uses the built-in name {name}, which is no name a test may use")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name a test does not define"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a name the file does not define, alone]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses {name}, which the file does not define")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a binding of a built-in name"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[an allowed built-in name bound by a parameter]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name}, a built-in name")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a binding of a name with two underscores"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a name with two underscores bound]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name that begins with pytest"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a mark for the whole file]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name}, a name pytest reads")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test name bound at the top of a file in another way than by a def"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test bound twice]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name} at the top of the file in another way than by the def of a test")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses sys and Path beyond the line that puts the helper folder on the search path"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the system module beside the line for the helper folder]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses {name} beyond the line that puts the helper folder on the search path")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The line that puts the helper folder on the search path names that folder only"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = '''    return numbers == [0, depth] and folders == [HELPERS]
+'''
+put = '''    return True
+'''
+
+[[protection]]
+what = "A helper of a test is a file of the helper folder"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = '''if p.parent == tests / HELPERS and p.suffix == ".py"'''
+put = '''if p.suffix == ".py"'''
+
+[[protection]]
+what = "The format checker refuses a Python file named like a package of the judge's environment"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/anyio.py]"]
+[[protection.change]]
+find = '''NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages()'''
+put = '''NOT_A_HELPER = (set(sys.stdlib_module_names)'''
+
+[[protection]]
+what = "The format checker refuses a link in a command-line task's tests folder"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_link_in_the_tests_folder_is_refused"]
+[[protection.change]]
+find = '''                found.append(problem(rel, "", f"is a link: {WHY}"))
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses an attribute that is not on the list a test may reach"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a hidden attribute]", "tests/test_cli_test_code.py::test_from_what_a_test_may_import_and_reach_no_module_or_dangerous_function_is_reached"]
+[[protection.change]]
+find = '''            self.refuse(node, f"reaches .{node.attr}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that stores or deletes an attribute"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[storing an attribute]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"stores or deletes the attribute .{node.attr}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a folder of the case used as a path"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a path the case gives, kept in a name]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses the folder .{node.attr} as a path")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses the use of a path a method of the case gives back"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a path a method of the case returns, made a string]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses the path .{node.func.attr} gives back")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a class whose name pytest collects tests by"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a class named like a test inside a function]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"defines the class {node.name}, whose name pytest collects tests by")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that yields"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test that yields]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"makes {node.name} yield")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses an output limit above the file limit"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_an_output_limit_above_the_file_limit_is_refused"]
+[[protection.change]]
+find = '''    if _whole(output) and _whole(disk) and 0 < disk and output > disk * 1024:
+'''
+put = '''    if False:
+'''
+
+[[protection]]
+what = "The format checker refuses a vulnerable variant without a security test of its weakness at its own step"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_vulnerable_variant_needs_a_security_test_of_its_weakness_at_its_own_step"]
+[[protection.change]]
+find = '''t.weakness == v.weakness and t.step == v.step'''
+put = '''t.weakness == v.weakness'''
+
+[[protection]]
+what = "A test superseded at a vulnerable variant's own step does not count for it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_test_superseded_at_the_variants_own_step_does_not_count_for_it"]
+[[protection.change]]
+find = '''                    for t in task.tests_for(v.step)):
+'''
+put = '''                    for t in task.tests):
+'''
+
+[[protection]]
 what = "The smallest container memory the format checker accepts holds the case's memory"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[the case's memory]"]
@@ -1468,14 +1580,6 @@ find = '''            if SLUG.match(s.name) and not task.secure_dir(lang, s.name
 '''
 put = '''            if False:
 '''
-
-[[protection]]
-what = "The format checker refuses a vulnerable variant without a security test of its weakness at its own step"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_format.py::test_a_vulnerable_variant_needs_a_security_test_of_its_weakness_at_its_own_step"]
-[[protection.change]]
-find = '''t.kind == "security" and t.weakness == v.weakness and t.step == v.step for t in task.tests'''
-put = '''t.kind == "security" and t.weakness == v.weakness for t in task.tests'''
 
 [[protection]]
 what = "The judge and the format checker count a file's tests as pytest collects them"

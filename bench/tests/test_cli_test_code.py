@@ -68,6 +68,7 @@ STARTS_SOMETHING = {
     "the debugger": "breakpoint()\n",
     "opening a file": "X = open('/tests/manifest.toml').read()\n",
     "a name the file does not define": "X = os.getpid()\n",
+    "a name the file does not define, alone": "X = somewhere\n",
     "a relative import": "from . import helper\n",
     "a module reached through an allowed module": "import json\n\nX = json.codecs\n",
     "a built-in name bound by a parameter": "def f(open=None):\n    return open\n",
@@ -75,6 +76,9 @@ STARTS_SOMETHING = {
     "a built-in name bound by a loop": "for eval in ():\n    pass\n",
     "a built-in name bound where it never runs": "if False:\n    exec = None\n",
     "storing an attribute": "case.x = 1\n",
+    "a module imported from an allowed module": "from json import codecs\n",
+    "an allowed built-in name bound by a parameter": "def f(str=None):\n    return str\n",
+    "a built-in name bound by a def": "def str(value):\n    return value\n",
 }
 
 # Ways a test could learn which language it judges, or anything else of the judge's settings.
@@ -99,12 +103,14 @@ LEARNS_SOMETHING = {
     "the system module beyond the search path": "import sys\n\nX = sys.modules\n",
     "the system module beside the line for the helper folder": (
         "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
-        "X = sys.argv\n"),
+        "X = str(sys)\n"),
     "a name with two underscores bound": "__all__ = []\n",
     "a path the case gives, kept in a name": (
         "def look():\n    with case() as c:\n        p = c.outside / 'x'\n        return str(p)\n"),
     "a path a method of the case returns, used": (
         "def look():\n    with case() as c:\n        return c.write('a', 'b').name\n"),
+    "a path a method of the case returns, made a string": (
+        "def look():\n    with case() as c:\n        return str(c.write('a', 'b'))\n"),
     "a path the case gives, asked about": (
         "def look():\n    with case() as c:\n        return sorted(c.work.parts)\n"),
     "a path beside the line for the helper folder": (
@@ -129,6 +135,8 @@ MULTIPLIES = {
     "a class pytest would collect, even an empty one": "class TestNothing:\n    pass\n",
     "a test name bound by a pattern": "match test_upper:\n    case test_alias:\n        pass\n",
     "a class named like a test": "class test_more:\n    pass\n",
+    "a class named like a test inside a function": "def make():\n    class TestInner:\n        pass\n    return TestInner\n",
+    "a test defined inside a function": "def outer():\n    def test_inner():\n        pass\n    return test_inner\n",
     "a test that yields": "def test_yields():\n    with case() as c:\n        c.run([])\n    yield\n",
     "a mark for the whole file": "pytestmark = 1\n",
     "a test stored on a class": "class Holder:\n    pass\n\n\nHolder.test_m = test_upper\n",
@@ -180,22 +188,20 @@ def test_a_word_in_a_comment_or_a_string_is_no_code(cli_task_dir):
 
 
 def test_what_a_test_may_use_is_accepted(cli_task_dir):
-    """The modules of the standard library that start nothing and read no file, a helper of the
-    task's own, classes that are no tests, local names that begin with test, and the one line that
-    puts the task's helper folder on the search path."""
+    """The modules of the standard library on the checker's list, a helper of the task's own, local
+    names that begin with test, and the one line that puts the task's helper folder on the search
+    path. A class with attributes of its own is not on the lists: its attributes are stored and read
+    by names the lists do not hold."""
     write(cli_task_dir, "tests/lib/expected.py", "import json\n\n\ndef upper(text):\n    return text.upper()\n")
     code = ("import sys\nfrom pathlib import Path\n\n"
             "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
             "import collections, json, math, re  # noqa: E401\n"
             "from expected import upper  # noqa: E402\n\n\n"
-            "class Expect:\n"
-            "    def __init__(self, value):\n"
-            "        self.value = value\n\n\n"
             "def test_expected_text():\n"
             "    test_input = 'abc'\n"
             "    with case() as c:\n"
             "        r = c.run(['upper'], stdin=test_input)\n"
-            "        assert r.out == upper(test_input) == Expect('ABC').value, r\n"
+            "        assert r.out == upper(test_input) == 'ABC', r\n"
             "        assert json.loads('[1]') == [1] and math.floor(1.5) == 1 and re.match('A', r.out)\n"
             "        assert collections.Counter(r.out)['A'] == 1\n")
     assert with_added(cli_task_dir, TEST, code) == []

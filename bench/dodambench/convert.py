@@ -39,12 +39,16 @@ def _toml_table(name: str, values: dict) -> str:
     return f"[{name}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in values.items())
 
 
-# What a correct program can run into where it runs and cannot find out by itself: the four calls that
-# hand a file's pages to a pipe or a socket without copying them answer "invalid argument". Both kinds
-# of task carry the same sentence.
-RESTRICTIONS = ("- Where the program runs, the system calls that hand a file's pages to a pipe or a socket without "
-                "copying them (`sendfile`, `splice`, `tee` and `vmsplice`) fail with \"invalid argument\". "
-                "Send or copy a file by reading it and writing it.")
+# What a correct program can run into where it runs and cannot find out by itself: the system's
+# temporary folders and /dev/shm, which are closed to a case, and the four calls that hand a file's pages
+# to a pipe or a socket without copying them, which answer "invalid argument". Both kinds of task carry
+# the same sentence.
+RESTRICTIONS = ("- Where the program runs, the system's temporary folders (`/tmp` and `/var/tmp`) and `/dev/shm` may "
+                "be closed to it: make temporary files only through your runtime's own call for them, not with the "
+                "C library's `tmpfile`, and use nothing that needs `/dev/shm`, such as the locks and pools of "
+                "Python's `multiprocessing`. The system calls that hand a file's pages to a pipe or a socket "
+                "without copying them (`sendfile`, `splice`, `tee` and `vmsplice`) fail with \"invalid argument\": "
+                "send or copy a file by reading it and writing it.")
 
 
 def cli_instruction(task: Task, step_text: str, lang: Language) -> str:
