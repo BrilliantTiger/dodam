@@ -287,6 +287,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     close_input()
+    job.close_terminal()
     os.umask(0o077)
     job.install_signal_handlers()
     args = parse_args(argv)

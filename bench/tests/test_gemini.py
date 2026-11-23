@@ -1174,8 +1174,8 @@ AGENT_IN_ORCA = {
     "Antigravity's own shell": ({"ANTIGRAVITY_AGENT": "1"}, None, "", "ANTIGRAVITY_AGENT"),
     "Claude Code's plugins not Orca's": ({"CLAUDE_CODE_PLUGIN_DIRS": "/opt/elsewhere/plugins"}, None, "", "CLAUDE_CODE_PLUGIN_DIRS"),
     "Antigravity among the parents": ({}, "agy", "", "parent:agy"),
-    "an agent named after flags": ({}, "node", "--max-old-space-size=4096 --no-warnings /opt/tools/bin/claude", "parent:claude"),
-    "an agent in a folder with spaces": ({}, "node", "/opt/My  Agent Tools/bin/claude", "parent:claude"),
+    "an agent named after flags": ({}, "node with a flag", "", "parent:claude"),
+    "an agent in a folder with spaces": ({}, "My  Agent Tools/claude", "", "parent:claude"),
     "Gemini's CLI among the parents": ({}, "gemini", "", "parent:gemini"),
     "Claude Code by its versioned path": ({}, "claude/versions/2.1.330", "", "parent:claude"),
 }
@@ -1191,7 +1191,16 @@ def test_in_a_terminal_of_orca_an_agent_orca_or_antigravity_started_or_one_named
     env = world.orca_env(**extra)
     argv = world.job_argv("verify", 7) if program == "job" else [
         sys.executable, str(WATCH), "--settings", str(world.settings), "--private", str(world.private), "--polls", "1"]
-    out, _ = world.start(world.under("Orca Agents", world.under(parent, argv, words)), env)
+    if parent == "node with a flag":
+        # As an interpreter runs an agent's script after its own flags: node -e <folder>/claude <the program>.
+        script = world.root / "agent-scripts" / "claude"
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('"$@"; exit $?\n', encoding="utf-8")
+        node = world.under("node", [])[0]
+        inner = [node, "-e", str(script), *argv]
+    else:
+        inner = world.under(parent, argv, words)
+    out, _ = world.start(world.under("Orca Agents", inner), env)
     run = World.wait(out)
     if program == "job":
         result = result_of(run)

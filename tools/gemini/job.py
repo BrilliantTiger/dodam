@@ -20,6 +20,7 @@ quota is used up; 7 a sign-in is missing; 8 the run passed its time; 129, 130, 1
 from __future__ import annotations
 
 import argparse
+import atexit
 import fcntl
 import hashlib
 import html
@@ -99,18 +100,20 @@ ENV_MARK_PREFIXES = ("CLAUDE_", "CODEX_", "ANTIGRAVITY_", "ORCA_AGENT_LAUNCH")
 # plugin's folder and nothing else, is Orca's and no reason to refuse.
 ORCA_PLUGIN_NAME = "ORCA_CLAUDE_AGENT_VIEW_PLUGIN_DIR"
 # Coding agents, by the name of their program, among the parent processes: those of other companies, and Google's
-# own CLI, whose shells start nothing either.
+# own CLIs, whose shells start nothing either.
+GOOGLE_PROGRAMS = frozenset({"agy", "antigravity", "gemini"})
 AGENT_PROGRAMS = frozenset(
     {
         "claude", "claude-code", "codex", "opencode", "cursor-agent", "aider", "goose", "amp", "crush",
-        "copilot", "droid", "qwen", "grok", "kimi", "cline", "jcode", "agy", "antigravity",
+        "copilot", "droid", "qwen", "grok", "kimi", "cline", "jcode", *GOOGLE_PROGRAMS,
     }
 )
 AGENT_ARGUMENT_MARKS = ("@anthropic-ai/claude-code", "/claude-code/", "@openai/codex", "opencode-ai")
 # A value marks Orca or a coding agent when it holds Orca's name or the name of an agent's program, standing alone
 # (not inside a longer word). The model's process gets no such value.
-# Google's own CLI is the program the job runs: its name does not mark a value.
-VALUE_MARK_WORDS = frozenset({"orca", "claudecode", *AGENT_PROGRAMS} - {"agy", "antigravity"})
+# Google's own CLI is the program the job runs, and the job's own folders are named after Gemini: those names do
+# not mark a value.
+VALUE_MARK_WORDS = frozenset({"orca", "claudecode", *AGENT_PROGRAMS} - GOOGLE_PROGRAMS)
 VALUE_MARK_RE = re.compile(
     r"(?i)(?<![a-z0-9])(?:"
     + "|".join(re.escape(name) for name in sorted(VALUE_MARK_WORDS, key=len, reverse=True))
@@ -168,14 +171,27 @@ def process_table() -> dict[int, tuple[int, str, str]] | None:
     return table
 
 
+def _agent_names(path: str) -> list[str]:
+    """The agents a path names: by its last name, or by a folder named for an agent (a program named for its version
+    in a folder named for it). Google's names count as a program's own name only: this job's own folder is named
+    after Gemini."""
+    parts = path.split("/")
+    return [
+        part.lstrip("-") for index, part in enumerate(parts)
+        if part.lstrip("-").lower() in AGENT_PROGRAMS
+        and (index == len(parts) - 1 or part.lstrip("-").lower() not in GOOGLE_PROGRAMS)
+    ]
+
+
 def _agent_name(program: str, arguments: str) -> str | None:
-    # The program's own name, then every word of its command line: an agent may come after flags, or in a folder
-    # whose name holds spaces.
-    own = os.path.basename(program.rstrip("/"))
-    for candidate in (own, *(os.path.basename(token) for token in arguments.split())):
-        name = candidate.lstrip("-")
-        if name and name.lower() in AGENT_PROGRAMS:
-            return name
+    # What the process runs: its program, the first two words of its command line, and the first word after the
+    # first that is not a flag (the script an interpreter such as node runs, after any flags).
+    tokens = arguments.split()
+    script = next((token for token in tokens[1:] if not token.startswith("-")), "")
+    for candidate in (program.rstrip("/"), *tokens[:2], script):
+        found = _agent_names(candidate)
+        if found:
+            return found[0]
     low_args = arguments.lower()
     for mark in AGENT_ARGUMENT_MARKS:
         if mark in low_args:
@@ -851,6 +867,32 @@ def _on_signal(signum: int, _frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+def _give_back(fd: int, mode: int) -> None:
+    try:
+        os.fchmod(fd, mode)
+    except OSError:
+        pass
+
+
+def close_terminal() -> None:
+    """While the program runs, its terminal cannot be opened by its name: its permissions are cleared as the program
+    starts and given back as it ends. A process that holds no descriptor of it, agy among them, cannot open it to
+    read what is typed there or to write into it."""
+    seen: set[tuple[int, int]] = set()
+    for fd in (0, 1, 2):
+        try:
+            if not os.isatty(fd):
+                continue
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) in seen:
+                continue
+            os.fchmod(fd, 0)
+        except OSError:
+            continue
+        seen.add((info.st_dev, info.st_ino))
+        atexit.register(_give_back, fd, stat.S_IMODE(info.st_mode))
+
+
 def install_signal_handlers() -> None:
     """When the terminal closes (or on Ctrl-C or a stop), agy and everything it started stop as well."""
     for signum in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
@@ -1345,9 +1387,12 @@ def run_job(
         say(f"{kind} for {number} ended: status {result['status']}, verdict {result['verdict']}"
             + (f", reasons {reasons}" if reasons else ""))
         if result["status"] == "posted" and posted_public is not None:
-            say("the public part, as it was posted:")
-            print(posted_public, file=sys.stderr, flush=True)
+            # Each line of the public part after a mark of its own, so that none can be taken for one of the job's.
+            say("the public part, as it was posted, each line after |:")
+            for line in posted_public.split("\n"):
+                print(f"  | {line}", file=sys.stderr)
             say("end of the public part")
+            sys.stderr.flush()
     if result["private"] is not None:
         _write_private(Path(str(result["private"])) / "result.json", json.dumps(result, indent=2) + "\n")
         tell_coordinator(private, result, tell)
@@ -1501,6 +1546,7 @@ def tell_run(raw: str | None) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    close_terminal()
     os.umask(0o077)
     install_signal_handlers()
     args = parse_args(argv)
