@@ -120,6 +120,8 @@ LEARNS_SOMETHING = {
         "def look():\n    with case() as c:\n        w = c.write\n        return w\n"),
     "a method of the case that gives a path, in a list": (
         "def look():\n    with case() as c:\n        [c.mkdir][0]('d')\n"),
+    "a method of the case that gives a path, passed to a call": (
+        "def look():\n    with case() as c:\n        box = []\n        box.append(c.write)\n"),
     "a method of the case that gives a path, from a function": (
         "def look():\n    with case() as c:\n        (lambda: c.sparse)()('y', 1)\n"),
     "a way of a path that copies a file": "def look(q):\n    return q.copy\n",
@@ -337,6 +339,12 @@ def test_a_test_imports_from_a_helper_only_what_the_helper_defines(cli_task_dir)
     for name in ("Path", "sys", "json"):
         assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), name
     assert with_added(cli_task_dir, TEST, head + "from paths import VALUE  # noqa: E402\n") == []
+    # an annotation without a value binds nothing, and a name the helper imported stays the imported one
+    for line in ("Path: int\n", "sys: int\n", "Path: int = 1\n", "json = 1\n"):
+        name = line.split(":")[0].split("=")[0].strip()
+        write(cli_task_dir, "tests/lib/paths.py", "import json\nimport sys\nfrom pathlib import Path\n\n"
+              + PATH_LINE + "VALUE = json.dumps(1)\n" + line)
+        assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), line
 
 
 def test_a_link_in_the_tests_folder_is_refused(cli_task_dir, tmp_path):
