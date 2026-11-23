@@ -933,8 +933,9 @@ class _TestCode(ast.NodeVisitor):
 
 
 def _defined_at_top(path: Path) -> set[str]:
-    """The names a helper defines at its top by a def, a class or an assignment: what a test may
-    import from it. A name the helper imported is not among them."""
+    """The names a helper defines at its top by a def, a class or an assignment with a value: what a
+    test may import from it. An annotation without a value binds nothing, and a name the helper
+    binds by an import anywhere is never among them, whatever else the helper does with it."""
     try:
         tree = ast.parse(path.read_bytes())
     except (SyntaxError, ValueError):
@@ -943,10 +944,12 @@ def _defined_at_top(path: Path) -> set[str]:
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
             names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        elif isinstance(node, ast.Assign) or (isinstance(node, ast.AnnAssign) and node.value is not None):
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
                 names |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
-    return names
+    imported = {alias.asname or alias.name.split(".")[0]
+                for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
+    return names - imported
 
 
 def _tests_tree(tests: Path) -> tuple[list[Path], list[dict]]:

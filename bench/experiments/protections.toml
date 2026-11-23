@@ -1528,6 +1528,22 @@ put = '''                    pass
 '''
 
 [[protection]]
+what = "An annotation without a value in a helper defines nothing a test may import"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_imports_from_a_helper_only_what_the_helper_defines"]
+[[protection.change]]
+find = '''isinstance(node, ast.Assign) or (isinstance(node, ast.AnnAssign) and node.value is not None)'''
+put = '''isinstance(node, (ast.Assign, ast.AnnAssign))'''
+
+[[protection]]
+what = "A name a helper imported is never one a test may import from it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_imports_from_a_helper_only_what_the_helper_defines"]
+[[protection.change]]
+find = '''    return names - imported'''
+put = '''    return names'''
+
+[[protection]]
 what = "The format checker refuses a hidden name imported from a helper"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
