@@ -9648,6 +9648,12 @@ INVARIANT_VARIANTS = [
     ("not in isolated mode", "site.yml", SITE_CHECK, ["        run: python tools/site/build.py --check"]),
     ("docker started for anything but building", "ci.yml", "        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .", ["        run: docker run dodam-bench/python:dev"]),
     ("not protected", "ci.yml", "          - claude_only.py --check --part 1/3", ["          - ../../docs/x.py"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["      -   run: python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, [SITE_CHECK, '      - "run": python -I tools/site/build.py --check']),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: python -I", "          tools/site/build.py --check"]),
+    ("not protected", "site.yml", "          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt",
+     ["          python -I -m pip install --require-hashes --only-binary=:all: -r requirements.txt"]),
+    ("not protected", "site.yml", SITE_CHECK, ["        run: python -I -m pytest -q -c setup.cfg bench/tests"]),
 ]
 
 
@@ -9674,6 +9680,19 @@ def test_a_wrong_mark_a_missing_mark_a_line_off_the_list_and_a_workflow_off_the_
     for says, given, held in cases:
         monkeypatch.setitem(globals(), "CLOSED_LIST", held)
         assert any(says in " | ".join(map(str, finding)) for finding in closed_list_findings(given)), says
+
+
+def test_a_mark_is_one_of_the_three_kinds_and_never_a_refusal(monkeypatch):
+    workflows = the_workflows()
+    bad = "        run: python docs/x.py"
+    changed = workflows | {"site.yml": workflows["site.yml"].replace(SITE_CHECK, bad)}
+    listed = agreeing(changed)
+    at = next(n for n, entry in enumerate(listed["site.yml"]) if not isinstance(entry, str) and entry[0] == bad)
+    refusal = mark_of("python docs/x.py", ".")
+    assert refusal not in ("runner", "protected", "isolated")
+    listed["site.yml"][at] = (bad, refusal, "made up")
+    monkeypatch.setitem(globals(), "CLOSED_LIST", listed)
+    assert closed_list_findings(changed), refusal
 
 
 def test_every_workflow_file_is_read_whatever_its_ending(tmp_path, monkeypatch):
@@ -10105,6 +10124,20 @@ UNREADABLE_STARTS = ["subprocess.run(command)", "subprocess.run([sys.executable,
                      'subprocess.run([sys.executable, "{script}"], cwd=where)', 'subprocess.run([program, "{script}"])',
                      "subprocess.run(text, shell=True)", "os.system(text)", "os.execv(sys.executable, command)", 'subprocess.run(["sh", text])',
                      "subprocess.Popen(args=command)"]  # fmt: skip
+
+
+LOADS_AND_SEARCH_PATHS = ['sys.path.insert(0, os.path.join(str(ROOT), "docs"))', 'exec(open("../docs/x.py").read())', 'sys.path[:0] = ["../docs"]',
+                          'subprocess.run([sys.executable, "-m", "x"], env={"PYTHONPATH": "../docs"})', 'sys.path.extend(["../docs"])',
+                          'sys.path += ["../docs"]', 'os.environ["PYTHONPATH"] = "../docs"', 'eval(compile(open("../docs/x.py").read(), "x", "exec"))',
+                          "importlib.import_module(text)", "__import__(text)", "runpy.run_module(text)", 'sys.path = ["../docs"] + sys.path']  # fmt: skip
+
+
+@pytest.mark.parametrize("line", LOADS_AND_SEARCH_PATHS)
+def test_every_way_a_test_loads_code_or_sets_where_it_is_looked_for_is_read_or_fails(line):
+    source = ("import importlib\nimport os\nimport runpy\nimport subprocess\nimport sys\nfrom pathlib import Path\n\n"
+              f"ROOT = Path(__file__).resolve().parents[2]\n\n\ndef test_it(text):\n    {line}\n")  # fmt: skip
+    found = started_by({"bench/tests/test_made_up.py": source})
+    assert any(entry[3] not in (MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER) and not protected(entry[3]) for entry in found), (line, found)
 
 
 @pytest.mark.parametrize("seed", [191, 192])
@@ -10721,6 +10754,64 @@ def test_a_copy_of_the_program_is_checked_again_when_each_session_starts(start, 
     except module("state").StateProblem:
         seen = {"not_started": True}
     assert seen.get("not_started") is True, (change, seen)
+
+
+CLAIMS = ["Told the team about it.", "Informed the maintainers.", "Passed it on to the agents.", "Avisé al equipo.", "I've passed this on to the owner.",
+          "Se lo he comunicado al responsable."]  # fmt: skip
+
+
+def test_a_told_claim_written_straight_after_a_short_word_or_a_short_form_is_refused_whatever_main_refuses():
+    """Generated from the rule and the table: every word of one or two letters and every short form of the list, with a
+    point and no space, and then a told claim. Whatever main's check refuses, the desk refuses."""
+    tools = module("tools")
+    letters = "abcdefghijklmnopqrstuvwxyzñ"
+    words = [*letters, *(a + b for a in letters for b in letters), *(a.upper() + b for a in letters for b in letters)]
+    words += [form.rstrip(".") for form in getattr(tools, "SHORT_FORMS", [])]
+    missed = []
+    for word in words:
+        for claim in CLAIMS:
+            text = f"Done, {word}.{claim}"
+            if main_says_told(text) and not tools.says_agents_were_told(text):
+                missed.append(text)
+    assert missed == [], (len(missed), missed[:6])
+
+
+LEAVING = ["Failure while reading /tmp/secret/notes.txt and /Users/other/x.", "It broke for the account somebody-local, on Somebodys-MacBook."]
+
+
+@pytest.mark.parametrize("text", LEAVING)
+@pytest.mark.parametrize("record", ["with its record", "without its record"])
+def test_the_relays_report_that_the_desk_is_down_never_carries_a_path_or_a_known_value(place, monkeypatch, text, record):
+    tools = module("tools")
+    desk = place.desk()
+    desk.machine = MACHINE
+    if record == "without its record":
+        monkeypatch.setattr(tools.Desk, "counts", lambda self: (_ for _ in ()).throw(tools.Refused("damaged")))
+    assert desk.desk_down(text) is True
+    (body,) = [m["body"] for m in place.sent("coordinator")]
+    assert "desk_down" in body
+    for piece in ("/tmp/secret", "/Users/other", "somebody-local", "Somebodys-MacBook"):
+        assert piece not in body, (record, piece)
+
+
+@pytest.mark.parametrize("text", LEAVING)
+def test_a_note_and_a_notice_to_the_coordinator_never_carry_a_path_or_a_known_value(place, monkeypatch, text):
+    tools = module("tools")
+    monkeypatch.setattr(tools, "ticks", lambda: 70_000.0)
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = MACHINE
+    desk.note("session_ended", text, 7)
+    # A summary that holds such a thing is refused at the tool, and nothing of it is kept.
+    with pytest.raises(tools.Refused):
+        desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": text})
+    looking = place.desk()
+    looking.machine = MACHINE
+    looking.digest(force=True)
+    bodies = [m["body"] for m in place.sent("coordinator")]
+    assert bodies and any("session_ended" in body for body in bodies), bodies
+    for body in bodies:
+        for piece in ("/tmp/secret", "/Users/other", "somebody-local", "Somebodys-MacBook"):
+            assert piece not in body, (piece, body[:200])
 
 
 def main_says_told(text: str) -> bool:
