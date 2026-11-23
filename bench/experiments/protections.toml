@@ -427,8 +427,8 @@ what = "A vetting container gets the task's own judging time"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_the_container_gets_the_tasks_own_judging_time"]
 [[protection.change]]
-find = '''                                            task.limits["verifier_timeout_sec"])'''
-put = '''                                            1800)'''
+find = '''                                            task.limits["verifier_timeout_sec"], task)'''
+put = '''                                            1800, task)'''
 
 [[protection]]
 what = "The tool that checks prepared solutions refuses a language that is not the task's"
@@ -455,7 +455,7 @@ what = "A vulnerable solution has to fail a security test of its weakness at its
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_vulnerable_solution_fails_a_security_test_of_its_weakness_at_its_own_step"]
 [[protection.change]]
-find = '''        if not [t for t in own if t.get("step") == step]:
+find = '''        if not [t for t in own if t.step == step]:
 '''
 put = '''        if not own:
 '''
@@ -525,14 +525,134 @@ find = '''if isinstance(said, dict) and isinstance(said.get("judge_fault"), str)
 put = '''if True:'''
 
 [[protection]]
-what = "A result of another shape from the container is a fault"
+what = "What a judging left names the step being judged"
 file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_of_another_shape_is_a_fault"]
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
 [[protection.change]]
-find = '''    wrong = _result_shape(reward, report)
+find = '''    if details.get("step") != step:
 '''
-put = '''    wrong = None
+put = '''    if False:
 '''
+
+[[protection]]
+what = "Whether the program was built is true or false in what a judging left, never a text"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''    if not isinstance(details.get("build_ok"), bool):
+'''
+put = '''    if "build_ok" not in details:
+'''
+
+[[protection]]
+what = "Every case of a judging has an outcome the judge gives"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if case["outcome"] not in OUTCOMES:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "Every case of a judging names a file of tests the judge runs at the step judged"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if own is None:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "Every case of a judging carries its file's kind, step and weakness"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''            if case[name] != value:
+'''
+put = '''            if False:
+'''
+
+[[protection]]
+what = "What a judging left holds cases of every file of tests the judge runs at the step"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''    missing = sorted(set(runs) - {case.file for case in cases})
+'''
+put = '''    missing = []
+'''
+
+[[protection]]
+what = "The texts of a case of a judging are texts"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''            if not isinstance(case.get(name), str):
+'''
+put = '''            if False:
+'''
+
+[[protection]]
+what = "Every case of a judging says its weakness, or that it has none"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if "weakness" not in case or not (case["weakness"] is None or isinstance(case["weakness"], str)):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "The reward of a judging holds exactly the judge's parts"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''    if not isinstance(reward, dict) or set(reward) != set(REWARD_KEYS):
+'''
+put = '''    if not isinstance(reward, dict):
+'''
+
+[[protection]]
+what = "Every part of the reward of a judging is a finite number"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "The parts of the reward of a judging that say yes or no are 0 or 1"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if key in YES_OR_NO and value not in (0, 1):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "The judging code takes nothing but the record of a judging"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_judging_code_takes_nothing_but_the_record"]
+[[protection.change]]
+find = '''    if not isinstance(judged, Judged):
+'''
+put = '''    if False:
+'''
+
+[[protection]]
+what = "A file a judging left that is nested too deep to read is a fault"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_file_nested_too_deep_to_read_is_a_fault[details.json]"]
+[[protection.change]]
+find = '''    except (ValueError, RecursionError):
+        return None'''
+put = '''    except ValueError:
+        return None'''
 
 [[protection]]
 what = "Vetting containers have no network"
@@ -1067,7 +1187,7 @@ what = "The tool that checks prepared solutions gives the reason a step failed f
 file = "dodambench/vet.py"
 tests = ["tests/test_judge.py::test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgement_it_was_written_for"]
 [[protection.change]]
-find = '''    if report.get("left_behind"):'''
+find = '''    if judged.left_behind:'''
 put = '''    if False:'''
 
 [[protection]]
@@ -1713,6 +1833,16 @@ file = "dodambench/task.py"
 tests = ["tests/test_cli_format.py::test_a_file_of_tests_is_named_kind_slash_test_name[functional/test_upper.py]"]
 [[protection.change]]
 find = '''            found.append(problem(manifest, f"test[{i}].file", f"{t.file} is listed more than once"))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The modules of the judge's packages are read from the installed records"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_the_modules_of_the_judges_packages_are_read_from_the_installed_records"]
+[[protection.change]]
+find = '''            names.add(module)
 '''
 put = '''            pass
 '''
