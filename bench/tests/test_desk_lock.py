@@ -9419,9 +9419,15 @@ def mark_of(command: str, folder: str) -> str:
         return "refused: a character or a word outside the closed list's own"
     if any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in words):
         return "refused: a variable set for a command"
-    for word in words[1:]:
+    module_at = next((n + 1 for n, word in enumerate(words[:-1]) if word == "-m" or re.fullmatch(r"-[A-Za-z]*m", word)), None)
+    for n, word in enumerate(words[1:], start=1):
         path = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
-        if "/" in path and not path.startswith('"$RUNNER_TEMP') and not protected(posixpath.join(folder, path.split("::")[0])):
+        if n == module_at or path.startswith('"$RUNNER_TEMP') or path in ('""', "") or path.startswith("-"):
+            continue
+        # A word names a file when it has a folder, begins with a point, ends in a file's ending, or is there in the
+        # folder: with or without a slash, it is read as a path of that folder.
+        names_a_file = "/" in path or path.startswith(".") or re.search(r"\.[A-Za-z]\w*$", path) or (ROOT / folder / path).exists()
+        if names_a_file and not protected(posixpath.join(folder, path.split("::")[0])):
             return "refused: a path that is not protected"
     step = {"workflow": "", "matrix": {}, "folder": None if folder == "." else folder, "run": [], "uses": None}
     program = words[0]
@@ -9458,7 +9464,7 @@ def with_the_matrix(command: str, matrix: dict[str, list[str]]) -> list[str]:
 OPENING_KEYS = {"on", "push", "pull_request", "workflow_dispatch", "schedule", "permissions", "concurrency", "env", "jobs", "steps", "with",
                 "strategy", "matrix", "outputs", "branches", "paths", "types", "inputs", "environment"}  # fmt: skip
 KEY_LINE = re.compile(r"( *)(- )?([A-Za-z_][A-Za-z0-9_-]*):(?: (.*))?")
-ITEM_LINE = re.compile(r"( *)- (.+)")
+ITEM_LINE = re.compile(r"( *)- (\S.*)")
 NOT_THE_NOTATION = "a line not in the one notation the closed list reads"
 
 
@@ -9491,8 +9497,8 @@ def notation_findings(name: str, lines: list[str]) -> list[tuple[str, ...]]:
                 continue
             if value is not None and plain(value):
                 continue
-        elif item and plain(item.group(2)):
-            continue
+        elif item and plain(item.group(2)) and not re.match(r"""["']?[\w-]+["']?\s*:(?:\s|$)""", item.group(2)):
+            continue  # An item with a plain value; one that holds a key is a step or a mapping written another way.
         found.append((name, line.strip(), NOT_THE_NOTATION))
     return found
 
@@ -9520,6 +9526,9 @@ def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[
             found.append((name, "a line that starts something without a mark, or a mark on a line that starts nothing"))
             continue
         for (command, step), (_, mark) in zip(commands, marked, strict=True):
+            if mark not in ("runner", "protected", "isolated"):
+                found.append((name, command, "a mark that is not one of the three kinds"))
+                continue
             for one in with_the_matrix(command, step["matrix"]):
                 if (got := mark_of(one, step["folder"] or ".")) != mark:
                     found.append((name, one, f"marked {mark}: {got}"))
@@ -9968,13 +9977,81 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
         for node in ast.walk(tree):
             if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and isinstance(node.iter, ast.Tuple):
                 known.setdefault(node.target.id, [v for element in node.iter.elts for v in value(element)])
+        def listed(node) -> list[str]:
+            """The paths a list written in the file holds, each read; empty when any cannot be read."""
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                sides = [side for side in (node.left, node.right) if ast.unparse(side) != "sys.path"]
+                return [p for side in sides for p in listed(side)] if all(listed(side) for side in sides) else []
+            if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+                return []
+            paths = [value(element) for element in node.elts]
+            return [p for each in paths for p in each] if all(paths) else []
+
+        def variables(node) -> list[str]:
+            """The paths that variables which decide where code is looked for are given; empty when any cannot be read."""
+            if not isinstance(node, ast.Dict) or any(key is None or not isinstance(key, ast.Constant) for key in node.keys):
+                return []
+            paths = [CHECKED]
+            for key, given in zip(node.keys, node.values, strict=True):
+                if key.value in SEARCH_VARIABLES:
+                    read_paths = [part for whole in value(given) for part in whole.split(":") if part]
+                    if not read_paths:
+                        return []
+                    paths += read_paths
+            return paths
+
         for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                text = ast.unparse(node)
+                for target in targets:
+                    aimed = ast.unparse(target.value if isinstance(target, ast.Subscript) else target)
+                    if aimed == "sys.path":
+                        found.extend((name, node.lineno, "put on the search path", p, text) for p in (listed(node.value) or [CANNOT_BE_READ]))
+                    elif aimed == "os.environ":
+                        key = target.slice if isinstance(target, ast.Subscript) else None
+                        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                            found.append((name, node.lineno, "set in the environment", CANNOT_BE_READ, text))
+                        elif key.value in SEARCH_VARIABLES:
+                            paths = [part for whole in value(node.value) for part in whole.split(":") if part]
+                            found.extend((name, node.lineno, "set in the environment", p, text) for p in (paths or [CANNOT_BE_READ]))
+                continue
             if not isinstance(node, ast.Call):
                 continue
             called, text = ast.unparse(node.func), ast.unparse(node)
 
             def read(what: str, paths: list[str]) -> None:
                 found.extend((name, node.lineno, what, p, text) for p in (paths or [CANNOT_BE_READ]))
+
+            first = node.args[0] if node.args else None
+            constant = isinstance(first, ast.Constant) and isinstance(first.value, str)
+            if called in ("exec", "eval", "compile"):
+                if not constant:
+                    read("run as code", [])
+                continue
+            if called in ("__import__", "importlib.import_module", "runpy.run_module"):
+                read("loaded as a module", [MODULE_OR_CODE] if constant else [])
+                continue
+            if called == "sys.path.extend":
+                read("put on the search path", listed(first) if first is not None else [])
+                continue
+            if called in ("os.environ.update", "os.environ.setdefault", "os.putenv", "monkeypatch.setenv", "monkeypatch.setitem", "monkeypatch.delenv"):
+                arguments = node.args[1:] if called == "monkeypatch.setitem" else node.args
+                if called == "monkeypatch.setitem" and ast.unparse(node.args[0]) != "os.environ":
+                    continue
+                key = arguments[0] if arguments else None
+                if called == "os.environ.update":
+                    read("set in the environment", variables(key) if key is not None else [])
+                elif not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                    read("set in the environment", [])
+                elif key.value in SEARCH_VARIABLES and called != "monkeypatch.delenv":
+                    given = arguments[1] if len(arguments) > 1 else None
+                    read("set in the environment", [part for whole in (value(given) if given is not None else []) for part in whole.split(":") if part])
+                continue
+            if called in STARTS or re.fullmatch(r"os\.(?:exec|spawn|posix_spawn)\w*", called):
+                for keyword in node.keywords:
+                    if keyword.arg == "env":
+                        read("set for a start", variables(keyword.value))
 
             if called in ("sys.path.insert", "sys.path.append") and node.args:
                 read("put on the search path", value(node.args[-1]))
@@ -9992,6 +10069,10 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
 STARTS = {"subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen", "subprocess.getoutput",
           "subprocess.getstatusoutput", "os.system", "os.popen", "pty.spawn", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}  # fmt: skip
 CANNOT_BE_READ = "<what the scan cannot read>"
+CHECKED = "<read, and nothing in it decides where code is looked for>"
+# Variables that decide where a program or Python looks for code. Others are read as data.
+SEARCH_VARIABLES = {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "BASH_ENV", "ENV"}  # fmt: skip
 MODULE_OR_CODE = "<a module or code given to Python>"
 PROGRAM_OF_THE_COMPUTER = "<a program of the computer, by its name>"
 # The starts and loads of the project's own tests that the scan cannot read: each word for word, with its reason. A start
@@ -10039,6 +10120,12 @@ READ_BY_HAND = [
      "pytest in the test's own copy of the repository, on the test it has broken"),
     ('bench/tests/test_pilot_variants.py', "subprocess.run([sys.executable, 'render.py'], cwd=folder / 'tools' / 'pilot', check=True, capture_output=True)",
      "the trial run's renderer in the test's own copy of the repository"),
+    ('bench/tests/test_desk_lock.py', "subprocess.run([sys.executable, str(DESK / 'start.py'), '--coordinator', 'the-coordinator', '--state', str(start.state), '--print'], capture_output=True, text=True, env=start.environ)",
+     "the desk's start, from its protected folder, run with the made-up environment of the start's tests"),
+    ('bench/tests/test_desk_lock.py', "monkeypatch.setenv('PATH', self.environ['PATH'])",
+     "the start's tests put their own folder of stand-in programs first on the search path for programs"),
+    ('bench/tests/test_proctable.py', 'monkeypatch.setenv(\'PATH\', f"{tmp_path}{os.pathsep}{os.environ[\'PATH\']}")',
+     'the test puts its own temporary folder of stand-in programs first on the search path for programs'),
 ]  # fmt: skip
 PYTHON_NAME = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?")
 
@@ -10137,7 +10224,7 @@ def test_every_way_a_test_loads_code_or_sets_where_it_is_looked_for_is_read_or_f
     source = ("import importlib\nimport os\nimport runpy\nimport subprocess\nimport sys\nfrom pathlib import Path\n\n"
               f"ROOT = Path(__file__).resolve().parents[2]\n\n\ndef test_it(text):\n    {line}\n")  # fmt: skip
     found = started_by({"bench/tests/test_made_up.py": source})
-    assert any(entry[3] not in (MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER) and not protected(entry[3]) for entry in found), (line, found)
+    assert any(entry[3] not in (MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER, CHECKED) and not protected(entry[3]) for entry in found), (line, found)
 
 
 @pytest.mark.parametrize("seed", [191, 192])
@@ -10160,7 +10247,7 @@ def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protec
     listed = {(file, call) for file, call, _ in READ_BY_HAND}
     assert sorted(unread - listed) == [], "a start the scan cannot read, and that is not on the list"
     assert sorted(listed - unread) == [], "an entry of the list that no longer stands in a test"
-    marks = (CANNOT_BE_READ, MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER)
+    marks = (CANNOT_BE_READ, MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER, CHECKED)
     assert [entry[:4] for entry in found if entry[3] not in marks and not protected(entry[3])] == []
 
 
@@ -10776,7 +10863,7 @@ def test_a_told_claim_written_straight_after_a_short_word_or_a_short_form_is_ref
     assert missed == [], (len(missed), missed[:6])
 
 
-LEAVING = ["Failure while reading /tmp/secret/notes.txt and /Users/other/x.", "It broke for the account somebody-local, on Somebodys-MacBook."]
+LEAVING = ["Failure while reading /tmp/secret/notes.txt and /Users/you/x.", "It broke for the account somebody-local, on Somebodys-MacBook."]
 
 
 @pytest.mark.parametrize("text", LEAVING)
@@ -10790,7 +10877,7 @@ def test_the_relays_report_that_the_desk_is_down_never_carries_a_path_or_a_known
     assert desk.desk_down(text) is True
     (body,) = [m["body"] for m in place.sent("coordinator")]
     assert "desk_down" in body
-    for piece in ("/tmp/secret", "/Users/other", "somebody-local", "Somebodys-MacBook"):
+    for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
         assert piece not in body, (record, piece)
 
 
@@ -10810,14 +10897,30 @@ def test_a_note_and_a_notice_to_the_coordinator_never_carry_a_path_or_a_known_va
     bodies = [m["body"] for m in place.sent("coordinator")]
     assert bodies and any("session_ended" in body for body in bodies), bodies
     for body in bodies:
-        for piece in ("/tmp/secret", "/Users/other", "somebody-local", "Somebodys-MacBook"):
+        for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
+            assert piece not in body, (piece, body[:200])
+
+
+@pytest.mark.parametrize("text", LEAVING)
+def test_a_notice_whose_summary_got_past_the_tool_still_never_carries_a_path_or_a_known_value(place, monkeypatch, text):
+    """The second wall: with the tool's own check taken away, the summary reaches the message, and the check of variable
+    parts replaces it before it goes."""
+    tools = module("tools")
+    monkeypatch.setattr(tools.Desk, "holds", lambda self, text, keys=True: [])
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = MACHINE
+    desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": text})
+    bodies = [m["body"] for m in place.sent("coordinator")]
+    assert bodies and any("vulnerability" in body for body in bodies), bodies
+    for body in bodies:
+        for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
             assert piece not in body, (piece, body[:200])
 
 
 def main_says_told(text: str) -> bool:
     """The told check as the desk had it before this round, word for word: whatever it refused, the desk still refuses."""
-    passing = module("tools").PASSING_ON
-    return any(passing.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+    tools = module("tools")
+    return any(tools.MAIN_PASSING_ON.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
 
 
 @pytest.mark.parametrize("seed", [121, 122, 123])

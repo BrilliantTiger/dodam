@@ -128,9 +128,32 @@ ELLIPSIS = re.compile(r"\.(?:\s*\.){1,}|…")
 SENTENCE_END = re.compile(r"[.!?]+(?=\s*$|\s+(?![a-záéíñóúü0-9]))|[。！？\n]+")
 
 
+# The told check as main had it before this round, word for word. It stays beside the new one, and a claim either
+# of them catches is refused: whatever main caught, the desk still catches.
+MAIN_PASSING_ON = re.compile(
+    r"(?i)\b(?:tell|tells|told|telling|notif(?:y|ies|ied|ying)|inform(?:s|ed|ing)?|alert(?:s|ed|ing)?|escalat(?:e|es|ed|ing)|forward(?:s|ed|ing)?"
+    r"|pass(?:es|ed|ing)?\s+(?:\S+\s+){0,3}(?:on|along)|hand(?:s|ed|ing)?\s+(?:\S+\s+){0,3}over|let(?:ting)?\s+(?:\S+\s+){0,5}know|report(?:s|ed|ing)?\s+(?:this|it|that)"
+    r"|avis\w+|inform(?:a|an|ar\w*|ad[oa]s?|é|ó|amos)|notific\w+|comunic\w+|pasar\w*|pasad\w+|pas[éó]|transmit\w+|traslad\w+)\b"
+    r"|전달|알리|알렸|알려|보고|통보|넘기|넘겼|伝え|知らせ|報告|通知|連絡|引き継"
+)
+MAIN_WHOM = re.compile(
+    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*)\b"
+    r"|에이전트|관리자|담당|메인테이너|코디네이터|エージェント|メンテナ|担当|チーム|管理者|コーディネーター"
+)
+
+
+def main_says_told(text: str) -> bool:
+    return any(MAIN_PASSING_ON.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+
+
 def says_agents_were_told(text: str) -> bool:
-    """Whether a sentence of the text makes the claim in the usual words. The sentences are found in the text as written
-    (a capital after a point is part of the rule); each is then read in one width and one case."""
+    """Whether a sentence of the text makes the claim in the usual words, by the new check or by main's. The sentences
+    are found in the text as written (a capital after a point is part of the rule); each is then read in one width and
+    one case."""
+    return main_says_told(text) or _says_agents_were_told(text)
+
+
+def _says_agents_were_told(text: str) -> bool:
     text = unicodedata.normalize("NFKC", text).replace("…", "...")
     text = ELLIPSIS.sub(" ", text)
     text = SHORT_FORM.sub(lambda found: found.group(0).replace(".", ""), text)

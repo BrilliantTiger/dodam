@@ -960,7 +960,8 @@ def workflow_triggers(name: str) -> str:
 
 def test_every_merge_to_main_and_a_fixed_interval_build_the_page_and_nothing_else_does():
     triggers = workflow_triggers("pages.yml")
-    assert re.search(r"push:\s*\n\s+branches:\s*\[\s*main\s*\]", triggers)
+    # The branch list is written in the one notation the closed list of the workflows reads: one item a line.
+    assert re.search(r"push:\s*\n\s+branches:\s*\n\s+- main\s*\n", triggers)
     assert "paths" not in triggers, "a merge that does not touch site/ would not build the page"
     assert re.search(r"schedule:\s*\n\s+- cron: \"\d+ \* \* \* \*\"", triggers), "the page is not built again every hour"
     assert not re.search(r"pull_request|workflow_dispatch|workflow_run|issue", triggers), "something else can deploy the page"
