@@ -537,7 +537,7 @@ def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_i
     # The judgment on Google's page is the owner's, and is said as the owner's; the charter does not state it as a fact.
     for text in (charter(), english_charter()):
         for row in text.splitlines():
-            if row.startswith("| v0.15 |"):
+            if row.startswith("| v0.14 |"):
                 assert "소유자의 판단으로는" in row or "In the owner's judgment" in row, row
     # the reason claims no more than that the way uses the mode Google describes: Google has not confirmed the rest
     assert "쓰라고 적는 방식이" not in charter() and "is the one Google's published pages describe" not in english_charter()
@@ -566,9 +566,10 @@ GEMINI_WAYS = {
 @pytest.mark.parametrize("lang", LANGS)
 def test_the_page_says_gemini_works_in_orca_in_the_job_and_in_a_session(lang):
     how = all_strings()[lang]["how1"]
+    built = Page(page_path(lang).read_text(encoding="utf-8")).text
     for words in GEMINI_WAYS[lang]:
         assert words in how, f"{lang} how1 does not say {words!r}"
-    assert words in Page(page_path(lang).read_text(encoding="utf-8")).text, f"the built {lang} page is not built from it"
+        assert words in built, f"the built {lang} page does not say {words!r}"
 
 
 def test_the_job_s_document_and_the_list_of_open_work_say_both_ways():
@@ -1091,7 +1092,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.15 (2026-11-23)", "- 판: v0.16 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.16", "2026-12-24")),
+    ("- 판: v0.14 (2026-11-23)", "- 판: v0.15 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.15", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
