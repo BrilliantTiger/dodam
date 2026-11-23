@@ -1612,6 +1612,28 @@ def test_pids():
     assert seen["judge_statuses"] == ["/proc/1/status", f"/proc/{seen['parent']}/status"], seen
     assert outcomes(result) == {"test_pids": "passed"}, lost(result, tmp_path / "out")
 
+def test_the_result_says_for_each_case_and_the_step_what_the_readings_of_its_memory_gave(tmp_path):
+    """Each case of a judging says how many of its readings could not decide and the most it can have
+    held; the step's count of readings that could not decide is the sum of its cases' counts."""
+    tests = {"functional/test_says.py": """
+def test_one():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_two():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    cases = result["report"]["tests"]
+    assert [c["outcome"] for c in cases] == ["passed", "passed"], lost(result, tmp_path / "out")
+    for c in cases:
+        assert isinstance(c.get("undecided_readings"), int) and isinstance(c.get("memory_bound_bytes"), int), c
+    assert result["report"]["memory"]["undecided_readings"] == sum(c["undecided_readings"] for c in cases), (
+        result["report"]["memory"])
+
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
     seen = []
     for attempt in range(3):

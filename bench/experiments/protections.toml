@@ -1291,7 +1291,7 @@ put = '''                case["undecided_readings"] = sum(n["undecided"] for n i
 [[protection]]
 what = "The result says for the step how many readings could not decide"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_isolation.py::test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image"]
+tests = ["tests/test_cli_isolation.py::test_the_result_says_for_each_case_and_the_step_what_the_readings_of_its_memory_gave"]
 [[protection.change]]
 find = '''            report["memory"]["undecided_readings"] = cli.undecided'''
 put = '''            report["memory"]["undecided_readings"] = cli.undecided + 1'''
@@ -1299,7 +1299,7 @@ put = '''            report["memory"]["undecided_readings"] = cli.undecided + 1'
 [[protection]]
 what = "The result says for each case the most it can have held"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_isolation.py::test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image"]
+tests = ["tests/test_cli_isolation.py::test_the_result_says_for_each_case_and_the_step_what_the_readings_of_its_memory_gave"]
 [[protection.change]]
 find = '''                case["memory_bound_bytes"] = max(n["bound"] for n in mine)
 '''
