@@ -91,6 +91,12 @@ LEARNS_SOMETHING = {
     "the frame of a traceback": "def look(error):\n    return error.tb_frame\n",
     "attributes through a format string": "X = '{0.__class__}'.format(case)\n",
     "the system module beyond the search path": "import sys\n\nX = sys.modules\n",
+    "the system module beside the line for the helper folder": (
+        "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
+        "X = sys.argv\n"),
+    "a path beside the line for the helper folder": (
+        "import sys\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))\n"
+        "X = str(Path('x'))\n"),
     "a path module beyond the search path": "from pathlib import Path\n\nX = Path('/tests').iterdir()\n",
 }
 
@@ -106,6 +112,9 @@ MULTIPLIES = {
                          "        c.run([])\n"),
     "a hook that makes tests": "def pytest_generate_tests(metafunc):\n    metafunc.parametrize('x', [1, 2])\n",
     "plug-ins named by the file": "pytest_plugins = ['x']\n",
+    "a hook of pytest by its name": "def pytest_collection_modifyitems(items):\n    items.reverse()\n",
+    "a class pytest would collect, even an empty one": "class TestNothing:\n    pass\n",
+    "a test name bound by a pattern": "match test_upper:\n    case test_alias:\n        pass\n",
     "a test bound twice": "test_again = test_upper\n",
     "a test name bound by a loop": "for test_each in range(2):\n    pass\n",
     "a test name bound by an import": "from json import loads as test_load\n",

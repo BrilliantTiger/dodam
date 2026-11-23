@@ -314,7 +314,7 @@ def judged(tmp_path: Path, out: Path):
     tests.mkdir(exist_ok=True)
     solution.mkdir(exist_ok=True)
     return judge_in_image("dodam-bench/python:dev", tests, solution, out, "build",
-                          {"memory_mb": 1024, "cpus": 2, "processes": 512})
+                          {"memory_mb": 1024, "cpus": 2, "processes": 512}, 600)
 
 
 def test_an_earlier_runs_result_is_never_read_as_this_runs(tmp_path, fake_docker, monkeypatch):

@@ -1618,3 +1618,22 @@ def test_javas_temporary_folder_is_the_cases_own(tmp_path):
         f"def test_the_same_folder():\n    with case() as c:\n        r = c.run([{given[0]!r}])\n"
         "        assert r.out == 'True\\n', r\n")}
     assert outcomes(judge_program(tmp_path, program, tests)) == {"test_the_same_folder": "passed"}
+
+
+def test_a_test_gives_no_more_standard_input_than_the_cases_file_limit(tmp_path):
+    """What the case runner keeps of the standard input a test gives is one term of the container's
+    memory, bounded by the case's file limit. Up to it the input reaches the program; a test that
+    gives more is a fault of the task's tests, and no result is written."""
+    program = "import sys\nprint(len(sys.stdin.buffer.read()))\n"
+    limit = 8 * 1024 * 1024
+    (tmp_path / "within").mkdir()
+    (tmp_path / "above").mkdir()
+    tests = {"functional/test_input.py": (
+        f"def test_up_to_the_limit():\n    with case() as c:\n        r = c.run([], stdin=b'x' * {limit})\n"
+        f"        assert r.out == '{limit}\\n', r\n")}
+    assert outcomes(judge_program(tmp_path / "within", program, tests)) == {"test_up_to_the_limit": "passed"}
+    tests = {"functional/test_input.py": (
+        f"def test_above_the_limit():\n    with case() as c:\n        c.run([], stdin=b'x' * {limit + 1})\n")}
+    with pytest.raises(judge_module.JudgeFault) as fault:
+        judge_program(tmp_path / "above", program, tests)
+    assert "standard input" in str(fault.value)

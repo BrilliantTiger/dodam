@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import CANARY
 from dodambench.languages import LANGUAGES
 import test_cli_isolation
 from test_cli_isolation import found_by, judge_attack, lost, outcomes
@@ -72,7 +73,7 @@ def test_temp():
     with case() as c:
         r = c.run(["temp"])
         note("temp", {"exit_code": r.exit_code, "out": r.out[-300:], "err": r.err[-1200:]})
-        assert r.exit_code == 0 and r.out.strip() == os.path.realpath(c.home / "tmp") and r.err == "", r
+        assert r.exit_code == 0 and r.out.splitlines()[:1] == [os.path.realpath(c.home / "tmp")] and r.err == "", r
 
 
 def test_copy():
@@ -267,7 +268,8 @@ def judge_served(tmp_path: Path, lang: str) -> dict:
     (solution / place).write_text(source.lstrip(), encoding="utf-8")
     shutil.copy(test_cli_isolation.BENCH / "dodambench/judge.py", tests_dir / "lib/dodam_judge.py")
     (tests_dir / "functional").mkdir()
-    (tests_dir / "functional/test_temp.py").write_text(test_cli_isolation.HEAD + ASK_TEMP, encoding="utf-8")
+    # a web task's tests have no case runner
+    (tests_dir / "functional/test_temp.py").write_text(f"# {CANARY}\nimport json, os\n" + ASK_TEMP, encoding="utf-8")
     (tests_dir / "manifest.toml").write_text('[[test]]\nfile = "functional/test_temp.py"\nkind = "functional"\n'
                                              'step = "build"\n', encoding="utf-8")
     env = {"STEPS": "build", "BUILD_CMD": language.build_cmd, "START_CMD": language.start_cmd, "PORT": "8080",

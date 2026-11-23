@@ -70,9 +70,10 @@ def test_a_missing_limit_and_an_unknown_one_are_reported(cli_task_dir):
 def test_the_containers_memory_must_hold_the_case_its_files_and_the_judge(cli_task_dir):
     """The case's files live in memory, so the container's memory is the case's memory, its files and the judge."""
     assert errors_of(cli_task_dir) == []
-    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 1785")   # 1785 + 8 + 256 > 2048
+    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 1785")
     errors = errors_of(cli_task_dir)
-    assert any("memory_mb must be at least 2049" in e for e in errors), errors
+    # 1785 + 8 + (4 * 64 / 1024 + 1) + 8 + 256 = 2058.25 > 2048
+    assert any("memory_mb must be at least 2059" in e for e in errors), errors
 
 
 def test_a_command_line_task_takes_no_server_settings(cli_task_dir):
@@ -198,9 +199,9 @@ WRONG_KIND = [
     ("task.toml", 'domain = "cli"', 'domain = ["cli"]', "task.toml", "domain"),
     ("task.toml", 'languages = ["python", "go"]', "languages = 123", "task.toml", "languages"),
     ("task.toml", 'languages = ["python", "go"]', 'languages = ["python", 7]', "task.toml", "languages[1]"),
-    ("task.toml", "[limits]\n", "limits = 1\n[unused]\n", "task.toml", "limits"),
-    ("task.toml", "[cli]\n", "cli = 1\n[unused]\n", "task.toml", "cli"),
-    ("task.toml", '[[steps]]\nname = "build"', 'steps = 1\n[[unused]]\nname = "build"', "task.toml", "steps"),
+    ("task.toml", ("schema = 1\n", "[limits]\n"), ("schema = 1\nlimits = 1\n", "[unused]\n"), "task.toml", "limits"),
+    ("task.toml", ("schema = 1\n", "[cli]\n"), ("schema = 1\ncli = 1\n", "[unused]\n"), "task.toml", "cli"),
+    ("task.toml", ("schema = 1\n", "[[steps]]\n"), ("schema = 1\nsteps = 1\n", "[[unused]]\n"), "task.toml", "steps"),
     ("task.toml", 'name = "build"', "name = 1", "task.toml", "steps[0].name"),
     ("tests/manifest.toml", 'kind = "boundary"', "kind = 3", "tests/manifest.toml", "test[1].kind"),
     ("tests/manifest.toml", 'step = "change-1"\n\n', 'step = "change-1"\nsuperseded_in = "build"\n\n',
@@ -215,7 +216,10 @@ WRONG_KIND = [
 
 @pytest.mark.parametrize("rel, old, new, file, key", WRONG_KIND, ids=[f"{w[4]}" for w in WRONG_KIND])
 def test_a_value_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_task_dir, rel, old, new, file, key):
-    edit(cli_task_dir / rel, old, new)
+    for before, after in zip(*((old, new) if isinstance(old, tuple) else ((old,), (new,)))):
+        text = (cli_task_dir / rel).read_text(encoding="utf-8")
+        assert before in text, before
+        (cli_task_dir / rel).write_text(text.replace(before, after), encoding="utf-8")
     done = check(cli_task_dir)
     assert "Traceback" not in done.stderr, done.stderr[-1500:]
     assert done.returncode == 1, (done.returncode, done.stdout[-500:], done.stderr[-500:])
@@ -233,8 +237,8 @@ def test_a_table_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_tas
 
 
 def test_a_replacement_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_task_dir):
-    edit(cli_task_dir / "solutions/variants/python.toml", '[[variant.replace]]\n        file = "main.py"\n        old = ".upper()"',
-         'replace = "bad"\n\n        [[variant.unused]]\n        file = "main.py"\n        old = ".upper()"')
+    edit(cli_task_dir / "solutions/variants/python.toml", '[[variant.replace]]\nfile = "main.py"\nold = ".upper()"',
+         'replace = "bad"\n\n[[variant.unused]]\nfile = "main.py"\nold = ".upper()"')
     done = check(cli_task_dir)
     assert "Traceback" not in done.stderr and done.returncode == 1, done.stderr[-1500:]
     assert [p for p in report_of(done)["problems"] if p.get("key") == "variant[1].replace"], report_of(done)
