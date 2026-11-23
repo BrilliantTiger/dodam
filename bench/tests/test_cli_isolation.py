@@ -2194,7 +2194,8 @@ def test_what_a_program_does_while_the_judge_measures_neither_fails_it_nor_hides
     seen = found_by(tmp_path / "out", "attack.json")
     for name, said in seen.items():
         note_figures(f"while the judge measures: {name}", counted=said["measured"].get("memory_highest", 0) / 2**20,
-                     longest_gap_ms=said["measured"].get("longest_gap", 0) * 1000)
+                     longest_gap_ms=said["measured"].get("longest_gap", 0) * 1000,
+                     readings_moved=said["measured"].get("moved_most", 0) / 2**20)
     expected = "passed" if aim == "below" else "failed"
     assert set(outcomes(result).values()) == {expected} and len(outcomes(result)) == 6, lost(result, tmp_path / "out")
     if aim == "above":
@@ -2585,6 +2586,53 @@ def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_act
     assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
     assert outcomes(result)["test_within"] == "passed" and outcomes(result)["test_beyond"] == "failed" and \
         outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+
+
+# The same under pressure: while the case under test makes and holds memory files, a process of it
+# reads a file of 700 MB again and again, dropping it from the cache before every pass, so that the
+# container stands at its cap and the kernel takes back old records while new ones are made.
+PRESSES = r"""
+if sys.argv[1:2] == ["hold"]:
+    import atexit, signal
+    pressing = os.fork()
+    if pressing == 0:
+        fd = os.open("/app/press.bin", os.O_RDONLY)
+        while True:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.lseek(fd, 0, 0)
+            while os.read(fd, MB):
+                pass
+
+    def stop_pressing():
+        os.kill(pressing, signal.SIGKILL)
+        os.waitpid(pressing, 0)
+    atexit.register(stop_pressing)
+"""
+
+
+@pytest.mark.parametrize("limit_mb", [64, 256, 512])
+def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound(tmp_path, limit_mb):
+    """After an earlier case left the records of 300,000 names that are not there, a case keeps its
+    container at its cap by reading a large file over and over, so that the kernel takes old records
+    back while the case makes and holds memory files, mapped and closed. Either it fails for memory, or
+    what it holds beyond the judge's count, read from outside, is no more than the amount left out
+    and the tolerance."""
+    way = "memory files, mapped and closed"
+    tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
+        .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + PRESSES + HELD + HOLDS, {"functional/test_hold.py": tests},
+                          {"reading": True, "before": "dd if=/dev/zero of=/app/press.bin bs=1M count=700 status=none"},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    within = seen["within"]
+    within["start"] = seen["start"]
+    note_figures(f"under pressure, limit {limit_mb} MB: what the earlier case left",
+                 records_grown=seen["asks"]["measured"].get("records_grown", 0) / 2**20,
+                 times_at_cap=result["report"].get("memory", {}).get("times_at_cap", 0))
+    if within["limit"] != "memory":
+        assert within["exit_code"] == 0, f"the attempt did not run as written: {within}"
+    within_the_bound(within, limit_mb, f"under pressure: {way}, limit {limit_mb} MB")
 
 
 def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:

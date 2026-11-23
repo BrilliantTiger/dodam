@@ -1214,6 +1214,118 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
     assert outcomes(result) == {"test_between": "passed"}, message(result, "test_between")
 
 
+# A program 8 MB below its limit whose pages of the cache come and go while the judge reads, so that
+# the two halves of a reading differ by 20 MB in every try: the judge knows only that the figure lies
+# between 8 MB below the limit and 12 MB above it. Such a reading is no failure and no pass: it is read
+# again. "now and then": the cache comes or goes after the total is read, so that every other try
+# settles below the limit. "in every reading": it comes after the first half is read and goes after
+# the second, so that no reading ever settles; the case is then not judged, as a fault of measuring.
+UNSETTLED = r'''
+import builtins, functools, io
+from pathlib import Path
+import dodam_cli
+
+MB = 2**20
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def stand_in(group, held):
+    for name, value in (("memory.current", held["current"]), ("memory.max", 4096 * MB), ("memory.swap.current", 0)):
+        (group / name).write_text(f"{value}\n")
+    (group / "memory.stat").write_text(f"anon {held['current'] - held['file']}\nfile {held['file']}\n"
+                                       f"inactive_file {held['file']}\nactive_file 0\nslab_reclaimable 0\n")
+
+
+def test_unsettled():
+    group = Path(GROUP)
+    group.mkdir()
+    held = {"current": 400 * MB, "file": 100 * MB, "up": False}
+    stand_in(group, held)
+    reads = {"total": 0, "stat": 0}
+    real_open = builtins.open
+
+    def toggle(up=None):
+        up = not held["up"] if up is None else up
+        if up != held["up"]:
+            step = 20 * MB if up else -20 * MB
+            held["current"] += step
+            held["file"] += step
+            held["up"] = up
+            stand_in(group, held)
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        name = str(file)
+        if name not in (str(group / "memory.current"), str(group / "memory.stat")) or any(m in mode for m in "wax+"):
+            return f
+        text = f.read()
+        f.close()
+        if name.endswith("memory.current"):
+            reads["total"] += 1
+            if reads["total"] == 5:
+                # the program takes memory up to 8 MB below its limit of 256 MB
+                held["current"] += 248 * MB
+                stand_in(group, held)
+            elif reads["total"] >= 20 and HOW == "now and then":
+                toggle()
+        else:
+            reads["stat"] += 1
+            if reads["total"] >= 20 and HOW == "in every reading":
+                # every reading reads this file twice, around the total: up after the first, back after the second
+                toggle(reads["stat"] % 2 == 1)
+        return io.BytesIO(text) if "b" in mode else io.StringIO(text)
+
+    tool = dodam_cli._judge
+    kept = builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
+    builtins.open = io.open = opening
+    tool.container_memory = functools.partial(kept[2], group=group)
+    dodam_cli._files_held = lambda folder: 0
+    dodam_cli._own_memory = lambda: 0
+    try:
+        with case() as c:
+            c._side = Side()
+            r = c.run([])
+            with real_open(SEEN, "w") as f:
+                json.dump({"limit": r.limit, "highest": c.measured.get("memory_highest"), "reads": reads["total"]}, f)
+    finally:
+        builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
+'''
+
+
+@pytest.mark.parametrize("how", ["now and then", "in every reading"])
+def test_a_reading_that_cannot_be_taken_is_no_failure_and_no_pass(tmp_path, how):
+    """When every try of a reading moved too much to say on which side of the limit the figure lies,
+    the program is not ended for memory on it: the reading is taken again. When the readings settle
+    now and then, the case is judged by them and passes. When no reading settles, the case is not
+    judged, as a fault of measuring: it is no pass, and the result counts it on its own."""
+    seen = tmp_path / "seen.json"
+    source = UNSETTLED.replace("GROUP", repr(str(tmp_path / "group"))).replace("HOW", repr(how)).replace("SEEN", repr(str(seen)))
+    result = judge_program(tmp_path, "import time\ntime.sleep(0.6)\nprint('fine')\n",
+                           {"functional/test_unsettled.py": source}, CASE_MEMORY_MB="256")
+    assert seen.is_file(), message(result, "test_unsettled")
+    measured = json.loads(seen.read_text())
+    assert measured["reads"] >= 20, f"the readings did not move while the program ran: {measured}"
+    assert measured["limit"] != "memory", f"a program was ended for memory on readings that could not be taken: {measured}"
+    case = next(c for c in result["report"]["tests"] if c["name"] == "test_unsettled")
+    if how == "now and then":
+        assert case["outcome"] == "passed", case
+        assert not case.get("not_judged_for_measuring"), case
+    else:
+        assert case["outcome"] == "skipped" and case.get("not_judged_for_measuring") is True, case
+        assert result["report"].get("not_judged_for_measuring") == 1, result["report"].get("not_judged_for_measuring")
+        assert result["reward"]["reward"] == 0.0 and result["reward"]["unjudged"] == 1.0, result["reward"]
+
+
 SWAP_STOP = r'''
 import functools
 from pathlib import Path
