@@ -9759,3 +9759,66 @@ def test_lock_md_does_not_call_the_plans_folder_open_to_pull_requests_from_outsi
     assert "The scripts of the plan, in a folder that pull requests from outside may change" not in said_in_lock_md()
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "the scripts are in a folder that pull requests from outside may change" not in workflow
+
+
+# =================================================================================================
+# What the review at the head before merging found: each as its class
+# =================================================================================================
+
+# The patterns of the words for whom as the desk had them before this round, word for word: whatever they found, the
+# desk still finds.
+MAIN_WHOM = re.compile(
+    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*)\b"
+    r"|에이전트|관리자|담당|메인테이너|코디네이터|エージェント|メンテナ|担当|チーム|管理者|コーディネーター"
+)
+
+
+@pytest.mark.parametrize("seed", [111, 112])
+def test_every_told_claim_the_desk_refused_before_this_round_it_still_refuses(seed):
+    tools, rng = module("tools"), random.Random(seed)
+    stems = {"coordinat": ["ion", "e", "ed", "or", "ors", "ing"], "mantenedor": ["", "a", "as", "es"], "coordinador": ["", "a", "as", "es"],
+             "agent": ["", "s"], "maintainer": ["", "s"], "owner": ["", "s"], "agente": ["", "s"], "responsable": ["", "s"]}  # fmt: skip
+    verbs = ["I've passed this on to", "I informed the", "He avisado a las", "Se lo he comunicado a las", "He notificado a la", "I told the"]
+    missed = []
+    for stem, ends in stems.items():
+        for end in ends:
+            for verb in verbs:
+                text = f"{verb} {stem}{end}{rng.choice(['.', ' del proyecto.', ' today.'])}"
+                if MAIN_WHOM.search(text) and tools.PASSING_ON.search(text) and not tools.says_agents_were_told(text):
+                    missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The class of a point that ends no sentence: a point that a lowercase letter or a digit follows after a space, and one or
+# two letters with points, as in a time of day or a short name of a country.
+@pytest.mark.parametrize("inside", ["a las 5 p. m. al", "como Ud. pidió, al", "como Uds. pidieron, a los", "to Prof. Kim's", "the U.S.", "at 3 p.m. to the",
+                                    "al dpto. de los", "a las 9 a. m. al", "por EE. UU. al", "via St. Louis to the", "con Vd. al", "to Jr. and the"])  # fmt: skip
+def test_a_point_that_ends_no_sentence_does_not_split_the_told_claim(inside):
+    tools = module("tools")
+    for text in (f"I've passed this on {inside} maintainers.", f"Lo he comunicado {inside} equipo."):
+        assert tools.says_agents_were_told(text), text
+
+
+@pytest.mark.parametrize("path", ["./../../../../../../../../tmp/secret", "notes/../../../../../../../../tmp/secret", ".\\..\\..\\..\\..\\tmp\\x",
+                                  "a/./b/../../../../tmp/x", "docs/./../.././../Users/you/notes"])  # fmt: skip
+def test_a_relative_path_is_made_plain_before_its_climb_is_read(path):
+    assert "a path outside the repository" in module("guard").leaks(f"Look in {path} now.", [])
+
+
+def test_every_part_of_an_address_split_at_a_plus_is_a_known_value():
+    guard = module("guard")
+    known = [("the owner's git name or address", "12345+gildong@users.noreply.github.com")]
+    for text in ("Ask gildong about it.", "gildong님에게 물어보세요.", "It was gildong."):
+        assert guard.leaks(text, known) == ["the owner's git name or address"], text
+
+
+@pytest.mark.parametrize("folder", ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/", "bench/harbor/",
+                                    "bench/records/", "tools/desk/", "tools/gemini/", "tools/site/", "tools/plan/", "tools/pilot/", "bench/"])  # fmt: skip
+def test_a_pull_request_that_changes_a_file_of_any_protected_folder_is_not_ready(folder):
+    pr_files = module("pr_files")
+    path = {"bench/tests/": "bench/tests/test_site.py", "bench/tasks/": "bench/tasks/web-signup/task.toml", "bench/": "bench/pyproject.toml",
+            "tools/site/": "tools/site/build.py"}.get(folder, folder + "x.py")  # fmt: skip
+    for how in ({"filename": path, "status": "modified"}, {"filename": path, "status": "added"}, {"filename": "docs/x.md", "status": "renamed", "previous_filename": path}):
+        got = classified([how])
+        assert got.get("ready_for_review") is False and folder in got.get("protected_folders", []), (folder, how, got)
+    assert folder in pr_files.PROTECTED_FOLDERS
