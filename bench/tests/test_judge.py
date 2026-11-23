@@ -451,8 +451,8 @@ def test_the_entry_the_last_stop_adds_has_a_kind_of_its_own_that_every_reader_ta
     assert [c["kind"] for c in run["failed_checks"]] == [entry["kind"]], run["failed_checks"]
     from dodambench.task import TestFile
     from dodambench.vet import record_of
-    judged = record_of(reward, details, [TestFile("functional/test_one.py", "functional", "build", None, False, ())],
-                       ["build", "change-1"], "build")
+    judged = record_of(reward, details, tests, [TestFile("functional/test_one.py", "functional", "build", None, False, ())],
+                       "build", separated=False, cli=False)
     problems = judgement_problems("broken", None, judged)
     assert problems and "data folder" in problems[0], problems
 
