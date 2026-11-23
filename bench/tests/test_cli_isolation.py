@@ -300,7 +300,7 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
                  changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
                  processes: int | None = None, own_filter_only: bool = False,
-                 capabilities: tuple[str, ...] = (), mounts: tuple[str, ...] = ()) -> dict:
+                 capabilities: tuple[str, ...] = (), mounts: tuple[str, ...] = (), volumes: tuple[str, ...] = ()) -> dict:
     """What the verifier does: a fresh container without network, capped in memory, processors and
     processes, with the capped memory-backed folder for the cases; the judge as root with its own
     Python, started by the verifier's own script, the program's build user named agent. Returns the
@@ -317,7 +317,7 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     refused is refused by the judge's own. `capabilities` are given to the container's root beside
     Docker's usual ones, for a hidden test that needs one; the program's side never has any.
     `mounts` are memory-backed folders given to the container beside the cases' one, as Docker's
-    `--tmpfs` takes them."""
+    `--tmpfs` takes them; `volumes` are Docker volumes given to it, as `--volume` takes them."""
     name = f"dodam-attack-{uuid.uuid4().hex[:12]}"
     (tests_dir / "test.sh").write_text(TEST_SH, encoding="utf-8")
     for file, text, replacement in changed:
@@ -343,6 +343,8 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
         flags += ["--cap-add", capability]
     for mount in mounts:
         flags += ["--tmpfs", mount]
+    for volume in volumes:
+        flags += ["--volume", volume]
     if reading:
         flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
@@ -1227,6 +1229,42 @@ def test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next(tm
     assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
     before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
     assert [place for place in READ_MARKS if before[place] != after[place]] == [], (before, after)
+
+
+# What the container is given before the judge begins: a volume made seconds earlier, and the files the
+# container's runtime puts in one by one. The judge begins three seconds after its container.
+GIVEN_MARKS = ("/given/g0", "/given/g1", "/given", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf")
+READS_WHAT_IT_WAS_GIVEN = r'''
+import json, os, sys
+MARKS = GIVEN_MARKS
+seen = {place: os.stat(place).st_atime_ns for place in MARKS}
+if sys.argv[1:] == ["read"]:
+    for place in ("/given/g1", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf"):
+        with open(place) as f:
+            f.read()
+    os.listdir("/given")
+print(json.dumps(seen))
+'''.replace("GIVEN_MARKS", repr(GIVEN_MARKS))
+
+
+def test_what_one_case_reads_of_what_the_container_was_given_shows_nothing_to_the_next(tmp_path):
+    """Not only what the build left: what a file system other than the image's own layers holds, and
+    the files the container's runtime puts in, show the next case nothing of what one case read."""
+    volume = f"dodam-given-{uuid.uuid4().hex[:12]}"
+    subprocess.run(["docker", "volume", "create", volume], check=True, capture_output=True)
+    try:
+        subprocess.run(["docker", "run", "--rm", "--network", "none", "--memory", "128m", "--pids-limit", "32",
+                        "--volume", f"{volume}:/given", IMAGE, "sh", "-c",
+                        "echo x > /given/g0 && echo x > /given/g1 && chmod 0755 /given && chmod 0644 /given/g0 /given/g1"],
+                       check=True, capture_output=True)
+        time.sleep(3)
+        result = judge_attack(tmp_path, READS_WHAT_IT_WAS_GIVEN, {"functional/test_given.py": READS_THEN_LOOKS},
+                              room={"volumes": (f"{volume}:/given",), "before": "sleep 3"})
+    finally:
+        subprocess.run(["docker", "volume", "rm", "--force", volume], capture_output=True)
+    assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
+    before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
+    assert [place for place in GIVEN_MARKS if before[place] != after[place]] == [], (before, after)
 
 
 def test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read(tmp_path):

@@ -1644,6 +1644,38 @@ def test_what_lies_where_a_dependency_folder_goes_and_cannot_be_removed(tmp_path
     assert (tmp_path / "out/reward.json").is_file()
 
 
+@pytest.mark.parametrize("refused, fault", [(errno.EPERM, False), (errno.EIO, True)],
+                         ids=["refused whatever the judge does", "an error no program causes"])
+def test_what_the_build_left_in_the_memory_folder_and_cannot_be_removed(tmp_path, monkeypatch, refused, fault):
+    """What the build left in the container's memory-backed folder and what cannot be removed whatever
+    the judge does fails the step: no file of tests runs, and the reason is given. A removal that
+    fails for a reason no program can cause is a fault of the judge."""
+    app, cases, memory = tmp_path / "app", tmp_path / "cases", tmp_path / "memory"
+    for folder in (app, cases, memory):
+        folder.mkdir()
+    (memory / "left-by-the-build").write_text("x")
+    monkeypatch.setattr(judge_module, "close_writable_places", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(judge_module, "settle_access_times", lambda *args, **kwargs: 0, raising=False)
+    monkeypatch.setattr(judge_module, "MEMORY_FOLDER", memory)
+    monkeypatch.setattr(judge_module, "CASES_DIR", cases)
+    remove = judge_module.remove_tree
+
+    def refusing(top, *args, **kwargs):
+        if Path(top) == memory:
+            raise OSError(refused, os.strerror(refused))
+        return remove(top, *args, **kwargs)
+    monkeypatch.setattr(judge_module, "remove_tree", refusing)
+    if fault:
+        with pytest.raises(judge_module.JudgeFault):
+            judge_module.CliRun(app, lang_env(), "someone", {"PATH": "/usr/bin"})
+        return
+    run = judge_module.CliRun(app, lang_env(), "someone", {"PATH": "/usr/bin"})
+    try:
+        assert "cannot be emptied" in run.left and os.strerror(refused) in run.left, run.left
+    finally:
+        run.close()
+
+
 def test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_of_the_judge(tmp_path, monkeypatch):
     """Before the first case nothing of the program's side can have written the cases' folder: when
     it cannot be emptied then, the judge has failed."""
