@@ -39,7 +39,7 @@ jobs:
           .harbor-venv/bin/python -m pip install --quiet --require-hashes --only-binary=:all: -r harbor/requirements.txt
       - name: Check that the leak test catches the released Harbor
         working-directory: bench
-        run: sh ci/the_leak_test_catches_the_released_harbor.sh
+        run: python -I ci/the_leak_test_catches_the_released_harbor.py
       - name: Apply Dodam's patch to Harbor
         working-directory: bench
         run: python -m dodambench.harbor_patch apply
@@ -73,7 +73,7 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
       - name: Check that every pilot test fails on its broken variant
         working-directory: bench
-        run: sh ci/every_pilot_test_fails_on_its_variant.sh
+        run: python -I ci/every_pilot_test_fails_on_its_variant.py
       - name: Run the checks on the Gemini job
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py

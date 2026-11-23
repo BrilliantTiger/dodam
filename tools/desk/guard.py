@@ -459,11 +459,20 @@ def _plain_path(token: str) -> str:
     return (head + "/" if head is not None else "") + "/".join(stack)
 
 
+CLIMBING_STEP = re.compile(r"\.\./")
+
+
 def stack_path_spelling(text: str) -> str:
     """Every path of the text walked by _plain_path: in one width and one case, backslashes as slashes, spaces round a
-    slash taken out, and each path between the spaces and the marks that stand round a word."""
+    slash taken out, and each path between the spaces and the marks that stand round a word; and what follows every
+    climbing step, read from the root."""
     text = re.sub(r"[ \t]*/[ \t]*", "/", unicodedata.normalize("NFKC", text).casefold().replace("\\", "/"))
-    return " ".join(_plain_path(word.strip("'\"`()[]<>,;")) if "/" in word else word for word in text.split())
+    walked = [_plain_path(word.strip("'\"`()[]<>,;")) if "/" in word else word for word in text.split()]
+    # Free of position: wherever a climbing step stands, whatever stands straight before it, what follows it has left the
+    # copy and is read from the root.
+    climbed = [_plain_path("/" + text[step.end() :].split(None, 1)[0].strip("'\"`()[]<>,;")) for step in CLIMBING_STEP.finditer(text)
+               if text[step.end() : step.end() + 1].strip()]  # fmt: skip
+    return " ".join(walked + climbed)
 
 
 def path_spelling(text: str) -> str:

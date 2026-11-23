@@ -186,6 +186,25 @@ def which(name: str) -> str:
     return str(Path(found).resolve())
 
 
+def program_of_the_desks_own(program: str, state: Path) -> str:
+    """The same program in a folder of the desk's own in the state folder, so that its own path names nothing of the
+    owner's. It is copied again only when it differs."""
+    folder = state_files.folder(state / "program", "The folder of the program in the state folder", make=True)
+    target = folder / "claude"
+    data = Path(program).read_bytes()
+    if not target.exists() or target.is_symlink() or target.read_bytes() != data:
+        fresh = folder / "claude.new"
+        fresh.unlink(missing_ok=True)
+        with open(os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700), "wb") as out:
+            out.write(data)
+        os.replace(fresh, target)
+    return str(target)
+
+
+# What a session is given at its start, by the kind of thing that carries it: the start names the kind, never the value.
+GIVEN_AT_THE_START = ("the program's own path", "an argument", "a variable", "the working folder")
+
+
 def version_tuple(text: str) -> tuple[int, ...]:
     """A released version: numbers and dots and nothing else. A version with a suffix is not a release."""
     word = text.strip().split()[0] if text.strip() else ""
@@ -486,6 +505,10 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         found = guard.names(path, values, PUBLIC)
         if found:
             raise Problem(f"The path of {what} holds " + ", ".join(found) + ". A session is shown this path. Use a folder whose path names none of them.")
+    if own_sign_in and guard.names(claude, values, PUBLIC):
+        # The program's real path is part of what a session is given. Where it names the owner, the session is started
+        # from the same program in a folder of the desk's own.
+        claude = program_of_the_desks_own(claude, state)
     live = lock["live_server"]
     settings = {
         # Claude Code otherwise describes the repository to the session, the owner's git name included.
@@ -543,6 +566,14 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         env["HOME"] = str(state_files.folder(state / "session-home", "The session's home folder in the state folder", make=True))
         env["TMPDIR"] = str(state_files.folder(state / "session-tmp", "The session's folder for temporary files in the state folder", make=True))
         env["USER"] = env["LOGNAME"] = "desk"
+        # A count, not a promise: everything the session is given at its start, by its kind, holds no known value. Where
+        # one does, the session is not started, and only the kind of thing that carried it is said.
+        given = [("the program's own path", str(Path(argv[0]).resolve())), *(("an argument", word) for word in argv),
+                 *(("a variable", text) for pair in env.items() for text in pair), ("the working folder", str(copy))]  # fmt: skip
+        carried = {kind for kind, text in given if guard.names(text, values, PUBLIC)}
+        if carried:
+            raise Problem("On the desk's own sign-in, what a session would be given at its start names the owner, in "
+                          + ", ".join(kind for kind in GIVEN_AT_THE_START if kind in carried) + ". Nothing is started.")
     # The watcher gets the same sign-in to GitHub as the tools: the desk's own token when there is one.
     if stand_in is not None:
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}

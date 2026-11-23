@@ -19,6 +19,7 @@ import sys
 import textwrap
 import threading
 import time
+import itertools
 import unicodedata
 from pathlib import Path
 
@@ -8456,8 +8457,8 @@ def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_i
         if not protected and not re.search(r"python3?\s+(?:-\w+\s+)*-I\b", command):
             open_to_outside.append((workflow, folder or "the root of the repository", command))
     assert open_to_outside == []
-    phrase = ("What the workflows start is a closed list too: every line a step runs is one simple command (a step's output written to "
-              "GitHub's own file for it aside), and anything longer is a script in a protected folder")  # fmt: skip
+    phrase = ("What the workflows start is a closed list too, and the list is the workflows themselves: a test holds every line of "
+              "every workflow, in its order and with its indentation")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
 
 
@@ -9019,6 +9020,254 @@ def test_every_way_of_writing_pythons_options_is_read():
     assert python_start(["python", "-u", "x.py", "-m", "y"]) == {"isolated": False, "script": "x.py"}
 
 
+# The closed list of what the workflows start is the workflows themselves: every line, in its order and with its
+# indentation, comments and blank lines aside. Nothing is read out of a workflow but against this list, so a change to a
+# workflow changes this list in the same commit, where a reviewer sees it. A line that starts something carries its mark
+# ("runner", "protected" or "isolated") and one line of reason, and the mark is checked against the line and its folder.
+CLOSED_LIST: dict[str, list] = {
+    'ci.yml': [
+        'name: ci',
+        'on:',
+        '  push:',
+        '  pull_request:',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: ci-${{ github.ref }}',
+        '  cancel-in-progress: true',
+        'env:',
+        '  DODAM_PILOT_VARIANTS: skip',
+        'jobs:',
+        '  bench:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 25',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Install the pinned Harbor',
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m venv .harbor-venv', 'protected', "the runner's own module for environments, in the benchmark's folder"),
+        ('          .harbor-venv/bin/python -m pip install --quiet --require-hashes --only-binary=:all: -r harbor/requirements.txt', 'protected', "pip of the environment made the line before, inside the benchmark's folder, with hashes from a protected file"),
+        '      - name: Check that the leak test catches the released Harbor',
+        '        working-directory: bench',
+        ('        run: python -I ci/the_leak_test_catches_the_released_harbor.py', 'isolated', 'a script of the protected folder of checks, in isolated mode'),
+        "      - name: Apply Dodam's patch to Harbor",
+        '        working-directory: bench',
+        ('        run: python -m dodambench.harbor_patch apply', 'protected', "a module of the measuring tools, found in the benchmark's folder"),
+        '      - name: Run the tests',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_gemini.py --ignore=tests/test_desk.py --ignore=tests/test_desk_lock.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  variants:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 15',
+        '    env:',
+        '      DODAM_PILOT_VARIANTS: run',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Check that every pilot test fails on its broken variant',
+        '        working-directory: bench',
+        ('        run: python -I ci/every_pilot_test_fails_on_its_variant.py', 'isolated', 'a script of the protected folder of checks, in isolated mode'),
+        '      - name: Run the checks on the Gemini job',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  recorded:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 15',
+        '    strategy:',
+        '      fail-fast: false',
+        '      matrix:',
+        '        check:',
+        '          - pilot_replan.py --check --part schedule',
+        '          - pilot_replan.py --check --part forecast',
+        '          - claude_only.py --check --part 1/3',
+        '          - claude_only.py --check --part 2/3',
+        '          - claude_only.py --check --part 3/3',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Check that the recorded output is what the script gives',
+        '        working-directory: tools/plan',
+        ('        run: python -I ${{ matrix.check }}', 'isolated', "the plan's scripts from their protected folder, in isolated mode"),
+        '  attacks:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 60',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Build the Python language image',
+        '        working-directory: bench/images',
+        ('        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .', 'protected', 'an image built from the protected folder of images'),
+        '      - name: Run the tests that judge inside the image',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  protections:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 65',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Build the Python language image',
+        '        working-directory: bench/images',
+        ('        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .', 'protected', 'an image built from the protected folder of images'),
+        '      - name: Break each protection and see a test fail',
+        '        working-directory: bench',
+        ('        run: python experiments/check_protections.py', 'protected', 'a script of the protected security experiments'),
+    ],
+    'pages.yml': [
+        'name: pages',
+        'on:',
+        '  push:',
+        '    branches: [main]',
+        '  schedule:',
+        '    - cron: "17 * * * *"',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: pages',
+        '  cancel-in-progress: false',
+        'jobs:',
+        '  build:',
+        "    if: github.ref == 'refs/heads/main'",
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 5',
+        '    permissions:',
+        '      contents: read',
+        '      issues: read',
+        '    outputs:',
+        '      changed: ${{ steps.page.outputs.changed }}',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '          fetch-depth: 0   # the latest merged changes are read from the history',
+        '      - name: Build the page with the values of now',
+        '        id: page',
+        '        env:',
+        '          GITHUB_TOKEN: ${{ github.token }}',
+        ('        run: python3 -I tools/site/build.py --live "$RUNNER_TEMP/site" --compare >> "$GITHUB_OUTPUT"', 'isolated', "the page's builder from its protected folder, in isolated mode; it writes whether the page changed to GitHub's own file for it"),
+        "      - if: github.event_name == 'push' || steps.page.outputs.changed == 'true'",
+        '        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0',
+        '        with:',
+        '          path: ${{ runner.temp }}/site',
+        '  deploy:',
+        '    needs: build',
+        "    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || needs.build.outputs.changed == 'true')",
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 5',
+        '    permissions:',
+        '      pages: write',
+        '      id-token: write',
+        '    environment:',
+        '      name: github-pages',
+        '      url: ${{ steps.deployment.outputs.page_url }}',
+        '    steps:',
+        '      - id: deployment',
+        '        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1',
+    ],
+    'site.yml': [
+        'name: site',
+        'on:',
+        '  push:',
+        '  pull_request:',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: site-${{ github.ref }}',
+        '  cancel-in-progress: true',
+        'jobs:',
+        '  layout:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 20',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Install the pinned browser driver',
+        '        run: |',
+        ('          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt', 'isolated', "pip in isolated mode from the root, with hashes from the site's protected file"),
+        '      - name: The committed pages are what the template builds',
+        ('        run: python -I tools/site/build.py --check', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Build what would be published, with a made-up status that carries markup in a title',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay the page out at every size with the question about measurement open, and check that it asks first',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/site" --consent', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '      - name: Build it again as it would be without a measurement ID',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/unmeasured" --status tools/site/sample_status.json --analytics ""', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out as well, and check that it asks no other host for anything',
+        ('        run: python -I tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '  desk:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 40',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Install the pinned browser driver',
+        '        run: |',
+        ('          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt', 'isolated', "pip in isolated mode from the root, with hashes from the site's protected file"),
+        '      - name: Install the pinned test runner',
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        "      - name: Run the desk's tests",
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider tests/test_desk.py tests/test_desk_lock.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '      - name: Build what would be published with the way on GitHub open',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/github" --status tools/site/sample_status.json --open github', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out at every size',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/github" --desk github', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '      - name: Build it again with both ways open',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/both" --status tools/site/sample_status.json --open github,live', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out at every size',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/both" --desk github,live', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+    ],
+}  # fmt: skip
+
+
 def the_workflows() -> dict[str, str]:
     """Every workflow of the repository, by its name, as it is written."""
     return {path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))}
@@ -9152,25 +9401,96 @@ def judged(step: dict, words: list[str]) -> str | None:
     return None if protected(posixpath.join(folder, "x")) else "a module or code started from a folder that is not protected, not in isolated mode"
 
 
+# A word of a workflow's command: plain letters, digits and signs that the shell reads as themselves, an empty word, or a
+# folder of the runner's own for temporary files. Anything else (a quote, a substitution, a separator, a redirection, a
+# variable) is outside the closed list, whatever it would do.
+COMMAND_WORD = re.compile(r'[A-Za-z0-9_.,:=@/+%-]+|""|"\$RUNNER_TEMP(?:/[A-Za-z0-9_.-]+)*"')
+VARIABLES_OF_THE_WORKFLOWS = {"DODAM_PILOT_VARIANTS", "GITHUB_TOKEN"}
+
+
+def mark_of(command: str, folder: str) -> str:
+    """What one command of a workflow starts, by the mark the closed list gives it: "runner" for a program of the runner,
+    "protected" for code that only a protected folder holds, "isolated" for Python in isolated mode; or why it is refused."""
+    words = command.removesuffix(' >> "$GITHUB_OUTPUT"').split(" ")
+    if not all(COMMAND_WORD.fullmatch(word) for word in words):
+        return "refused: a character or a word outside the closed list's own"
+    if any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in words):
+        return "refused: a variable set for a command"
+    for word in words[1:]:
+        path = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+        if "/" in path and not path.startswith('"$RUNNER_TEMP') and not protected(posixpath.join(folder, path.split("::")[0])):
+            return "refused: a path that is not protected"
+    step = {"workflow": "", "matrix": {}, "folder": None if folder == "." else folder, "run": [], "uses": None}
+    program = words[0]
+    if program in PROGRAMS_OF_THE_RUNNER:
+        return "runner"
+    if program == "docker":
+        why = judged(step, words)
+        return "protected" if why is None else "refused: " + why
+    if re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", program):
+        why = judged(step, words)
+        if why:
+            return "refused: " + why
+        isolated = python_start(words).get("isolated")
+        if not isolated and not protected(posixpath.join(folder, "x")):
+            return "refused: Python in a folder that is not protected, not in isolated mode"
+        return "isolated" if isolated else "protected"
+    return "refused: a program that is not on the list"
+
+
+def with_the_matrix(command: str, matrix: dict[str, list[str]]) -> list[str]:
+    """The command once for every value of its job's matrix that it names."""
+    commands = [command]
+    for name, values in matrix.items():
+        marker = "${{ matrix." + name + " }}"
+        if marker in command:
+            commands = [one.replace(marker, value) for one in commands for value in values]
+    return commands
+
+
 def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[str, ...]]:
-    """What the closed list of what the workflows start refuses, in the given workflows or in the repository's own."""
-    open_to_outside = []
-    for step in steps_of_the_workflows(workflows):
-        if step["uses"] is not None:
+    """What the closed list refuses in the given workflows, or in the repository's own. The list is the workflows
+    themselves, line by line: nothing that is not on it runs, and every line that starts something carries a mark that
+    is checked against the line."""
+    workflows = the_workflows() if workflows is None else workflows
+    found: list[tuple[str, ...]] = []
+    if sorted(workflows) != sorted(CLOSED_LIST):
+        found.append(("the workflows", "a workflow that is not on the closed list, or one on it that is gone"))
+    for name, text in sorted(workflows.items()):
+        held = CLOSED_LIST.get(name, [])
+        written = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if written != [entry if isinstance(entry, str) else entry[0] for entry in held]:
+            at = next(n for n, (one, other) in enumerate(itertools.zip_longest(written, [e if isinstance(e, str) else e[0] for e in held])) if one != other)
+            found.append((name, f"line {at + 1} of those that count", "a line that is not on the closed list"))
+            continue
+        marked = [(entry[0].strip().removeprefix("- ").removeprefix("run:").strip(), entry[1]) for entry in held if not isinstance(entry, str)]
+        steps = steps_of_the_workflows({name: text})
+        commands = [(line.strip(), step) for step in steps for line in step["run"] if line.strip() and not line.strip().startswith("#")]
+        if [command for command, _ in commands] != [command for command, _ in marked]:
+            found.append((name, "a line that starts something without a mark, or a mark on a line that starts nothing"))
+            continue
+        for (command, step), (_, mark) in zip(commands, marked, strict=True):
+            for one in with_the_matrix(command, step["matrix"]):
+                if (got := mark_of(one, step["folder"] or ".")) != mark:
+                    found.append((name, one, f"marked {mark}: {got}"))
+        for step in steps:
             # An action is named by the forty digits of its commit, from outside the repository.
-            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}", step["uses"]):
-                open_to_outside.append((step["workflow"], step["uses"], "an action that is not pinned, or from the repository itself"))
-        for words in commands_of(step):
-            why = judged(step, words)
-            if why:
-                open_to_outside.append((step["workflow"], step["folder"] or "the root of the repository", " ".join(words), why))
-    # Nothing a step sets can make a later start look elsewhere: no search path for Python or the shell, no folder put on the path.
-    for name, text in sorted((the_workflows() if workflows is None else workflows).items()):
-        if re.search(r"^\s*(?:PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|PYTHONSAFEPATH|LD_PRELOAD|BASH_ENV|ENV)\s*:", text, re.M):
-            open_to_outside.append((name, "a variable that changes where code is looked for"))
+            if step["uses"] is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}", step["uses"]):
+                found.append((name, step["uses"], "an action that is not pinned, or from the repository itself"))
+        for n, line in enumerate(written):
+            if re.match(r"^\s*(?:- )?(?:shell|defaults|container|services)\s*:", line):
+                found.append((name, line.strip(), "a key that decides how lines run, which the closed list does not hold"))
+            if re.match(r"^\s*(?:- )?env:\s*$", line):
+                indent = len(line) - len(line.lstrip())
+                for later in written[n + 1 :]:
+                    if len(later) - len(later.lstrip()) <= indent:
+                        break
+                    variable = later.strip().split(":", 1)[0]
+                    if variable not in VARIABLES_OF_THE_WORKFLOWS:
+                        found.append((name, variable, "a variable that is not on the list"))
         if "GITHUB_ENV" in text or "GITHUB_PATH" in text:
-            open_to_outside.append((name, "a step that sets what later steps are given"))
-    return open_to_outside
+            found.append((name, "a step that sets what later steps are given"))
+    return found
 
 
 def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mode():
@@ -9213,6 +9533,24 @@ def changed_workflows(rng: random.Random) -> list[tuple[str, dict[str, str]]]:
                 defaults = ["    defaults:", "      run:", f"        working-directory: {folder()}"]
                 changed.append((f"{file}:{n + 1}: a folder of the job's own", workflows | {file: "\n".join(lines[: n + 1] + defaults + lines[n + 1 :]) + "\n"}))
     return changed
+
+
+def test_a_mark_that_does_not_hold_for_its_line_is_refused(monkeypatch):
+    lists = 0
+    for name, held in CLOSED_LIST.items():
+        for n, entry in enumerate(held):
+            if isinstance(entry, str):
+                continue
+            for other in ("runner", "protected", "isolated"):
+                if other != entry[1]:
+                    monkeypatch.setitem(CLOSED_LIST, name, held[:n] + [(entry[0], other, entry[2])] + held[n + 1 :])
+                    assert closed_list_findings(), (name, n, other)
+                    lists += 1
+            # A line that starts something, held without its mark.
+            monkeypatch.setitem(CLOSED_LIST, name, held[:n] + [entry[0]] + held[n + 1 :])
+            assert closed_list_findings(), (name, n)
+        monkeypatch.setitem(CLOSED_LIST, name, held)
+    assert lists >= 50, lists
 
 
 @pytest.mark.parametrize("seed", [151, 152])
@@ -9430,7 +9768,8 @@ def test_a_relative_path_that_climbs_out_of_the_copy_to_a_private_folder_is_refu
 def started_by_the_tests() -> list[tuple[str, int, str, str]]:
     """What the tests of the benchmark's folder put on Python's search path, load from a file, or start with Python, wherever
     the path is written in the test itself: the file, the line, what is done, and the path in the repository."""
-    return started_by({path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / "bench" / "tests").glob("*.py"))})
+    files = [*sorted((ROOT / "bench" / "tests").glob("*.py")), *sorted((ROOT / "bench" / "ci").glob("*.py"))]
+    return started_by({str(path.relative_to(ROOT)): path.read_text(encoding="utf-8") for path in files})
 
 
 def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
@@ -9472,7 +9811,10 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
                 found += [(name, node.lineno, "loaded from a file", p) for p in value(node.args[-1] if called.endswith("spec_from_file_location") else node.args[0])]
             elif called.startswith("subprocess.") and node.args and isinstance(node.args[0], ast.List) and node.args[0].elts:
                 words = node.args[0].elts
-                if ast.unparse(words[0]) != "sys.executable":
+                # Python by its own path, or by its name, which the search path of programs finds.
+                program = ast.unparse(words[0])
+                if program != "sys.executable" and not (isinstance(words[0], ast.Constant) and isinstance(words[0].value, str)
+                                                        and re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", words[0].value)):  # fmt: skip
                     continue
                 cwd = [value(k.value) for k in node.keywords if k.arg == "cwd"]
                 # Python's options read as a workflow's are: a script is the code of its own file and, in isolated mode
@@ -9485,7 +9827,8 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
                 for p in value(script):
                     for folder in (cwd[0] if cwd else [""]):
                         found.append((name, node.lineno, "started with Python", posixpath.join(folder, p) if not p.startswith("/") else p))
-    return [(name, line, what, posixpath.normpath(p)) for name, line, what, p in found if p and not p.startswith("/") and "/" in p.strip("/")]
+    # A name without a folder is a file of the folder the process starts in, which no test fixes: it is read from the root.
+    return [(name, line, what, posixpath.normpath(p)) for name, line, what, p in found if p and not p.startswith("/")]
 
 
 @pytest.mark.parametrize("seed", [161, 162])
@@ -9827,7 +10170,7 @@ def test_the_copys_git_folder_is_looked_at_where_the_computer_resolves_it(start,
 
 def test_the_public_names_of_the_repository_are_never_refused_in_a_path_at_the_start(tmp_path, monkeypatch):
     started = Start(tmp_path / "dodam", monkeypatch)
-    (tmp_path / "dodam" / "home" / ".gitconfig").write_text("[user]\n\tname = Somebody Else\n\temail = dodam+desk@example.invalid\n")
+    (tmp_path / "dodam" / "home" / ".gitconfig").write_text("[user]\n\tname = Somebody Else\n\temail = dodam+kim@example.invalid\n")
     started.own_sign_in()
     started.plan()
 
@@ -9922,14 +10265,15 @@ def characters_of_every_class(rng: random.Random, each: int = 3) -> dict[str, li
 @pytest.mark.parametrize("seed", [171, 172])
 def test_a_climbing_step_is_found_whatever_stands_straight_before_it(seed):
     """Free of position: a climbing step leaves the copy wherever it stands in the text, so what follows it is read from the
-    root, whatever character of whatever class stands straight before it."""
+    root, whatever character of whatever class stands straight before it. A character the desk never writes refuses the
+    text before any path is looked for, which refuses it too."""
     guard, rng = module("guard"), random.Random(seed)
     missed = []
     for kind, chars in characters_of_every_class(rng).items():
         for char in chars:
             for place in ("tmp/secret", "Users/you/notes"):
                 for text in (f"{char}./../{place}", f"{char}../{place}", f"word{char}./../../{place}", f"Look in {char}{char}./../{place} now."):
-                    if "a path outside the repository" not in guard.leaks(text, []):
+                    if guard.leaks(text, []) != [guard.NOT_ALLOWED] and "a path outside the repository" not in guard.leaks(text, []):
                         missed.append((kind, hex(ord(char)), text.index(char)))
     assert missed == [], (len(missed), missed[:8])
 
