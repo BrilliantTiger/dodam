@@ -311,6 +311,7 @@ os.symlink({str(tmp_path)!r}, "folder")
 os.symlink("../outside", "beside")
 os.symlink("inner", "again")
 os.symlink("nowhere", "dangling")
+os.mkdir("taken")
 '''
     result = judge_program(tmp_path, program, {"security/test_links.py": '''
 def refused(attempt):
@@ -334,6 +335,8 @@ def test_a_link_left_by_the_program_is_not_followed():
             assert refused(lambda: c.sparse(folder + "/planted.txt", 10)), folder
             assert refused(lambda: c.mkdir(folder + "/planted")), folder
             assert refused(lambda: c.symlink(folder + "/planted", "inner")), folder
+        # what the program left where a case's file goes that is no file is refused, not taken for one
+        assert refused(lambda: c.write("taken", "x")) and refused(lambda: c.sparse("taken", 10))
         assert c.files_outside() == ["neighbour.txt"], c.files_outside()
         assert sorted(os.listdir(c.work / "inner")) == ["mine.txt"]
         c.write("out.txt", "the case's own file")
@@ -494,15 +497,17 @@ def test_the_program_gets_none_of_the_judges_own_settings(tmp_path, monkeypatch)
 
 def test_the_build_gets_none_of_the_judges_own_settings(tmp_path, monkeypatch):
     """The build is the program's side as well: it is started with the environment the program gets,
-    without anything of the judge's own settings."""
+    without anything of the judge's own settings, its temporary folder or the folder it was in before."""
     monkeypatch.setenv("DODAM_APP_USER", "someone")
     monkeypatch.setenv("PYTHONPATH", "/judge/only")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("OLDPWD", "/judge/before")
     look = (f"{sys.executable} -c \"import json, os; "
             "json.dump(sorted(os.environ), open('seen-by-the-build.json', 'w'))\"")
     result = judge_program(tmp_path, "print('ok')\n", {"functional/test_ok.py": OK_TEST}, BUILD_CMD=look)
     assert result["reward"]["build_ok"] == 1.0, result["report"]
     seen = json.loads((tmp_path / "app/seen-by-the-build.json").read_text())
-    assert [key for key in seen if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], seen
+    assert [key for key in seen if key.startswith(("DODAM", "PYTEST", "PYTHONPATH", "TMPDIR", "OLDPWD"))] == [], seen
 
 
 def test_vet_judges_every_solution_of_a_command_line_task(cli_task_dir, tmp_path):
@@ -647,6 +652,16 @@ def test_a_program_ended_by_a_signal_fails_its_case_whatever_the_test_checks(tmp
     assert result["reward"]["unjudged"] == 0.0 and result["reward"]["reward"] == 0.0
 
 
+def test_a_program_ended_by_a_signal_that_left_processes_behind_is_named_for_both(tmp_path):
+    program = ("import os, signal, subprocess, sys\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+               "start_new_session=False)\nos.kill(os.getpid(), signal.SIGTERM)\n")
+    tests = {"functional/test_both.py": "def test_both():\n    with case() as c:\n        c.run([])\n"}
+    result = judge_program(tmp_path, program, tests)
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert said["test_both"][0] == "failed", said
+    assert "signal 15" in said["test_both"][1] and "left processes" in said["test_both"][1], said
+
+
 # ---------------------------------------------------------------------------------------------
 # The judge survives whatever a case leaves
 # ---------------------------------------------------------------------------------------------
@@ -693,6 +708,19 @@ def test_removing_what_a_case_left_follows_no_link_and_needs_no_depth(tmp_path):
     (tmp_path / "again/x").write_text("1")
     remove_tree(tmp_path / "again", keep_top=True)
     assert (tmp_path / "again").is_dir() and list((tmp_path / "again").iterdir()) == []
+
+
+def test_removing_opens_up_a_folder_that_can_be_entered_but_not_written(tmp_path):
+    """A judge that is not root needs to write a folder to remove what is in it. A folder the program
+    left that can be read and entered but not written is opened up through what was opened."""
+    top = tmp_path / "left"
+    (top / "half-closed/inner").mkdir(parents=True)
+    (top / "half-closed/inner/file.txt").write_text("x")
+    (top / "half-closed/file.txt").write_text("x")
+    (top / "half-closed/inner").chmod(0o500)
+    (top / "half-closed").chmod(0o500)
+    judge_module.remove_tree(top)
+    assert not top.exists()
 
 
 def test_removing_follows_no_link_that_takes_the_place_of_a_folder_it_listed(tmp_path, monkeypatch):
@@ -1492,6 +1520,20 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
     assert said["test_in_the_second_file"][0] == "failed" and "seconds" in said["test_in_the_second_file"][1], said
 
 
+def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_the_steps_time(tmp_path, monkeypatch):
+    """A case runner notes what is left of the step's time for walking and removing after every
+    removal as well as before it. Here the step gives one second; the first file's runner removes
+    little and then waits more than a second; the second file's case needs about 0.6 seconds."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
+    waits = "def test_waits_after_it():\n    time.sleep(1.2)\n"
+    tests = {"functional/test_a.py": RUNS_OK.replace("test_ok", "test_removes_little") + "\n\n" + waits,
+             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_needs_some")}
+    result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
+    said = said_of(result)
+    assert said["test_removes_little"] == ("passed", "") and said["test_waits_after_it"] == ("passed", ""), said
+    assert said["test_needs_some"] == ("passed", ""), said
+
+
 def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
     """What a case runner spends removing what the program left is drawn from the step's time for
     walking and removing, not from the time of its file of tests, also for the runner started after
@@ -1556,12 +1598,70 @@ def test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_j
     assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
     assert "remove" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
 
+    before_a_case = ("import errno\nimport dodam_cli\n\n\ndef _fails(*args, **kwargs):\n"
+                     "    raise OSError(errno.EIO, 'Input/output error')\n\n\n" + RUNS_OK.replace(
+                         "    with case() as c:\n", "    dodam_cli._judge.remove_tree = _fails\n    with case() as c:\n"))
+    code, out = judge_command(tmp_path / "before", "print('ok')\n", {"functional/test_before.py": before_a_case})
+    assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
+    assert "case" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
     def fails(*args, **kwargs):
         raise OSError(errno.EIO, "Input/output error")
     monkeypatch.setattr(judge_module, "remove_tree", fails)
     code, out = judge_command(tmp_path / "judge", "print('ok')\n", {"functional/test_ok.py": RUNS_OK})
     assert code == 3 and not (out / "reward.json").exists(), capsys.readouterr()
     assert "empty" in json.loads((out / "judge-fault.json").read_text())["judge_fault"]
+
+
+@pytest.mark.parametrize("refused, fault", [(errno.EPERM, False), (errno.EIO, True)],
+                         ids=["refused whatever the judge does", "an error no program causes"])
+def test_what_lies_where_a_dependency_folder_goes_and_cannot_be_removed(tmp_path, monkeypatch, refused, fault):
+    """What the working phase left where a pinned dependency folder goes and what cannot be removed
+    whatever the judge does fails the step, with a result. A removal that fails for a reason no
+    program can cause is a fault of the judge."""
+    remove = judge_module.remove_tree
+
+    def refusing(top, *args, **kwargs):
+        if Path(top).name == "node_modules":
+            raise OSError(refused, os.strerror(refused))
+        return remove(top, *args, **kwargs)
+    monkeypatch.setattr(judge_module, "remove_tree", refusing)
+    deps = tmp_path / "deps"
+    (deps / "node_modules").mkdir(parents=True)
+    many_files(tmp_path / "app/node_modules", 3)
+    (tmp_path / "app/main.py").write_text("print('ok')\n")
+    tests_dir = tmp_path / "tests"
+    (tests_dir / "functional").mkdir(parents=True)
+    (tests_dir / "functional/test_ok.py").write_text(HEAD + RUNS_OK)
+    (tests_dir / "manifest.toml").write_text('[[test]]\nfile = "functional/test_ok.py"\nkind = "functional"\nstep = "build"\n')
+    env = lang_env(DEPS_DIR=str(deps), DEPS_LINKS="node_modules")
+    if fault:
+        with pytest.raises(judge_module.JudgeFault):
+            judge(tests_dir, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+        return
+    result = judge(tests_dir, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    assert result["reward"]["build_ok"] == 0.0 and "cannot be removed" in result["report"]["build_ended"], result["report"]
+    assert (tmp_path / "out/reward.json").is_file()
+
+
+def test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_of_the_judge(tmp_path, monkeypatch):
+    """Before the first case nothing of the program's side can have written the cases' folder: when
+    it cannot be emptied then, the judge has failed."""
+    app, cases = tmp_path / "app", tmp_path / "cases"
+    app.mkdir()
+    cases.mkdir()
+    monkeypatch.setattr(judge_module, "close_writable_places", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(judge_module, "MEMORY_FOLDER", tmp_path / "no-memory-folder")
+    monkeypatch.setattr(judge_module, "CASES_DIR", cases)
+    remove = judge_module.remove_tree
+
+    def failing(top, *args, **kwargs):
+        if Path(top) == cases:
+            raise OSError(errno.EIO, "Input/output error")
+        return remove(top, *args, **kwargs)
+    monkeypatch.setattr(judge_module, "remove_tree", failing)
+    with pytest.raises(judge_module.JudgeFault):
+        judge_module.CliRun(app, lang_env(), "someone", {"PATH": "/usr/bin"})
 
 
 def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):

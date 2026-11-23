@@ -300,7 +300,7 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
                  changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
                  processes: int | None = None, own_filter_only: bool = False,
-                 capabilities: tuple[str, ...] = ()) -> dict:
+                 capabilities: tuple[str, ...] = (), mounts: tuple[str, ...] = ()) -> dict:
     """What the verifier does: a fresh container without network, capped in memory, processors and
     processes, with the capped memory-backed folder for the cases; the judge as root with its own
     Python, started by the verifier's own script, the program's build user named agent. Returns the
@@ -315,7 +315,9 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     tests can ask it what the container really holds; the folder they ask through is root's alone.
     With `own_filter_only` the container gets no call filter from Docker, so that a call that is
     refused is refused by the judge's own. `capabilities` are given to the container's root beside
-    Docker's usual ones, for a hidden test that needs one; the program's side never has any."""
+    Docker's usual ones, for a hidden test that needs one; the program's side never has any.
+    `mounts` are memory-backed folders given to the container beside the cases' one, as Docker's
+    `--tmpfs` takes them."""
     name = f"dodam-attack-{uuid.uuid4().hex[:12]}"
     (tests_dir / "test.sh").write_text(TEST_SH, encoding="utf-8")
     for file, text, replacement in changed:
@@ -339,6 +341,8 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
         flags += ["--security-opt", "seccomp=unconfined"]
     for capability in capabilities:
         flags += ["--cap-add", capability]
+    for mount in mounts:
+        flags += ["--tmpfs", mount]
     if reading:
         flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
@@ -1171,6 +1175,85 @@ def test_second_case_looks_whether_any_of_it_changed():
             f.write(r.out)
         assert r.exit_code == 0, r
 '''
+
+
+# What the build leaves that a case may read: files and folders in the program's folder and in a
+# temporary folder. The first case notes when each was last read, then reads some and lists the folders;
+# the second notes it again.
+READ_MARKS = ("/app/bits/b0", "/app/bits/b1", "/app/bits/b2", "/app/bits/b3", "/app/bits", "/tmp/t0", "/tmp/t1", "/tmp")
+LEAVES_FILES_TO_READ = ("mkdir -p /app/bits && for n in 0 1 2 3; do echo x > /app/bits/b$n; done && "
+                        "echo y > /tmp/t0 && echo y > /tmp/t1 && chmod 0644 /tmp/t0 /tmp/t1")
+READS_SOME = r'''
+import json, os, sys
+MARKS = READ_MARKS
+seen = {place: os.stat(place).st_atime_ns for place in MARKS}
+if sys.argv[1:] == ["read"]:
+    for place in ("/app/bits/b1", "/app/bits/b3", "/tmp/t1"):
+        with open(place) as f:
+            f.read()
+    os.listdir("/app/bits")
+    os.listdir("/tmp")
+print(json.dumps(seen))
+'''.replace("READ_MARKS", repr(READ_MARKS))
+READS_THEN_LOOKS = '''
+def test_first_case_reads_some_of_what_the_build_left():
+    with case() as c:
+        r = c.run(["read"])
+        with open("/logs/verifier/before.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+
+
+def test_second_case_looks_when_they_were_read():
+    with case() as c:
+        r = c.run(["look"])
+        with open("/logs/verifier/after.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+'''
+
+
+def test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next(tmp_path):
+    """Reading a file or listing a folder can move when it was last read. Nothing the build or the
+    working phase left that a case may read shows the next case whether it was read."""
+    result = judge_attack(tmp_path, READS_SOME, {"functional/test_read.py": READS_THEN_LOOKS}, BUILD_CMD=LEAVES_FILES_TO_READ)
+    assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
+    before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
+    assert [place for place in READ_MARKS if before[place] != after[place]] == [], (before, after)
+
+
+def test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read(tmp_path):
+    """Such a file system would show the next case what one case read, whatever the judge did. The
+    container's device folder is always mounted so, and is named under the limits; another is refused."""
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, room={"mounts": ("/strict:strictatime",)},
+                          BUILD_CMD="touch /app/the-build-ran")
+    assert result["exit_code"] == 3 and result["reward"] is None, result
+    refusal = json.loads(found_by(tmp_path / "out", "judge-fault.json")["judge_fault"])
+    assert refusal["severity"] == "error" and refusal["key"] == "access times" and "/strict" in refusal["message"], refusal
+    assert not (tmp_path / "out/ground.json").exists()
+
+
+# The step's one time for walking and removing, with separation: the judge gives three seconds, and the
+# case runner removes each file slowly, about two seconds for what the program leaves in one case.
+SLOW_IN_THE_RUNNER = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
+                      "def _slowly(*args, **kwargs):\n    time.sleep(0.1)\n    return _unlink(*args, **kwargs)\n\n\n"
+                      "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+LEAVES_TWENTY = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('plain')\n"
+ONE_CASE = "def test_NAME():\n    with case() as c:\n        assert c.run([]).out == 'plain\\n'\n"
+
+
+def test_with_separation_the_case_runners_remove_on_the_steps_one_time(tmp_path):
+    result = judge_attack(tmp_path, LEAVES_TWENTY, {
+        "functional/test_a.py": SLOW_IN_THE_RUNNER + ONE_CASE.replace("NAME", "first") + "\n\n" + ONE_CASE.replace("NAME", "second"),
+        "functional/test_b.py": ONE_CASE.replace("NAME", "later")},
+        room={"changed": (("dodam_judge.py", "TREE_SECONDS = 120 ", "TREE_SECONDS = 3 "),)})
+    out = tmp_path / "out"
+    assert result["exit_code"] == 0 and result["fault"] is None and result["reward"] is not None, lost(result, out)
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert said["test_first"] == ("passed", ""), said
+    assert said["test_second"][0] == "failed" and "seconds" in said["test_second"][1], said
+    assert said["test_b.py"][0] == "failed" and "cannot be emptied" in said["test_b.py"][1], said
+    assert "seconds" in result["report"].get("left_behind", ""), result["report"]
 
 
 def test_no_named_pipe_or_socket_the_build_leaves_can_be_written_by_a_case(tmp_path):

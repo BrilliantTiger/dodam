@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import socket
@@ -540,3 +541,52 @@ def test_a_served_program_the_judge_cannot_start_as_its_user_is_a_fault_of_the_j
             app.start(timeout=5)
     finally:
         app.stop()
+
+
+
+def test_a_build_or_a_served_program_the_judge_cannot_start_in_its_folder_is_a_fault_of_the_judge(tmp_path: Path):
+    """Whatever stops the judge from starting a process of the program's side is the judge's fault,
+    also an error of the system such as a working folder that is not there."""
+    env = {"PATH": os.environ.get("PATH", "")}
+    with pytest.raises(judge_module.JudgeFault):
+        judge_module.run_build("true", tmp_path / "not-there", None, env, 10)
+    app = App(tmp_path / "not-there", "true", free_port(), "", {})
+    try:
+        with pytest.raises(judge_module.JudgeFault):
+            app.start(timeout=5)
+    finally:
+        app.stop()
+
+
+@pytest.mark.parametrize("refused, fault", [(errno.EPERM, False), (errno.EIO, True)],
+                         ids=["refused whatever the judge does", "an error no program causes"])
+def test_a_served_programs_data_folder_that_cannot_be_removed(tmp_path: Path, monkeypatch, refused, fault):
+    """What cannot be removed whatever the judge does is what the program left: the step fails with
+    that reason and a result, and the program is not started again on it. A removal that fails for a
+    reason no program can cause is a fault of the judge."""
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    remove = judge_module.remove_tree
+
+    def refusing(top, *args, **kwargs):
+        if Path(top).name.startswith("dodam-data-"):
+            raise OSError(refused, os.strerror(refused))
+        return remove(top, *args, **kwargs)
+    monkeypatch.setattr(judge_module, "remove_tree", refusing)
+    tests, app = tmp_path / "tests", tmp_path / "app"
+    write(tests, "manifest.toml", '[[test]]\nfile = "functional/test_one.py"\nkind = "functional"\nstep = "build"\n\n'
+                                  '[[test]]\nfile = "security/test_two.py"\nkind = "security"\nstep = "build"\n'
+                                  'weakness = "path-traversal"\n')
+    write(tests, "functional/test_one.py", "def test_one():\n    assert True\n")
+    write(tests, "security/test_two.py", "def test_two():\n    assert True\n")
+    write(app, "main.py", "import http.server, os\nhttp.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), "
+                          "http.server.SimpleHTTPRequestHandler).serve_forever()\n")
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    if fault:
+        with pytest.raises(judge_module.JudgeFault):
+            judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+        return
+    result = judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert "cannot be removed" in result["report"].get("left_behind", ""), result["report"]
+    assert said["test_two.py"][0] == "skipped" and "cannot be removed" in said["test_two.py"][1], said
+    assert result["reward"]["reward"] == 0.0 and (tmp_path / "out/reward.json").is_file()
