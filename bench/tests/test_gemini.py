@@ -70,24 +70,44 @@ CLAUDE_CODE_MARKS = {
 }
 # Marks the job takes for two other coding agents (not seen at work: a guess on the safe side).
 OTHER_AGENT_MARKS = {"CODEX_SANDBOX": "seatbelt", "OPENCODE": "1"}
-# What Orca puts into the shells of its terminals (names seen in Orca 1.4.266; the values are made up). A
-# terminal of Orca that holds no coding agent is where the job and the watcher run.
+ORCA_BIN = "/Applications/Orca.app/Contents/Resources/bin"
+# The plugin Orca gives Claude Code in every terminal, in its own folder.
+ORCA_PLUGIN = "/opt/orca-data/claude-agent-view/made-up/orca-agent-view"
+# What Orca puts into the shell of a terminal that holds no coding agent: every name seen in such a terminal of Orca
+# 1.4.266 (the values are made up). Among them is one that begins with CLAUDE_: Orca names its own plugin for Claude
+# Code. A terminal of Orca that holds no coding agent is where the job and the watcher run.
 ORCA_TERMINAL = {
-    "ORCA_TERMINAL_HANDLE": "term_00000000",
-    "ORCA_PANE_KEY": "made-up",
+    "ORCA_AGENT_HOOK_ENDPOINT": "made-up",
+    "ORCA_AGENT_HOOK_ENV": "made-up",
+    "ORCA_AGENT_HOOK_OPENCODE_TUI": "made-up",
+    "ORCA_AGENT_HOOK_PORT": "0",
+    "ORCA_AGENT_HOOK_TOKEN": "made-up",
+    "ORCA_AGENT_HOOK_TRANSPORT": "made-up",
+    "ORCA_AGENT_HOOK_VERSION": "1",
     "ORCA_AGENT_PANE": "made-up",
+    "ORCA_APP_VERSION": "9.9.9",
+    "ORCA_CLAUDE_AGENT_VIEW_PLUGIN_DIR": ORCA_PLUGIN,
+    "ORCA_CLAUDE_CONFIG_DIR": "/opt/orca-data/claude-config",
+    "ORCA_CLAUDE_PROFILE_POINTER": "made-up",
+    "ORCA_CLI_BIN_DIR": ORCA_BIN,
+    "ORCA_IMAGE_PROTOCOL": "made-up",
+    "ORCA_PANE_KEY": "made-up",
+    "ORCA_PROVIDER_HOST": "1",
+    "ORCA_RUNTIME_SOURCE_ID": "made-up",
+    "ORCA_RUNTIME_SOURCE_INCARNATION": "made-up",
+    "ORCA_RUNTIME_SOURCE_PROFILE_PATH": "/opt/orca-data/profile",
     "ORCA_TAB_ID": "00000000-0000-4000-8000-000000000001",
+    "ORCA_TERMINAL_HANDLE": "term_00000000",
+    "ORCA_USER_DATA_PATH": "/opt/orca-data",
     "ORCA_WORKSPACE_ID": "made-up",
     "ORCA_WORKTREE_ID": "made-up",
-    "ORCA_APP_VERSION": "9.9.9",
-    "ORCA_CLI_BIN_DIR": "/Applications/Orca.app/Contents/Resources/bin",
-    "ORCA_PROVIDER_HOST": "1",
+    "ORCA_WSL_HOSTS_GATE_STATE": "made-up",
+    "CLAUDE_CODE_PLUGIN_DIRS": ORCA_PLUGIN,
     "TERM_PROGRAM": "Orca",
     "TERM_PROGRAM_VERSION": "9.9.9",
     "__CFBundleIdentifier": "com.example.orca",
     "COLORTERM": "truecolor",
 }
-ORCA_BIN = "/Applications/Orca.app/Contents/Resources/bin"
 # The program that holds Orca's terminals, by the names it was seen with: "Orca Agents" in Orca 1.4.266, and
 # "orca-terminal-host" before.
 ORCA_HOSTS = ["Orca Agents", "orca-terminal-host"]
@@ -925,6 +945,17 @@ def no_model_text_in(run: dict[str, object], *texts: str) -> None:
         assert text not in str(run.get("stderr")), "the program's error output carries text of the model"
 
 
+def only_result_lines_on_stdout(run: dict[str, object]) -> None:
+    """Standard output carries the JSON result lines and nothing else: no text of the model, posted or not."""
+    for line in str(run.get("stdout") or "").splitlines():
+        if line.strip():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                value = None
+            assert isinstance(value, dict), f"standard output carries a line that is not a result: {line!r}"
+
+
 # --- Inside a coding agent, nothing starts --------------------------------------------------------------
 
 
@@ -1039,27 +1070,16 @@ def test_in_a_terminal_of_orca_the_job_runs_unless_an_agent_holds_it_and_agy_get
 PASSED_THROUGH = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ")
 
 
-@pytest.mark.parametrize("case", ["marks in every value", "a temporary folder that marks"])
-def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_an_agent(world: World, case: str):
+def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_an_agent(world: World):
     world.label(world.pull(7), "verify")
     home = world.root / ".claude"
     home.mkdir()
-    if case == "marks in every value":
-        planted = {"HOME": str(home), "USER": "orca", "LOGNAME": "claude", "SHELL": "/opt/codex/bin/sh",
-                   "LANG": "orca.UTF-8", "LC_ALL": "claude", "TERM": "xterm-orca", "TZ": "Orca/Island"}
-    else:
-        tmp = world.root / "orca-tmp"
-        tmp.mkdir()
-        planted = {"TMPDIR": str(tmp)}
+    planted = {"HOME": str(home), "USER": "orca", "LOGNAME": "claude", "SHELL": "/opt/codex/bin/sh",
+               "LANG": "orca.UTF-8", "LC_ALL": "claude", "TERM": "xterm-orca", "TZ": "Orca/Island"}
     env = world.orca_env(**planted)
     env["PATH"] = os.pathsep.join([env["PATH"], "/opt/claude-code/bin", "/opt/tools/.codex/bin"])
     env["OTHER_TOOL_DIR"] = "/opt/orca/tools"
     run = world.run_watch(extra_env=env, parent="Orca Agents")
-    if case == "a temporary folder that marks":
-        # The folders the job makes for the run would carry the mark: nothing starts.
-        assert run["code"] == 4 and "temporary_folder" in str(run["stderr"]), run
-        assert world.agy_runs() == [] and world.gh_calls() == []
-        return
     [result] = results_of(run)
     assert result.get("status") == "posted", run
     [record] = world.agy_runs()
@@ -1084,6 +1104,63 @@ def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_
     kept = json.loads((answer_folder(result) / "agy.json").read_text(encoding="utf-8"))
     own = {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
     assert set(kept["environment_names"]) - own == set(got) - own
+
+
+
+@pytest.mark.parametrize("form", ["named", "linked"])
+@pytest.mark.parametrize("program", ["watcher", "job"])
+def test_a_temporary_folder_that_marks_orca_or_an_agent_starts_no_run(world: World, program: str, form: str):
+    """The folders the job makes for a run lie in the folder for temporary files, and agy's environment names them:
+    when that folder marks, as named or once its links are followed, agy does not start, the run does not count,
+    the mark stays and the watcher stops."""
+    world.label(world.pull(7), "verify")
+    marked = world.root / "orca-tmp"
+    marked.mkdir()
+    folder = marked
+    if form == "linked":
+        folder = world.root / "tmp-link"
+        folder.symlink_to(marked)
+    env = world.orca_env(TMPDIR=str(folder))
+    if program == "watcher":
+        run = world.run_watch(extra_env=env, parent="Orca Agents")
+        assert run["code"] == 4 and "temporary_folder" in str(run["stderr"]), run
+        assert results_of(run) == [], run
+        saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+        assert saved["handled"] == {}, "the mark was handled"
+        assert LABELS["verify"] in world.github_state()["items"]["7"]["labels"], "the mark was taken off"  # type: ignore[index]
+    else:
+        out, _ = world.start(world.under("Orca Agents", world.job_argv("verify", 7)), env)
+        result = result_of(World.wait(out))
+        assert result.get("status") == "error" and "temporary_folder" in result.get("reasons", []), result
+        assert result.get("ran") is False, result
+    assert world.agy_runs() == [], "agy started with folders whose paths mark"
+    assert sum(world.job_state().get("days", {}).values()) == 0  # type: ignore[union-attr]
+    assert posted(world) == []
+
+
+# Ways a coding agent shows inside a terminal of Orca that the refusal must see, now that Orca's own names do not
+# make it refuse: names Orca sets only where it started an agent (seen in Orca 1.4.266), names of Antigravity's
+# own shells (a guess on the safe side), Claude Code's plugins named by someone other than Orca, and agents among
+# the parents that are named after flags or in a folder whose name holds spaces.
+AGENT_IN_ORCA = {
+    "Orca started an agent here": ({"ORCA_AGENT_LAUNCH": "made-up", "ORCA_AGENT_LAUNCH_TOKEN": "made-up"}, None, "", "ORCA_AGENT_LAUNCH"),
+    "Antigravity's own shell": ({"ANTIGRAVITY_AGENT": "1"}, None, "", "ANTIGRAVITY_AGENT"),
+    "Claude Code's plugins not Orca's": ({"CLAUDE_CODE_PLUGIN_DIRS": "/opt/elsewhere/plugins"}, None, "", "CLAUDE_CODE_PLUGIN_DIRS"),
+    "Antigravity among the parents": ({}, "agy", "", "parent:agy"),
+    "an agent named after flags": ({}, "node", "--max-old-space-size=4096 --no-warnings /opt/tools/bin/claude", "parent:claude"),
+    "an agent in a folder with spaces": ({}, "node", "/opt/My  Agent Tools/bin/claude", "parent:claude"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(AGENT_IN_ORCA))
+def test_in_a_terminal_of_orca_an_agent_orca_or_antigravity_started_or_one_named_late_still_stops_the_job(world: World, case: str):
+    world.label(world.pull(7), "verify")
+    extra, parent, words, reason = AGENT_IN_ORCA[case]
+    env = world.orca_env(**extra)
+    out, _ = world.start(world.under("Orca Agents", world.under(parent, world.job_argv("verify", 7), words)), env)
+    result = result_of(World.wait(out))
+    assert result.get("status") == "refused" and reason in result.get("reasons", []), f"{case}: {result}"
+    assert world.agy_runs() == [] and world.gh_calls() == []
 
 
 def _start_line(program: str) -> str:
@@ -1156,6 +1233,8 @@ def test_the_terminal_shows_each_run_its_title_a_line_a_minute_and_how_it_ended(
         assert ANSWER_PUBLIC not in shown and "someone@example.org" not in shown, "text of a held answer was shown"
     assert "\x1b" not in shown and "\x07" not in shown, "a control character reached the terminal"
     no_model_text_in(run, ANSWER_PRIVATE)
+    only_result_lines_on_stdout(run)
+    assert ANSWER_PUBLIC not in str(run["stdout"]), "the public part was printed on standard output"
 
 
 # --- Only a mark of the project's account on one of its own items starts a job --------------------------
@@ -1656,8 +1735,10 @@ def test_the_whole_answer_stays_private_and_only_the_public_part_is_posted_under
     assert folder.resolve().is_relative_to(world.private.resolve())
     assert not folder.resolve().is_relative_to(ROOT.resolve())
     assert (world.private.stat().st_mode & 0o077) == 0, "the private folder is open to other accounts"
-    # The terminal shows the public part once it is posted; the private part never.
+    # The terminal shows the public part once it is posted, on standard error; the private part never.
     no_model_text_in(run, ANSWER_PRIVATE)
+    only_result_lines_on_stdout(run)
+    assert ANSWER_PUBLIC not in str(run["stdout"])
 
 
 CUTS = {
@@ -2391,6 +2472,8 @@ def test_the_coordinator_hears_a_fixed_line_that_carries_no_text_of_the_model(wo
     for text in (ANSWER_PUBLIC, ANSWER_PRIVATE, "PUBLIC-SENTENCE", "PRIVATE-SENTENCE"):
         assert text not in json.dumps(call) and text not in "\n".join(logged)
     no_model_text_in(run, ANSWER_PRIVATE)
+    only_result_lines_on_stdout(run)
+    assert ANSWER_PUBLIC not in str(run["stdout"])
 
 
 def test_without_a_run_to_tell_the_line_goes_only_to_the_private_file(world: World):
