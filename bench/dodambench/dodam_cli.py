@@ -528,15 +528,17 @@ class Case:
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
         try:
             result = self._watch(proc, stdin, started, left)
+            # ended by a signal no limit of the case explains
+            signalled = result.limit is None and result.signal is not None
             if result.limit is None and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
             self._end(proc)
         if separated and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
-        if result.limit is None and result.signal is not None:
+        if signalled and result.limit != "memory":
             # the program the case runner started was ended by a signal: the case fails, whatever
-            # its test checks afterwards
+            # its test checks afterwards, and says which signal also when it left processes behind
             self._signals.append(result.signal)
         high_now = _judge.highest_memory() if separated else 0
         above = _above_in_a_new_high(high_before, high_now, held_before["taken"],
@@ -771,7 +773,9 @@ class Case:
             why = _not_removed(exc)
             if why is None:
                 raise fault(f"cannot remove the case's folder: {exc}") from None
-            self._broken.append(f"left what cannot be removed ({why})")
+            what = ("left what could not be removed in the step's time" if isinstance(exc, _judge.TooMuchLeft)
+                    else "left what cannot be removed")
+            self._broken.append(f"{what} ({why})")
 
 
 @contextmanager

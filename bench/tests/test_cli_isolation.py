@@ -1177,18 +1177,20 @@ def test_second_case_looks_whether_any_of_it_changed():
 '''
 
 
-# What the build leaves that a case may read: files and folders in the program's folder and in a
-# temporary folder. The first case notes when each was last read, then reads some and lists the folders;
-# the second notes it again.
-READ_MARKS = ("/app/bits/b0", "/app/bits/b1", "/app/bits/b2", "/app/bits/b3", "/app/bits", "/tmp/t0", "/tmp/t1", "/tmp")
+# What the build and the working phase leave that a case may read: files and folders in the program's
+# folder and in a temporary folder, one of them changed, by the build's say, in the year 2100. The first
+# case notes when each was last read, then reads some and lists the folders; the second notes it again.
+READ_MARKS = ("/app/bits/b0", "/app/bits/b1", "/app/bits/b2", "/app/bits/b3", "/app/bits", "/app/given.txt",
+              "/tmp/t0", "/tmp/t1", "/tmp")
 LEAVES_FILES_TO_READ = ("mkdir -p /app/bits && for n in 0 1 2 3; do echo x > /app/bits/b$n; done && "
+                        "touch -d @4102444800 /app/bits/b3 && "
                         "echo y > /tmp/t0 && echo y > /tmp/t1 && chmod 0644 /tmp/t0 /tmp/t1")
 READS_SOME = r'''
 import json, os, sys
 MARKS = READ_MARKS
 seen = {place: os.stat(place).st_atime_ns for place in MARKS}
 if sys.argv[1:] == ["read"]:
-    for place in ("/app/bits/b1", "/app/bits/b3", "/tmp/t1"):
+    for place in ("/app/bits/b1", "/app/bits/b3", "/app/given.txt", "/tmp/t1"):
         with open(place) as f:
             f.read()
     os.listdir("/app/bits")
@@ -1216,7 +1218,12 @@ def test_second_case_looks_when_they_were_read():
 def test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next(tmp_path):
     """Reading a file or listing a folder can move when it was last read. Nothing the build or the
     working phase left that a case may read shows the next case whether it was read."""
-    result = judge_attack(tmp_path, READS_SOME, {"functional/test_read.py": READS_THEN_LOOKS}, BUILD_CMD=LEAVES_FILES_TO_READ)
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/given.txt").write_text("left by the working phase\n")
+    # the program's folder is handed over well before the build begins, as a large one is
+    handed_over_early = (("dodam_judge.py", "        if deps_dir and links:\n", "        time.sleep(2)\n        if deps_dir and links:\n"),)
+    result = judge_attack(tmp_path, READS_SOME, {"functional/test_read.py": READS_THEN_LOOKS}, BUILD_CMD=LEAVES_FILES_TO_READ,
+                          room={"changed": handed_over_early})
     assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
     before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
     assert [place for place in READ_MARKS if before[place] != after[place]] == [], (before, after)
