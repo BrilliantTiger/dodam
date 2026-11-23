@@ -9553,6 +9553,88 @@ def test_a_mark_that_does_not_hold_for_its_line_is_refused(monkeypatch):
     assert lists >= 50, lists
 
 
+def agreeing(workflows: dict[str, str]) -> dict[str, list]:
+    """A closed list that agrees with the given workflows line by line, as one who changes both in one commit would write
+    it: every line that the reading of steps takes for a command carries a mark, the one that holds where one does."""
+    listed = {}
+    for name, text in workflows.items():
+        steps = steps_of_the_workflows({name: text})
+        commands = [(line.strip(), step) for step in steps for line in step["run"] if line.strip() and not line.strip().startswith("#")]
+        held, k = [], 0
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if k < len(commands) and line.strip().removeprefix("- ").removeprefix("run:").strip() == commands[k][0]:
+                command, step = commands[k]
+                k += 1
+                marks = [mark_of(one, step["folder"] or ".") for one in with_the_matrix(command, step["matrix"])]
+                held.append((line, next((m for m in marks if not m.startswith("refused")), "protected"), "made up"))
+            else:
+                held.append(line)
+        listed[name] = held
+    return listed
+
+
+SITE_CHECK = "        run: python -I tools/site/build.py --check"
+GEMINI_TESTS = "        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py"
+# Each invariant of the closed list, broken alone in a workflow with which the list agrees: (what the finding says, the
+# workflow, the line it replaces, the lines put in its place).
+INVARIANT_VARIANTS = [
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run:", "          python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        env: { PYTHONPATH: docs }", SITE_CHECK]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, [SITE_CHECK, "      - { name: More, run: python -I tools/site/build.py --check }"]),
+    ("a line not in the one notation", "ci.yml", GEMINI_TESTS, ["        working-directory:", "          bench", GEMINI_TESTS]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        name: &named Check", SITE_CHECK]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: !!str python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: >", "          python -I tools/site/build.py --check"]),
+    ("an action that is not pinned", "site.yml", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", ["      - uses: actions/checkout@v7"]),
+    ("a key that decides how lines run", "site.yml", SITE_CHECK, ["        shell: bash", SITE_CHECK]),
+    ("a variable that is not on the list", "site.yml", SITE_CHECK, ["        env:", "          PYTHONPATH: docs", SITE_CHECK]),
+    ("a step that sets what later steps are given", "site.yml", SITE_CHECK, ['        run: echo x >> "$GITHUB_ENV"']),
+    ("a variable set for a command", "site.yml", SITE_CHECK, ["        run: PYTHONPATH=docs python -I tools/site/build.py --check"]),
+    ("a path that is not protected", "ci.yml", GEMINI_TESTS, ["        run: python -m pytest -q -c ../docs/pytest.ini tests/test_gemini.py"]),
+    ("a character or a word outside", "ci.yml", GEMINI_TESTS, ["        run: python -m pytest -q 'tests/test_gemini.py'"]),
+    ("a program that is not on the list", "ci.yml", GEMINI_TESTS, ["        run: sh ci/check.sh"]),
+    ("not in isolated mode", "site.yml", SITE_CHECK, ["        run: python tools/site/build.py --check"]),
+    ("docker started for anything but building", "ci.yml", "        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .", ["        run: docker run dodam-bench/python:dev"]),
+    ("not protected", "ci.yml", "          - claude_only.py --check --part 1/3", ["          - ../../docs/x.py"]),
+]
+
+
+@pytest.mark.parametrize("says, workflow, line, put", INVARIANT_VARIANTS)
+def test_each_invariant_of_the_closed_list_catches_its_variant_when_the_list_agrees(monkeypatch, says, workflow, line, put):
+    workflows = the_workflows()
+    lines = workflows[workflow].split("\n")
+    at = lines.index(line)
+    changed = workflows | {workflow: "\n".join(lines[:at] + put + lines[at + 1 :])}
+    monkeypatch.setitem(globals(), "CLOSED_LIST", agreeing(changed))
+    findings = closed_list_findings(changed)
+    assert any(says in " | ".join(map(str, finding)) for finding in findings), findings
+
+
+def test_a_wrong_mark_a_missing_mark_a_line_off_the_list_and_a_workflow_off_the_list_are_each_caught(monkeypatch):
+    workflows = the_workflows()
+    listed = agreeing(workflows)
+    at = next(n for n, entry in enumerate(listed["ci.yml"]) if not isinstance(entry, str))
+    entry = listed["ci.yml"][at]
+    cases = [("marked", workflows, listed | {"ci.yml": listed["ci.yml"][:at] + [(entry[0], "runner", "made up")] + listed["ci.yml"][at + 1 :]}),
+             ("without a mark", workflows, listed | {"ci.yml": listed["ci.yml"][:at] + [entry[0]] + listed["ci.yml"][at + 1 :]}),
+             ("not on the closed list", workflows | {"site.yml": workflows["site.yml"].replace(SITE_CHECK, SITE_CHECK + " ")}, listed),
+             ("a workflow that is not on the closed list", workflows | {"more.yaml": "name: more\n"}, listed)]  # fmt: skip
+    for says, given, held in cases:
+        monkeypatch.setitem(globals(), "CLOSED_LIST", held)
+        assert any(says in " | ".join(map(str, finding)) for finding in closed_list_findings(given)), says
+
+
+def test_every_workflow_file_is_read_whatever_its_ending(tmp_path, monkeypatch):
+    folder = tmp_path / ".github" / "workflows"
+    folder.mkdir(parents=True)
+    for name in ("a.yml", "b.yaml"):
+        (folder / name).write_text("name: x\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    assert sorted(the_workflows()) == ["a.yml", "b.yaml"]
+
+
 @pytest.mark.parametrize("seed", [151, 152])
 def test_every_change_to_what_decides_how_a_workflow_line_runs_is_refused_by_the_closed_list(seed):
     changed = changed_workflows(random.Random(seed))
@@ -9847,6 +9929,33 @@ def test_a_script_that_a_test_starts_by_a_bare_name_or_with_any_python_is_found_
         if not found or protected(found[0][3]):
             missed.append((python, options, script))
     assert missed == [], missed[:5]
+
+
+SCAN_HEAD = ('import os\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[2]\n'
+             'SCRIPT = "{script}"\n\n\ndef test_it(command, rest, text, where, program):\n    {call}\n')  # fmt: skip
+# Starts whose script the file itself names, in every form the scan reads: a path joined to the root, a name given
+# above, a tuple, Python by its name, a folder to start in.
+READABLE_STARTS = ['subprocess.run([sys.executable, str(ROOT / "{script}")])', "subprocess.run([sys.executable, SCRIPT])",
+                   'subprocess.run((sys.executable, "{script}"))', 'subprocess.check_call(["python3", "-u", "{script}"])',
+                   'subprocess.Popen([sys.executable, "-B", SCRIPT], cwd=str(ROOT))', 'subprocess.run(["sh", "{script}"])']  # fmt: skip
+# Starts the scan cannot read: what is started, or where, is computed while the test runs.
+UNREADABLE_STARTS = ["subprocess.run(command)", "subprocess.run([sys.executable, *rest])", "subprocess.run([sys.executable, text.strip()])",
+                     'subprocess.run([sys.executable, "{script}"], cwd=where)', 'subprocess.run([program, "{script}"])',
+                     "subprocess.run(text, shell=True)", "os.system(text)", "os.execv(sys.executable, command)", 'subprocess.run(["sh", text])',
+                     "subprocess.Popen(args=command)"]  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", [191, 192])
+def test_the_scan_finds_every_start_it_reads_and_fails_on_every_start_it_cannot_read(seed):
+    rng = random.Random(seed)
+    missed = []
+    for call in READABLE_STARTS + UNREADABLE_STARTS:
+        script = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz_") for _ in range(rng.randint(3, 10))) + rng.choice([".py", ".sh"])
+        source = SCAN_HEAD.format(script=script, call=call.format(script=script))
+        found = started_by({"bench/tests/test_made_up.py": source})
+        if not any(not protected(entry[3]) for entry in found):
+            missed.append(call)
+    assert missed == [], missed
 
 
 def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protected_folder():
@@ -10350,6 +10459,101 @@ def test_a_program_whose_real_path_names_a_hidden_value_is_started_from_a_path_o
     assert program.resolve() == program and program.is_relative_to(start.state), program
     assert module("guard").names(str(program), MACHINE, ("BrilliantTiger", "dodam")) == []
     assert program.read_bytes() == real.read_bytes()
+
+
+OWN_SHOWS = '{"loggedIn": true, "authMethod": "oauth_token"}'
+SIGN_INS = {
+    "the owner's, with an address": (False, '{"loggedIn": true, "email": "somebody@example.invalid", "orgName": "Somebody Household"}'),
+    "the owner's, without an address": (False, OWN_SHOWS),
+    "the owner's, saying nothing": (False, '{"loggedIn": true}'),
+    "the desk's own, as its settings say": (True, OWN_SHOWS),
+    "the desk's own, with an address": (True, '{"loggedIn": true, "authMethod": "oauth_token", "email": "desk@example.invalid"}'),
+    "the desk's own, another way of signing in": (True, '{"loggedIn": true, "authMethod": "claude.ai"}'),
+    "the desk's own, saying less": (True, '{"loggedIn": true}'),
+    "the desk's own, saying more": (True, '{"loggedIn": true, "authMethod": "oauth_token", "orgName": "Somewhere"}'),
+}
+WAYS = {"no way": FACTS.replace("[ways.github]\nopen = true", "[ways.github]\nopen = false"), "GitHub": FACTS}
+
+
+@pytest.mark.parametrize("sign_in", sorted(SIGN_INS))
+@pytest.mark.parametrize("ways", sorted(WAYS))
+def test_a_way_is_open_only_on_the_desks_own_sign_in_as_its_settings_name_it_and_after_a_count_of_zero(tmp_path, monkeypatch, sign_in, ways):
+    started = Start(tmp_path, monkeypatch, facts=WAYS[ways])
+    own, shows = SIGN_INS[sign_in]
+    if own:
+        started.own_sign_in()
+        (started.bin / "own-status").write_text(shows)
+    else:
+        (started.bin / "owner-status").write_text(shows)
+    started.committed()
+    allowed = sign_in == "the desk's own, as its settings say"
+    try:
+        planned = started.plan(stand_in=None)
+    except started.start.Problem as refusal:
+        assert not allowed, str(refusal)
+        return
+    if ways != "no way":
+        assert allowed, sign_in
+        assert planned["own_sign_in"] and planned["exposure"]["counted"] > 0 and planned["exposure"]["found"] == 0, planned.get("exposure")
+
+
+def a_program_whose_real_path_names_the_owner(start, tmp_path) -> Path:
+    real = tmp_path / "somebody-local" / ".local" / "share" / "claude" / "claude"
+    real.parent.mkdir(parents=True)
+    version = lock_file()["claude_version"]
+    real.write_text(f"""#!/bin/sh\nif [ "$1" = auth ]; then echo '{OWN_SHOWS}'; else echo "{version} (Claude Code)"; fi\n""")
+    real.chmod(0o755)
+    (start.bin / "claude").unlink()
+    (start.bin / "claude").symlink_to(real)
+    return real
+
+
+@pytest.mark.parametrize("there", ["a link", "open to others", "not to be run", "other bytes", "a folder for the new copy"])
+def test_a_copy_of_the_program_that_does_not_hold_is_not_reused(start, tmp_path, there):
+    start.own_sign_in()
+    real = a_program_whose_real_path_names_the_owner(start, tmp_path)
+    folder = start.state / "program"
+    folder.mkdir(mode=0o700)
+    copy = folder / "claude"
+    if there == "a link":
+        copy.symlink_to(real)
+    elif there == "a folder for the new copy":
+        (folder / "claude.new").mkdir()
+    else:
+        copy.write_bytes(real.read_bytes() + (b"# other\n" if there == "other bytes" else b""))
+        copy.chmod({"open to others": 0o777, "not to be run": 0o600}.get(there, 0o700))
+    program = Path(start.plan()["argv"][0])
+    info = os.lstat(program)
+    assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o777 == 0o700 and info.st_uid == os.getuid(), (there, oct(info.st_mode))
+    assert program.read_bytes() == real.read_bytes()
+
+
+@pytest.mark.parametrize("change", ["other bytes", "open to others", "a link", "a folder open to others", "another owner"])
+def test_a_copy_of_the_program_is_checked_again_when_each_session_starts(start, tmp_path, monkeypatch, change):
+    start.own_sign_in()
+    real = a_program_whose_real_path_names_the_owner(start, tmp_path)
+    planned = start.plan()
+    program = Path(planned["argv"][0])
+    relay = module("relay")
+    running = relay.Relay(planned, {"PATH": "/usr/bin:/bin"}, typed=io.StringIO(""), shown=io.StringIO(), exit_when_idle=True,
+                          retry_seconds=0.05, quiet_seconds=0.4)  # fmt: skip
+    if change == "other bytes":
+        program.write_bytes(program.read_bytes() + b"# other\n")
+    elif change == "open to others":
+        program.chmod(0o777)
+    elif change == "a link":
+        program.unlink()
+        program.symlink_to(real)
+    elif change == "a folder open to others":
+        program.parent.chmod(0o777)
+    else:
+        uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    try:
+        seen = running.run_session("Hello.", planned["env"])
+    except module("state").StateProblem:
+        seen = {"not_started": True}
+    assert seen.get("not_started") is True, (change, seen)
 
 
 def main_says_told(text: str) -> bool:
