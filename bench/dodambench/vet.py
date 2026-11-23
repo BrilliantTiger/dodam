@@ -29,7 +29,8 @@ from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from .convert import to_harbor, verifier_env
-from .judge import LEFT_BEHIND, JudgeFault, judge, names_of_tests, reward_of
+from .judge import (LEFT_BEHIND, NOT_JUDGED_FOR_MEASURING, OUTCOMES, UNMEASURED, JudgeFault, judge, names_of_tests,
+                    reward_of)
 from .languages import LANGUAGES, Language
 from .task import (PROCESS_CAP, Task, TaskError, TestFile, cases_mount, container_memory_mb, load_task,
                    materialize, task_problems)
@@ -56,7 +57,6 @@ class VetError(Exception):
 
 # --- what a judging left, as the one record the judging code reads ---
 
-OUTCOMES = ("passed", "failed", "skipped")         # every outcome the judge gives a case
 REWARD_KEYS = tuple(reward_of([], True, "", True))  # the parts of the judge's reward
 # The most a file a judging left may hold. The largest of 70 results of earlier judgings held 17,130
 # bytes; a case's message is at most 300 characters and the build's log 2,000.
@@ -150,6 +150,9 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.name", "a text that is not empty")
         if case["outcome"] not in OUTCOMES:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.outcome", f"one of {', '.join(OUTCOMES)}")
+        if case["outcome"] == UNMEASURED and case["message"] != NOT_JUDGED_FOR_MEASURING:
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.message", "the judge's own words for a case not judged "
+                                                                    "for measuring")
         own = files.get(case["file"])
         if own is None:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.file", f"a file of tests the judge runs at step {step}")
@@ -175,6 +178,10 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
         if not _whole_picture(of_file[test.file], test, names, build_ok, left, cli):
             raise _not_of_the_shape(DETAILS_FILE, "tests", f"a case for every test of {test.file}, each once, or "
                                                            f"the one entry the judge writes for the whole file")
+    unmeasured = [f"{c.file}::{c.name}" for c in cases if c.outcome == UNMEASURED]
+    if details.get(UNMEASURED) != unmeasured:
+        raise _not_of_the_shape(DETAILS_FILE, UNMEASURED, "the cases not judged for measuring, as file::name in the "
+                                                          "order of the cases, and an empty list where there is none")
     expected = reward_of([{"outcome": c.outcome, "kind": c.kind, "step": c.step} for c in cases], build_ok, step,
                          separated)
     if not isinstance(reward, dict) or set(reward) != set(expected):
@@ -184,6 +191,10 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(REWARD_FILE, key, "a number")
         if reward[key] != value:
             raise _not_of_the_shape(REWARD_FILE, key, f"{value}, what the cases give")
+    if unmeasured:
+        # the judging is no judgement of the solution, whatever kind it was written as: a fault of measuring
+        raise JudgeFault(json.dumps({"severity": "error", "file": DETAILS_FILE, "key": UNMEASURED,
+                                     "message": f"{NOT_JUDGED_FOR_MEASURING}: {', '.join(unmeasured)}"}))
     return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward))
 
 

@@ -151,6 +151,14 @@ def _own_memory(status: str = "/proc/self/status") -> int:
     return own
 
 
+def _in_time(now: dict) -> bool:
+    """Whether a reading was taken in time, not cut by time. Only such a reading moves a lowest figure:
+    each of its parts is taken from the side that makes the figure no smaller, so it lies no lower than
+    what the container held, whatever moved; while a reading is cut by time a part can go and come back
+    unseen, and the reading may lie below."""
+    return not now.get("late")
+
+
 def _lowest(lowest: int | None, figure: int) -> int:
     """The lowest figure a case has reached, with the figure read now. A case's memory is counted
     from there: from one starting figure for all its runs, and when memory that was there at the
@@ -161,7 +169,6 @@ def _lowest(lowest: int | None, figure: int) -> int:
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
-UNSETTLED = "unsettled"     # what the watch says when it gave a run up because no reading could be taken
 PR_SET_CHILD_SUBREAPER = 36
 
 
@@ -292,9 +299,8 @@ class Case:
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
-        # readings in a row that could not say on which side of a line the figure lies, and whether a
-        # run of the case was given up for them
-        self._unsettled_in_a_row = 0
+        # whether a reading of the case could not say on which side of a line the figure lay: then the
+        # case cannot pass, and what its test decides stands only when it fails
         self._unsettled = False
         # the kernel's records: the lowest figure since the case began, and the most they stood above it
         self._records_lowest: int | None = None
@@ -523,8 +529,12 @@ class Case:
         held_before = self._container() if separated else {"taken": 0, "all": 0}
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
-            # own files are written; a later run of the case is measured against it as well
-            self._lowest = _lowest(self._lowest, self._figure(held_before))
+            # own files are written; a later run of the case is measured against it as well. A
+            # reading cut by time is no starting figure, and its case cannot pass
+            if _in_time(held_before):
+                self._lowest = _lowest(self._lowest, self._figure(held_before))
+            else:
+                self._undecided()
             self._records(held_before)
         started = time.monotonic()
         try:
@@ -540,13 +550,9 @@ class Case:
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
         try:
             result = self._watch(proc, stdin, started, left)
-            # given up because no reading could be taken: no limit is broken, and the case is not judged
-            unsettled = result.limit == UNSETTLED
-            if unsettled:
-                result.limit, self._unsettled = None, True
             # ended by a signal no limit of the case explains
-            signalled = result.limit is None and result.signal is not None and not unsettled
-            if result.limit is None and not unsettled and self._left_processes(proc):
+            signalled = result.limit is None and result.signal is not None
+            if result.limit is None and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
             self._end(proc)
@@ -598,7 +604,12 @@ class Case:
 
     def _records(self, now: dict) -> int:
         """Take note of the kernel's records as they are now; what they stand above their lowest
-        figure in the case, beyond the amount left out, counts as memory."""
+        figure in the case, beyond the amount left out, counts as memory. A reading cut by time
+        moves neither the lowest figure nor the most they stood above it."""
+        if not _in_time(now):
+            if self._records_lowest is None:
+                return 0
+            return _records_counted(max(now.get("records", 0) - self._records_lowest, 0), self._left_out_at_most)
         self._records_lowest, grown = _records_grown(self._records_lowest, now.get("records", 0))
         self._records_grown = max(self._records_grown, grown)
         return _records_counted(grown, self._left_out_at_most)
@@ -608,10 +619,15 @@ class Case:
         together."""
         return _judge.container_memory(outside=lambda: _files_held(self._cfg["work_root"]))
 
+    def _undecided(self) -> None:
+        """A reading could not say on which side of a line the figure lies: from now on the case cannot pass."""
+        self._unsettled = True
+        self.measured["undecided"] = self.measured.get("undecided", 0) + 1
+
     def _figure(self, now: dict) -> int:
         """The container's count, less the cases' files, which have a limit of
         their own, and less the case runner's own memory."""
-        files = now["files"] if "files" in now else _files_held(self._cfg["work_root"])
+        files = now["files"]
         return now["taken"] - files - _own_memory()
 
     def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float) -> Result:
@@ -627,28 +643,34 @@ class Case:
             records what grew beyond the amount that is left out. Above the limit the program is
             ended. It is ended as well when the container is about to run out of memory, whatever
             the case's limit says: that keeps the kernel from having to choose what to end. A reading
-            whose parts still moved apart can say only that the figure lies within what moved; when a
-            line lies in there too, the reading ends nothing and is taken again, and after
-            UNSETTLED_READINGS such readings in a row the program is ended and its case not judged."""
+            whose parts still moved apart can say only that the figure lies within what moved, and a
+            reading cut by time says nothing of either side; when such a reading cannot say on which
+            side of a line the figure lies, it ends nothing, and the case cannot pass."""
             now = self._container()
+            late = bool(now.get("late"))
             records = self._records(now)
             figure = self._figure(now)
-            self._lowest = _lowest(self._lowest, figure)
+            if _in_time(now):
+                self._lowest = _lowest(self._lowest, figure)
+            # how far the parts of the reading the figure was made of moved apart, and how many were cut by time
+            self.measured["moved_most"] = max(self.measured.get("moved_most", 0), now.get("moved", 0))
+            if late:
+                self.measured["late"] = self.measured.get("late", 0) + 1
+            if late or self._lowest is None:
+                self._undecided()
+                return None
             taken = figure - self._lowest + records
             self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
-            # how far the parts of the reading the figure was made of moved apart
-            self.measured["moved_most"] = max(self.measured.get("moved_most", 0), now.get("moved", 0))
             room = now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
             moved = now.get("moved", 0)
             high = taken > max_memory or (bool(now["cap"]) and now["taken"] + records > room)
             if not high:
-                self._unsettled_in_a_row = 0
                 return None
             low = taken - moved > max_memory or (bool(now["cap"]) and now["taken"] - moved + records > room)
             if low or moved <= _judge.TOGETHER_BYTES:
                 return "memory"
-            self._unsettled_in_a_row += 1
-            return UNSETTLED if self._unsettled_in_a_row >= _judge.UNSETTLED_READINGS else None
+            self._undecided()
+            return None
 
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
@@ -777,7 +799,8 @@ class Case:
             return
         try:
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"case": self._key, "unsettled": self._unsettled, "grown": self._records_grown,
+                f.write(json.dumps({"case": self._key, "unsettled": self._unsettled,
+                                    "undecided": self.measured.get("undecided", 0), "grown": self._records_grown,
                                     "left_out": min(self._records_grown, self._left_out_at_most),
                                     "counted": _records_counted(self._records_grown, self._left_out_at_most)}) + "\n")
         except OSError:
@@ -812,10 +835,6 @@ class Case:
             what = ("left what could not be removed in the step's time" if isinstance(exc, _judge.TooMuchLeft)
                     else "left what cannot be removed")
             self._broken.append(f"{what} ({why})")
-        if self._unsettled and not self.failing():
-            # no reading could say on which side of the limit the program's memory lay: no pass, and no failure
-            import pytest
-            pytest.skip(_judge.NOT_JUDGED_FOR_MEASURING)
 
 
 @contextmanager

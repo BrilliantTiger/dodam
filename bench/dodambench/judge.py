@@ -220,12 +220,15 @@ MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the co
 TOGETHER_BYTES = 2**20
 TOGETHER_SECONDS = 0.001
 TOGETHER_TRIES = 8
-# A reading that still moved more than TOGETHER_BYTES after its tries can say only that the figure lies
-# within what moved. When the limit lies in there too, it fails nothing and is taken again; after this
-# many such readings in a row the case is not judged, as a fault of measuring.
-UNSETTLED_READINGS = 25
+# A reading whose every try took longer than TOGETHER_SECONDS was not read in one piece, and one that
+# still moved more than TOGETHER_BYTES can say only that the figure lies within what moved. When it
+# cannot say on which side of a line the figure lies, it ends nothing, and its case cannot pass: a case
+# that would pass, or would be left unjudged, is UNMEASURED. What its test decided otherwise stands.
+UNMEASURED = "unmeasured"
+# every outcome the judge gives a case: pytest's three, and the judge's own for a case not judged for measuring
+OUTCOMES = ("passed", "failed", "skipped", UNMEASURED)
 NOT_JUDGED_FOR_MEASURING = ("not judged: the judge could not take a reading of the container's memory that says "
-                            "on which side of the limit it lies")
+                            "on which side of a line it lies")
 MACHINE_INFO = Path("/proc/meminfo")   # what the machine has, its swap included
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
@@ -564,7 +567,9 @@ def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
     total, and the smaller of the two is taken: a page or a file that came or went while the total
     was read neither lowers the figure nor raises it by more than what moved. A reading whose two
     halves differ by more than TOGETHER_BYTES, or that took longer than TOGETHER_SECONDS, is read
-    again, up to TOGETHER_TRIES times; then the reading whose halves moved least is taken."""
+    again, up to TOGETHER_TRIES times; then a reading that took no longer than that comes before one
+    that did, and of those the one whose halves moved least is taken. What came and went while a reading
+    was cut by time no half shows, so such a reading is "late": it says nothing of either side."""
     best = None
     for _ in range(TOGETHER_TRIES):
         began = time.monotonic()
@@ -579,17 +584,17 @@ def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
         moved = (abs(file_after - file_before) + abs(records_after - records_before) + abs(files_after - files_before)
                  + abs(swapped_after - swapped_before))
         # one value of the records for the figure and for their own count, so that nothing is counted twice
-        reading = (moved, took, current, max(swapped_before, swapped_after), min(file_before, file_after),
-                   min(records_before, records_after), min(files_before, files_after))
-        if best is None or (moved, took) < best[:2]:
+        reading = (took > TOGETHER_SECONDS, moved, took, current, max(swapped_before, swapped_after),
+                   min(file_before, file_after), min(records_before, records_after), min(files_before, files_after))
+        if best is None or reading[:3] < best[:3]:
             best = reading
         if moved <= TOGETHER_BYTES and took <= TOGETHER_SECONDS:
             break
-    moved, took, current, swapped, can_be_given_back, records, files = best
+    late, moved, took, current, swapped, can_be_given_back, records, files = best
     memory_max = _group_number(group, "memory.max") or 0
     return {"taken": current - can_be_given_back + swapped - records,
             "all": current, "cap": memory_max + swap_allowed(group) if memory_max else 0, "records": records,
-            "files": files, "moved": moved}
+            "files": files, "moved": moved, "late": int(late)}
 
 
 def highest_memory(group: Path = GROUP) -> int:
@@ -831,7 +836,7 @@ def tests_in(source: bytes | str) -> int:
 def reward_of(cases: list[dict], build_ok: bool, step: str, separated: bool) -> dict:
     """The reward of a judging at `step`, from its cases: what the judge writes, and what the tool
     that checks prepared solutions compares a judging's reward with."""
-    judged = [c for c in cases if c["outcome"] != "skipped"]
+    judged = [c for c in cases if c["outcome"] in ("passed", "failed")]
     failed = [c for c in judged if c["outcome"] == "failed"]
     reward = {"build_ok": 1.0 if build_ok else 0.0}
     for kind in ("functional", "boundary", "security"):
@@ -843,7 +848,9 @@ def reward_of(cases: list[dict], build_ok: bool, step: str, separated: bool) -> 
         reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
         reward[f"{kind}_judged"] = float(len(of_kind))
     reward.update({
-        "unjudged": float(len(cases) - len(judged)),
+        "unjudged": float(sum(c["outcome"] == "skipped" for c in cases)),
+        # cases not judged for measuring: no pass, and no judgement of the program either
+        "unmeasured": float(sum(c["outcome"] == UNMEASURED for c in cases)),
         "vulns_found": float(sum(c["kind"] == "security" for c in failed)),
         "regression_broken": float(sum(c["step"] != step for c in failed)),
         "reward": 1.0 if build_ok and cases and all(c["outcome"] == "passed" for c in cases) else 0.0,
@@ -1166,7 +1173,7 @@ class CliRun:
         self.highs_file = self.private / "highs.jsonl"
         self.records_file = self.private / "records.jsonl"
         self.records_highest = 0       # the most the kernel's records grew by in one case of this judging
-        self.not_judged = 0            # cases not judged because no reading of their memory could be taken
+        self.undecided = 0             # readings that could not say on which side of a line the figure lay
         # the case runner gives every case its own home, temporary folder and working folder
         env = {k: v for k, v in for_the_programs_side({**os.environ, **extra_env}).items() if k != "HOME"}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
@@ -1199,7 +1206,9 @@ class CliRun:
     def note_records(self, cases: list[dict]) -> None:
         """Write into each case's outcome how much of the kernel's records was left out of its
         memory and how much was counted, as the case runner noted it, so that a case that failed
-        for memory shows why."""
+        for memory shows why. A case with a reading that could not say on which side of a line the
+        figure lay is UNMEASURED when its test passed or left it unjudged: then the outcome depended
+        on the reading. A case whose test failed stays failed."""
         try:
             noted = [json.loads(line) for line in self.records_file.read_text(encoding="utf-8").splitlines() if line]
             self.records_file.unlink()
@@ -1211,9 +1220,9 @@ class CliRun:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
                 case["records_counted_bytes"] = max(n["counted"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
-                if any(n.get("unsettled") for n in mine):
-                    case["not_judged_for_measuring"] = True
-                    self.not_judged += 1
+                self.undecided += sum(n.get("undecided", 0) for n in mine)
+                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):
+                    case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,
@@ -1754,9 +1763,6 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
                                     "weakness": t.get("weakness")})
     app.stop()
     highs = cli.highs() if cli is not None else None
-    if cli is not None:
-        # cases not judged because no reading of their memory could be taken: no pass, and counted on their own
-        report["not_judged_for_measuring"] = cli.not_judged
     if cli is not None and run_as:
         records["highest_in_a_case"] = cli.records_highest
         records["left_out_of_a_case_at_most"] = min(cli.limits["memory_mb"] * 2**20 // 4, RECORDS_LEFT_OUT_MB * 2**20)
@@ -1778,12 +1784,17 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
         # and how many processes the kernel ended there
         report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
                             "ended_by_the_kernel": killed_for_memory()}
+        if cli is not None:
+            # how many readings of the step's cases could not say on which side of a line the figure lay
+            report["memory"]["undecided_readings"] = cli.undecided
         records["at_end"] = container_memory()["records"]
         report["memory"]["records_mb"] = {name: round(value / 2**20, 1) for name, value in records.items()}
         if highs is not None:
             # the runs that made a new high of the container's memory above the case's limit
             report["memory"]["highs_above_the_limit"] = highs
 
+    # the cases not judged for measuring, by name: their count is in the reward
+    report[UNMEASURED] = [f"{c['file']}::{c['name']}" for c in report["tests"] if c["outcome"] == UNMEASURED]
     reward = reward_of(report["tests"], report["build_ok"], step, bool(run_as))
     write_output(out_dir / "details.json", json.dumps(report, indent=1, ensure_ascii=False))
     write_output(out_dir / "reward.json", json.dumps(reward, indent=1))
