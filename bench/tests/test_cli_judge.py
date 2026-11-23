@@ -1157,7 +1157,7 @@ def test_between():
         text = f.read()
         f.close()
         reads["total"] += 1
-        if reads["total"] == 40:
+        if reads["total"] == 40 or (KEEPS and 40 < reads["total"] <= 52):
             CHANGE
             stand_in(group, held)
         return io.BytesIO(text) if "b" in mode else io.StringIO(text)
@@ -1183,6 +1183,9 @@ BETWEEN_TWO_READINGS = {
     "the cache of files grows": (0, 'held["current"] += 300 * MB; held["file"] += 300 * MB'),
     # a program that removes a file of 300 MB it wrote into its folder
     "a file in the case's folder is removed": (300, 'held["current"] -= 300 * MB; held["files"] -= 300 * MB'),
+    # a program that keeps reading: 40 MB more of the cache of files each time the judge has read the total,
+    # for longer than the judge reads again
+    "the cache of files keeps growing while the judge reads": (0, 'held["current"] += 40 * MB; held["file"] += 40 * MB'),
 }
 
 
@@ -1197,6 +1200,7 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
     files, change_code = BETWEEN_TWO_READINGS[change]
     seen = tmp_path / "seen.json"
     source = (BETWEEN.replace("GROUP", repr(str(tmp_path / "group"))).replace("FILES", str(files))
+              .replace("KEEPS", repr("keeps" in change))
               .replace("CHANGE", change_code).replace("SEEN", repr(str(seen))))
     result = judge_program(tmp_path, "import time\ntime.sleep(0.6)\nprint('fine')\n",
                            {"functional/test_between.py": source}, CASE_MEMORY_MB="256")
@@ -1323,11 +1327,12 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     figure is still read only once it stands still."""
     from test_cli_isolation import READER
     asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
+    reclaim, freeze = HELPERS_NAMES[:2]
     asked.mkdir()
     held.mkdir()
     mb = 2**20
     for name, text in {"memory.current": f"{2 * mb}\n", "memory.swap.current": "0\n", "cgroup.events": "populated 1\nfrozen 1\n",
-                       "cgroup.freeze": "0\n", "memory.reclaim": "",
+                       freeze: "0\n", reclaim: "",
                        "memory.stat": f"anon 4096\nfile 0\nfile_dirty {64 * mb}\n"}.items():
         (held / name).write_text(text)
     drop.write_text("")
@@ -1343,13 +1348,13 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     try:
         (asked / "ask-one").write_text("one")
         # the waiting pages take 3.5 seconds to be written; then the kernel is asked to let go, and
-        # what it let go of is freed 0.2 seconds later
+        # what it let go of is freed a hundredth of a second later
         time.sleep(3.5)
         (held / "memory.stat").write_text("anon 4096\nfile 0\nfile_dirty 0\n")
         deadline = time.monotonic() + 10
         while drop.read_bytes() != b"2" and time.monotonic() < deadline:
             time.sleep(0.005)
-        time.sleep(0.2)
+        time.sleep(0.01)
         (held / "memory.current").write_text(f"{mb}\n")
         while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
             time.sleep(0.01)

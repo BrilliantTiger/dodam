@@ -212,6 +212,14 @@ RECORDS_LEFT_OUT_MB = 16           # the most of the kernel's records that is le
 HIGHS_KEPT = 10                    # how many runs with a new high above the limit the result names
 RUNNER_MARK = 500                  # the kernel's mark of the case runner; the program's side has 1000, the judge 0
 MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the container less than this
+# One figure of the container is made of several of the kernel's files, read one after another while
+# the program runs. What can be given back is read before and after the container's total, and a
+# reading whose two halves differ by more than TOGETHER_BYTES, or that took longer than
+# TOGETHER_SECONDS, is read again, up to TOGETHER_TRIES times.
+TOGETHER_BYTES = 2**20
+TOGETHER_SECONDS = 0.001
+TOGETHER_TRIES = 8
+MACHINE_INFO = Path("/proc/meminfo")   # what the machine has, its swap included
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
 TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
@@ -491,7 +499,45 @@ def _group_number(group: Path, name: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
-def container_memory(group: Path = GROUP) -> dict[str, int]:
+def _given_back(group: Path) -> tuple[int, int]:
+    """Of what the kernel counts for the container: the pages of files on disk that stand on its two
+    lists for pages of files, and its records of names, files and pages of that cache."""
+    stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
+    return (int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0)),
+            int(stat_lines.get("slab_reclaimable", 0)))
+
+
+def _swap_of(group: Path, machine_info: Path) -> int:
+    """How much the container may move out to swap, in bytes: its own allowance, and no more than
+    the machine has; all the machine has when the container has no allowance of its own; none on a
+    kernel that does not count swap for a container, and none on a machine without swap."""
+    machine_swap = 0
+    try:
+        for line in machine_info.read_text().splitlines():
+            if line.startswith("SwapTotal:"):
+                machine_swap = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        machine_swap = 0
+    allowed = _group_number(group, "memory.swap.max")
+    try:
+        unbounded = (group / "memory.swap.max").read_text().strip() == "max"
+    except OSError:
+        unbounded = False
+    return machine_swap if unbounded else min(allowed or 0, machine_swap)
+
+
+_SWAP_ALLOWED: dict[tuple[str, str], int] = {}
+
+
+def swap_allowed(group: Path = GROUP) -> int:
+    """The swap the container may use, read once: it does not change while the container runs."""
+    key = (str(group), str(MACHINE_INFO))
+    if key not in _SWAP_ALLOWED:
+        _SWAP_ALLOWED[key] = _swap_of(group, MACHINE_INFO)
+    return _SWAP_ALLOWED[key]
+
+
+def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
     """What the kernel counts for this container, in bytes. "taken" is the container's count:
     everything in memory together with what was moved out to swap, less two things. Memory in
     shared memory and in memory-backed folders is counted, and so is memory the kernel swapped
@@ -502,14 +548,38 @@ def container_memory(group: Path = GROUP) -> dict[str, int]:
     off them. A page on the lists that something holds is taken out all the same; the ways of
     holding one that are known are refused where the program's side is confined, and it is not
     shown that there is no other. "all" is everything in
-    memory, those included, which is what the kernel's own highest value counts."""
-    current = int((group / "memory.current").read_text())
-    stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
-    swapped = _group_number(group, "memory.swap.current") or 0
-    gives_back = int(stat_lines.get("slab_reclaimable", 0))
-    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))
+    memory, those included, which is what the kernel's own highest value counts. "cap" is the
+    memory cap and the swap the container may use: the room it has. `outside`, when given, says
+    how much the cases' files hold ("files").
+
+    The parts are files read one after another, while a program may read files, write them or
+    remove them. So what can be given back, and the cases' files, are read before and after the
+    total, and the smaller of the two is taken: a page or a file that came or went while the total
+    was read neither lowers the figure nor raises it by more than what moved. A reading whose two
+    halves differ by more than TOGETHER_BYTES, or that took longer than TOGETHER_SECONDS, is read
+    again, up to TOGETHER_TRIES times; then the reading whose halves moved least is taken."""
+    best = None
+    for _ in range(TOGETHER_TRIES):
+        began = time.monotonic()
+        file_before, records_before = _given_back(group)
+        files_before = outside() if outside is not None else 0
+        current = int((group / "memory.current").read_text())
+        swapped = _group_number(group, "memory.swap.current") or 0
+        file_after, records_after = _given_back(group)
+        files_after = outside() if outside is not None else 0
+        took = time.monotonic() - began
+        moved = abs(file_after - file_before) + abs(records_after - records_before) + abs(files_after - files_before)
+        reading = (moved, took, current, swapped, min(file_before, file_after), min(records_before, records_after),
+                   max(records_before, records_after), min(files_before, files_after))
+        if best is None or (moved, took) < best[:2]:
+            best = reading
+        if moved <= TOGETHER_BYTES and took <= TOGETHER_SECONDS:
+            break
+    moved, took, current, swapped, can_be_given_back, gives_back, records, files = best
+    memory_max = _group_number(group, "memory.max") or 0
     return {"taken": current - can_be_given_back + swapped - gives_back,
-            "all": current, "cap": _group_number(group, "memory.max") or 0, "records": gives_back}
+            "all": current, "cap": memory_max + swap_allowed(group) if memory_max else 0, "records": records,
+            "files": files, "moved": moved}
 
 
 def highest_memory(group: Path = GROUP) -> int:
@@ -544,12 +614,10 @@ def container_caps(disk_mb: int | None = None, group: Path = GROUP,
         return JudgeFault(json.dumps({"severity": "error", "file": "container", "key": key, "message": message}))
 
     memory, processes = number("memory.max"), number("pids.max")
-    machine = machine_swap = 0
+    machine = 0
     for line in machine_info.read_text().splitlines():
         if line.startswith("MemTotal:"):
             machine = int(line.split()[1]) * 1024
-        if line.startswith("SwapTotal:"):
-            machine_swap = int(line.split()[1]) * 1024
     if memory is None:
         raise refuse("memory", "the container has no memory cap, so nothing bounds the memory the program takes")
     if memory > machine:
@@ -561,12 +629,7 @@ def container_caps(disk_mb: int | None = None, group: Path = GROUP,
     if refusing_filter() is None:
         raise refuse("machine", f"no call filter is known for a {platform.machine()} machine")
     # how much of the machine's swap this container may use: none when the machine has none
-    allowed = number("memory.swap.max")
-    try:
-        unbounded = (group / "memory.swap.max").read_text().strip() == "max"
-    except OSError:
-        unbounded = False
-    swap = machine_swap if unbounded else min(allowed or 0, machine_swap)
+    swap = _swap_of(group, machine_info)
     caps = {"memory_mb": memory // 2**20, "processes": processes, "swap_mb": swap // 2**20}
     if disk_mb is not None:
         try:
@@ -1101,7 +1164,7 @@ class CliRun:
             noted = [json.loads(line) for line in self.highs_file.read_text(encoding="utf-8").splitlines() if line]
         except (OSError, ValueError):
             noted = []
-        noted.sort(key=lambda run: -run["above_the_limit_mb"])
+        noted.sort(key=lambda run: -run.get("above_the_limit_bytes", run["above_the_limit_mb"] * 2**20))
         return {"fails_a_case": False, "runs": len(noted), "largest": noted[:HIGHS_KEPT]}
 
     def give_back(self, not_run: str) -> tuple[str, str] | None:

@@ -559,9 +559,9 @@ what = "The judge's result says how much its container may swap"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_the_judge_says_how_much_its_container_may_swap"]
 [[protection.change]]
-find = '''    swap = machine_swap if unbounded else min(allowed or 0, machine_swap)
+find = '''    return machine_swap if unbounded else min(allowed or 0, machine_swap)
 '''
-put = '''    swap = 0
+put = '''    return 0
 '''
 
 [[protection]]
@@ -577,9 +577,9 @@ what = "The kernel's records of files that were looked at are left out of a case
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it"]
 [[protection.change]]
-find = '''    gives_back = int(stat_lines.get("slab_reclaimable", 0))
+find = '''            int(stat_lines.get("slab_reclaimable", 0)))
 '''
-put = '''    gives_back = 0
+put = '''            0)
 '''
 
 [[protection]]
@@ -591,12 +591,53 @@ find = '''    return max(grown - left_out_at_most, 0)'''
 put = '''    return 0'''
 
 [[protection]]
-what = "A fall of the kernel's records takes nothing off what a case made them grow by"
+what = "The kernel's records are counted from the lowest figure they reached in a case"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_kernels_records_are_left_out_only_up_to_a_bound"]
 [[protection.change]]
-find = '''    return grown + max(now - last, 0)'''
-put = '''    return grown + now - last'''
+find = '''    lowest = now if lowest is None else min(lowest, now)'''
+put = '''    lowest = now if lowest is None else lowest'''
+
+[[protection]]
+what = "What can be given back and the cases' files are read before and after the container's total, and the smaller counts"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_figure_is_made_of_readings_that_belong_together[the cache of files keeps growing while the judge reads]"]
+[[protection.change]]
+find = '''        reading = (moved, took, current, swapped, min(file_before, file_after), min(records_before, records_after),'''
+put = '''        reading = (moved, took, current, swapped, file_after, records_after,'''
+
+[[protection]]
+what = "A reading whose parts moved apart is read again"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_figure_is_made_of_readings_that_belong_together[a file in the case's folder is removed]"]
+[[protection.change]]
+find = '''        if moved <= TOGETHER_BYTES and took <= TOGETHER_SECONDS:
+            break'''
+put = '''        break'''
+
+[[protection]]
+what = "The stop 128 MB below the cap counts the swap the container may use"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_stop_before_the_cap_counts_the_swap_the_container_may_use"]
+[[protection.change]]
+find = '''"cap": memory_max + swap_allowed(group) if memory_max else 0,'''
+put = '''"cap": memory_max,'''
+
+[[protection]]
+what = "A run with a new high is written down to the byte"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first"]
+[[protection.change]]
+find = '''"above_the_limit_mb": math.ceil(above * 100 / mb) / 100, "above_the_limit_bytes": above}'''
+put = '''"above_the_limit_mb": above // mb}'''
+
+[[protection]]
+what = "The runs with a new high that the result names are ordered by their exact size"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first"]
+[[protection.change]]
+find = '''        noted.sort(key=lambda run: -run.get("above_the_limit_bytes", run["above_the_limit_mb"] * 2**20))'''
+put = '''        noted.sort(key=lambda run: -int(run["above_the_limit_mb"]))'''
 
 [[protection]]
 what = "The result says for each case how much of the kernel's records was left out and how much was counted"
@@ -634,7 +675,7 @@ tests = ["tests/test_cli_judge.py::test_a_run_reads_its_starting_values_before_t
 [[protection.change]]
 find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
-        held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
+        held_before = self._container() if separated else {"taken": 0, "all": 0}
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
             # own files are written; a later run of the case is measured against it as well
@@ -1206,8 +1247,8 @@ what = "A page of a file that stands on neither of the kernel's two lists counts
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memory", "tests/test_cli_isolation.py::test_pages_of_a_file_locked_by_many_processes_are_within_the_bound_or_fail_the_case"]
 [[protection.change]]
-find = '''    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))'''
-put = '''    can_be_given_back = int(stat_lines["file"]) - int(stat_lines["shmem"])'''
+find = '''    return (int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0)),'''
+put = '''    return (int(stat_lines["file"]) - int(stat_lines["shmem"]),'''
 
 [[protection]]
 what = "A case has one starting figure for all its runs"

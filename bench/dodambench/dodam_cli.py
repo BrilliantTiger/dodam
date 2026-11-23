@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import selectors
 import signal
@@ -118,13 +119,15 @@ def _records_left_out_at_most(memory_mb: int) -> int:
     return min(memory_mb * 2**20 // 4, _judge.RECORDS_LEFT_OUT_MB * 2**20)
 
 
-def _records_grown(grown: int, last: int | None, now: int) -> int:
-    """The sum of every rise of the kernel's records since the case began, with the figure read
-    now. A fall takes nothing off it: when the kernel gives back older records, that must not make
-    room for newer ones that are held."""
-    if last is None:
-        return grown
-    return grown + max(now - last, 0)
+def _records_grown(lowest: int | None, now: int) -> tuple[int, int]:
+    """The lowest figure the kernel's records reached since the case began, with the figure read
+    now, and how far the figure now lies above it. Counted from the lowest, a fall below where the
+    case began makes no room: when the kernel gives back older records, newer ones that are held
+    count. Records that rise and fall again with what a program does, such as files it makes and
+    removes or processes it starts and waits for, are not added up: what counts is how far they
+    stand above the lowest now."""
+    lowest = now if lowest is None else min(lowest, now)
+    return lowest, now - lowest
 
 
 def _records_counted(grown: int, left_out_at_most: int) -> int:
@@ -288,8 +291,8 @@ class Case:
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
-        # the kernel's records: the last figure read, and the sum of every rise since the case began
-        self._records_last: int | None = None
+        # the kernel's records: the lowest figure since the case began, and the most they stood above it
+        self._records_lowest: int | None = None
         self._records_grown = 0
         self._left_out_at_most = _records_left_out_at_most(self._limits["memory_mb"])
         # what the container held besides the cases' files and the runner's own memory: the lowest
@@ -508,7 +511,7 @@ class Case:
         separated = self._side is not None
         killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
-        held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
+        held_before = self._container() if separated else {"taken": 0, "all": 0}
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
             # own files are written; a later run of the case is measured against it as well
@@ -567,7 +570,8 @@ class Case:
         record = {"case": self._key, "limit_mb": self._limits["memory_mb"], "files_mb": self._limits["disk_mb"],
                   "high_before_mb": high_before // mb, "high_mb": high_now // mb,
                   "taken_before_mb": held_before["taken"] // mb, "held_before_mb": held_before["all"] // mb,
-                  "above_the_limit_mb": above // mb}
+                  # less than 1 MB above is written down with its size, not as nothing
+                  "above_the_limit_mb": math.ceil(above * 100 / mb) / 100, "above_the_limit_bytes": above}
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
@@ -580,17 +584,22 @@ class Case:
         return result
 
     def _records(self, now: dict) -> int:
-        """Take note of the kernel's records as they are now; what of their growth since the case
-        began counts as memory."""
-        records = now.get("records", 0)
-        self._records_grown = _records_grown(self._records_grown, self._records_last, records)
-        self._records_last = records
-        return _records_counted(self._records_grown, self._left_out_at_most)
+        """Take note of the kernel's records as they are now; what they stand above their lowest
+        figure in the case, beyond the amount left out, counts as memory."""
+        self._records_lowest, grown = _records_grown(self._records_lowest, now.get("records", 0))
+        self._records_grown = max(self._records_grown, grown)
+        return _records_counted(grown, self._left_out_at_most)
+
+    def _container(self) -> dict:
+        """One reading of the container, the cases' files read with it so that the parts belong
+        together."""
+        return _judge.container_memory(outside=lambda: _files_held(self._cfg["work_root"]))
 
     def _figure(self, now: dict) -> int:
         """The container's count, less the cases' files, which have a limit of
         their own, and less the case runner's own memory."""
-        return now["taken"] - _files_held(self._cfg["work_root"]) - _own_memory()
+        files = now["files"] if "files" in now else _files_held(self._cfg["work_root"])
+        return now["taken"] - files - _own_memory()
 
     def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float) -> Result:
         limits = self._limits
@@ -605,7 +614,7 @@ class Case:
             records what grew beyond the amount that is left out. Above the limit the program is
             ended. It is ended as well when the container is about to run out of memory, whatever
             the case's limit says: that keeps the kernel from having to choose what to end."""
-            now = _judge.container_memory()
+            now = self._container()
             records = self._records(now)
             figure = self._figure(now)
             self._lowest = _lowest(self._lowest, figure)

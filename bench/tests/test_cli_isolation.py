@@ -156,9 +156,10 @@ def standing_still():
     except OSError:
         dropped = False
     give_back(first)
-    # what the kernel lets go of it frees a moment later: the figure is read once it has stood still
-    last, still = charged(), 0
-    while still < 6 and time.monotonic() - started < 3:
+    # what the kernel lets go of it frees a moment later: the figure is read once it has stood still,
+    # with a time of its own, however long writing the waiting pages took
+    last, still, settling = charged(), 0, time.monotonic()
+    while still < 6 and time.monotonic() - settling < 3:
         time.sleep(0.005)
         now = charged()
         still = still + 1 if now > last - 65536 else 0
@@ -2059,6 +2060,73 @@ def test_a_program_that_keeps_making_and_removing_files_or_processes_is_not_ende
                      counted=said["measured"].get("memory_highest", 0) / 2**20)
     assert outcomes(result) == {"test_makes_and_removes_small_files": "passed", "test_starts_and_reaps_short_processes": "passed"}, (
         lost(result, tmp_path / "out"))
+
+
+# Records that stood before a case are counted nowhere: a program can hold those of the files its build
+# left, through descriptors that many of its processes share, and then take memory in all of them
+# until the container stands at its cap. Ending one process gives back little; the kernel ends one
+# process of the program after another, and never the case runner, while any of them is left.
+HOLDS_IN_MANY = r"""
+import resource
+if sys.argv[1:] == ["leave"]:
+    os.makedirs("/app/left", exist_ok=True)
+    for n in range(int(sys.argv[2]) if len(sys.argv) > 2 else 120000):
+        with open(f"/app/left/{n:06d}-" + "n" * 200, "w") as f:
+            f.write("x")
+    sys.exit(0)
+most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+held = []
+for name in sorted(os.listdir("/app/left")):
+    try:
+        held.append(os.open("/app/left/" + name, os.O_RDONLY))
+    except OSError:
+        break
+for _ in range(31):
+    if os.fork() == 0:
+        break
+taken = []
+while True:
+    block = bytearray(4 * MB)
+    touch(block)
+    taken.append(block)
+    time.sleep(0.02)
+"""
+
+HOLDS_IN_MANY_TESTS = """
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_holds_in_many():
+    with case() as c:
+        r = c.run(["holds"])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"limit": r.limit, "signal": r.signal, "measured": c.measured}, f)
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+def test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_case_runner(tmp_path):
+    """In the sample's smallest container (a case's limit of 512 MB and 64 MB of files, and 256 MB
+    for the judge: 832 MB), the build leaves 120,000 files; a program holds every one of them open,
+    starts 31 more processes that share what it holds, and takes memory in all 32 until the
+    container stands at its cap. The case fails for memory, the cases before and after it pass, the
+    judging ends in a result and not in a fault of the judge, and the kernel ends no case runner."""
+    result = judge_attack(tmp_path, PLAIN + HOLDS_IN_MANY, {"functional/test_holds.py": HOLDS_IN_MANY_TESTS},
+                          {"memory_mb": 832, "seconds": 400}, CASE_MEMORY_MB="512", CASE_DISK_MB="64",
+                          CASE_TIMEOUT_SEC="60", CASE_PROCESSES="64", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None and result["fault"] is None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_before": "passed", "test_holds_in_many": "failed", "test_after": "passed"}, (
+        lost(result, tmp_path / "out"))
+    assert "memory" in message(result, "test_holds_in_many"), lost(result, tmp_path / "out")
+    assert not result["report"].get("runner_ended"), f"the kernel ended a case runner: {lost(result, tmp_path / 'out')}"
+    note_figures("records many processes hold at the cap", kernel_ended=result["report"].get("memory", {}).get("ended_by_the_kernel", 0))
 
 
 # Programs that make the figures the judge reads move while it reads them: they read a file of 200 MB
