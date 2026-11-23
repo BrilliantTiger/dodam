@@ -1388,16 +1388,6 @@ put = '''            pass
 '''
 
 [[protection]]
-what = "The line that puts the helper folder on the search path names that folder only"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
-[[protection.change]]
-find = '''    return numbers == [0, depth] and folders == [HELPERS]
-'''
-put = '''    return True
-'''
-
-[[protection]]
 what = "A helper of a test is a file of the helper folder"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
@@ -1436,7 +1426,7 @@ put = '''            pass
 [[protection]]
 what = "The format checker refuses a test that stores or deletes an attribute"
 file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[storing an attribute]"]
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[storing an attribute on the list]"]
 [[protection.change]]
 find = '''            self.refuse(node, f"stores or deletes the attribute .{node.attr}")
 '''
@@ -1449,16 +1439,6 @@ file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a path the case gives, kept in a name]"]
 [[protection.change]]
 find = '''            self.refuse(node, f"uses the folder .{node.attr} as a path")
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses the use of a path a method of the case gives back"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a path a method of the case returns, made a string]"]
-[[protection.change]]
-find = '''            self.refuse(node, f"uses the path .{node.func.attr} gives back")
 '''
 put = '''            pass
 '''
@@ -1509,6 +1489,152 @@ tests = ["tests/test_cli_format.py::test_a_test_superseded_at_the_variants_own_s
 find = '''                    for t in task.tests_for(v.step)):
 '''
 put = '''                    for t in task.tests):
+'''
+
+[[protection]]
+what = "The format checker refuses a method of the case that gives a path reached otherwise than in a call whose value is not used"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a method of the case that gives a path, kept in a name]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses .{node.attr} otherwise than in a call whose value is not used")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The line that puts the helper folder on the search path names the helper folder only"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = ''' and folders == [HELPERS]'''
+put = ''''''
+
+[[protection]]
+what = "The line that puts the helper folder on the search path has the depth of its file"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = '''numbers == [0, depth] and '''
+put = ''''''
+
+[[protection]]
+what = "A test imports from a helper only what the helper defines itself"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_imports_from_a_helper_only_what_the_helper_defines"]
+[[protection.change]]
+find = '''                    self.refuse(node, f"imports {alias.name} from {module}, which the helper does not define itself")
+'''
+put = '''                    pass
+'''
+
+[[protection]]
+what = "The format checker refuses a hidden name imported from a helper"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = '''                    self.refuse(node, f"imports {alias.name}, a hidden name, from {module}")
+'''
+put = '''                    pass
+'''
+
+[[protection]]
+what = "No helper is named like a module of the standard library of any Python the judge runs"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/telnetlib.py]"]
+[[protection.change]]
+find = ''' | STANDARD_ELSEWHERE
+'''
+put = '''
+'''
+
+[[protection]]
+what = "A name bound by an assignment, a loop or del is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by a loop]"]
+[[protection.change]]
+find = '''            self.bound(node, name, self.depth == 0 or isinstance(node.ctx, ast.Del))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A parameter's name is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[an allowed built-in name bound by a parameter]"]
+[[protection.change]]
+find = '''        self.bound(node, node.arg, False)
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "A function's name is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by a def]"]
+[[protection.change]]
+find = '''        self.bound(node, node.name, self.depth == 0, by_def=at_top)
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "A class's name is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by a class]"]
+[[protection.change]]
+find = '''        self.bound(node, node.name, self.depth == 0)  # the name of a class
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "The name an exception is caught as is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by an exception caught]"]
+[[protection.change]]
+find = '''            self.bound(node, node.name, self.depth == 0)  # the name an exception is caught as
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A name a pattern captures is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by a pattern]"]
+[[protection.change]]
+find = '''                self.bound(part, name, self.depth == 0)
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "A name made global is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name made global]"]
+[[protection.change]]
+find = '''            self.bound(node, name, True)
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A name bound by importing a module is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by importing a module]"]
+[[protection.change]]
+find = '''            self.bound(node, alias.asname or top, True)
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A name bound by importing a name is held to the rules on binding"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by importing a name]"]
+[[protection.change]]
+find = '''            self.bound(node, alias.asname or alias.name, True)
+'''
+put = '''            pass
 '''
 
 [[protection]]

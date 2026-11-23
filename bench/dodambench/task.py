@@ -622,11 +622,11 @@ TEST_ATTRIBUTES = {
     "replace", "rfind", "rindex", "rjust", "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith",
     "strip", "swapcase", "title", "upper", "zfill",
     # lists, dicts, sets and the containers of collections
-    "add", "append", "appendleft", "clear", "copy", "difference", "discard", "elements", "extend", "get",
+    "add", "append", "appendleft", "clear", "difference", "discard", "elements", "extend", "get",
     "intersection", "issubset", "issuperset", "items", "keys", "most_common", "pop", "popleft", "remove",
     "reverse", "setdefault", "sort", "union", "update", "values",
-    # a pattern and its match
-    "compile", "escape", "findall", "finditer", "fullmatch", "group", "groupdict", "groups", "match", "search",
+    # a pattern and its match (a match's groups are reached by index)
+    "compile", "escape", "findall", "finditer", "fullmatch", "groupdict", "groups", "match", "search",
     "span", "start", "end", "sub", "subn", "pattern", "ASCII", "DOTALL", "IGNORECASE", "MULTILINE", "VERBOSE",
     # the functions of the modules a test may import
     "loads", "dumps",
@@ -672,9 +672,13 @@ def _judge_packages() -> set[str]:
     return names
 
 
+# The judge's own Python differs between the language images: 3.12, 3.13 or 3.14. The modules of the
+# standard library that one of them has and another has not, so that a helper is named like none of
+# them, whatever Python runs the checker.
+STANDARD_ELSEWHERE = {'_android_support', '_apple_support', '_ast_unparse', '_colorize', '_compression', '_crypt', '_hmac', '_interpchannels', '_interpqueues', '_interpreters', '_ios_support', '_msi', '_opcode_metadata', '_py_warnings', '_pyrepl', '_remote_debugging', '_suggestions', '_sysconfig', '_types', '_wmi', '_zstd', 'aifc', 'annotationlib', 'audioop', 'cgi', 'cgitb', 'chunk', 'compression', 'crypt', 'imghdr', 'lib2to3', 'mailcap', 'msilib', 'nis', 'nntplib', 'ossaudiodev', 'pipes', 'sndhdr', 'spwd', 'sunau', 'telnetlib', 'uu', 'xdrlib'}
 # Names a Python file of the tests may not have: Python would load the module of that name in its place,
 # or run it on its own.
-NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages()
+NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages() | STANDARD_ELSEWHERE
                 | {"dodam_cli", "dodam_judge", "conftest", "sitecustomize", "usercustomize"})
 # The one line that puts the task's helper folder on the search path, with any number and folder name;
 # the number and the name are checked apart.
@@ -711,7 +715,7 @@ def _is_test_name(name: str) -> bool:
 class _TestCode(ast.NodeVisitor):
     """The rules on one Python file of a command-line task's tests."""
 
-    def __init__(self, rel: str, helpers: set[str], path_lines: list[ast.stmt]):
+    def __init__(self, rel: str, helpers: dict[str, set[str]], path_lines: list[ast.stmt]):
         self.rel, self.helpers, self.path_lines = rel, helpers, path_lines
         self.found: list[dict] = []
         self.defined: set[str] = set()
@@ -771,6 +775,8 @@ class _TestCode(ast.NodeVisitor):
             elif module in self.helpers:
                 if alias.name.startswith("_"):
                     self.refuse(node, f"imports {alias.name}, a hidden name, from {module}")
+                elif alias.name not in self.helpers[module]:
+                    self.refuse(node, f"imports {alias.name} from {module}, which the helper does not define itself")
             else:
                 self.refuse(node, f"imports {alias.name} from {module}, a module a test may not import")
             self.bound(node, alias.asname or alias.name, True)
@@ -794,9 +800,6 @@ class _TestCode(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Name) and node.func.id == "case":
             self.calls_case = True
-        if isinstance(node.func, ast.Attribute) and node.func.attr in GIVES_A_PATH \
-                and not isinstance(self.parents.get(node), ast.Expr):
-            self.refuse(node, f"uses the path .{node.func.attr} gives back")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -806,7 +809,15 @@ class _TestCode(ast.NodeVisitor):
             self.refuse(node, f"reaches .{node.attr}")
         elif node.attr in CASE_FOLDERS and not self.made_a_string(node):
             self.refuse(node, f"uses the folder .{node.attr} as a path")
+        elif node.attr in GIVES_A_PATH and not self.called_alone(node):
+            self.refuse(node, f"uses .{node.attr} otherwise than in a call whose value is not used")
         self.generic_visit(node)
+
+    def called_alone(self, node: ast.Attribute) -> bool:
+        """Whether a method is reached only to be called, in a statement of its own, so that the path
+        it gives back is not used."""
+        call = self.parents.get(node)
+        return isinstance(call, ast.Call) and call.func is node and isinstance(self.parents.get(call), ast.Expr)
 
     def made_a_string(self, node: ast.AST) -> bool:
         """Whether a path is only made a string, put into an f-string or given to the case's symlink."""
@@ -877,14 +888,14 @@ class _TestCode(ast.NodeVisitor):
         self.refuse(node, f"defines {node.name} as asynchronous")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.bound(node, node.name, self.depth == 0)
+        self.bound(node, node.name, self.depth == 0)  # the name of a class
         if _is_test_name(node.name):
             self.refuse(node, f"defines the class {node.name}, whose name pytest collects tests by")
         self.generic_visit(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name:
-            self.bound(node, node.name, self.depth == 0)
+            self.bound(node, node.name, self.depth == 0)  # the name an exception is caught as
         self.generic_visit(node)
 
     def visit_match_case(self, node: ast.match_case) -> None:
@@ -921,6 +932,23 @@ class _TestCode(ast.NodeVisitor):
         self.visit(tree)
 
 
+def _defined_at_top(path: Path) -> set[str]:
+    """The names a helper defines at its top by a def, a class or an assignment: what a test may
+    import from it. A name the helper imported is not among them."""
+    try:
+        tree = ast.parse(path.read_bytes())
+    except (SyntaxError, ValueError):
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                names |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+    return names
+
+
 def _tests_tree(tests: Path) -> tuple[list[Path], list[dict]]:
     """Every file of the tests folder, and a problem for every link and for whatever is neither a
     file nor a folder: the converter copies what a link points at, which the checker would not read."""
@@ -948,8 +976,9 @@ def test_code_problems(task: Task) -> list[dict]:
     if not tests.is_dir():
         return []
     every, found = _tests_tree(tests)
-    helpers = {p.stem for p in every if p.parent == tests / HELPERS and p.suffix == ".py" and p.stem != "__init__"
-               and not _is_test_name(p.stem) and not p.stem.startswith("_")} - NOT_A_HELPER
+    helpers = {p.stem: _defined_at_top(p) for p in every
+               if p.parent == tests / HELPERS and p.suffix == ".py" and p.stem != "__init__"
+               and not _is_test_name(p.stem) and not p.stem.startswith("_") and p.stem not in NOT_A_HELPER}
     listed = {f"tests/{t.file}" for t in task.tests}
     for path in every:
         rel = f"tests/{path.relative_to(tests).as_posix()}"
