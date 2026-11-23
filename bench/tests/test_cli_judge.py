@@ -1026,9 +1026,11 @@ def test_the_figures():
     assert outcomes(result) == {"test_the_figures": "passed"}, message(result, "test_the_figures")
 
 
-def test_the_kernels_records_are_left_out_only_up_to_a_bound():
+def test_the_kernels_records_are_left_out_only_up_to_a_bound(tmp_path):
     """A quarter of the case's memory limit, never more than 16 MB; what the records grew by beyond
-    that counts as the case's memory. A fall of the records gives nothing back."""
+    that counts as the case's memory. They are counted from the lowest figure they reached in the
+    case: a fall below where they began makes no room, and records that rise and fall again with
+    what a program does are not added up."""
     from dodambench import dodam_cli as runner
     bound, counted = getattr(runner, "_records_left_out_at_most", None), getattr(runner, "_records_counted", None)
     assert bound is not None and counted is not None, "the case runner leaves the kernel's records out without a bound"
@@ -1038,11 +1040,62 @@ def test_the_kernels_records_are_left_out_only_up_to_a_bound():
     assert counted(16 * mb, 16 * mb) == 0
     assert counted(200 * mb, 16 * mb) == 184 * mb
     assert counted(10 * mb, 2 * mb) == 8 * mb
-    # the records rise by 10 MB, fall by 10 MB and rise by 10 MB again: 20 MB have been made
-    grown, last = 0, None
-    for now in (50 * mb, 60 * mb, 50 * mb, 60 * mb):
-        grown, last = runner._records_grown(grown, last, now), now
-    assert grown == 20 * mb
+    tests = {"functional/test_records.py": '''
+import dodam_cli
+
+MB = 2**20
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def grown(records):
+    tool = dodam_cli._judge
+    figures = [{"taken": 100 * MB, "all": 100 * MB, "cap": 0, "records": r * MB} for r in records]
+
+    def container_memory(*args, **kwargs):
+        return figures.pop(0) if len(figures) > 1 else figures[0]
+
+    kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
+    tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = container_memory, lambda folder: 0, lambda: 0
+    said = {}
+    try:
+        with case() as c:
+            c._side = Side()
+            c.run([])
+            said["grown"] = c.measured["records_grown"] // MB
+    except dodam_cli.LimitBroken:
+        pass                      # what was counted is still said; the limit it broke is another matter
+    finally:
+        tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
+    return said.get("grown")
+
+
+def test_the_records():
+    seen = {
+        # they rise by 10 MB, fall back and rise by 10 MB again, a hundred times over: at no moment
+        # do they stand more than 10 MB above where the case began
+        "up and down": grown([50] + [60, 50] * 100 + [60]),
+        # the kernel gives back 10 MB of older records and the program makes 10 MB of newer ones:
+        # counted from the lowest figure, the newer ones count; the giving back made no room
+        "given back, then made": grown([50, 40, 50]),
+        # they only rise
+        "only up": grown([50, 55, 60, 70]),
+    }
+    with open(SEEN, "w") as f:
+        json.dump(seen, f)
+'''.replace("SEEN", repr(str(tmp_path / "seen.json")))}
+    result = judge_program(tmp_path, "import time\ntime.sleep(0.4)\n", tests)
+    seen = json.loads((tmp_path / "seen.json").read_text()) if (tmp_path / "seen.json").is_file() else {}
+    assert seen == {"up and down": 10, "given back, then made": 10, "only up": 20}, (seen, message(result, "test_the_records"))
 
 
 def test_a_new_high_above_the_limit_is_a_number_in_the_result():
@@ -1057,6 +1110,255 @@ def test_a_new_high_above_the_limit_is_a_number_in_the_result():
     assert attempt(above, 100 * mb, 300 * mb, 80 * mb, 288 * mb) == 0          # a new high within what the case may take
     assert attempt(above, 600 * mb, 600 * mb, 80 * mb, 288 * mb) == 0          # no new high: an earlier one hides this run
     assert attempt(above, 0, 0, 80 * mb, 288 * mb) == 0                        # a kernel that keeps no high
+
+
+# A stand-in for the kernel's files of a container, and a program that acts at one moment of the
+# judge's measuring: right after the judge has read how much memory the container holds in all. The
+# judge's figure is made from several files read one after another; what the program does between
+# two of them must neither lower the figure from which the case is counted nor raise it for a moment.
+BETWEEN = r'''
+import builtins, functools, io
+from pathlib import Path
+import dodam_cli
+
+MB = 2**20
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def stand_in(group, held):
+    for name, value in (("memory.current", held["current"]), ("memory.max", 1024 * MB), ("memory.swap.current", 0)):
+        (group / name).write_text(f"{value}\n")
+    (group / "memory.stat").write_text(f"anon {held['current'] - held['file'] - held['files']}\nfile {held['file'] + held['files']}\n"
+                                       f"inactive_file {held['file']}\nactive_file 0\nshmem {held['files']}\nslab_reclaimable 0\n")
+
+
+def test_between():
+    group = Path(GROUP)
+    group.mkdir()
+    held = {"current": 400 * MB, "file": 100 * MB, "files": FILES * MB}
+    stand_in(group, held)
+    reads = {"total": 0}
+    real_open = builtins.open
+
+    def opening(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if str(file) != str(group / "memory.current") or any(m in mode for m in "wax+"):
+            return f
+        text = f.read()
+        f.close()
+        reads["total"] += 1
+        if reads["total"] == 40:
+            CHANGE
+            stand_in(group, held)
+        return io.BytesIO(text) if "b" in mode else io.StringIO(text)
+
+    tool = dodam_cli._judge
+    kept = builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
+    builtins.open = io.open = opening
+    tool.container_memory = functools.partial(kept[2], group=group)
+    dodam_cli._files_held = lambda folder: held["files"]
+    dodam_cli._own_memory = lambda: 0
+    try:
+        with case() as c:
+            c._side = Side()
+            r = c.run([])
+            with real_open(SEEN, "w") as f:
+                json.dump({"limit": r.limit, "highest": c.measured.get("memory_highest"), "reads": reads["total"]}, f)
+    finally:
+        builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
+'''
+
+BETWEEN_TWO_READINGS = {
+    # a program that reads a file: the cache of files grows by 300 MB, and the container's total with it
+    "the cache of files grows": (0, 'held["current"] += 300 * MB; held["file"] += 300 * MB'),
+    # a program that removes a file of 300 MB it wrote into its folder
+    "a file in the case's folder is removed": (300, 'held["current"] -= 300 * MB; held["files"] -= 300 * MB'),
+}
+
+
+@pytest.mark.parametrize("change", list(BETWEEN_TWO_READINGS))
+def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
+    """The judge reads what the container holds in all, what of it is pages of files the kernel can
+    give back, and what the cases' files hold, one after another, up to 500 times a second. A
+    program that reads a file or removes one of its own files between two of these readings
+    changes one and not the other. Neither may make the case's figure dip, which would lower the
+    figure the case is counted from for the rest of the case, nor jump for one reading: an honest
+    program within its limit is not ended for the moment the judge happened to read."""
+    files, change_code = BETWEEN_TWO_READINGS[change]
+    seen = tmp_path / "seen.json"
+    source = (BETWEEN.replace("GROUP", repr(str(tmp_path / "group"))).replace("FILES", str(files))
+              .replace("CHANGE", change_code).replace("SEEN", repr(str(seen))))
+    result = judge_program(tmp_path, "import time\ntime.sleep(0.6)\nprint('fine')\n",
+                           {"functional/test_between.py": source}, CASE_MEMORY_MB="256")
+    assert seen.is_file(), message(result, "test_between")
+    measured = json.loads(seen.read_text())
+    assert measured["reads"] >= 40, f"the program's act did not fall into its run: {measured}"
+    assert measured["limit"] is None, f"an honest program was ended for {measured['limit']}: {measured}"
+    assert measured["highest"] <= 2**20, f"the case was counted {measured['highest'] / 2**20:.1f} MB: {measured}"
+    assert outcomes(result) == {"test_between": "passed"}, message(result, "test_between")
+
+
+SWAP_STOP = r'''
+import functools
+from pathlib import Path
+import dodam_cli
+
+MB = 2**20
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def run_with(name, allowed, machine_mb):
+    group, info = Path(FOLDER) / name, Path(FOLDER) / (name + "-meminfo")
+    group.mkdir()
+    # 1,000 MB in memory and 100 MB moved out to swap; the memory cap is 1,024 MB
+    for file, value in (("memory.current", 1000 * MB), ("memory.max", 1024 * MB), ("memory.swap.current", 100 * MB),
+                        ("memory.swap.max", allowed)):
+        (group / file).write_text(f"{value}\n")
+    (group / "memory.stat").write_text(f"anon {1000 * MB}\nfile 0\ninactive_file 0\nactive_file 0\nslab_reclaimable 0\n")
+    info.write_text(f"MemTotal:        4000000 kB\nSwapTotal:       {machine_mb * 1024} kB\n")
+    tool = dodam_cli._judge
+    kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory, getattr(tool, "MACHINE_INFO", None)
+    tool.container_memory = functools.partial(kept[0], group=group)
+    tool.MACHINE_INFO = info
+    dodam_cli._files_held = lambda folder: 0
+    dodam_cli._own_memory = lambda: 0
+    try:
+        with case() as c:
+            c._side = Side()
+            r = c.run([])
+            seen = json.load(open(SEEN)) if os.path.exists(SEEN) else {}
+            seen[name] = r.limit
+            with open(SEEN, "w") as f:
+                json.dump(seen, f)
+    finally:
+        tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept[:3]
+        tool.MACHINE_INFO = kept[3]
+
+
+def test_allowed_512_of_1024():
+    run_with("allowed_512_of_1024", 512 * MB, 1024)
+
+
+def test_allowed_all_of_1024():
+    run_with("allowed_all_of_1024", "max", 1024)
+
+
+def test_allowed_none():
+    run_with("allowed_none", 0, 1024)
+
+
+def test_allowed_all_of_64():
+    run_with("allowed_all_of_64", "max", 64)
+
+
+def test_allowed_512_of_128():
+    run_with("allowed_512_of_128", 512 * MB, 128)
+'''
+
+
+def test_the_stop_before_the_cap_counts_the_swap_the_container_may_use(tmp_path):
+    """The judge ends a program when the container has less than 128 MB left. What the container
+    holds is counted with what it moved out to swap, so the room it has is its memory cap and the
+    swap it may use: as much as its own allowance says and the machine has. A container holding
+    1,000 MB in memory and 100 MB in swap under a cap of 1,024 MB has room left when it may swap
+    512 MB, and none when it may swap nothing or the machine has little swap."""
+    seen = tmp_path / "seen.json"
+    folder = tmp_path / "groups"
+    folder.mkdir()
+    result = judge_program(tmp_path, "print('fine')\n", {"functional/test_swap.py": SWAP_STOP.replace(
+        "FOLDER", repr(str(folder))).replace("SEEN", repr(str(seen)))})
+    ended = json.loads(seen.read_text()) if seen.is_file() else {}
+    assert ended == {"allowed_512_of_1024": None, "allowed_all_of_1024": None, "allowed_none": "memory",
+                     "allowed_all_of_64": "memory", "allowed_512_of_128": "memory"}, (ended, result["report"]["tests"])
+
+
+def test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first(tmp_path):
+    """A run whose new high lies less than 1 MB above what the case may take is written down with
+    its size, not as nothing, and the ten runs that lay furthest above are ordered by their exact
+    size."""
+    from types import SimpleNamespace
+    from dodambench import dodam_cli as runner
+    highs = tmp_path / "highs.jsonl"
+    mb = 2**20
+    runs = {"half": mb // 2, "one and a fifth": 6 * mb // 5, "one and nine tenths": 19 * mb // 10,
+            "one and a half": 3 * mb // 2}
+    for name, above in runs.items():
+        case = SimpleNamespace(_cfg={"highs_file": str(highs)}, _key=f"functional/test_x.py::{name}",
+                               _limits={"memory_mb": 256, "disk_mb": 32})
+        runner.Case._record_high(case, 100 * mb, 400 * mb, {"taken": 80 * mb, "all": 90 * mb}, above)
+    said = judge_module.CliRun.highs(SimpleNamespace(highs_file=highs))
+    assert said["runs"] == 4
+    order = [run["case"].split("::")[-1] for run in said["largest"]]
+    assert order == ["one and nine tenths", "one and a half", "one and a fifth", "half"], order
+    half = said["largest"][-1]
+    assert any(isinstance(value, (int, float)) and value > 0 for key, value in half.items() if key.startswith("above_the_limit")), (
+        f"a run half a MB above the limit was written down as nothing: {half}")
+
+
+def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(tmp_path):
+    """The helper that reads from outside what a container really holds has the machine write the
+    pages that wait to be written, has the kernel give back what it can, and then waits until the
+    figure stands still, because the kernel frees what it lets go of a moment later. That last
+    wait has a time of its own: when writing the waiting pages took more than three seconds, the
+    figure is still read only once it stands still."""
+    from test_cli_isolation import READER
+    asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
+    asked.mkdir()
+    held.mkdir()
+    mb = 2**20
+    for name, text in {"memory.current": f"{2 * mb}\n", "memory.swap.current": "0\n", "cgroup.events": "populated 1\nfrozen 1\n",
+                       "cgroup.freeze": "0\n", "memory.reclaim": "",
+                       "memory.stat": f"anon 4096\nfile 0\nfile_dirty {64 * mb}\n"}.items():
+        (held / name).write_text(text)
+    drop.write_text("")
+    machine.write_text("".join(f"{name}: 1000 kB\n" for name in ("MemTotal", "MemFree", "Buffers", "Cached", "Shmem", "SReclaimable")))
+    program = READER
+    for path, here in (('asked, held = "/reading", "/group"', f'asked, held = "{asked}", "{held}"'),
+                       ('open("/drop", "wb"', f'open("{drop}", "wb"'),
+                       ('open("/proc/meminfo")', f'open("{machine}")')):
+        assert program.count(path) == 1, f"the helper no longer names {path} once"
+        program = program.replace(path, here)
+    (tmp_path / "helper.py").write_text(program)
+    helper = subprocess.Popen([sys.executable, str(tmp_path / "helper.py")], cwd=tmp_path, stderr=subprocess.PIPE)
+    try:
+        (asked / "ask-one").write_text("one")
+        # the waiting pages take 3.5 seconds to be written; then the kernel is asked to let go, and
+        # what it let go of is freed 0.2 seconds later
+        time.sleep(3.5)
+        (held / "memory.stat").write_text("anon 4096\nfile 0\nfile_dirty 0\n")
+        deadline = time.monotonic() + 10
+        while drop.read_bytes() != b"2" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        time.sleep(0.2)
+        (held / "memory.current").write_text(f"{mb}\n")
+        while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
+            time.sleep(0.01)
+        assert (asked / "answer-one").exists(), f"the helper gave no answer: {helper.stderr.read()[-2000:] if helper.poll() is not None else 'it is still running'}"
+        answer = json.loads((asked / "answer-one").read_text())
+    finally:
+        helper.kill()
+        helper.wait()
+    assert answer["charged"] == mb, f"the figure was read before it stood still: {answer['charged'] / mb:.2f} MB, after {answer['seconds']:.2f} s"
 
 
 def test_a_run_reads_its_starting_values_before_the_program_is_started(tmp_path):

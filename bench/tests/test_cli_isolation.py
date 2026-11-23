@@ -2000,6 +2000,139 @@ time.sleep(0.2)
     assert failed.get("records_counted_bytes", 0) > 0 and failed["records_left_out_bytes"] == 16 * 2**20, failed
 
 
+# Honest programs that do ordinary things again and again for a while: they hold little beyond what
+# they had when the case began, and must never fail for memory.
+KEEPS_DOING = r"""
+import signal, subprocess
+end = time.monotonic() + float(sys.argv[2])
+cycles = 0
+if sys.argv[1] == "makes and removes small files":
+    # 5,000 small files with long names are made and removed, over and over, in the working folder
+    while time.monotonic() < end:
+        for n in range(5000):
+            with open(f"{n:05d}-" + "w" * 100, "w") as f:
+                f.write("x")
+        for n in range(5000):
+            os.unlink(f"{n:05d}-" + "w" * 100)
+        cycles += 1
+elif sys.argv[1] == "starts and reaps short processes":
+    while time.monotonic() < end:
+        running = [subprocess.Popen(["/bin/sh", "-c", "cat /proc/self/status > /dev/null"]) for _ in range(8)]
+        for p in running:
+            p.wait()
+        cycles += 1
+print("done", cycles)
+"""
+
+KEEPS_DOING_TESTS = """
+def keeps(how):
+    with case() as c:
+        r = c.run([how, "8"])
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[how] = {"limit": r.limit, "out": r.out[-200:], "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.limit is None and r.out.startswith("done"), r
+
+
+def test_makes_and_removes_small_files():
+    keeps("makes and removes small files")
+
+
+def test_starts_and_reaps_short_processes():
+    keeps("starts and reaps short processes")
+"""
+
+
+def test_a_program_that_keeps_making_and_removing_files_or_processes_is_not_ended_for_memory(tmp_path):
+    """A program that, for eight seconds, makes 5,000 small files and removes them again, over and
+    over, holds at the end what it held at the start; so does one that starts short-lived processes
+    and waits for them. The kernel's records rise and fall with what they do. Only what they have
+    grown by beyond the lowest figure they reached counts, so neither is ended for memory under a
+    limit of 64 MB."""
+    result = judge_attack(tmp_path, PLAIN + KEEPS_DOING, {"functional/test_keeps.py": KEEPS_DOING_TESTS},
+                          CASE_MEMORY_MB="64", CASE_TIMEOUT_SEC="30", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    for how, said in seen.items():
+        note_figures(f"keeps doing: {how}", records_grown=said["measured"].get("records_grown", 0) / 2**20,
+                     counted=said["measured"].get("memory_highest", 0) / 2**20)
+    assert outcomes(result) == {"test_makes_and_removes_small_files": "passed", "test_starts_and_reaps_short_processes": "passed"}, (
+        lost(result, tmp_path / "out"))
+
+
+# Programs that make the figures the judge reads move while it reads them: they read a file of 200 MB
+# again and again, dropping it from the cache before every pass, or write files of 12 MB into their
+# folder and remove them, in two processes at once, so that both processors are busy and the judge
+# is often stopped in the middle of a measurement.
+CHURNS = r"""
+import mmap
+how, aim, limit_mb, seconds = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+held = (limit_mb + 24 if aim == "above" else limit_mb - 32) * MB
+block = mmap.mmap(-1, held, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+touch(block)
+end = time.monotonic() + seconds
+children = []
+for worker in range(2):
+    pid = os.fork()
+    if pid == 0:
+        if how == "reads":
+            fd = os.open("/app/large.bin", os.O_RDONLY)
+            while time.monotonic() < end:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.lseek(fd, 0, 0)
+                while os.read(fd, MB):
+                    pass
+        else:
+            chunk = b"y" * MB
+            while time.monotonic() < end:
+                with open(f"churn-{worker}", "wb") as f:
+                    for _ in range(12):
+                        f.write(chunk)
+                os.unlink(f"churn-{worker}")
+        os._exit(0)
+    children.append(pid)
+for pid in children:
+    os.waitpid(pid, 0)
+print("done")
+"""
+
+CHURN_TESTS = """
+def churn(how, aim, turn):
+    with case() as c:
+        r = c.run([how, aim, LIMIT_MB, "3"])
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[f"{how} {aim} {turn}"] = {"limit": r.limit, "out": r.out[-200:], "err": r.err[-300:], "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.limit is None and r.out == "done\\n", r
+
+"""
+
+
+@pytest.mark.parametrize("aim", ["below", "above"])
+def test_what_a_program_does_while_the_judge_measures_neither_fails_it_nor_hides_its_memory(tmp_path, aim):
+    """A program that holds 32 MB less than its limit of 128 MB and reads a large file over and
+    over, or writes and removes files in its folder, in two processes, moves the figures the judge
+    reads while it reads them. It never fails for memory: three cases of each, three seconds each.
+    The same program holding 24 MB more than its limit fails for memory in every one of them: what
+    it does between two readings hides nothing."""
+    tests = CHURN_TESTS.replace("LIMIT_MB", repr("128")) + "".join(
+        f"\ndef test_{how}_{turn}():\n    churn({how!r}, {aim!r}, {turn})\n\n" for how in ("reads", "writes") for turn in range(3))
+    result = judge_attack(tmp_path, PLAIN + CHURNS, {"functional/test_churn.py": tests},
+                          {"before": "dd if=/dev/zero of=/app/large.bin bs=1M count=200 status=none"},
+                          CASE_MEMORY_MB="128", CASE_TIMEOUT_SEC="20", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    for name, said in seen.items():
+        note_figures(f"while the judge measures: {name}", counted=said["measured"].get("memory_highest", 0) / 2**20,
+                     longest_gap_ms=said["measured"].get("longest_gap", 0) * 1000)
+    expected = "passed" if aim == "below" else "failed"
+    assert set(outcomes(result).values()) == {expected} and len(outcomes(result)) == 6, lost(result, tmp_path / "out")
+    if aim == "above":
+        assert all(said["limit"] == "memory" for said in seen.values()), seen
+
+
 READS = r"""
 if sys.argv[1] == "holds":
     block = bytearray(b"x") * (100 * MB)
