@@ -569,8 +569,8 @@ what = "Memory moved out to swap counts as memory"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_memory_moved_out_to_swap_is_counted_as_memory"]
 [[protection.change]]
-find = '''    return {"taken": current - can_be_given_back + swapped - gives_back,'''
-put = '''    return {"taken": current - can_be_given_back - gives_back,'''
+find = '''    return {"taken": current - can_be_given_back + swapped - records,'''
+put = '''    return {"taken": current - can_be_given_back - records,'''
 
 [[protection]]
 what = "The kernel's records of files that were looked at are left out of a case's memory"
