@@ -1544,6 +1544,14 @@ find = '''    return names - imported'''
 put = '''    return names'''
 
 [[protection]]
+what = "A name a helper imports anywhere, also inside a function, is never one a test may import from it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_imports_from_a_helper_only_what_the_helper_defines"]
+[[protection.change]]
+find = '''for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))'''
+put = '''for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))'''
+
+[[protection]]
 what = "The format checker refuses a hidden name imported from a helper"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]

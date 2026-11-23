@@ -348,6 +348,12 @@ def test_a_test_imports_from_a_helper_only_what_the_helper_defines(cli_task_dir)
     write(cli_task_dir, "tests/lib/paths.py", "import json\nimport sys\nfrom pathlib import Path\n\n"
           + PATH_LINE + "VALUE = json.dumps(1)\nLATER: int\n")
     assert with_added(cli_task_dir, TEST, head + "from paths import LATER  # noqa: E402\n")
+    # a name imported inside a function of the helper, and made global there, is still an imported name
+    write(cli_task_dir, "tests/lib/paths.py", "Path = None\nsys = None\n\n\ndef keep():\n    global Path, sys\n"
+          "    import sys\n    from pathlib import Path\n\n\nkeep()\n" + PATH_LINE)
+    assert refused_in(cli_task_dir, "tests/lib/paths.py") == []
+    for name in ("Path", "sys"):
+        assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), name
 
 
 def test_a_link_in_the_tests_folder_is_refused(cli_task_dir, tmp_path):
