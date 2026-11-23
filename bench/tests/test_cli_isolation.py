@@ -1575,6 +1575,9 @@ def test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image(tmp
                 details = json.loads((tmp_path / "out" / step / r["solution"] / "details.json").read_text())
                 caught |= {t["name"] for t in details["tests"] if t["kind"] == "security" and t["outcome"] == "failed"}
         assert own and own - caught == set(), (step, own - caught)
+    undecided = sum(json.loads((tmp_path / "out" / r["step"] / r["solution"] / "details.json").read_text())
+                    ["memory"]["undecided_readings"] for r in results)
+    note_figures("the sample's Python solutions: readings that could not be decided", count=undecided)
     by_label = {(r["step"], r["solution"]): r["reward"] for r in results}
     assert by_label[("change-1", "secure")]["reward"] == 1.0
     assert by_label[("change-1", "broken-crlf-kept-in-field")]["regression_broken"] >= 1.0
@@ -1592,6 +1595,9 @@ def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, t
             view.append((r["step"], r["solution"], r["ok"], r["reward"],
                          [(t["file"], t["name"], t["outcome"]) for t in details["tests"]]))
         seen.append(view)
+        note_figures(f"the small task's solutions, judging {attempt + 1}: readings that could not be decided",
+                     count=sum(json.loads((tmp_path / f"out-{attempt}" / r["step"] / r["solution"] / "details.json")
+                                          .read_text())["memory"]["undecided_readings"] for r in results))
     assert len(seen[0]) == 5
     assert seen[0] == seen[1] == seen[2]
 
@@ -2199,7 +2205,9 @@ def test_what_a_program_does_while_the_judge_measures_neither_fails_it_nor_hides
     for name, said in seen.items():
         note_figures(f"while the judge measures: {name}", counted=said["measured"].get("memory_highest", 0) / 2**20,
                      longest_gap_ms=said["measured"].get("longest_gap", 0) * 1000,
-                     readings_moved=said["measured"].get("moved_most", 0) / 2**20)
+                     readings_moved=said["measured"].get("moved_most", 0) / 2**20,
+                     readings_undecided=said["measured"].get("undecided", 0),
+                     readings_cut_by_time=said["measured"].get("late", 0))
     expected = "passed" if aim == "below" else "failed"
     assert set(outcomes(result).values()) == {expected} and len(outcomes(result)) == 6, lost(result, tmp_path / "out")
     if aim == "above":

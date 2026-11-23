@@ -998,7 +998,7 @@ def test_the_figures():
     def container_memory(*args, **kwargs):
         # the figures of one run in turn; the last one stays
         figure = held["figures"].pop(0) if len(held["figures"]) > 1 else held["figures"][0]
-        return {"taken": figure * MB, "all": figure * MB, "cap": 0, "records": 0}
+        return {"taken": figure * MB, "all": figure * MB, "cap": 0, "records": 0, "files": 0}
 
     kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
     tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = container_memory, lambda folder: 0, lambda: 0
@@ -1059,7 +1059,7 @@ class Side:
 
 def grown(records):
     tool = dodam_cli._judge
-    figures = [{"taken": 100 * MB, "all": 100 * MB, "cap": 0, "records": r * MB} for r in records]
+    figures = [{"taken": 100 * MB, "all": 100 * MB, "cap": 0, "records": r * MB, "files": 0} for r in records]
 
     def container_memory(*args, **kwargs):
         return figures.pop(0) if len(figures) > 1 else figures[0]
@@ -1214,13 +1214,15 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
     assert outcomes(result) == {"test_between": "passed"}, message(result, "test_between")
 
 
-# A program 8 MB below its limit whose pages of the cache come and go while the judge reads, so that
-# the two halves of a reading differ by 20 MB in every try: the judge knows only that the figure lies
-# between 8 MB below the limit and 12 MB above it. Such a reading is no failure and no pass: it is read
-# again. "now and then": the cache comes or goes after the total is read, so that every other try
-# settles below the limit. "in every reading": it comes after the first half is read and goes after
-# the second, so that no reading ever settles; the case is then not judged, as a fault of measuring.
-UNSETTLED = r'''
+# A stand-in for the container's figures, made part by part as the judge reads them. Each try of a
+# reading reads, in this order, the pages the kernel can give back and its records ("stat before"),
+# the cases' files ("files before"), the swap ("swap before"), the container's total ("total"), and
+# then the swap, the stat and the files again ("swap after", "stat after", "files after"). A way of
+# reading says what happens to what the container holds at a part of a try (`happen`), which try is cut
+# by time (`late`), and what the cases' folder holds when it is read outside a reading (`outside`). The
+# container starts with 400 MB in all, of it 100 MB of pages of files, 100 MB of the kernel's records
+# and 40 MB of the cases' files; the case's limit is 256 MB.
+UNDECIDED = r'''
 import builtins, functools, io
 from pathlib import Path
 import dodam_cli
@@ -1240,90 +1242,335 @@ class Side:
 
 
 def stand_in(group, held):
-    for name, value in (("memory.current", held["current"]), ("memory.max", 4096 * MB), ("memory.swap.current", 0)):
-        (group / name).write_text(f"{value}\n")
-    (group / "memory.stat").write_text(f"anon {held['current'] - held['file']}\nfile {held['file']}\n"
-                                       f"inactive_file {held['file']}\nactive_file 0\nslab_reclaimable 0\n")
+    for name, value in (("memory.current", held["current"]), ("memory.max", CAP_MB * MB),
+                        ("memory.swap.current", held["swap"])):
+        (group / name).write_text(f"{int(value)}\n")
+    (group / "memory.stat").write_text(f"anon {int(held['current'] - held['file'])}\nfile {int(held['file'])}\n"
+                                       f"inactive_file {int(held['file'])}\nactive_file 0\n"
+                                       f"slab_reclaimable {int(held['records'])}\n")
 
 
-def test_unsettled():
+def move(held, **parts):
+    """Parts of the container that come or go; what is in memory comes and goes with the total."""
+    for part, mb in parts.items():
+        held[part] += mb * MB
+        if part not in ("current", "swap"):
+            held["current"] += mb * MB
+
+
+def late(n):
+    return 0.0
+
+
+def outside(held):
+    return held["files"]
+
+
+WAY
+
+
+def test_measured():
     group = Path(GROUP)
     group.mkdir()
-    held = {"current": 400 * MB, "file": 100 * MB, "up": False}
+    held = {"current": 400 * MB, "file": 100 * MB, "records": 100 * MB, "files": 40 * MB, "swap": 0}
     stand_in(group, held)
-    reads = {"total": 0, "stat": 0}
+    reads = {"try": 0, "after": False, "inside": False}
     real_open = builtins.open
+    parts = {str(group / "memory.current"): "total", str(group / "memory.stat"): "stat",
+             str(group / "memory.swap.current"): "swap"}
 
-    def toggle(up=None):
-        up = not held["up"] if up is None else up
-        if up != held["up"]:
-            step = 20 * MB if up else -20 * MB
-            held["current"] += step
-            held["file"] += step
-            held["up"] = up
+    def at(part):
+        n = reads["try"] if reads["after"] else reads["try"] + 1
+        if part == "total":
+            reads["try"], reads["after"] = n, True
+        was = dict(held)
+        happen(n, part if part == "total" else f"{part} {'after' if reads['after'] else 'before'}", held)
+        if held != was:
             stand_in(group, held)
+        if part == "total":
+            Clock.now += late(n)
+        return n
 
     def opening(file, mode="r", *args, **kwargs):
-        f = real_open(file, mode, *args, **kwargs)
         name = str(file)
-        if name not in (str(group / "memory.current"), str(group / "memory.stat")) or any(m in mode for m in "wax+"):
-            return f
-        text = f.read()
-        f.close()
-        if name.endswith("memory.current"):
-            reads["total"] += 1
-            if reads["total"] == 5:
-                # the program takes memory up to 8 MB below its limit of 256 MB
-                held["current"] += 248 * MB
-                stand_in(group, held)
-            elif reads["total"] >= 20 and HOW == "now and then":
-                toggle()
-        else:
-            reads["stat"] += 1
-            if reads["total"] >= 20 and HOW == "in every reading":
-                # every reading reads this file twice, around the total: up after the first, back after the second
-                toggle(reads["stat"] % 2 == 1)
-        return io.BytesIO(text) if "b" in mode else io.StringIO(text)
+        if name in parts and not any(m in mode for m in "wax+"):
+            at(parts[name])
+            if SLOW:
+                time.sleep(SLOW)
+        return real_open(file, mode, *args, **kwargs)
+
+    def files_held(folder):
+        if not reads["inside"]:
+            return outside(held)
+        at("files")
+        if reads["after"]:
+            reads["after"] = False
+        return held["files"]
 
     tool = dodam_cli._judge
     kept = builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
+    reading, real_time = functools.partial(kept[2], group=group), tool.time
+
+    class Clock:
+        """The reading's own clock: a try takes a millionth of a second, and longer only where the way says."""
+        now = 0.0
+
+        @classmethod
+        def monotonic(cls):
+            cls.now += 1e-6
+            return cls.now
+
+    def container_memory(*args, **kwargs):
+        reads["inside"], tool.time = True, Clock
+        try:
+            return reading(*args, **kwargs)
+        finally:
+            reads["inside"], tool.time = False, real_time
+
     builtins.open = io.open = opening
-    tool.container_memory = functools.partial(kept[2], group=group)
-    dodam_cli._files_held = lambda folder: 0
+    tool.container_memory = container_memory
+    dodam_cli._files_held = files_held
     dodam_cli._own_memory = lambda: 0
     try:
         with case() as c:
             c._side = Side()
-            r = c.run([])
+            r = c.run([SOLUTION])
             with real_open(SEEN, "w") as f:
-                json.dump({"limit": r.limit, "highest": c.measured.get("memory_highest"), "reads": reads["total"]}, f)
+                json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
+                           "tries": reads["try"]}, f)
+            CHECK
     finally:
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
 '''
 
+# A program that sleeps and then gives what its kind of solution gives: the right output; the right
+# output and a leak on its error stream; or the wrong output.
+SOLUTIONS = ("import sys, time\ntime.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
+             "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n")
+CHECKS = {"ordinary": "assert r.out == 'fine\\n', r.out", "security": "assert 'leak' not in r.err, r.err"}
+FILES_OF = {"ordinary": "functional/test_measured.py", "security": "security/test_measured.py"}
 
-@pytest.mark.parametrize("how", ["now and then", "in every reading"])
-def test_a_reading_that_cannot_be_taken_is_no_failure_and_no_pass(tmp_path, how):
-    """When every try of a reading moved too much to say on which side of the limit the figure lies,
-    the program is not ended for memory on it: the reading is taken again. When the readings settle
-    now and then, the case is judged by them and passes. When no reading settles, the case is not
-    judged, as a fault of measuring: it is no pass, and the result counts it on its own."""
+
+def takes(mb: float, at: int = 5) -> str:
+    """The program takes `mb` MB at the total of the `at`-th try; the case's figure is then `mb` MB."""
+    return f"    if n == {at} and part == 'total':\n        move(held, current={mb})\n"
+
+
+def every_try(changes: dict, at: str = "swap before", start: int = 20) -> str:
+    """From the `start`-th try on, `changes` come at the part `at` of every try, after the first half of
+    what they change is read, and go again before the next try begins."""
+    come = ", ".join(f"{part}={mb}" for part, mb in changes.items())
+    go = ", ".join(f"{part}={-mb}" for part, mb in changes.items())
+    return (f"    if n >= {start} and part == {at!r}:\n        move(held, {come})\n"
+            f"    if n > {start} and part == 'stat before':\n        move(held, {go})\n")
+
+
+def way(*lines: str, late: tuple = (), outside: str = "") -> str:
+    code = "def happen(n, part, held):\n" + "".join(lines) + "    pass\n"
+    if late:
+        code += f"\n\ndef late(n):\n    return 0.003 if n in {set(late)!r} else 0.0\n"
+    if outside:
+        code += f"\n\ndef outside(held):\n    return {outside}\n"
+    return code
+
+
+# what the total shows during tries `first` to `first + 7` and no half shows
+def at_the_total_only(mb: float, first: int) -> str:
+    return (f"    if {first} <= n < {first + 8} and part == 'total':\n        move(held, current={mb})\n"
+            f"    if {first} <= n < {first + 8} and part == 'swap after':\n        move(held, current={-mb})\n")
+
+
+EIGHT = tuple(range(8))
+WAYS = {
+    "settled": way(takes(200)),
+    # pages of the cache come and go: the figure lies between 8 MB below the limit and 12 MB above it
+    "every try moved": way(takes(248), every_try({"file": 20})),
+    "every try moved, and the program ends first": way(takes(248), every_try({"file": 20})),
+    # what the total shows while the tries of one reading are cut by time neither half shows
+    "cut by time, the total jumps": way(takes(248, 3), at_the_total_only(20, 10), late=tuple(10 + i for i in EIGHT)),
+    "cut by time at the case's start": way(takes(200, 12), late=tuple(1 + i for i in EIGHT)),
+    "cut by time, the total dips": way(takes(230, 15), at_the_total_only(-40, 3), late=tuple(3 + i for i in EIGHT)),
+    "cut by time, the records dip": way(takes(230, 15), "    if 3 <= n < 11 and part == 'stat before':\n"
+                                        "        move(held, records=-60)\n"
+                                        "    if 3 <= n < 11 and part == 'files after':\n"
+                                        "        move(held, records=60)\n", late=tuple(3 + i for i in EIGHT)),
+}
+SLOWER = {"every try moved, and the program ends first": 0.001}
+
+# Ways in which every try of a reading moved, each taking one part of a try away from the other half,
+# or one try away from the others, from the 20th try on, when the program takes its memory; and what
+# the judge has to make of each.
+EVERY_TRY = {
+    # 40 MB of pages of the cache are given back while every try is read; the program holds 14 MB above its limit
+    "pages of the cache are given back": (way(takes(270, 20), every_try({"file": -40})), "unmeasured"),
+    # a file of 40 MB of the case's is removed while every try is read; the program holds 14 MB above its limit
+    "a file is removed": (way(takes(270, 20), every_try({"files": -40})), "unmeasured"),
+    # a file of 40 MB is written while every try is read; the program holds 30 MB above its limit
+    "a file is written": (way(takes(286, 20), every_try({"files": 40})), "memory"),
+    # 40 MB of the kernel's records go while every try is read; the program holds 14 MB above its limit
+    "records fall": (way(takes(270, 20), every_try({"records": -40})), "unmeasured"),
+    # 40 MB of records come while every try is read; the program holds 5 MB above its limit
+    "records rise": (way(takes(261, 20), every_try({"records": 40})), "memory"),
+    # 40 MB move out to swap while every try is read; the program holds 14 MB above its limit
+    "memory moves out to swap": (way(takes(270, 20), every_try({"current": -40, "swap": 40}, at="total")),
+                                 "unmeasured"),
+    # 40 MB come back from swap while every try is read; the program holds 5 MB above its limit
+    "memory comes back from swap": (way(takes(261, 20), "    if n == 19 and part == 'files after':\n"
+                                        "        move(held, current=-40, swap=40)\n",
+                                        every_try({"current": 40, "swap": -40}, at="total")), "memory"),
+    # half a MB of the case's files is removed while every try is read; the program holds 0.3 MB above its limit
+    "half a MB is removed": (way(takes(256.3, 20), every_try({"files": -0.5})), "memory"),
+    # the container stands above the stop 128 MB below its cap by more than what every try moved
+    "above the stop by more than what moved": (way(takes(740, 20), every_try({"file": 20})), "memory"),
+    # the first try of every reading moves 2 MB and lies below the limit; the others move 20 MB across it
+    "the try that moved least lies below": (way(takes(240, 20), "    if n >= 20 and part == 'swap before':\n"
+                                                "        move(held, file=2 if n % 8 == 4 else 20)\n",
+                                                "    if n > 20 and part == 'stat before':\n"
+                                                "        move(held, file=-2 if (n - 1) % 8 == 4 else -20)\n"),
+                                            "passed"),
+    # the first try of a reading is cut by time and shows 20 MB more than its halves; the others are
+    # read in time and move 2 MB below the limit
+    "a try cut by time is not taken before one in time": (way(takes(240, 20), "    if n == 20 and part == 'total':\n"
+                                                              "        move(held, current=20)\n"
+                                                              "    if n == 20 and part == 'swap after':\n"
+                                                              "        move(held, current=-20)\n",
+                                                              "    if 21 <= n < 28 and part == 'swap before':\n"
+                                                              "        move(held, file=2)\n"
+                                                              "    if 22 <= n < 29 and part == 'stat before':\n"
+                                                              "        move(held, file=-2)\n", late=(20,)), "passed"),
+    # the first try of a reading is cut by time; the next is read in time and moves nothing
+    "one try cut by time": (way(takes(200, 20), late=(20,)), "passed"),
+    # once the program holds its memory, the cases' folder read once more after a reading shows a file of
+    # 40 MB gone that the total held
+    "the cases' files read after the reading": (way(takes(230, 20), outside="held['files'] - (40 * MB if "
+                                                    "held['current'] > 600 * MB else 0)"), "passed"),
+}
+LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
+
+
+def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
+                   slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256") -> tuple[dict, dict]:
+    """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
+    says: the judging, and what the case's run saw."""
     seen = tmp_path / "seen.json"
-    source = UNSETTLED.replace("GROUP", repr(str(tmp_path / "group"))).replace("HOW", repr(how)).replace("SEEN", repr(str(seen)))
-    result = judge_program(tmp_path, "import time\ntime.sleep(0.6)\nprint('fine')\n",
-                           {"functional/test_unsettled.py": source}, CASE_MEMORY_MB="256")
-    assert seen.is_file(), message(result, "test_unsettled")
-    measured = json.loads(seen.read_text())
-    assert measured["reads"] >= 20, f"the readings did not move while the program ran: {measured}"
-    assert measured["limit"] != "memory", f"a program was ended for memory on readings that could not be taken: {measured}"
-    case = next(c for c in result["report"]["tests"] if c["name"] == "test_unsettled")
-    if how == "now and then":
-        assert case["outcome"] == "passed", case
-        assert not case.get("not_judged_for_measuring"), case
+    source = (UNDECIDED.replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
+              .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
+              .replace("CHECK", CHECKS[test]).replace("WAY", way_code))
+    result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb)
+    assert seen.is_file(), message(result, "test_measured")
+    return result, json.loads(seen.read_text())
+
+
+def read_as_the_tool_does(tmp_path: Path, result: dict, test: str):
+    """What the tool that checks prepared solutions reads from this judging: its record, or a fault."""
+    from dodambench.task import TestFile
+    from dodambench.vet import record_of
+    run = [TestFile(file=FILES_OF[test], kind=FILES_OF[test].split("/")[0], step="build",
+                    weakness="path-traversal" if test == "security" else None, fresh_app=False, superseded_in=())]
+    return record_of(json.loads(json.dumps(result["reward"])), json.loads(json.dumps(result["report"])),
+                     tmp_path / "tests", run, "build", False, True)
+
+
+def the_case(result: dict) -> dict:
+    return next(c for c in result["report"]["tests"] if c["name"] == "test_measured")
+
+
+@pytest.mark.parametrize("way", [w for w in WAYS if w != "settled"])
+def test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it(tmp_path, way):
+    """A reading whose every try moved, so that a line lies within what moved, or whose tries were all
+    cut by time, says nothing of the side of the line the figure lies on: it ends no program, moves no
+    lowest figure, and from it on the case cannot pass. However few such readings there were and
+    however fast the machine, a case whose test passes after one is not judged, as a fault of
+    measuring: the outcome is "unmeasured"."""
+    result, seen = judge_measured(tmp_path, WAYS[way], slow=SLOWER.get(way, 0.0))
+    assert seen["limit"] is None and seen["out"] == "fine\n", f"the program was ended on such a reading: {seen}"
+    assert seen["tries"] >= 20, f"the program ended before the readings this needs: {seen}"
+    case = the_case(result)
+    assert case["outcome"] == judge_module.UNMEASURED, case
+    assert case["message"] == judge_module.NOT_JUDGED_FOR_MEASURING, case
+
+
+def test_readings_taken_in_one_piece_judge_the_case(tmp_path):
+    """Without such readings the same case is judged by its test: it passes."""
+    result, seen = judge_measured(tmp_path, WAYS["settled"])
+    assert seen["limit"] is None and outcomes(result) == {"test_measured": "passed"}, message(result, "test_measured")
+    assert result["reward"]["unmeasured"] == 0.0 and result["report"]["unmeasured"] == [], result["reward"]
+
+
+def test_a_reading_cut_by_time_moves_no_lowest_figure(tmp_path):
+    """While a reading is cut by time a file can be gone from the total and back before the second half
+    is read, and so can records of the kernel's: such a reading may lie below what the container held.
+    The case's lowest figure is the one of its start all the same, so nothing is counted twice later."""
+    lowest = {}
+    for name in ("settled", "cut by time, the total dips", "cut by time, the records dip"):
+        (tmp_path / name).mkdir()
+        result, seen = judge_measured(tmp_path / name, WAYS[name])
+        assert seen["limit"] is None, f"{name}: the program was ended for {seen['limit']}: {seen}"
+        lowest[name] = seen["lowest"]
+    assert len(set(lowest.values())) == 1, lowest
+
+
+@pytest.mark.parametrize("change", list(EVERY_TRY))
+def test_each_part_of_a_reading_is_taken_as_it_can_be_trusted(tmp_path, change):
+    """Each part of a try is read before and after the total, and the side of it that makes the figure
+    no smaller counts: a reading whose parts moved apart then says the figure lies within what moved.
+    Where a line lies in there it decides nothing; where the figure lies above a line by more than what
+    moved, or below it, it decides. A try cut by time, or one that moved more than another, is not the
+    one taken; and the cases' files are taken from the reading itself, not read once more."""
+    code, expected = EVERY_TRY[change]
+    cap_mb, memory_mb = LIMITS_OF.get(change, (4096, "256"))
+    result, seen = judge_measured(tmp_path, code, cap_mb=cap_mb, memory_mb=memory_mb)
+    assert seen["tries"] >= 20, f"the program ended before the readings this needs: {seen}"
+    case = the_case(result)
+    if expected == "memory":
+        assert seen["limit"] == "memory", f"the program was not ended for memory: {seen}"
+        assert case["outcome"] == "failed", case
     else:
-        assert case["outcome"] == "skipped" and case.get("not_judged_for_measuring") is True, case
-        assert result["report"].get("not_judged_for_measuring") == 1, result["report"].get("not_judged_for_measuring")
-        assert result["reward"]["reward"] == 0.0 and result["reward"]["unjudged"] == 1.0, result["reward"]
+        assert seen["limit"] is None and seen["out"] == "fine\n", f"the program was ended for {seen['limit']}: {seen}"
+        assert case["outcome"] == ("passed" if expected == "passed" else judge_module.UNMEASURED), case
+
+
+# what a test of each kind decides for each kind of solution, when every try of its readings moved
+DECIDED = {"right-ordinary": "passes", "right-security": "passes", "vulnerable-ordinary": "passes",
+           "vulnerable-security": "fails", "broken-ordinary": "fails", "broken-security": "passes"}
+
+
+@pytest.mark.parametrize("kinds", list(DECIDED))
+def test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured(tmp_path, kinds):
+    """After a reading that could not be taken, what the test itself decided stands: a case whose test
+    failed is failed, with the test's own words, and a security test that found its weakness has found
+    it. Only a case that would pass becomes "unmeasured". The step that cleans up after the case changes
+    no outcome. The result names the cases not judged and the reward counts them; the tool that checks
+    prepared solutions reads any such case as a fault of measuring, whatever kind of solution it judged,
+    and every other judging as a record of what its tests decided."""
+    from dodambench.vet import judgement_problems
+    solution, test = kinds.split("-")
+    result, seen = judge_measured(tmp_path, WAYS["every try moved"], solution, test)
+    assert seen["limit"] is None, seen
+    case = the_case(result)
+    name = f"{FILES_OF[test]}::test_measured"
+    if DECIDED[kinds] == "fails":
+        assert case["outcome"] == "failed", case
+        said = "leak" if test == "security" else "wrong"
+        assert said in case["message"] and "AssertionError" in case["message"], case
+        assert result["report"]["unmeasured"] == [] and result["reward"]["unmeasured"] == 0.0, result["reward"]
+        assert result["reward"]["vulns_found"] == (1.0 if test == "security" else 0.0), result["reward"]
+        judged = read_as_the_tool_does(tmp_path, result, test)
+        expect, weakness = ("vulnerable", "path-traversal") if test == "security" else ("broken", None)
+        assert [c.outcome for c in judged.cases] == ["failed"]
+        assert judgement_problems(expect, weakness, judged) == [], judgement_problems(expect, weakness, judged)
+    else:
+        assert case["outcome"] == judge_module.UNMEASURED, case
+        assert result["report"]["unmeasured"] == [name], result["report"]["unmeasured"]
+        assert result["reward"]["unmeasured"] == 1.0 and result["reward"]["reward"] == 0.0, result["reward"]
+        kind = FILES_OF[test].split("/")[0]
+        assert result["reward"][f"{kind}_pass_rate"] == 0.0, result["reward"]
+        assert result["reward"][f"{kind}_judged"] == 0.0 and result["reward"]["unjudged"] == 0.0, result["reward"]
+        with pytest.raises(judge_module.JudgeFault) as fault:
+            read_as_the_tool_does(tmp_path, result, test)
+        said = json.loads(str(fault.value))
+        assert said["key"] == "unmeasured" and said["message"].startswith(judge_module.NOT_JUDGED_FOR_MEASURING), said
+        assert name in said["message"], said
 
 
 SWAP_STOP = r'''
@@ -1418,16 +1665,19 @@ def test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first(tmp_p
     from dodambench import dodam_cli as runner
     highs = tmp_path / "highs.jsonl"
     mb = 2**20
+    # the last two lie apart by 4,000 bytes and are written down as the same 1.51 MB
     runs = {"half": mb // 2, "one and a fifth": 6 * mb // 5, "one and nine tenths": 19 * mb // 10,
-            "one and a half": 3 * mb // 2}
+            "one and a half": 3 * mb // 2, "just above one and a half": 3 * mb // 2 + 1000,
+            "a little further above one and a half": 3 * mb // 2 + 5000}
     for name, above in runs.items():
         case = SimpleNamespace(_cfg={"highs_file": str(highs)}, _key=f"functional/test_x.py::{name}",
                                _limits={"memory_mb": 256, "disk_mb": 32})
         runner.Case._record_high(case, 100 * mb, 400 * mb, {"taken": 80 * mb, "all": 90 * mb}, above)
     said = judge_module.CliRun.highs(SimpleNamespace(highs_file=highs))
-    assert said["runs"] == 4
+    assert said["runs"] == 6
     order = [run["case"].split("::")[-1] for run in said["largest"]]
-    assert order == ["one and nine tenths", "one and a half", "one and a fifth", "half"], order
+    assert order == ["one and nine tenths", "a little further above one and a half", "just above one and a half",
+                     "one and a half", "one and a fifth", "half"], order
     half = said["largest"][-1]
     assert any(isinstance(value, (int, float)) and value > 0 for key, value in half.items() if key.startswith("above_the_limit")), (
         f"a run half a MB above the limit was written down as nothing: {half}")
@@ -1516,7 +1766,7 @@ def test_the_order():
     kept = tool.killed_for_memory, tool.highest_memory, tool.container_memory
     tool.killed_for_memory = noting("what the kernel ended", 0)
     tool.highest_memory = noting("the highest value", 0)
-    tool.container_memory = noting("what is held", {"taken": 0, "all": 0, "cap": 0})
+    tool.container_memory = noting("what is held", {"taken": 0, "all": 0, "cap": 0, "files": 0})
     dodam_cli.subprocess.Popen = started
     try:
         with case() as c:

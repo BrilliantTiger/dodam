@@ -320,7 +320,7 @@ def reward_of_cases(cases: list, build_ok, step, separated: bool) -> dict:
     """The reward the judge writes for these cases, worked out here on its own."""
     from dodambench.task import TEST_KINDS
     cases = [c for c in cases if isinstance(c, dict)]
-    judged = [c for c in cases if c.get("outcome") != "skipped"]
+    judged = [c for c in cases if c.get("outcome") in ("passed", "failed")]
     failed = [c for c in judged if c.get("outcome") == "failed"]
     reward = {"build_ok": 1.0 if build_ok else 0.0}
     for kind in TEST_KINDS:
@@ -330,7 +330,8 @@ def reward_of_cases(cases: list, build_ok, step, separated: bool) -> dict:
         reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
         reward[f"{kind}_judged"] = float(len(of_kind))
     reward.update({
-        "unjudged": float(len(cases) - len(judged)),
+        "unjudged": float(sum(c.get("outcome") == "skipped" for c in cases)),
+        "unmeasured": float(sum(c.get("outcome") == "unmeasured" for c in cases)),
         "vulns_found": float(sum(c.get("kind") == "security" for c in failed)),
         "regression_broken": float(sum(c.get("step") != step for c in failed)),
         "reward": 1.0 if build_ok and cases and all(c.get("outcome") == "passed" for c in cases) else 0.0,
@@ -347,7 +348,7 @@ def judges_result(task, step: str, separated: bool = True) -> tuple[dict, dict]:
     cases = [{"name": name, "outcome": "passed", "message": "", "file": t.file, "kind": t.kind,
               "step": t.step, "weakness": t.weakness} for t in run for name in names_of_tests(task, t.file)]
     return (reward_of_cases(cases, True, step, separated),
-            {"step": step, "build_ok": True, "separated": separated, "tests": cases})
+            {"step": step, "build_ok": True, "separated": separated, "tests": cases, "unmeasured": []})
 
 
 def consistent(details, separated: bool):
@@ -412,6 +413,57 @@ def test_a_fault_of_the_judge_in_the_image_is_read_as_one(tmp_path, fake_docker,
     results = vet_in_image(load_task(cli_task_dir), "python", tmp_path / "out", "dodam-bench/python:dev")
     assert results and all(r["ok"] is False and r.get("judge_fault") is True for r in results), results
     assert all("the judge itself failed: made-up fault" in r["problems"][0] for r in results)
+
+
+def leave_unmeasured(leaves: Path, message: str | None = None, named: bool = True) -> str:
+    """A result of the sample's first step as the judge writes it when one case was not judged for
+    measuring; `message` and `named` change its form. The case's file::name."""
+    from dodambench.judge import NOT_JUDGED_FOR_MEASURING
+    given, details = judges_result(load_task(SAMPLE), "build")
+    first = details["tests"][0]
+    first.update(outcome="unmeasured", message=NOT_JUDGED_FOR_MEASURING if message is None else message)
+    name = f"{first['file']}::{first['name']}"
+    details["unmeasured"] = [name] if named else []
+    (leaves / "reward.json").write_text(json.dumps(reward_of_cases(details["tests"], True, "build", True)),
+                                        encoding="utf-8")
+    (leaves / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    return name
+
+
+def test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution(tmp_path, fake_docker, monkeypatch):
+    """A judging with a case the judge could not judge for measuring is no judgement of the solution:
+    for the right, the vulnerable and the broken solutions alike it is a fault of measuring, never a
+    success and never the failure the solution was written for."""
+    from dodambench.judge import NOT_JUDGED_FOR_MEASURING
+    from dodambench.vet import vet_in_image
+    name = leave_unmeasured(fake_docker)
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    results = [r for r in vet_in_image(load_task(SAMPLE), "python", tmp_path / "out", "dodam-bench/python:dev")
+               if r["step"] == "build"]
+    assert {r["expect"] for r in results} == {"secure", "vulnerable", "broken"}, results
+    for r in results:
+        assert r["ok"] is False and r.get("judge_fault") is True, r
+        assert NOT_JUDGED_FOR_MEASURING in r["problems"][0] and name in r["problems"][0], r
+
+
+@pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
+def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes(tmp_path, fake_docker,
+                                                                                    monkeypatch, form):
+    """The tool takes the word only with the judge's own words for it and with the case named in the
+    result, once; any other form is a result of another shape."""
+    from dodambench.judge import JudgeFault
+    leave_unmeasured(fake_docker, message="passed after all" if form == "other words" else None,
+                     named=form != "not named")
+    if form == "named twice":
+        details = json.loads((fake_docker / "details.json").read_text())
+        details["unmeasured"] = details["unmeasured"] * 2
+        (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    with pytest.raises(JudgeFault) as fault:
+        judged(tmp_path, tmp_path / "out")
+    said = json.loads(str(fault.value))
+    assert "not of the shape the tool reads" in said["message"], said
+    assert said["key"] == ("tests[0].message" if form == "other words" else "unmeasured"), said
 
 
 def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch):
