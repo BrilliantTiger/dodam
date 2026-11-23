@@ -7,13 +7,15 @@ A job starts when the project's own account, known by its numeric id, has put on
 the project's own pull requests or issues: one for a verification look, one for an attack look, one for a
 discussion. When the job is done the label is taken off, so that the mark can be put again.
 
-It is started by hand in a plain terminal and runs in that terminal only: when the terminal closes, it
-stops, and so does a run of agy it started. It installs nothing that keeps running. With --polls N it
-stops after N rounds.
+It is started in a terminal of Orca that holds no coding agent, or in a plain terminal, with a line that
+replaces the terminal's shell, and runs in that terminal only: when the terminal closes, it stops, and so
+does a run of agy it started. Its input is closed as it starts, so that what is typed into the terminal is
+handed to nothing it starts. It installs nothing that keeps running. With --polls N it stops after N rounds.
 
 Standard output carries one line per finished job, the job's own result line (fixed words, numbers and the
-private answer's path). Standard error carries short notes in fixed words. Neither ever carries text of
-the model or of anyone on GitHub.
+private answer's path). Standard error carries short notes in fixed words, and the job's lines for each run:
+the item's title, a line a minute, and how the run ended, with the public part once it was posted. Neither
+carries the private part or anything of an answer that was held.
 """
 
 from __future__ import annotations
@@ -228,6 +230,11 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
         if not result.get("ran") and status in ("quota", "day_bound"):
             note("the job was held back by its own bounds; trying again later")
             break
+        if not result.get("ran") and "temporary_folder" in (result.get("reasons") or []):  # type: ignore[operator]
+            # The folder for temporary files marks Orca or a coding agent: no run can start from this terminal.
+            save_state(state_path, state)
+            note("stopping: the folder for temporary files marks Orca or a coding agent (temporary_folder)")
+            return job.EXIT_CODES["settings"]
         print(json.dumps(result), flush=True)
         if status == "quota" and result.get("ran"):
             returns[str(event_id)] = put_back + 1
@@ -260,6 +267,15 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
     return None
 
 
+def close_input() -> None:
+    """The terminal stops being the watcher's input: the watcher reads nothing of what is typed into it, and hands
+    none of it to what it starts."""
+    fd = os.open(os.devnull, os.O_RDONLY)
+    if fd != 0:
+        os.dup2(fd, 0)
+        os.close(fd)
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Watch the project's repository and start the Gemini job.")
     parser.add_argument("--settings", type=Path, default=job.DEFAULT_SETTINGS)
@@ -270,12 +286,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    close_input()
+    job.close_terminal()
     os.umask(0o077)
     job.install_signal_handlers()
     args = parse_args(argv)
     refusal = job.inside_agent_reasons()
     if refusal:
-        note("refused: it runs inside a coding agent or a terminal an agent can type into (" + ", ".join(refusal) + ")")
+        note("refused: it runs inside a coding agent (" + ", ".join(refusal) + ")")
         return job.EXIT_CODES["refused"]
     try:
         settings = job.load_settings(args.settings)
