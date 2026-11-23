@@ -299,7 +299,8 @@ def reader_command(name: str, group: str) -> list[str]:
 def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32", memory_mb: int | None = None,
                  without: tuple[str, ...] = (), user: str = "agent", judge_args: str = "", before: str = "",
                  changed: tuple[tuple[str, str, str], ...] = (), seconds: int = 300, reading: bool = False,
-                 processes: int | None = None, own_filter_only: bool = False) -> dict:
+                 processes: int | None = None, own_filter_only: bool = False,
+                 capabilities: tuple[str, ...] = (), mounts: tuple[str, ...] = (), volumes: tuple[str, ...] = ()) -> dict:
     """What the verifier does: a fresh container without network, capped in memory, processors and
     processes, with the capped memory-backed folder for the cases; the judge as root with its own
     Python, started by the verifier's own script, the program's build user named agent. Returns the
@@ -313,7 +314,10 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     is ended and fails the test. With `reading` a helper runs outside the container and the hidden
     tests can ask it what the container really holds; the folder they ask through is root's alone.
     With `own_filter_only` the container gets no call filter from Docker, so that a call that is
-    refused is refused by the judge's own."""
+    refused is refused by the judge's own. `capabilities` are given to the container's root beside
+    Docker's usual ones, for a hidden test that needs one; the program's side never has any.
+    `mounts` are memory-backed folders given to the container beside the cases' one, as Docker's
+    `--tmpfs` takes them; `volumes` are Docker volumes given to it, as `--volume` takes them."""
     name = f"dodam-attack-{uuid.uuid4().hex[:12]}"
     (tests_dir / "test.sh").write_text(TEST_SH, encoding="utf-8")
     for file, text, replacement in changed:
@@ -335,6 +339,12 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     hung = False
     if own_filter_only:
         flags += ["--security-opt", "seccomp=unconfined"]
+    for capability in capabilities:
+        flags += ["--cap-add", capability]
+    for mount in mounts:
+        flags += ["--tmpfs", mount]
+    for volume in volumes:
+        flags += ["--volume", volume]
     if reading:
         flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
@@ -1123,6 +1133,186 @@ print(json.dumps(found))
     assert found["as agent"] == str(found["uid"]) and found["uid"] >= 200_000, found
 
 
+# Named pipes and sockets any user may write, left by the build in the temporary folders and in its
+# home, which it opens to everyone. When the build ends it notes when each was last changed.
+SPECIAL = ("/tmp/pipe", "/var/tmp/pipe", "/home/agent/pipe", "/tmp/socket")
+LEAVES_SPECIAL_FILES = (
+    "chmod 0755 /home/agent && mkfifo /tmp/pipe /var/tmp/pipe /home/agent/pipe && "
+    "chmod 0666 /tmp/pipe /var/tmp/pipe /home/agent/pipe && "
+    "python3 -c \"import socket; socket.socket(socket.AF_UNIX).bind('/tmp/socket')\" && chmod 0777 /tmp/socket && "
+    "python3 -c \"import json, os; json.dump({p: os.lstat(p).st_mtime_ns for p in "
+    + repr(SPECIAL).replace('"', "'") + "}, open('/app/built.json', 'w'))\"")
+TRIES_SPECIAL_FILES = r'''
+import json, os, sys
+SPECIAL = SPECIAL_FILES
+if sys.argv[1:] == ["try"]:
+    found = {}
+    for place in SPECIAL:
+        found[place] = {"writable": os.access(place, os.W_OK), "written": False}
+        try:
+            fd = os.open(place, os.O_RDWR | os.O_NONBLOCK)
+            os.write(fd, b"x")
+            os.close(fd)
+            found[place]["written"] = True
+        except OSError:
+            pass
+    print(json.dumps(found))
+else:
+    print(json.dumps({"now": {place: os.lstat(place).st_mtime_ns for place in SPECIAL},
+                      "built": json.load(open("/app/built.json"))}))
+'''.replace("SPECIAL_FILES", repr(SPECIAL))
+SPECIAL_TESTS = '''
+def test_first_case_tries_what_the_build_left():
+    with case() as c:
+        r = c.run(["try"])
+        with open("/logs/verifier/tried.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+
+
+def test_second_case_looks_whether_any_of_it_changed():
+    with case() as c:
+        r = c.run(["look"])
+        with open("/logs/verifier/looked.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+'''
+
+
+# What the build and the working phase leave that a case may read: files and folders in the program's
+# folder and in a temporary folder, one of them changed, by the build's say, in the year 2100. The first
+# case notes when each was last read, then reads some and lists the folders; the second notes it again.
+READ_MARKS = ("/app/bits/b0", "/app/bits/b1", "/app/bits/b2", "/app/bits/b3", "/app/bits", "/app/given.txt",
+              "/tmp/t0", "/tmp/t1", "/tmp")
+LEAVES_FILES_TO_READ = ("mkdir -p /app/bits && for n in 0 1 2 3; do echo x > /app/bits/b$n; done && "
+                        "touch -d @4102444800 /app/bits/b3 && "
+                        "echo y > /tmp/t0 && echo y > /tmp/t1 && chmod 0644 /tmp/t0 /tmp/t1")
+READS_SOME = r'''
+import json, os, sys
+MARKS = READ_MARKS
+seen = {place: os.stat(place).st_atime_ns for place in MARKS}
+if sys.argv[1:] == ["read"]:
+    for place in ("/app/bits/b1", "/app/bits/b3", "/app/given.txt", "/tmp/t1"):
+        with open(place) as f:
+            f.read()
+    os.listdir("/app/bits")
+    os.listdir("/tmp")
+print(json.dumps(seen))
+'''.replace("READ_MARKS", repr(READ_MARKS))
+READS_THEN_LOOKS = '''
+def test_first_case_reads_some_of_what_the_build_left():
+    with case() as c:
+        r = c.run(["read"])
+        with open("/logs/verifier/before.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+
+
+def test_second_case_looks_when_they_were_read():
+    with case() as c:
+        r = c.run(["look"])
+        with open("/logs/verifier/after.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+'''
+
+
+def test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next(tmp_path):
+    """Reading a file or listing a folder can move when it was last read. Nothing the build or the
+    working phase left that a case may read shows the next case whether it was read."""
+    (tmp_path / "solution").mkdir()
+    (tmp_path / "solution/given.txt").write_text("left by the working phase\n")
+    # the program's folder is handed over well before the build begins, as a large one is
+    handed_over_early = (("dodam_judge.py", "        if deps_dir and links:\n", "        time.sleep(2)\n        if deps_dir and links:\n"),)
+    result = judge_attack(tmp_path, READS_SOME, {"functional/test_read.py": READS_THEN_LOOKS}, BUILD_CMD=LEAVES_FILES_TO_READ,
+                          room={"changed": handed_over_early})
+    assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
+    before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
+    assert [place for place in READ_MARKS if before[place] != after[place]] == [], (before, after)
+
+
+# What the container is given before the judge begins: a volume made seconds earlier, and the files the
+# container's runtime puts in one by one. The judge begins three seconds after its container.
+GIVEN_MARKS = ("/given/g0", "/given/g1", "/given", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf")
+READS_WHAT_IT_WAS_GIVEN = r'''
+import json, os, sys
+MARKS = GIVEN_MARKS
+seen = {place: os.stat(place).st_atime_ns for place in MARKS}
+if sys.argv[1:] == ["read"]:
+    for place in ("/given/g1", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf"):
+        with open(place) as f:
+            f.read()
+    os.listdir("/given")
+print(json.dumps(seen))
+'''.replace("GIVEN_MARKS", repr(GIVEN_MARKS))
+
+
+def test_what_one_case_reads_of_what_the_container_was_given_shows_nothing_to_the_next(tmp_path):
+    """Not only what the build left: what a file system other than the image's own layers holds, and
+    the files the container's runtime puts in, show the next case nothing of what one case read."""
+    volume = f"dodam-given-{uuid.uuid4().hex[:12]}"
+    subprocess.run(["docker", "volume", "create", volume], check=True, capture_output=True)
+    try:
+        subprocess.run(["docker", "run", "--rm", "--network", "none", "--memory", "128m", "--pids-limit", "32",
+                        "--volume", f"{volume}:/given", IMAGE, "sh", "-c",
+                        "echo x > /given/g0 && echo x > /given/g1 && chmod 0755 /given && chmod 0644 /given/g0 /given/g1"],
+                       check=True, capture_output=True)
+        time.sleep(3)
+        result = judge_attack(tmp_path, READS_WHAT_IT_WAS_GIVEN, {"functional/test_given.py": READS_THEN_LOOKS},
+                              room={"volumes": (f"{volume}:/given",), "before": "sleep 3"})
+    finally:
+        subprocess.run(["docker", "volume", "rm", "--force", volume], capture_output=True)
+    assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
+    before, after = found_by(tmp_path / "out", "before.json"), found_by(tmp_path / "out", "after.json")
+    assert [place for place in GIVEN_MARKS if before[place] != after[place]] == [], (before, after)
+
+
+def test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read(tmp_path):
+    """Such a file system would show the next case what one case read, whatever the judge did. The
+    container's device folder is always mounted so, and is named under the limits; another is refused."""
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, room={"mounts": ("/strict:strictatime",)},
+                          BUILD_CMD="touch /app/the-build-ran")
+    assert result["exit_code"] == 3 and result["reward"] is None, result
+    refusal = json.loads(found_by(tmp_path / "out", "judge-fault.json")["judge_fault"])
+    assert refusal["severity"] == "error" and refusal["key"] == "access times" and "/strict" in refusal["message"], refusal
+    assert not (tmp_path / "out/ground.json").exists()
+
+
+# The step's one time for walking and removing, with separation: the judge gives three seconds, and the
+# case runner removes each file slowly, about two seconds for what the program leaves in one case.
+SLOW_IN_THE_RUNNER = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
+                      "def _slowly(*args, **kwargs):\n    time.sleep(0.1)\n    return _unlink(*args, **kwargs)\n\n\n"
+                      "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+LEAVES_TWENTY = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('plain')\n"
+ONE_CASE = "def test_NAME():\n    with case() as c:\n        assert c.run([]).out == 'plain\\n'\n"
+
+
+def test_with_separation_the_case_runners_remove_on_the_steps_one_time(tmp_path):
+    result = judge_attack(tmp_path, LEAVES_TWENTY, {
+        "functional/test_a.py": SLOW_IN_THE_RUNNER + ONE_CASE.replace("NAME", "first") + "\n\n" + ONE_CASE.replace("NAME", "second"),
+        "functional/test_b.py": ONE_CASE.replace("NAME", "later")},
+        room={"changed": (("dodam_judge.py", "TREE_SECONDS = 120 ", "TREE_SECONDS = 3 "),)})
+    out = tmp_path / "out"
+    assert result["exit_code"] == 0 and result["fault"] is None and result["reward"] is not None, lost(result, out)
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert said["test_first"] == ("passed", ""), said
+    assert said["test_second"][0] == "failed" and "seconds" in said["test_second"][1], said
+    assert said["test_b.py"][0] == "failed" and "cannot be emptied" in said["test_b.py"][1], said
+    assert "seconds" in result["report"].get("left_behind", ""), result["report"]
+
+
+def test_no_named_pipe_or_socket_the_build_leaves_can_be_written_by_a_case(tmp_path):
+    """What any user may write is closed after the build, whatever kind of file it is: no case can
+    write a named pipe or a socket the build left, so nothing one case does to them reaches the next."""
+    result = judge_attack(tmp_path, TRIES_SPECIAL_FILES, {"functional/test_special.py": SPECIAL_TESTS},
+                          BUILD_CMD=LEAVES_SPECIAL_FILES)
+    assert set(outcomes(result).values()) == {"passed"}, lost(result, tmp_path / "out")
+    tried, looked = found_by(tmp_path / "out", "tried.json"), found_by(tmp_path / "out", "looked.json")
+    assert set(tried) == set(SPECIAL), tried
+    assert [place for place, seen in tried.items() if seen["writable"] or seen["written"]] == [], tried
+    assert looked["now"] == looked["built"], looked
+
+
 BUILD_LOOKS = r"""
 import ctypes, json, os, sys
 libc = ctypes.CDLL(None, use_errno=True)
@@ -1149,6 +1339,7 @@ seen["no new privileges"] = [l.split()[1] for l in open("/proc/self/status") if 
 seen["first to go"] = open("/proc/self/oom_score_adj").read().strip()
 seen["shared memory"] = libc.shmget(0, 4096, 0o1666) >= 0
 seen["user"] = os.getuid()
+seen["environment"] = sorted(os.environ)
 json.dump(seen, open("/app/seen-by-the-build.json", "w"))
 """.replace("MARKER", CANARY)
 
@@ -1168,6 +1359,7 @@ def test_the_build_is_held_as_the_program_is(tmp_path):
         assert word not in said, (word, seen["command lines"])
     assert seen["no new privileges"] == ["1"] and seen["first to go"] == "1000" and seen["shared memory"] is False
     assert seen["user"] == 1000
+    assert [key for key in seen["environment"] if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], seen["environment"]
 
 
 @pytest.mark.parametrize("build, built, seconds", [
@@ -1202,6 +1394,119 @@ def test_the_judge_cannot_do_its_work():
     assert result["exit_code"] == 3 and result["reward"] is None
     assert not (tmp_path / "out/reward.json").exists()
     assert "own tool broke" in found_by(tmp_path / "out", "judge-fault.json")["judge_fault"]
+
+
+# The judge with the confinement of every new process of the program's side failing: the kernel's
+# mark that it can gain no rights is never set, or its filter of calls is never set.
+CANNOT_CONFINE = (("dodam_judge.py", "    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:",
+                   "    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 or True:"),)
+CANNOT_FILTER = (("dodam_judge.py", "        if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:",
+                  "        if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0 or True:"),)
+
+
+@pytest.mark.parametrize("what, failing", [("the build", CANNOT_CONFINE), ("a case's program", CANNOT_CONFINE),
+                                           ("a case's program", CANNOT_FILTER)],
+                         ids=["the build", "a case's program", "the filter of calls of a case's program"])
+def test_a_process_the_judge_cannot_confine_is_a_fault_of_the_judge_and_never_a_failure_of_the_program(tmp_path, what, failing):
+    """Nothing of the program's side runs unconfined. When the judge cannot confine the build or a
+    case's program, that is its own fault: no result, its account of the fault, exit code 3."""
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST, room={"changed": failing},
+                          BUILD_CMD="true" if what == "the build" else "")
+    out = tmp_path / "out"
+    assert result["exit_code"] == 3 and result["reward"] is None, lost(result, out)
+    assert not (out / "reward.json").exists() and not (out / "details.json").exists()
+    assert "start" in found_by(out, "judge-fault.json")["judge_fault"], result["fault"]
+    assert not (out / "ground.json").exists(), "the program ran although it could not be confined"
+
+
+def test_an_exit_code_the_program_or_its_build_gives_itself_is_its_own(tmp_path):
+    """Whatever exit code a program or its build ends with, it is theirs: none of them is read as the
+    judge failing to confine them."""
+    result = judge_attack(tmp_path, "import sys\nsys.exit(126)\n", {"functional/test_own.py": '''
+def test_its_own_exit_code():
+    with case() as c:
+        assert c.run([]).exit_code == 126
+'''}, BUILD_CMD="true")
+    assert result["exit_code"] == 0 and outcomes(result) == {"test_its_own_exit_code": "passed"}, lost(result, tmp_path / "out")
+    (tmp_path / "build").mkdir()
+    built = judge_attack(tmp_path / "build", "print('plain')\n", GROUND_TEST, BUILD_CMD="exit 126")
+    assert built["exit_code"] == 0 and built["reward"]["build_ok"] == 0.0, lost(built, tmp_path / "build/out")
+
+
+# The judge with every process of the program's side seeming to outlive every attempt to end it.
+NEVER_ENDED = (("dodam_judge.py", "    def alive(self) -> list[int]:\n        return user_pids(self.uid)",
+                "    def alive(self) -> list[int]:\n        return [1]"),)
+
+
+def test_processes_of_the_programs_side_the_judge_cannot_end_are_a_fault_of_the_judge(tmp_path):
+    """An earlier result lies where the result goes. The judge cannot end the processes of the
+    program's side: it removes that result, says so and ends with exit code 3."""
+    result = judge_attack(tmp_path, "print('plain')\n", GROUND_TEST,
+                          room={"changed": NEVER_ENDED, "before": "echo '{\"reward\": 1.0}' > /logs/verifier/reward.json"})
+    out = tmp_path / "out"
+    assert result["exit_code"] == 3 and result["reward"] is None, lost(result, out)
+    assert not (out / "reward.json").exists()
+    assert "could not be ended" in found_by(out, "judge-fault.json")["judge_fault"]
+
+
+# A program that leaves a file in its working folder when asked; the hidden test then makes that file
+# one that nothing in the container can remove, for the rest of the step.
+STAYS = r'''
+import sys
+if sys.argv[1:] == ["leave"]:
+    with open("kept.txt", "w") as f:
+        f.write("x")
+print("plain")
+'''
+STAYS_TESTS = {"functional/test_stays.py": '''
+import array, fcntl
+
+
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_leaves_what_cannot_be_removed():
+    with case() as c:
+        assert c.run(["leave"]).out == "plain\\n"
+        fd = os.open(c.work / "kept.txt", os.O_RDONLY | os.O_NOFOLLOW)
+        flags = array.array("l", [0])
+        fcntl.ioctl(fd, 0x80086601, flags)          # the file's attributes
+        flags[0] |= 0x10                            # it cannot be changed or removed
+        fcntl.ioctl(fd, 0x40086602, flags)
+        os.close(fd)
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+''', "security/test_later.py": '''
+def test_in_a_later_file():
+    with open("/logs/verifier/later-ran.json", "w") as f:
+        f.write("{}")
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+'''}
+
+
+def test_what_stays_unremovable_fails_its_case_and_the_cases_after_it_are_no_pass_with_a_result(tmp_path):
+    """An entry in a case's folder stays unremovable for the whole step. That case fails; the cases of
+    the step after it, which need the same folder, are not judged and are no pass; no later file of
+    tests runs; a result is written, and the judge reports no fault of its own."""
+    result = judge_attack(tmp_path, STAYS, STAYS_TESTS, room={"capabilities": ("LINUX_IMMUTABLE",)})
+    out = tmp_path / "out"
+    assert result["exit_code"] == 0 and result["fault"] is None and result["reward"] is not None, lost(result, out)
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert said["test_before"] == ("passed", ""), said
+    assert said["test_leaves_what_cannot_be_removed"][0] == "failed", said
+    assert "cannot be removed" in said["test_leaves_what_cannot_be_removed"][1], said
+    assert said["test_after"][0] == "failed" and "cannot be emptied" in said["test_after"][1], said
+    # a file of tests that does not run is named by its file
+    assert said["test_later.py"][0] == "skipped" and "cannot be emptied" in said["test_later.py"][1], said
+    assert not (out / "later-ran.json").exists(), "a file of tests ran after the cases' folder could not be emptied"
+    assert "cannot be emptied" in result["report"].get("left_behind", ""), result["report"]
+    assert result["reward"]["reward"] == 0.0 and result["reward"]["vulns_found"] == 0.0
 
 
 @pytest.mark.parametrize("without, room, key", [

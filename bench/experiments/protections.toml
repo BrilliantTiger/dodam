@@ -35,8 +35,8 @@ what = "The command line of a test run names no test and no report"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging"]
 [[protection.change]]
-find = '''subprocess.run([sys.executable, "-m", "pytest"], env=env,'''
-put = '''subprocess.run([sys.executable, "-m", "pytest", *options], env=env,'''
+find = '''subprocess.Popen([sys.executable, "-m", "pytest"], env=env,'''
+put = '''subprocess.Popen([sys.executable, "-m", "pytest", *options], env=env,'''
 
 [[protection]]
 what = "The judge's own command line says nothing"
@@ -54,8 +54,8 @@ what = "The program's environment carries nothing of the judge's"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_the_program_learns_nothing_about_the_judging"]
 [[protection.change]]
-find = '''if not k.startswith(("DODAM_", "PYTEST_")) and'''
-put = '''if True and'''
+find = '''        env = {k: v for k, v in for_the_programs_side({**os.environ, **extra_env}).items()'''
+put = '''        env = {k: v for k, v in {**os.environ, **extra_env}.items()'''
 
 [[protection]]
 what = "The program runs as a user of its own, not the build's"
@@ -71,7 +71,7 @@ file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_the_program_runs_as_an_ordinary_user_who_cannot_become_root"]
 [[protection.change]]
 find = '''    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-        os._exit(126)
+        raise NotConfined("the kernel's mark that the process can gain no rights could not be set")
 '''
 put = ''''''
 
@@ -88,7 +88,7 @@ what = "No place any user could write stays writable"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_the_program_can_write_nowhere_but_in_its_own_case"]
 [[protection.change]]
-find = '''            self.closed = close_writable_places()'''
+find = '''            self.closed = close_writable_places(deadline)'''
 put = '''            self.closed = 0'''
 
 [[protection]]
@@ -117,10 +117,10 @@ what = "The served web program runs confined"
 file = "dodambench/judge.py"
 tests = ["tests/test_web_isolation.py::test_the_build_and_the_served_program_run_confined"]
 [[protection.change]]
-find = '''            self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
-                                         env=side.environment(self.env), preexec_fn=side.entering(),'''
-put = '''            self.proc = subprocess.Popen(["su", "-s", "/bin/sh", self.run_as, "-c", self.start_cmd], cwd=self.app_dir,
-                                         env=self.env, start_new_session=True,'''
+find = '''                self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
+                                             env=side.environment(program_env), preexec_fn=side.entering(),'''
+put = '''                self.proc = subprocess.Popen(["su", "-s", "/bin/sh", self.run_as, "-c", self.start_cmd], cwd=self.app_dir,
+                                             env=program_env, start_new_session=True,'''
 
 [[protection]]
 what = "What the build prints is dropped but for its end"
@@ -176,7 +176,6 @@ file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[files deleted while they are open]"]
 [[protection.change]]
 find = '''            self.work_root = CASES_DIR
-            remove_tree(self.work_root, keep_top=True)
 '''
 put = '''            self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
 '''
@@ -290,7 +289,7 @@ what = "The case's folder is removed when the case ends"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_isolation.py::test_what_is_capped_cannot_be_taken_and_nothing_is_left_of_the_attempt[many files]"]
 [[protection.change]]
-find = '''            _judge.remove_tree(self.root)
+find = '''            _remove(self.root)
 '''
 put = '''            pass
 '''
@@ -300,9 +299,10 @@ what = "Before a case anything left in the cases' folder is removed"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge"]
 [[protection.change]]
-find = '''            _judge.remove_tree(cfg["work_root"], keep_top=True)
+find = '''            _remove(cfg["work_root"], keep_top=True)
 '''
-put = ''''''
+put = '''            pass
+'''
 
 [[protection]]
 what = "Removing is bounded for any depth and follows no link"
@@ -323,7 +323,7 @@ what = "What cannot be removed fails the case and is no fault of the judge"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_whose_folder_cannot_be_removed_fails_and_is_no_fault_of_the_judge"]
 [[protection.change]]
-find = '''            self._broken.append(f"left what cannot be removed ({exc.strerror})")'''
+find = '''            self._broken.append(f"{what} ({why})")'''
 put = '''            raise fault(f"cannot remove the case's folder: {exc}") from None'''
 
 [[protection]]
@@ -331,7 +331,7 @@ what = "A broken limit fails the case even when the test would be left unjudged"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_limit_broken_before_a_test_is_left_unjudged_fails_it"]
 [[protection.change]]
-find = '''        if c._broken:
+find = '''        if c.failing():
             raise c.broken() from None
         raise
 '''
@@ -796,7 +796,7 @@ what = "The search for places any user may write gives up after a set number of 
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_a_build_that_leaves_too_many_places_any_user_may_write_is_given_up_on"]
 [[protection.change]]
-find = '''                    if found > WRITABLE_PLACES:
+find = '''                    if found > most:
 '''
 put = '''                    if False:
 '''
@@ -807,11 +807,11 @@ file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_build_that_leaves_too_many_places_any_user_may_write_fails_the_step"]
 [[protection.change]]
 find = '''        try:
-            cli = CliRun(app_dir, lang_env, run_as, extra_env or {})
+            cli = CliRun(app_dir, lang_env, run_as, extra_env or {}, build_began)
         except TooMuchLeft as exc:
             report["build_ok"], report["build_ended"] = False, str(exc)
 '''
-put = '''        cli = CliRun(app_dir, lang_env, run_as, extra_env or {})
+put = '''        cli = CliRun(app_dir, lang_env, run_as, extra_env or {}, build_began)
 '''
 
 [[protection]]
@@ -891,7 +891,7 @@ what = "Between two runners the judge takes back what the ended runner left"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
-find = '''        cases = run_cases(path, self.test_env, timeout, self.sweep, ended)'''
+find = '''        cases = run_cases(path, self.test_env, timeout, lambda: self.give_back(not_run), ended)'''
 put = '''        cases = run_cases(path, self.test_env, timeout, None, ended)'''
 
 [[protection]]
@@ -910,10 +910,15 @@ file = "dodambench/judge.py"
 second_line = "before every case anything left in the cases' folder is removed"
 tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
-find = '''            self.work_root = CASES_DIR
-            remove_tree(self.work_root, keep_top=True)
+find = '''            try:
+                remove_tree(self.work_root, keep_top=True)
+            except OSError as exc:
+                # nothing of the program's side could write there yet
 '''
-put = '''            self.work_root = CASES_DIR
+put = '''            try:
+                pass
+            except OSError as exc:
+                # nothing of the program's side could write there yet
 '''
 
 [[protection]]
@@ -928,7 +933,10 @@ find = '''        try:
             # what the program's side left is its doing: the step fails with that reason
             self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
         except OSError as exc:
-            raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+            if exc.errno not in UNREMOVABLE:
+                raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+            # what cannot be removed whatever the judge does is the program's doing, as above
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
 '''
 put = ''''''
 
@@ -1640,7 +1648,7 @@ what = "The case that was running when its runner was ended fails with that reas
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
-find = '''                if running is not None:
+find = '''                if running is not None and running not in undecided:
                     decide(running, "failed", how or "the case runner ended while this case ran")
 '''
 put = '''                if False:
@@ -1709,7 +1717,7 @@ what = "A result the judge was ended over does not stay"
 file = "dodambench/convert.py"
 tests = ["tests/test_cli_convert.py::test_the_verifiers_script_says_so_when_the_judge_ends_without_a_result"]
 [[protection.change]]
-find = '''rm -rf "$out/reward.json" "$out/reward.txt" "$out/judge-fault.json"'''
+find = '''rm -rf "$out/reward.json" "$out/reward.txt" "$out/details.json" "$out/judge-fault.json"'''
 put = '''rm -rf "$out/judge-fault.json"'''
 
 [[protection]]
@@ -1717,22 +1725,32 @@ what = "What a test reads of the program's files follows no link"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_test_reads_no_link_the_program_left"]
 [[protection.change]]
-find = '''            if not stat.S_ISREG(os.lstat(path).st_mode):
-                return None
-            real, root = os.path.realpath(path), os.path.realpath(self.root)
-            if os.path.commonpath([real, root]) != root:
-                return None
-'''
-put = ''''''
+find = '''            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)'''
+put = '''            fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK, dir_fd=folder)'''
 
 [[protection]]
 what = "A case's file is never written through a link the program left"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_test_reads_no_link_the_program_left"]
 [[protection.change]]
-find = '''        if os.path.commonpath([real, os.path.realpath(self.root)]) != os.path.realpath(self.root):
+find = '''                os.unlink(parts[-1], dir_fd=folder)
 '''
-put = '''        if False:
+put = '''                pass
+'''
+[[protection.change]]
+find = '''            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=folder)'''
+put = '''            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644, dir_fd=folder)'''
+
+[[protection]]
+what = "The folders on the way to a case's file are entered one at a time, never through a link"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_test_reads_no_link_the_program_left"]
+[[protection.change]]
+find = '''                try:
+                    below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+'''
+put = '''                try:
+                    below = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=here)
 '''
 
 [[protection]]
@@ -1818,3 +1836,374 @@ tests = ["tests/test_cli_isolation.py::test_no_memory_can_be_locked_and_no_page_
 find = '''        close_terminals()
 '''
 put = ''''''
+
+[[protection]]
+what = "Removing opens a folder it listed before it changes its permissions, and never through a link"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_removing_follows_no_link_that_takes_the_place_of_a_folder_it_listed"]
+[[protection.change]]
+find = '''            below = os.open(name, flags, dir_fd=here)
+            break
+'''
+put = '''            os.chmod(name, 0o700, dir_fd=here)
+            below = os.open(name, flags, dir_fd=here)
+            break
+'''
+
+[[protection]]
+what = "No named pipe or socket any user could write stays writable"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_no_named_pipe_or_socket_the_build_leaves_can_be_written_by_a_case"]
+[[protection.change]]
+find = '''"-o", "-type", "p",
+                                "-o", "-type", "s", ")"'''
+put = '''")"'''
+
+[[protection]]
+what = "The build's environment carries nothing of the judge's"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_build_gets_none_of_the_judges_own_settings", "tests/test_cli_isolation.py::test_the_build_is_held_as_the_program_is"]
+[[protection.change]]
+find = '''    env = for_the_programs_side(env)
+'''
+put = ''''''
+
+[[protection]]
+what = "The served program's environment carries nothing of the judge's"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_the_served_program_gets_none_of_the_judges_own_settings"]
+[[protection.change]]
+find = '''        program_env = for_the_programs_side(self.env)'''
+put = '''        program_env = self.env'''
+
+[[protection]]
+what = "A process that cannot be given the mark that it can gain no rights is the judge's fault, never an exit code"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_process_the_judge_cannot_confine_is_a_fault_of_the_judge_and_never_a_failure_of_the_program[a case's program]"]
+[[protection.change]]
+find = '''        raise NotConfined("the kernel's mark that the process can gain no rights could not be set")'''
+put = '''        os._exit(126)'''
+
+[[protection]]
+what = "A process whose filter of calls cannot be set is the judge's fault, never an exit code"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_a_process_the_judge_cannot_confine_is_a_fault_of_the_judge_and_never_a_failure_of_the_program[the filter of calls of a case's program]"]
+[[protection.change]]
+find = '''            raise NotConfined("the filter of calls could not be set")'''
+put = '''            os._exit(126)'''
+
+[[protection]]
+what = "A build the judge cannot start is the judge's fault, never a build that failed"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_build_the_judge_cannot_start_as_the_builds_user_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''        raise JudgeFault(f"cannot start the build confined as the build's user: {exc}") from None'''
+put = '''        return False, f"the build could not be started: {exc}", ""'''
+
+[[protection]]
+what = "A served program the judge cannot start is the judge's fault, never a program that did not start"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_program_the_judge_cannot_start_as_its_user_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            raise JudgeFault(f"cannot start the served program confined as its user: {exc}") from None'''
+put = '''            raise'''
+
+[[protection]]
+what = "Only a program that is not there or cannot be run as built fails its case for not starting"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_program_the_judge_cannot_start_in_its_working_folder_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            if exc.filename != argv[0] or exc.errno in (errno.EAGAIN, errno.ENOMEM):'''
+put = '''            if exc.errno in (errno.EAGAIN, errno.ENOMEM):'''
+
+[[protection]]
+what = "A case runner that cannot read its settings writes the fault where its outcomes go"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_runner_that_cannot_read_its_settings_is_a_fault_of_the_judge[not its settings]"]
+[[protection.change]]
+find = '''    path = (_config or {}).get("fault_file") or os.environ.get(_judge.PROGRESS_ENV)'''
+put = '''    path = (_config or {}).get("fault_file")'''
+
+[[protection]]
+what = "A fault written where a case runner's outcomes go is the judge's fault, and no result is written"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_case_runner_that_cannot_read_its_settings_is_a_fault_of_the_judge[not its settings]"]
+[[protection.change]]
+find = '''            if faults:'''
+put = '''            if False:'''
+
+[[protection]]
+what = "A program ended by a signal fails its case, whatever its test checks"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_program_ended_by_a_signal_fails_its_case_whatever_the_test_checks"]
+[[protection.change]]
+find = '''            self._signals.append(result.signal)'''
+put = '''            pass'''
+
+[[protection]]
+what = "A cases' folder that holds what cannot be removed fails the step, with a result"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_stays_unremovable_fails_its_case_and_the_cases_after_it_are_no_pass_with_a_result"]
+[[protection.change]]
+find = '''            # what cannot be removed whatever the judge does is the program's doing, as above
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
+'''
+put = '''            raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+'''
+
+[[protection]]
+what = "A case for which the cases' folder cannot be emptied is not judged on it"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_removing", "tests/test_cli_isolation.py::test_what_stays_unremovable_fails_its_case_and_the_cases_after_it_are_no_pass_with_a_result"]
+[[protection.change]]
+find = '''            _judge.leave_undecided(self._key, f"the folder the cases live in cannot be emptied: {why}")'''
+put = '''            raise fault(f"cannot make the case's folder: {exc}") from None'''
+
+[[protection]]
+what = "A case runner leaves no outcome for a case it did not judge"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_removing"]
+[[protection.change]]
+find = '''    if PROGRESS_ENV not in os.environ or nodeid in _runner["undecided"]:'''
+put = '''    if PROGRESS_ENV not in os.environ:'''
+
+[[protection]]
+what = "The judge does not fail a case its runner left undecided, but gives it the reason the cases' folder could not be emptied"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_removing"]
+[[protection.change]]
+find = '''                if running is not None and running not in undecided:'''
+put = '''                if running is not None:'''
+
+[[protection]]
+what = "No case runner starts on a cases' folder the judge could not empty"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_no_case_runner_starts_on_a_cases_folder_the_judge_could_not_empty"]
+[[protection.change]]
+find = '''        return (not_run, self.left) if self.left else None'''
+put = '''        return None'''
+
+[[protection]]
+what = "The case runners remove on the one time a step gives all walking and removing"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_removing"]
+[[protection.change]]
+find = '''        TREE_CLOCK.left = float(left)'''
+put = '''        pass'''
+
+[[protection]]
+what = "What a case runner used of that time is taken back"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_a_case_runner_used_of_that_time_is_taken_back"]
+[[protection.change]]
+find = '''                TREE_CLOCK.left = min(TREE_CLOCK.left, left_now())'''
+put = '''                pass'''
+
+[[protection]]
+what = "A case runner's own time is longer by what it used of the step's time for walking and removing"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time"]
+[[protection.change]]
+find = '''                wait = began + timeout + used - time.monotonic()'''
+put = '''                wait = began + timeout - time.monotonic()'''
+
+[[protection]]
+what = "What a case runner used of the step's time for walking and removing is not taken from its file's time"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time"]
+[[protection.change]]
+find = '''            spent += time.monotonic() - began - used'''
+put = '''            spent += time.monotonic() - began'''
+
+[[protection]]
+what = "A case's folder that cannot be removed for a reason no program causes is the judge's fault"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            if why is None:
+                raise fault(f"cannot remove the case's folder: {exc}") from None
+'''
+put = '''            if False:
+                pass
+'''
+
+[[protection]]
+what = "A cases' folder the judge cannot empty for a reason no program causes is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            if exc.errno not in UNREMOVABLE:
+                raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+'''
+put = '''            if False:
+                pass
+'''
+
+[[protection]]
+what = "What a case may read of what the build or the working phase left shows the next case nothing of when it was read"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next"]
+[[protection.change]]
+find = '''            self.settled = settle_access_times(min(began), deadline=deadline)'''
+put = '''            self.settled = 0'''
+
+[[protection]]
+what = "What changed since the container started gets a later time of last reading, not only what changed since the build began"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next"]
+[[protection.change]]
+find = '''            began = [moment for moment in (container_started(), since, time.time()) if moment is not None]'''
+put = '''            began = [moment for moment in (since, time.time()) if moment is not None]'''
+
+[[protection]]
+what = "Every entry of a file system other than the image's own layers gets a later time of last reading"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_container_was_given_shows_nothing_to_the_next"]
+[[protection.change]]
+find = '''lambda kind: ["-newerct", f"@{int(since) - 1}"] if kind == IMAGE_LAYERS else []'''
+put = '''lambda kind: ["-newerct", f"@{int(since) - 1}"]'''
+
+[[protection]]
+what = "A time of change the build set in the future is set back to the moment the times of last reading are settled"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_what_one_case_reads_of_what_the_build_left_shows_nothing_to_the_next"]
+[[protection.change]]
+find = '''min(info.st_mtime_ns, now)'''
+put = '''info.st_mtime_ns'''
+
+[[protection]]
+what = "The judge refuses a file system on which every read moves when it was last read"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read"]
+[[protection.change]]
+find = '''        if counting:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "A served program's data folder that holds what cannot be removed fails the step, with a result"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_that_cannot_be_removed[refused whatever the judge does]"]
+[[protection.change]]
+find = '''                # what cannot be removed whatever the judge does is the program's doing, as above
+                self.left = f"the served program's data folder cannot be removed: {exc}"
+'''
+put = '''                raise
+'''
+
+[[protection]]
+what = "A served program's data folder the judge cannot remove for a reason no program causes is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_served_programs_data_folder_that_cannot_be_removed[an error no program causes]"]
+[[protection.change]]
+find = '''                if exc.errno not in UNREMOVABLE:
+                    raise JudgeFault(f"cannot remove the served program's data folder: {exc}") from None
+'''
+put = '''                if False:
+                    pass
+'''
+
+[[protection]]
+what = "What the working phase left where a dependency folder goes that cannot be removed fails the step, with a result"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_lies_where_a_dependency_folder_goes_and_cannot_be_removed[refused whatever the judge does]"]
+[[protection.change]]
+find = '''        # what cannot be removed whatever the judge does is what the working phase left
+        refused = f"what the working phase left in the program's folder cannot be removed: {exc}"
+'''
+put = '''        raise
+'''
+
+[[protection]]
+what = "What lies where a dependency folder goes that the judge cannot remove for a reason no program causes is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_lies_where_a_dependency_folder_goes_and_cannot_be_removed[an error no program causes]"]
+[[protection.change]]
+find = '''        if exc.errno not in UNREMOVABLE:
+            raise JudgeFault(f"cannot take over what the working phase left in the program's folder: {exc}") from None
+'''
+put = '''        if False:
+            pass
+'''
+
+[[protection]]
+what = "A cases' folder that cannot be emptied before the first case is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''                raise JudgeFault(f"cannot empty the folder the cases live in before the first case: {exc}") from None'''
+put = '''                raise'''
+
+[[protection]]
+what = "A case runner notes what is left of the step's time for walking and removing after every removal"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_the_steps_time"]
+[[protection.change]]
+find = '''        _judge.note_tree_clock()
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "Removing opens up a folder through what it opened"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_removing_opens_up_a_folder_that_can_be_entered_but_not_written"]
+[[protection.change]]
+find = '''        os.fchmod(below, 0o700)'''
+put = '''        pass'''
+
+[[protection]]
+what = "Something that is no file where a case's file goes is refused, not taken for one"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_test_reads_no_link_the_program_left"]
+[[protection.change]]
+find = '''                if not (stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode)):'''
+put = '''                if False:'''
+
+[[protection]]
+what = "A removal before a case that fails for a reason no program causes is the judge's fault"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            if why is None or not os.path.isdir(cfg["work_root"]):'''
+put = '''            if not os.path.isdir(cfg["work_root"]):'''
+
+[[protection]]
+what = "A build the judge cannot start for an error of the system is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_build_or_a_served_program_the_judge_cannot_start_in_its_folder_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''        raise JudgeFault(f"cannot start the build: {exc}") from None'''
+put = '''        return False, f"the build could not be started: {exc}", ""'''
+
+[[protection]]
+what = "A served program the judge cannot start for an error of the system is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_judge.py::test_a_build_or_a_served_program_the_judge_cannot_start_in_its_folder_is_a_fault_of_the_judge"]
+[[protection.change]]
+find = '''            raise JudgeFault(f"cannot start the served program: {exc}") from None'''
+put = '''            return False'''
+
+[[protection]]
+what = "What the build left in the container's memory-backed folder that cannot be removed fails the step"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_the_build_left_in_the_memory_folder_and_cannot_be_removed[refused whatever the judge does]"]
+[[protection.change]]
+find = '''                    # what cannot be removed whatever the judge does is what the build left
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
+'''
+put = '''                    raise
+'''
+
+[[protection]]
+what = "The container's memory-backed folder that the judge cannot empty for a reason no program causes is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_the_build_left_in_the_memory_folder_and_cannot_be_removed[an error no program causes]"]
+[[protection.change]]
+find = '''                    if exc.errno not in UNREMOVABLE:
+                        raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+'''
+put = '''                    if False:
+                        pass
+'''

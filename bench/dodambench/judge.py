@@ -39,13 +39,14 @@ together have TREE_SECONDS in a step.
 
 Without a user to run the program as nothing separates the program from the judge. That is only for
 the project's own prepared solutions: it must be asked for, it is refused for root, and its result
-says "separated": 0.
+says "separated": 0.0 (and its details false).
 """
 from __future__ import annotations
 
 import argparse
 import ast
 import ctypes
+import errno
 import grp
 import json
 import os
@@ -217,13 +218,28 @@ CASE_ENTRIES = 20000               # how many files and folders a case may hold
 TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
 TREE_SECONDS = 120                 # how long all walking and removing of what it left may take in one step
 WRITABLE_PLACES = 10_000           # how many places any user may write a build may leave
-SEARCH_SECONDS = 300               # how long the search for such places may take
+SEARCH_SECONDS = 300               # how long the searches for such places and for what the image does not hold may take
+LATER_NS = 86_400 * 10**9          # how far after the judge sets them the access times of what a case may read lie
 KERNEL_ENDED = "the kernel ended a process because the container ran out of memory"
 # The kind of the entry that says the step failed for what the program's side left and the judge
 # could not take back. No task gives a test this kind, and no rate counts it.
 LEFT_BEHIND = "left-behind"
 TIMED_OUT = "timed out"
 PROGRESS_ENV = "DODAM_JUDGE_PROGRESS"
+# What is left of the step's time for walking and removing when a case runner starts, and a mark of
+# that start; the runner draws on the time and notes what it used, so that the judge takes it back.
+TREE_ENV = "DODAM_JUDGE_TREE"
+# What a removal is refused with when something cannot be removed whatever the judge does: the
+# program's side left it so. A removal that fails in any other way is a fault of the judge.
+UNREMOVABLE = (errno.EPERM, errno.EACCES, errno.EBUSY, errno.ENOTEMPTY)
+
+
+def for_the_programs_side(env: dict[str, str]) -> dict[str, str]:
+    """The environment every start of the program's side gets, the build, a served program and a
+    case's program alike: the one place where the judge's own settings are taken out, with its
+    temporary folder and the folders it was in."""
+    return {key: value for key, value in env.items()
+            if not key.startswith(("DODAM_", "PYTEST_")) and key not in ("PYTHONPATH", "TMPDIR", "PWD", "OLDPWD")}
 
 
 def refusing_filter(machine: str | None = None) -> bytes | None:
@@ -265,6 +281,12 @@ class _Filter(ctypes.Structure):
     _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
 
 
+class NotConfined(Exception):
+    """Raised in a new process that could not be confined, before anything of the program's side
+    runs in it. The process that started it learns of it as a failed start, never as an exit code a
+    program could give itself."""
+
+
 def confine(uid: int, gid: int, groups: list[int], limits: dict[str, int], filter_bytes: bytes | None) -> None:
     """Called in a new process just before it becomes the program's side. From here on it is a plain
     user that cannot gain rights, is the first to go when the container runs out of memory, cannot
@@ -278,12 +300,12 @@ def confine(uid: int, gid: int, groups: list[int], limits: dict[str, int], filte
     os.setgid(gid)
     os.setuid(uid)
     if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-        os._exit(126)
+        raise NotConfined("the kernel's mark that the process can gain no rights could not be set")
     if filter_bytes is not None:
         held = ctypes.create_string_buffer(filter_bytes)
         prog = _Filter(len(filter_bytes) // 8, ctypes.addressof(held))
         if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:
-            os._exit(126)
+            raise NotConfined("the filter of calls could not be set")
 
 
 class TooMuchLeft(Exception):
@@ -316,13 +338,45 @@ def in_time(deadline: float | None) -> None:
                           "seconds a step gives it")
 
 
+def _enter(here: int, name: str) -> int | None:
+    """Open a folder that was listed in the open folder `here`, never through a link, and open it up
+    for removing through what was opened; None when what has the name is no folder any more. A
+    folder closed to a judge that is not root is opened up by its name first, never through a link
+    either."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    for opened_up in (False, True):
+        try:
+            below = os.open(name, flags, dir_fd=here)
+            break
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if opened_up:
+                raise
+            try:
+                os.chmod(name, 0o700, dir_fd=here, follow_symlinks=False)
+            except (NotImplementedError, ValueError):  # the name is a link now: what it points at is not touched
+                return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                return None
+            raise
+    try:
+        os.fchmod(below, 0o700)
+    except BaseException:
+        os.close(below)
+        raise
+    return below
+
+
 def remove_tree(top: str | Path, keep_top: bool = False, most: int | None = None) -> None:
     """Remove a folder and everything in it, whatever a program made there: any depth, any names,
     links (never followed), closed permissions, special files. It holds two folders open at a time.
     It reads each folder once, removing its files and remembering the folders in it, and once more
     when those are gone, so its cost is one step per entry; it remembers no more names than walking
-    the tree does. It gives up after `most` entries, and when the step's time for walking and
-    removing is spent."""
+    the tree does. A folder it listed is opened before its permissions are changed, through what was
+    opened; when a link or a file has taken its place by then, that is removed and not followed. It
+    gives up after `most` entries, and when the step's time for walking and removing is spent."""
     top = str(top)
     here = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     names: list[str] = []              # the folders on the way down from top to here
@@ -334,8 +388,14 @@ def remove_tree(top: str | Path, keep_top: bool = False, most: int | None = None
             if waiting[-1]:
                 in_time(deadline)
                 name = waiting[-1].pop()
-                os.chmod(name, 0o700, dir_fd=here)
-                below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=here)
+                below = _enter(here, name)
+                if below is None:
+                    # no folder any more: whatever has its name is removed, a link without being followed
+                    try:
+                        os.unlink(name, dir_fd=here)
+                    except FileNotFoundError:
+                        pass
+                    continue
                 os.close(here)
                 here = below
                 names.append(name)
@@ -521,6 +581,11 @@ def container_caps(disk_mb: int | None = None, group: Path = GROUP,
                                   f"{CASE_ENTRIES} entries at {CASES_DIR}"
                                   + (f" (found {size} MB, {room.f_files} entries)" if mounted else ""))
         caps["files_mb"] = size
+        # on such a file system one case could show the next what it read, whatever the judge does
+        counting = where_every_read_counts()
+        if counting:
+            raise refuse("access times", "every read moves when it was last read on " + ", ".join(counting)
+                         + ", so one case could show the next what it read")
     return caps
 
 
@@ -602,14 +667,18 @@ def run_build(command: str, app_dir: Path, side: Side | None, env: dict[str, str
     """Run the build and say whether it worked, with the end of what it printed and, when it was
     ended from outside, by what. The build is the agent's code: with a side it runs confined as that
     user, what it prints is read and dropped but for its end, and when it ends nothing of it is
-    left running."""
+    left running. Whatever stops the judge from starting it is the judge's fault, never a failure
+    of the build."""
+    env = for_the_programs_side(env)
     try:
         proc = subprocess.Popen(["/bin/sh", "-c", command], cwd=app_dir, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 env=side.environment(env) if side else env,
                                 preexec_fn=side.entering() if side else None, start_new_session=side is None)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"the build could not be started: {exc}", ""
+    except subprocess.SubprocessError as exc:
+        raise JudgeFault(f"cannot start the build confined as the build's user: {exc}") from None
+    except OSError as exc:
+        raise JudgeFault(f"cannot start the build: {exc}") from None
     tail = b""
     deadline = time.monotonic() + timeout
     killed_before = killed_for_memory()
@@ -708,7 +777,7 @@ def step_terms(tests_per_file: list[int], case_seconds: int) -> dict[str, float]
             "the build": BUILD_SECONDS,
             "ending the build's processes": ending,
             "waiting for the ended build": BUILD_ENDING_SECONDS,
-            "the search for places any user may write": SEARCH_SECONDS,
+            "the searches for places any user may write and for what the image does not hold": SEARCH_SECONDS,
             "walking and removing what the program's side left": TREE_SECONDS,
             "starting every case runner the files can need": runners * FILE_SECONDS,
             "every case at its full time limit": sum(tests_per_file) * (case_seconds + CASE_SECONDS),
@@ -731,25 +800,32 @@ def free_user_id() -> int:
             return number
 
 
-def writable_by_others(mounts: Path = Path("/proc/self/mounts")):
-    """Every folder and file any user may write, on every file system mounted here, one at a time.
-    The search is given SEARCH_SECONDS and WRITABLE_PLACES places; a build that left more fails."""
-    tops = []
+def _mounted(mounts: Path) -> list[tuple[str, str, set[str]]]:
+    """Where each file system is mounted here, its kind and its options, the kernel's own aside."""
+    found = []
     for line in mounts.read_text(encoding="utf-8").splitlines():
         parts = line.split()
-        if len(parts) >= 3 and parts[2] not in NO_FILES:
-            tops.append(parts[1].replace("\\040", " "))
-    deadline = time.monotonic() + SEARCH_SECONDS
+        if len(parts) >= 4 and parts[2] not in NO_FILES:
+            found.append((parts[1].replace("\\040", " "), parts[2], set(parts[3].split(","))))
+    return found
+
+
+def _search(mounts: Path, condition, most: int, what: str, deadline: float | None):
+    """Every entry on every file system mounted here that `condition` of `find` picks, one at a
+    time; `condition` is a list, or says one for each kind of file system. It gives up after `most`
+    of them, and at `deadline` (SEARCH_SECONDS from now by default)."""
+    deadline = time.monotonic() + SEARCH_SECONDS if deadline is None else deadline
     found = 0
-    for top in sorted(set(tops)):
-        search = subprocess.Popen(["find", top, "-xdev", "(", "-type", "d", "-o", "-type", "f", ")", "-perm", "-0002",
-                                   "-print0"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    for top, kind in sorted({(where, kind) for where, kind, _ in _mounted(mounts)}):
+        picked = condition(kind) if callable(condition) else condition
+        search = subprocess.Popen(["find", top, "-xdev", *picked, "-print0"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         rest = b""
         try:
             while True:
                 ready, _, _ = select.select([search.stdout], [], [], max(deadline - time.monotonic(), 0))
                 if not ready or time.monotonic() >= deadline:
-                    raise TooMuchLeft("the build left more files than can be searched for places any user may write")
+                    raise TooMuchLeft(f"the build left more files than can be searched for {what}")
                 data = os.read(search.stdout.fileno(), 1 << 16)
                 if len(rest) + len(data) > 1 << 22 and b"\0" not in data:
                     rest = rest[:8192]          # the start of a path too long to name is enough to close it
@@ -757,8 +833,8 @@ def writable_by_others(mounts: Path = Path("/proc/self/mounts")):
                 *paths, rest = (rest + data).split(b"\0")
                 for path in paths:
                     found += 1
-                    if found > WRITABLE_PLACES:
-                        raise TooMuchLeft(f"the build left more than {WRITABLE_PLACES} places any user may write")
+                    if found > most:
+                        raise TooMuchLeft(f"the build left more than {most} {what}")
                     yield path
                 if not data:
                     break
@@ -768,12 +844,103 @@ def writable_by_others(mounts: Path = Path("/proc/self/mounts")):
             search.stdout.close()
 
 
-def close_writable_places() -> int:
+def writable_by_others(mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None):
+    """Every folder, file, named pipe and socket any user may write, on every file system mounted
+    here, one at a time: every kind of file a user without rights can make. A link's own permissions
+    mean nothing, and the devices of a container are made by its maker, not by a user.
+    The search is given SEARCH_SECONDS and WRITABLE_PLACES places; a build that left more fails."""
+    yield from _search(mounts, ["(", "-type", "d", "-o", "-type", "f", "-o", "-type", "p",
+                                "-o", "-type", "s", ")", "-perm", "-0002"],
+                       WRITABLE_PLACES, "places any user may write", deadline)
+
+
+IMAGE_LAYERS = "overlay"           # the kind of file system that lays the container's own changes over the image's
+
+
+def not_of_the_image(since: float, mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None):
+    """Every entry the image's own layers do not hold, on every file system mounted here: on the
+    one laid over the image, whatever changed since `since` (seconds of the clock of the machine);
+    on every other one, all of it. The image's own entries are read from its layers, which keep
+    their times whatever is read. It shares the time of the search for places any user may write
+    and is given TREE_ENTRIES entries."""
+    yield from _search(mounts, lambda kind: ["-newerct", f"@{int(since) - 1}"] if kind == IMAGE_LAYERS else [],
+                       TREE_ENTRIES, "entries the image does not hold", deadline)
+
+
+def container_started(proc: Path = Path("/proc")) -> float | None:
+    """When the container's first process started, in seconds of the clock of the machine; None
+    where that cannot be read."""
+    try:
+        fields = (proc / "1/stat").read_text().rsplit(")", 1)[1].split()
+        booted = next(int(line.split()[1]) for line in (proc / "stat").read_text().splitlines()
+                      if line.startswith("btime "))
+        return booted + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def where_every_read_counts(mounts: Path = Path("/proc/self/mounts"), devices: Path = Path("/dev")) -> list[str]:
+    """The file systems mounted here on which every read of an entry moves when it was last read:
+    neither `relatime` nor `noatime` nor read-only. The container's device folder is always mounted
+    so, and so are the files of it laid over other places; they are left out here."""
+    try:
+        own = os.stat(devices).st_dev
+    except OSError:
+        own = None
+    found = []
+    for where, _, options in _mounted(mounts):
+        if options & {"relatime", "noatime", "ro"}:
+            continue
+        try:
+            if os.stat(where).st_dev == own:
+                continue
+        except OSError:
+            pass
+        found.append(where)
+    return found
+
+
+def settle_access_times(since: float, mounts: Path = Path("/proc/self/mounts"), deadline: float | None = None) -> int:
+    """Nothing a case may read that the image's own layers do not hold shows the next case whether
+    it was read: what the build or the working phase left, and what the container was given. Reading
+    a file or listing a folder moves when it was last read only while that time is not later than
+    when it was last changed; so every such entry, on the file system laid over the image whatever
+    changed since `since` and on every other file system all of it, gets a time of last reading a day
+    after both the moment this runs and its time of change. A time of change set in the future is
+    set to the moment this runs. Says how many entries it settled."""
+    now = time.time_ns()
+
+    def settle(folder: int | None, name, info: os.stat_result | None = None) -> None:
+        try:
+            info = info or os.lstat(name)
+            os.utime(name, ns=(now + LATER_NS, min(info.st_mtime_ns, now)), dir_fd=folder, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if exc.errno != 30:  # a read-only file system keeps its times
+                raise JudgeFault(f"cannot settle when what the build left was last read: {exc}") from None
+
+    settled = 0
+    for path in not_of_the_image(since, mounts, deadline):
+        if len(path) < 4000:
+            settle(None, path)
+        else:
+            # a place so deep that no path names it is closed to others above, as places others may write are
+            above = path[:4000].rsplit(b"/", 1)[0]
+            try:
+                os.chmod(above, stat.S_IMODE(os.lstat(above).st_mode) & ~0o007)
+            except OSError as exc:
+                raise JudgeFault(f"cannot close {above!r} to the program: {exc}") from None
+        settled += 1
+    return settled
+
+
+def close_writable_places(deadline: float | None = None) -> int:
     """Take write access away from every place any user could write; says how many places it closed.
     A place so deep that no path can name it is closed off altogether: the folder above it that a
     path can still name is closed to other users, who then reach nothing below it."""
     closed = 0
-    for path in writable_by_others():
+    for path in writable_by_others(deadline=deadline):
         try:
             if len(path) < 4000:
                 os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & ~0o002)
@@ -852,7 +1019,8 @@ class CliRun:
             raise JudgeFault("the task's settings name no command to run the program")
         return limits, command
 
-    def __init__(self, app_dir: Path, lang_env: dict[str, str], run_as: str, extra_env: dict[str, str]):
+    def __init__(self, app_dir: Path, lang_env: dict[str, str], run_as: str, extra_env: dict[str, str],
+                 since: float | None = None):
         self.run_as = run_as
         self.uid: int | None = None
         self.left = ""   # why no more files of tests are run: what the cases left cannot be taken back
@@ -862,25 +1030,40 @@ class CliRun:
         if run_as:
             open_for_reading(app_dir)
             self.uid = free_user_id()
-            self.closed = close_writable_places()
+            # the search for places any user may write and the one for what the build changed share their time
+            deadline = time.monotonic() + SEARCH_SECONDS
+            self.closed = close_writable_places(deadline)
             # what the build left in the container's memory-backed folder would stay charged to the
             # container through every case: it is removed before the first case begins
             if MEMORY_FOLDER.is_dir() and not MEMORY_FOLDER.is_symlink():
                 try:
                     remove_tree(MEMORY_FOLDER, keep_top=True)
+                except TooMuchLeft as exc:
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
                 except OSError as exc:
-                    raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+                    if exc.errno not in UNREMOVABLE:
+                        raise JudgeFault(f"cannot empty {MEMORY_FOLDER} after the build: {exc}") from None
+                    # what cannot be removed whatever the judge does is what the build left
+                    self.left = f"the container's memory-backed folder cannot be emptied after the build: {exc}"
             # the cases live in the folder the container caps; it is closed to others above
             self.work_root = CASES_DIR
-            remove_tree(self.work_root, keep_top=True)
+            try:
+                remove_tree(self.work_root, keep_top=True)
+            except OSError as exc:
+                # nothing of the program's side could write there yet
+                raise JudgeFault(f"cannot empty the folder the cases live in before the first case: {exc}") from None
+            # no case shows the next what it read of what the image does not hold: what the container
+            # was given since it started, and what the working phase and the build left
+            began = [moment for moment in (container_started(), since, time.time()) if moment is not None]
+            self.settled = settle_access_times(min(began), deadline=deadline)
         else:
             self.work_root = Path(tempfile.mkdtemp(prefix="dodam-cases-"))
         self.fault_file = self.private / "faults.jsonl"
         self.highs_file = self.private / "highs.jsonl"
         self.records_file = self.private / "records.jsonl"
         self.records_highest = 0       # the most the kernel's records grew by in one case of this judging
-        env = {k: v for k, v in {**os.environ, **extra_env}.items()
-               if not k.startswith(("DODAM_", "PYTEST_")) and k not in ("PYTHONPATH", "HOME", "TMPDIR", "PWD", "OLDPWD")}
+        # the case runner gives every case its own home, temporary folder and working folder
+        env = {k: v for k, v in for_the_programs_side({**os.environ, **extra_env}).items() if k != "HOME"}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
                     "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env,
                     "highs_file": str(self.highs_file), "records_file": str(self.records_file)}
@@ -891,10 +1074,10 @@ class CliRun:
                          "PYTHONPATH": str(Path(__file__).resolve().parent),
                          "PYTHONDONTWRITEBYTECODE": "1", "DODAM_CLI_CONFIG": str(self.settings_file)}
 
-    def run_file(self, path: Path, ended: list[dict]) -> list[dict]:
+    def run_file(self, path: Path, ended: list[dict], not_run: str = "failed") -> list[dict]:
         tests = tests_in(path.read_bytes())
         timeout = file_seconds(tests, self.limits["timeout_sec"])
-        cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
+        cases = run_cases(path, self.test_env, timeout, lambda: self.give_back(not_run), ended)
         self.note_records(cases)
         if self.fault_file.exists():
             raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
@@ -936,10 +1119,18 @@ class CliRun:
         noted.sort(key=lambda run: -run["above_the_limit_mb"])
         return {"fails_a_case": False, "runs": len(noted), "largest": noted[:HIGHS_KEPT]}
 
+    def give_back(self, not_run: str) -> tuple[str, str] | None:
+        """Between two case runners of a file: take back what the last one left. Where the cases'
+        folder cannot be emptied, no runner starts on it: the cases that are left get `not_run`
+        and the reason."""
+        self.sweep()
+        return (not_run, self.left) if self.left else None
+
     def sweep(self) -> None:
         """Between two files of tests nothing of the program is left: no process, no case folder.
-        Where the cases' folder cannot be emptied in the step's time, no more files of tests are run
-        and `left` says why."""
+        Where the cases' folder cannot be emptied, because what is in it cannot be removed or the
+        step's time for walking and removing is spent, no more files of tests are run and `left`
+        says why."""
         if self.uid is not None and not Side(self.uid, self.uid).end():
             raise JudgeFault("processes of the program could not be ended")
         if not self.work_root.is_dir():
@@ -950,7 +1141,10 @@ class CliRun:
             # what the program's side left is its doing: the step fails with that reason
             self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
         except OSError as exc:
-            raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+            if exc.errno not in UNREMOVABLE:
+                raise JudgeFault(f"cannot empty the folder the cases live in: {exc}") from None
+            # what cannot be removed whatever the judge does is the program's doing, as above
+            self.left = self.left or f"the folder the cases live in cannot be emptied: {exc}"
 
     def close(self) -> None:
         try:
@@ -1005,16 +1199,23 @@ class App:
             os.chown(self.data_dir, side.uid, side.gid)
         self.env = {**os.environ, **self.extra_env, "PORT": str(self.port),
                     "DB_PATH": str(self.data_dir / "app.db"), "APP_SECRET": secrets.token_hex(32)}
-        if self.run_as:
-            # the served program is the agent's code: it runs confined, as the build does
-            self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
-                                         env=side.environment(self.env), preexec_fn=side.entering(),
-                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
-        else:
-            self.proc = subprocess.Popen(self.start_cmd, shell=True, cwd=self.app_dir, env=self.env,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                         start_new_session=True)
+        program_env = for_the_programs_side(self.env)
+        try:
+            if self.run_as:
+                # the served program is the agent's code: it runs confined, as the build does
+                self.proc = subprocess.Popen(["/bin/sh", "-c", self.start_cmd], cwd=self.app_dir,
+                                             env=side.environment(program_env), preexec_fn=side.entering(),
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+            else:
+                self.proc = subprocess.Popen(self.start_cmd, shell=True, cwd=self.app_dir, env=program_env,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                             start_new_session=True)
+        except subprocess.SubprocessError as exc:
+            # whatever stops the judge from starting the program is its own fault, never a program that did not start
+            raise JudgeFault(f"cannot start the served program confined as its user: {exc}") from None
+        except OSError as exc:
+            raise JudgeFault(f"cannot start the served program: {exc}") from None
         return wait_for_port(self.port, timeout, self.proc)
 
     def alive(self) -> bool:
@@ -1043,6 +1244,11 @@ class App:
                 self.left = f"the served program's data folder cannot be removed: {exc}"
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                if exc.errno not in UNREMOVABLE:
+                    raise JudgeFault(f"cannot remove the served program's data folder: {exc}") from None
+                # what cannot be removed whatever the judge does is the program's doing, as above
+                self.left = f"the served program's data folder cannot be removed: {exc}"
             self.data_dir = None
 
 
@@ -1069,11 +1275,41 @@ def _note_progress(record: dict) -> None:
 # What follows up to run_cases runs inside the case runner: pytest loads this file as a plug-in. It
 # writes every case's outcome down the moment the case ends, so that the outcomes do not depend on
 # the runner living to the end of its file.
-_runner: dict = {"reports": {}, "kills": {}, "session": None}
+_runner: dict = {"reports": {}, "kills": {}, "session": None, "undecided": set(), "tree": None}
 
 
 def pytest_sessionstart(session) -> None:
     _runner["session"] = session
+    given = os.environ.get(TREE_ENV, "")
+    if given:
+        # what is left of the step's time for walking and removing: the cases' removals draw on it
+        left, _runner["tree"] = given.split()
+        TREE_CLOCK.left = float(left)
+
+
+def note_tree_clock(removing: bool = False) -> None:
+    """In a case runner: note what is left of the step's time for walking and removing, and with
+    `removing` when a removal begins, so that the judge takes back what this runner used of it, also
+    when the runner is ended in the middle of a removal."""
+    if _runner["tree"] is None or PROGRESS_ENV not in os.environ:
+        return
+    record = {"tree": TREE_CLOCK.left, "runner": _runner["tree"]}
+    if removing:
+        record["at"] = time.monotonic()
+    _note_progress(record)
+
+
+def leave_undecided(case: str, why: str) -> None:
+    """In a case runner: the cases' folder cannot be emptied for this case, so it is not judged
+    here. The runner stops after it without an outcome for it, and the judge, which then cannot
+    empty that folder either, gives it and the cases after it the reason."""
+    import pytest
+    _runner["undecided"].add(case)
+    if PROGRESS_ENV in os.environ:
+        _note_progress({"undecided": case, "why": why})
+    if _runner["session"] is not None:
+        _runner["session"].shouldstop = why
+    pytest.skip(why)
 
 
 def pytest_collectreport(report) -> None:
@@ -1102,7 +1338,7 @@ def pytest_runtest_logreport(report) -> None:
 
 
 def pytest_runtest_logfinish(nodeid, location) -> None:
-    if PROGRESS_ENV not in os.environ:
+    if PROGRESS_ENV not in os.environ or nodeid in _runner["undecided"]:
         return
     outcome, message = "passed", ""
     for report in _runner["reports"].pop(nodeid, []):
@@ -1134,8 +1370,23 @@ def goes_before_the_judge() -> None:
         pass
 
 
+def tree_left(records: list[dict], runner: str, given: float, now: float) -> float:
+    """What is left of the step's time for walking and removing after a case runner drew on it, as
+    the runner noted: what was left after its last removal, or, when it noted the start of one and
+    no end, what was left then less the time since."""
+    mine = [r for r in records if r.get("runner") == runner and "tree" in r]
+    if not mine:
+        return given
+    last = mine[-1]
+    return max(last["tree"] - (now - last["at"] if "at" in last else 0.0), 0.0)
+
+
 def run_pytest(test_path: Path, env: dict[str, str], timeout: float, said: str) -> int | None:
-    """Run the case runner once; its exit code, or None when its time was up."""
+    """Run the case runner once; its exit code, or None when its time was up.
+
+    The runner is given what is left of the step's time for walking and removing, and what it
+    used is taken back. That time is not the file's: the runner's own time is longer by what it
+    has used of it so far."""
     # The command line of a process can be read by every user of the container, so it says nothing:
     # which file of tests to run and where the outcomes go travel in the environment, which only
     # root can read.
@@ -1143,13 +1394,32 @@ def run_pytest(test_path: Path, env: dict[str, str], timeout: float, said: str) 
     here = str(Path(__file__).resolve().parent)
     env = {**env, "PYTEST_ADDOPTS": " ".join(shlex.quote(o) for o in options),
            "PYTHONPATH": os.pathsep.join(part for part in (here, env.get("PYTHONPATH", "")) if part)}
+    given, runner, progress = TREE_CLOCK.left, secrets.token_hex(8), env.get(PROGRESS_ENV, "")
+    if given is not None:
+        env[TREE_ENV] = f"{given!r} {runner}"
+
+    def left_now() -> float:
+        return tree_left(read_progress(progress), runner, given, time.monotonic()) if given is not None else 0.0
+
     with open(said, "wb") as errors:
+        proc = subprocess.Popen([sys.executable, "-m", "pytest"], env=env, cwd=test_path.parent,
+                                stdout=subprocess.DEVNULL, stderr=errors, preexec_fn=goes_before_the_judge)
+        began = time.monotonic()
         try:
-            return subprocess.run([sys.executable, "-m", "pytest"], env=env, cwd=test_path.parent, timeout=timeout,
-                                  stdout=subprocess.DEVNULL, stderr=errors,
-                                  preexec_fn=goes_before_the_judge).returncode
-        except subprocess.TimeoutExpired:
-            return None
+            while True:
+                used = given - left_now() if given is not None else 0.0
+                wait = began + timeout + used - time.monotonic()
+                if wait <= 0:
+                    proc.kill()
+                    proc.wait()
+                    return None
+                try:
+                    return proc.wait(timeout=min(wait, 0.5))
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            if given is not None:
+                TREE_CLOCK.left = min(TREE_CLOCK.left, left_now())
 
 
 def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=None,
@@ -1171,9 +1441,11 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
         while True:
             known = sum("outcome" in r for r in read_progress(progress))
             kills = killed_for_memory()
-            began = time.monotonic()
+            began, tree_before = time.monotonic(), TREE_CLOCK.left
             code = run_pytest(test_path, env, timeout - spent, said) if spent < timeout else None
-            spent += time.monotonic() - began
+            # what the runner spent walking and removing is the step's time for that, not the file's
+            used = tree_before - TREE_CLOCK.left if tree_before is not None and TREE_CLOCK.left is not None else 0.0
+            spent += time.monotonic() - began - used
             how = ""
             if code is None:
                 how = TIMED_OUT
@@ -1183,10 +1455,17 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             elif code not in (0, 1, 2, 5):
                 how = f"the case runner ended with exit code {code}"
             records = read_progress(progress)
+            faults = [r["fault"] for r in records if "fault" in r]
+            if faults:
+                # the runner met a fault of the judge's before it knew where faults go
+                raise JudgeFault(f"{test_path.name}: {faults[0]}")
             listed = next((r["listed"] for r in records if "listed" in r), None)
             decided = {r["case"]: r for r in records if "outcome" in r}
             started = [r["started"] for r in records if "started" in r]
             running = started[-1] if started and started[-1] not in decided else None
+            # a case its runner left undecided because the cases' folder could not be emptied for it
+            since = max((at for at, r in enumerate(records) if r.get("started") == running), default=0)
+            undecided = {r["undecided"] for r in records[since:] if "undecided" in r}
             if how and ended is not None:
                 with open(said, "rb") as f:
                     f.seek(max(os.path.getsize(said) - 1500, 0))
@@ -1208,7 +1487,7 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
                     decided[case] = {"case": case, "outcome": outcome, "message": message}
                     _note_progress_to(progress, decided[case])
 
-                if running is not None:
+                if running is not None and running not in undecided:
                     decide(running, "failed", how or "the case runner ended while this case ran")
                 left = [case for case in listed if case not in decided]
                 if left and code is None:
@@ -1292,9 +1571,14 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
             restore_deps(app_dir, Path(deps_dir), links)
     except TooMuchLeft as exc:
         refused = str(exc)
+    except OSError as exc:
+        if exc.errno not in UNREMOVABLE:
+            raise JudgeFault(f"cannot take over what the working phase left in the program's folder: {exc}") from None
+        # what cannot be removed whatever the judge does is what the working phase left
+        refused = f"what the working phase left in the program's folder cannot be removed: {exc}"
 
     build_cmd = lang_env.get("BUILD_CMD", "").strip()
-    started = time.monotonic()
+    started, build_began = time.monotonic(), time.time()
     if refused:
         report["build_ended"] = refused
     elif build_cmd:
@@ -1310,7 +1594,7 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
     cli = None
     if is_cli and report["build_ok"]:
         try:
-            cli = CliRun(app_dir, lang_env, run_as, extra_env or {})
+            cli = CliRun(app_dir, lang_env, run_as, extra_env or {}, build_began)
         except TooMuchLeft as exc:
             report["build_ok"], report["build_ended"] = False, str(exc)
     report["runner_ended"] = []
@@ -1329,7 +1613,7 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
             cases = [{"name": path.name, "outcome": not_run, "message": cli.left}]
         elif cli is not None:
             try:
-                cases = cli.run_file(path, report["runner_ended"])
+                cases = cli.run_file(path, report["runner_ended"], not_run)
             except JudgeFault:
                 cli.close()
                 raise

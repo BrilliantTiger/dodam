@@ -18,7 +18,9 @@ poll_seconds = 60
 # At most this many runs of the model in one day (counted by the day in UTC).
 max_jobs_per_day = 8
 
-# The longest one run of the model may take, in seconds; past it the job stops the run and all it started.
+# The longest one run of the model may take, in seconds; past it the job stops the run and all it started. The
+# templates tell the model this time, and to have its answer written by two thirds of it, with numbers the job
+# fills in from this value.
 job_seconds = 1800
 
 # When Google's quota is used up, the job is put back and the watcher starts nothing for this long, in
@@ -42,6 +44,10 @@ max_comment_pages = 10
 # A mark whose job met a used-up quota is put back at most this many times; the next time it is handled as an
 # error and counts in the day.
 max_quota_returns = 3
+
+# After an attack run, each call of the container tool that removes the run's containers may take at most this
+# long, in seconds; there are two calls at most.
+container_seconds = 60
 
 # A comment of the project's account that begins with this line is a question for a discussion.
 discussion_first_line = "Question for the Gemini job:"
