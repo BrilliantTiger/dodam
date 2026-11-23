@@ -11,7 +11,8 @@ import shutil
 import pytest
 
 from conftest import CANARY
-from test_cli_isolation import BENCH, IMAGE, _image_ready, found_by, in_the_image, lost, message, outcomes
+from test_cli_isolation import (BENCH, CANNOT_CONFINE, IMAGE, _image_ready, found_by, in_the_image, lost, message,
+                                outcomes)
 
 pytestmark = pytest.mark.skipif(not _image_ready(), reason="needs Docker and the Python image")
 
@@ -42,6 +43,7 @@ def look():
     seen["first to go"] = open("/proc/self/oom_score_adj").read().strip()
     seen["shared memory"] = libc.shmget(0, 4096, 0o1666) >= 0
     seen["user"] = os.getuid()
+    seen["environment"] = sorted(os.environ)
     try:
         seen["seen by the build"] = json.load(open("/app/seen-by-the-build.json"))
     except OSError:
@@ -72,6 +74,7 @@ for top in ("/tests", "/logs"):
         for name in files:
             seen["files"].append(os.path.join(folder, name))
 seen["no new privileges"] = [l.split()[1] for l in open("/proc/self/status") if l.startswith("NoNewPrivs")]
+seen["environment"] = sorted(os.environ)
 json.dump(seen, open("/app/seen-by-the-build.json", "w"))
 '''
 
@@ -123,6 +126,9 @@ def test_the_served_program_learns_nothing_about_the_test_being_run(looked):
     assert looked["command lines"], "the program was to read the command lines of the other processes"
     for word in ("test_look", "security", "junit", ".xml", "--step", "--tests", "/logs/verifier", "manifest"):
         assert word not in said, (word, looked["command lines"])
+    # neither the served program nor the build gets anything of the judge's own settings
+    for environment in (looked["environment"], looked["seen by the build"]["environment"]):
+        assert [key for key in environment if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], environment
 
 
 def test_the_build_and_the_served_program_run_confined(looked):
@@ -232,6 +238,16 @@ def test_the_web_judge_refuses_a_container_whose_caps_are_missing_or_cannot_hold
     assert result["fault"] is not None, "the judge ran a served program in a container without caps that hold"
     refusal = json.loads(json.loads(result["fault"])["judge_fault"])
     assert refusal["severity"] == "error" and refusal["key"] == key and refusal["message"], refusal
+
+
+def test_a_served_program_the_judge_cannot_confine_is_a_fault_of_the_judge(tmp_path):
+    """Nothing of the program's side runs unconfined: a served program the judge cannot confine is
+    its own fault, not a program that did not start."""
+    result = judge_web(tmp_path, PLAIN_SERVER, ONE_TEST, changed=CANNOT_CONFINE)
+    out = tmp_path / "out"
+    assert result["exit_code"] == 3 and result["reward"] is None, lost(result, out)
+    assert not (out / "reward.json").exists() and not (out / "details.json").exists()
+    assert "start" in found_by(out, "judge-fault.json")["judge_fault"], result["fault"]
 
 
 def test_the_web_judges_result_names_the_caps_of_its_container_and_whether_it_may_swap(tmp_path):

@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import socket
@@ -464,3 +465,128 @@ def test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgem
                          "file": "functional/test_two.py", "weakness": None}]}
     problems = judgement_problems("broken", None, report)
     assert problems and "data folder" in problems[0], problems
+
+
+SERVES_ITS_ENVIRONMENT = """
+import http.server, json, os
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps(sorted(os.environ)).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), Handler).serve_forever()
+"""
+
+
+def test_the_served_program_gets_none_of_the_judges_own_settings(tmp_path: Path, monkeypatch):
+    """A served program is the program's side as well: it is started with the environment the
+    program gets, without anything of the judge's own settings."""
+    monkeypatch.setenv("DODAM_APP_USER", "someone")
+    monkeypatch.setenv("PYTHONPATH", "/judge/only")
+    tests = tmp_path / "tests"
+    write(tests, "manifest.toml", '[[test]]\nfile = "functional/test_env.py"\nkind = "functional"\nstep = "build"\n')
+    write(tests, "functional/test_env.py", """
+        import json, os, urllib.request
+
+
+        def test_env():
+            with urllib.request.urlopen(os.environ["BASE_URL"] + "/", timeout=20) as response:
+                seen = json.loads(response.read())
+            assert [key for key in seen if key.startswith(("DODAM", "PYTEST", "PYTHONPATH"))] == [], seen
+    """)
+    write(tmp_path / "app", "main.py", SERVES_ITS_ENVIRONMENT)
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    result = judge(tests, tmp_path / "app", "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    assert {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]} == {"test_env": ("passed", "")}
+
+
+class Unconfinable:
+    """A stand-in for the program's side whose new process cannot be confined: what becomes the
+    program's side fails before anything of it runs."""
+    uid, gid = os.getuid(), os.getgid()
+
+    def entering(self, limits=None):
+        def enter():
+            raise OSError(1, "the process could not be confined")
+        return enter
+
+    def environment(self, env):
+        return env
+
+    def end(self):
+        return True
+
+
+def test_a_build_the_judge_cannot_start_as_the_builds_user_is_a_fault_of_the_judge(tmp_path: Path):
+    """Whatever stops the judge from starting the build is the judge's: it is never written down as a
+    build that failed."""
+    with pytest.raises(judge_module.JudgeFault):
+        judge_module.run_build("true", tmp_path, Unconfinable(), {"PATH": os.environ.get("PATH", "")}, 10)
+
+
+def test_a_served_program_the_judge_cannot_start_as_its_user_is_a_fault_of_the_judge(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(judge_module.Side, "named", classmethod(lambda cls, user: Unconfinable()))
+    app = App(tmp_path, "true", free_port(), "someone", {})
+    try:
+        with pytest.raises(judge_module.JudgeFault):
+            app.start(timeout=5)
+    finally:
+        app.stop()
+
+
+
+def test_a_build_or_a_served_program_the_judge_cannot_start_in_its_folder_is_a_fault_of_the_judge(tmp_path: Path):
+    """Whatever stops the judge from starting a process of the program's side is the judge's fault,
+    also an error of the system such as a working folder that is not there."""
+    env = {"PATH": os.environ.get("PATH", "")}
+    with pytest.raises(judge_module.JudgeFault):
+        judge_module.run_build("true", tmp_path / "not-there", None, env, 10)
+    app = App(tmp_path / "not-there", "true", free_port(), "", {})
+    try:
+        with pytest.raises(judge_module.JudgeFault):
+            app.start(timeout=5)
+    finally:
+        app.stop()
+
+
+@pytest.mark.parametrize("refused, fault", [(errno.EPERM, False), (errno.EIO, True)],
+                         ids=["refused whatever the judge does", "an error no program causes"])
+def test_a_served_programs_data_folder_that_cannot_be_removed(tmp_path: Path, monkeypatch, refused, fault):
+    """What cannot be removed whatever the judge does is what the program left: the step fails with
+    that reason and a result, and the program is not started again on it. A removal that fails for a
+    reason no program can cause is a fault of the judge."""
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    remove = judge_module.remove_tree
+
+    def refusing(top, *args, **kwargs):
+        if Path(top).name.startswith("dodam-data-"):
+            raise OSError(refused, os.strerror(refused))
+        return remove(top, *args, **kwargs)
+    monkeypatch.setattr(judge_module, "remove_tree", refusing)
+    tests, app = tmp_path / "tests", tmp_path / "app"
+    write(tests, "manifest.toml", '[[test]]\nfile = "functional/test_one.py"\nkind = "functional"\nstep = "build"\n\n'
+                                  '[[test]]\nfile = "security/test_two.py"\nkind = "security"\nstep = "build"\n'
+                                  'weakness = "path-traversal"\n')
+    write(tests, "functional/test_one.py", "def test_one():\n    assert True\n")
+    write(tests, "security/test_two.py", "def test_two():\n    assert True\n")
+    write(app, "main.py", "import http.server, os\nhttp.server.HTTPServer(('127.0.0.1', int(os.environ['PORT'])), "
+                          "http.server.SimpleHTTPRequestHandler).serve_forever()\n")
+    env = {"STEPS": "build", "BUILD_CMD": "", "START_CMD": f"{sys.executable} main.py", "PORT": str(free_port())}
+    if fault:
+        with pytest.raises(judge_module.JudgeFault):
+            judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+        return
+    result = judge(tests, app, "build", tmp_path / "out", lang_env=env, **unseparated(judge))
+    said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
+    assert "cannot be removed" in result["report"].get("left_behind", ""), result["report"]
+    assert said["test_two.py"][0] == "skipped" and "cannot be removed" in said["test_two.py"][1], said
+    assert result["reward"]["reward"] == 0.0 and (tmp_path / "out/reward.json").is_file()
