@@ -2619,16 +2619,31 @@ if sys.argv[1:2] == ["hold"]:
         os.kill(pressing, signal.SIGKILL)
         os.waitpid(pressing, 0)
     atexit.register(stop_pressing)
+
+    def records_now():
+        with open("/sys/fs/cgroup/memory.stat") as f:
+            return int(dict(line.split()[:2] for line in f)["slab_reclaimable"])
+
+    # the kernel takes the old records back first: the case makes its own only once they have stopped
+    # falling for a second, or after 20 seconds, and goes on pressing while it does
+    lowest, still, until = records_now(), 0, time.monotonic() + 20
+    while still < 10 and time.monotonic() < until:
+        time.sleep(0.1)
+        now = records_now()
+        still = still + 1 if now > lowest - MB else 0
+        lowest = min(lowest, now)
 """
 
 
 @pytest.mark.parametrize("limit_mb", [64, 256, 512])
 def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound(tmp_path, limit_mb):
     """After an earlier case left the records of 300,000 names that are not there, a case keeps its
-    container at its cap by reading a large file over and over, so that the kernel takes old records
-    back while the case makes and holds memory files, mapped and closed. Either it fails for memory, or
-    what it holds beyond the judge's count, read from outside, is no more than the amount left out
-    and the tolerance."""
+    container at its cap by reading a large file over and over, so that the kernel takes the old
+    records back; once they have stopped falling, and while it goes on pressing, it makes and holds
+    memory files, mapped and closed. Either it fails for memory, or what it holds beyond the judge's
+    count, read from outside, is no more than the amount left out and the tolerance. Records made
+    while the kernel is still taking old ones back are not held to that bound: the figure does not
+    rise by what takes the place of what goes."""
     way = "memory files, mapped and closed"
     tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
         .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
