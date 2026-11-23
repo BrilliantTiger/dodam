@@ -632,16 +632,17 @@ def test_a_limit_broken_before_a_test_is_left_unjudged_fails_it(tmp_path):
 
 def test_a_program_ended_by_a_signal_fails_its_case_whatever_the_test_checks(tmp_path):
     """The program the case runner started ends by a signal: its case fails and says by which signal,
-    whether its test looks only at the output or would be left unjudged."""
+    whether its test looks only at the output or would be left unjudged. The signals here write no
+    dump of the program's memory, which a machine may take its time over."""
     program = "import os, signal, sys\nprint('started', flush=True)\nos.kill(os.getpid(), getattr(signal, sys.argv[1]))\n"
     tests = {"functional/test_output.py": "def test_looks_at_the_output_only():\n    with case() as c:\n"
-                                          "        assert c.run(['SIGSEGV']).out == 'started\\n'\n",
+                                          "        assert c.run(['SIGTERM']).out == 'started\\n'\n",
              "security/test_needed.py": "def test_needs_the_feature():\n    with case() as c:\n"
                                         "        need(c.run(['SIGKILL']).exit_code == 0, 'the feature')\n"}
     result = judge_program(tmp_path, program, tests)
     said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
     assert said["test_looks_at_the_output_only"][0] == "failed", said
-    assert "signal 11" in said["test_looks_at_the_output_only"][1], said
+    assert "signal 15" in said["test_looks_at_the_output_only"][1], said
     assert said["test_needs_the_feature"][0] == "failed" and "signal 9" in said["test_needs_the_feature"][1], said
     assert result["reward"]["unjudged"] == 0.0 and result["reward"]["reward"] == 0.0
 
