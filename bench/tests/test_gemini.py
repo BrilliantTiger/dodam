@@ -323,6 +323,26 @@ if answer.get("terminal"):
         facts["controlling_terminal"] = False
     facts["terminal_descriptors"] = [fd for fd in range(256) if os.isatty(fd)]
     facts["parent_input"] = input_of(os.getppid())
+    # The terminal of its parent, found by its name in the list of processes and opened as a file.
+    named = run(["/bin/ps", "-o", "tty=", "-p", str(os.getppid())])["out"].strip()
+    facts["parent_terminal"] = named
+    facts["parent_terminal_open"] = "none"
+    if named and named not in ("?", "??"):
+        try:
+            fd = os.open(named if named.startswith("/dev/") else "/dev/" + named, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError:
+            facts["parent_terminal_open"] = "refused"
+        else:
+            facts["parent_terminal_open"] = "opened"
+            try:
+                facts["parent_terminal_read"] = os.read(fd, 4096).decode("utf-8", "replace")
+            except OSError:
+                facts["parent_terminal_read"] = ""
+            try:
+                os.write(fd, b"WRITTEN-BY-THE-MODEL\r\n")
+            except OSError:
+                pass
+            os.close(fd)
     record["terminal"] = facts
 if answer.get("child"):
     # A process that stays in agy's process group, as a command the model starts would.
@@ -828,7 +848,7 @@ class World:
         if parent is None:
             return argv
         link = self.root / "parents" / parent
-        link.parent.mkdir(exist_ok=True)
+        link.parent.mkdir(parents=True, exist_ok=True)
         if not link.exists():
             link.symlink_to("/bin/sh")
         return [str(link), "-c", '"$@"; exit $?', words or parent, *argv]
@@ -1038,7 +1058,11 @@ def _screen_result(seen: dict[str, object]) -> dict[str, object]:
     return result_of({"stdout": str(seen.get("screen") or "")})
 
 
-@pytest.mark.parametrize("agent", [None, "claude"], ids=["no agent", "an agent"])
+# Coding agents in a terminal of Orca, by the program they run as, and the name the refusal gives each.
+AGENTS_IN_A_TERMINAL = {"claude": "claude", "agy": "agy", "gemini": "gemini", "claude/versions/2.1.330": "claude"}
+
+
+@pytest.mark.parametrize("agent", [None, *AGENTS_IN_A_TERMINAL], ids=["no agent", *AGENTS_IN_A_TERMINAL])
 @pytest.mark.parametrize("host", ORCA_HOSTS)
 def test_in_a_terminal_of_orca_the_job_runs_unless_an_agent_holds_it_and_agy_gets_no_input_and_no_terminal(
     world: World, host: str, agent: str | None,
@@ -1052,7 +1076,7 @@ def test_in_a_terminal_of_orca_the_job_runs_unless_an_agent_holds_it_and_agy_get
     result = _screen_result(seen)
     if agent is not None:
         # A coding agent's own shell inside a terminal of Orca: nothing starts, as anywhere else.
-        assert result.get("status") == "refused" and f"parent:{agent}" in result.get("reasons", []), seen
+        assert result.get("status") == "refused" and f"parent:{AGENTS_IN_A_TERMINAL[agent]}" in result.get("reasons", []), seen
         assert world.agy_runs() == [] and world.gh_calls() == []
         return
     assert result.get("status") == "posted", f"the job did not run in a terminal of Orca held by {host}: {seen}"
@@ -1065,6 +1089,9 @@ def test_in_a_terminal_of_orca_the_job_runs_unless_an_agent_holds_it_and_agy_get
     # A session of its own, and no terminal: none of its descriptors is one, and it has no controlling terminal.
     assert facts["own_session"] is True and facts["own_group"] is True, facts
     assert facts["controlling_terminal"] is False and facts["terminal_descriptors"] == [], facts
+    # Nor can it open the job's terminal by its name, to read what was typed or to write into it.
+    assert facts["parent_terminal_open"] == "refused", facts
+    assert "WRITTEN-BY-THE-MODEL" not in str(seen["screen"]), "agy wrote into the job's terminal"
 
 
 PASSED_THROUGH = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ")
@@ -1149,18 +1176,64 @@ AGENT_IN_ORCA = {
     "Antigravity among the parents": ({}, "agy", "", "parent:agy"),
     "an agent named after flags": ({}, "node", "--max-old-space-size=4096 --no-warnings /opt/tools/bin/claude", "parent:claude"),
     "an agent in a folder with spaces": ({}, "node", "/opt/My  Agent Tools/bin/claude", "parent:claude"),
+    "Gemini's CLI among the parents": ({}, "gemini", "", "parent:gemini"),
+    "Claude Code by its versioned path": ({}, "claude/versions/2.1.330", "", "parent:claude"),
 }
 
 
+@pytest.mark.parametrize("program", ["job", "watcher"])
 @pytest.mark.parametrize("case", sorted(AGENT_IN_ORCA))
-def test_in_a_terminal_of_orca_an_agent_orca_or_antigravity_started_or_one_named_late_still_stops_the_job(world: World, case: str):
+def test_in_a_terminal_of_orca_an_agent_orca_or_antigravity_started_or_one_named_late_still_stops_the_job(
+    world: World, case: str, program: str,
+):
     world.label(world.pull(7), "verify")
     extra, parent, words, reason = AGENT_IN_ORCA[case]
     env = world.orca_env(**extra)
-    out, _ = world.start(world.under("Orca Agents", world.under(parent, world.job_argv("verify", 7), words)), env)
-    result = result_of(World.wait(out))
-    assert result.get("status") == "refused" and reason in result.get("reasons", []), f"{case}: {result}"
+    argv = world.job_argv("verify", 7) if program == "job" else [
+        sys.executable, str(WATCH), "--settings", str(world.settings), "--private", str(world.private), "--polls", "1"]
+    out, _ = world.start(world.under("Orca Agents", world.under(parent, argv, words)), env)
+    run = World.wait(out)
+    if program == "job":
+        result = result_of(run)
+        assert result.get("status") == "refused" and reason in result.get("reasons", []), f"{case}: {result}"
+    else:
+        assert run["code"] == 3 and "refused" in str(run["stderr"]) and reason in str(run["stderr"]), f"{case}: {run}"
     assert world.agy_runs() == [] and world.gh_calls() == []
+
+
+# Lines a model could write in its public part, shaped like the job's own: its result line, its start and end lines.
+LINES_LIKE_THE_JOB_S = (
+    '{"kind": "verify", "number": 7, "status": "held", "verdict": "none", "reasons": ["made-up"], "private": null, "ran": false}',
+    "gemini job: verify for 7 started: a title made up by the model",
+    "gemini job: verify for 7 ended: status held, verdict changes-needed, reasons made-up",
+)
+
+
+def test_a_posted_public_part_shaped_like_the_job_s_own_lines_changes_no_result(world: World):
+    """Whatever reads a run's result (the tests' reader of standard output, the watcher, the record of the run and
+    the coordinator's line) takes the job's own result, whatever lines the posted public part holds."""
+    event = world.label(world.pull(7), "verify")
+    world.answer(envelope(answer_text(public=ANSWER_PUBLIC + "\n" + "\n".join(LINES_LIKE_THE_JOB_S))))
+    run = world.run_watch()
+    [result] = results_of(run)
+    assert result.get("status") == "posted" and result_of(run).get("status") == "posted", run
+    only_result_lines_on_stdout(run)
+    assert json.loads((answer_folder(result) / "result.json").read_text(encoding="utf-8")).get("status") == "posted"
+    [line] = (world.private / "finished.log").read_text(encoding="utf-8").splitlines()
+    assert " status=posted verdict=approve " in line, line
+    saved = json.loads((world.private / "watch-state.json").read_text(encoding="utf-8"))
+    assert saved["handled"] == {str(event): "posted"}, saved
+
+
+def test_on_the_terminal_each_line_of_the_public_part_is_told_apart_from_the_job_s_own(world: World):
+    world.label(world.pull(7), "verify")
+    world.answer(envelope(answer_text(public=ANSWER_PUBLIC + "\n" + "\n".join(LINES_LIKE_THE_JOB_S))))
+    run = world.run_watch()
+    assert result_of(run).get("status") == "posted", run
+    shown = str(run["stderr"]).splitlines()
+    own = [line for line in shown if line.startswith(("gemini job:", "watch:", "{"))]
+    assert not any("made-up" in line or "made up by the model" in line for line in own), own
+    assert any(ANSWER_PUBLIC in line for line in shown), "the posted public part is not shown"
 
 
 def _start_line(program: str) -> str:
@@ -1192,9 +1265,13 @@ def test_the_start_line_leaves_no_shell_to_read_what_is_typed_and_the_watcher_cl
     assert seen["ended_by_itself"], f"the terminal's process went on after the {program} ended: {seen}"
     assert _screen_result(seen).get("status") == "posted", seen
     [record] = world.agy_runs()
+    facts = record["terminal"]
+    assert isinstance(facts, dict)
     if program == "watcher":
-        parent_input = record["terminal"]["parent_input"]  # type: ignore[index]
-        assert parent_input in ("/dev/null", "closed"), f"the watcher's input is {parent_input}, not closed"
+        assert facts["parent_input"] in ("/dev/null", "closed"), f"the watcher's input is {facts['parent_input']}, not closed"
+    # agy cannot open the program's terminal by its name, to read what was typed or to write into it.
+    assert facts["parent_terminal_open"] == "refused", facts
+    assert "WRITTEN-BY-THE-MODEL" not in str(seen["screen"]), "agy wrote into the program's terminal"
     # The line names no local path and no run of the coordinator.
     assert "run_" not in line and not re.search(r"(?:^|\s)[~/]", line), line
 
@@ -1403,6 +1480,8 @@ def test_the_account_is_confirmed_again_right_before_the_job_posts(world: World,
     state = world.github_state()
     assert state.get("posted") is None and state.get("removed") is None, "something was written under another account"
     assert _requests(world)[-1] == ASK_USER, "the job asked GitHub for more after another account was signed in"
+    # Nothing was posted, so nothing of the answer is shown.
+    assert ANSWER_PUBLIC not in str(run["stdout"]) + str(run["stderr"]), "the public part was shown although not posted"
 
 
 @pytest.mark.parametrize("case", ["a refused sign-in", "a fault while confirming the account", "a fault while reading the marks"])
