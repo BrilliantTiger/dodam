@@ -78,7 +78,7 @@ def load_state(path: Path) -> dict[str, object]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StateError() from exc
-    if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != STATE_VERSION:
         raise StateError()
     for key in ("handled", "ignored"):
         entries = data.get(key)
@@ -167,6 +167,19 @@ def find_marks(settings, state: dict[str, object]) -> list[tuple[int, str, int, 
 
 def one_round(settings, private: Path, state_path: Path, state: dict[str, object], tell: str | None) -> int | None:
     """Look once and run the jobs that are due, one after another. Returns an exit code when it must stop."""
+    # The signed-in account is confirmed in every round before anything is read: another account stops the
+    # watcher at once; a fault of GitHub, a refused sign-in among them, leaves this round empty.
+    try:
+        me = job.gh("GET", "user")
+    except job.SignedOut:
+        note("the GitHub command-line tool is signed out")
+        return job.EXIT_CODES["signed_out"]
+    except job.GitHubError as exc:
+        note(f"could not confirm the signed-in account this round ({exc.reason})")
+        return None
+    if job.user_id(me) != settings.project_account_id:
+        note("the signed-in GitHub account is not the project's account")
+        return job.EXIT_CODES["settings"]
     try:
         held_back = job.gate(settings, job.load_job_state(private))
     except job.JobError:
@@ -229,6 +242,11 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
             note(f"stopping: {status}")
             return job.EXIT_CODES[status]
         reasons = result.get("reasons") or []
+        if status == "settings" and "account" in reasons:  # type: ignore[operator]
+            # Another account was signed in when the job was about to post: nothing was posted; the mark stays.
+            save_state(state_path, state)
+            note("the signed-in GitHub account is not the project's account")
+            return job.EXIT_CODES["settings"]
         if status == "error" and not result.get("ran") and set(reasons) <= TRY_AGAIN:  # type: ignore[arg-type]
             note(f"left out this round kind={kind} number={number} reason={','.join(map(str, reasons))}", keep=True)
             continue
