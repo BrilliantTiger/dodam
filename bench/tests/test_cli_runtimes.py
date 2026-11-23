@@ -300,3 +300,19 @@ def test_a_served_java_program_makes_its_temporary_files_where_a_python_one_does
         assert result["exit_code"] == 0 and outcomes(result) == {"test_temp": "passed"}, lost(result, tmp_path / lang / "out")
         folders[lang] = found_by(tmp_path / lang / "out", "attack.json")["temp"]
     assert folders["java"] == folders["python"], folders
+
+
+@pytest.mark.parametrize("lang", list(LANGUAGES))
+def test_no_helper_may_be_named_like_a_module_of_the_judges_python(lang):
+    """The judge's own Python differs between the images. A helper of a task may be named like no
+    module of the standard library of any of them, whatever Python runs the format checker."""
+    import json as json_module
+    from dodambench.task import NOT_A_HELPER
+    image = LANGUAGES[lang].image
+    if not _image_ready(image):
+        pytest.skip(f"needs Docker and the {LANGUAGES[lang].name} image")
+    done = subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/opt/judge/bin/python", image,
+                           "-c", "import sys, json; print(json.dumps(sorted(sys.stdlib_module_names)))"],
+                          capture_output=True, text=True, timeout=120)
+    names = set(json_module.loads(done.stdout))
+    assert names and not names - NOT_A_HELPER, sorted(names - NOT_A_HELPER)

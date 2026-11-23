@@ -2010,3 +2010,13 @@ def test_a_file_whose_cases_are_fewer_than_the_judge_counted_is_the_judges_fault
     with pytest.raises(judge_module.JudgeFault) as fault:
         judge_program(tmp_path, ECHO, tests)
     assert "test_fewer.py" in str(fault.value)
+
+
+@pytest.mark.parametrize("top", ["raise SystemExit\n", "X = 1 // 0\n"])
+def test_a_file_of_tests_whose_import_fails_is_the_judges_fault(tmp_path, top):
+    """The one way left for the cases pytest lists to differ from the count: the file cannot be
+    imported. pytest then lists nothing, and the judge makes it a fault."""
+    tests = {"functional/test_broken.py": top + "\n\ndef test_one():\n    with case() as c:\n        c.run([])\n"}
+    with pytest.raises(judge_module.JudgeFault) as fault:
+        judge_program(tmp_path, ECHO, tests)
+    assert "test_broken.py" in str(fault.value)

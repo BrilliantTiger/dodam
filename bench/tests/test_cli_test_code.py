@@ -79,6 +79,13 @@ STARTS_SOMETHING = {
     "a module imported from an allowed module": "from json import codecs\n",
     "an allowed built-in name bound by a parameter": "def f(str=None):\n    return str\n",
     "a built-in name bound by a def": "def str(value):\n    return value\n",
+    "a built-in name bound by a class": "class open:\n    pass\n",
+    "a built-in name bound by an exception caught": "try:\n    pass\nexcept ValueError as open:\n    pass\n",
+    "a built-in name bound by a pattern": "match 1:\n    case open:\n        pass\n",
+    "a built-in name made global": "def f():\n    global open\n",
+    "a built-in name bound by importing a module": "import json as open\n",
+    "a built-in name bound by importing a name": "from json import loads as open\n",
+    "storing an attribute on the list": "import json\n\njson.dumps = None\n",
 }
 
 # Ways a test could learn which language it judges, or anything else of the judge's settings.
@@ -109,6 +116,14 @@ LEARNS_SOMETHING = {
         "def look():\n    with case() as c:\n        p = c.outside / 'x'\n        return str(p)\n"),
     "a path a method of the case returns, used": (
         "def look():\n    with case() as c:\n        return c.write('a', 'b').name\n"),
+    "a method of the case that gives a path, kept in a name": (
+        "def look():\n    with case() as c:\n        w = c.write\n        return w\n"),
+    "a method of the case that gives a path, in a list": (
+        "def look():\n    with case() as c:\n        [c.mkdir][0]('d')\n"),
+    "a method of the case that gives a path, from a function": (
+        "def look():\n    with case() as c:\n        (lambda: c.sparse)()('y', 1)\n"),
+    "a way of a path that copies a file": "def look(q):\n    return q.copy\n",
+    "a way of a path that asks about a file": "def look(q):\n    return q.group\n",
     "a path a method of the case returns, made a string": (
         "def look():\n    with case() as c:\n        return str(c.write('a', 'b'))\n"),
     "a path the case gives, asked about": (
@@ -223,7 +238,8 @@ def test_every_python_file_of_the_tests_is_held_to_the_same_rules(cli_task_dir):
                                  "tests/functional/pytest.ini", "tests/pyproject.toml", "tests/tox.ini",
                                  "tests/setup.cfg", "tests/lib/fast.so", "tests/functional/__pycache__/x.pyc",
                                  "tests/lib/sitecustomize.py", "tests/lib/json.py", "tests/functional/dodam_cli.py",
-                                 "tests/lib/anyio.py", "tests/lib/httpx.py", "tests/lib/pluggy.py"])
+                                 "tests/lib/anyio.py", "tests/lib/httpx.py", "tests/lib/pluggy.py",
+                                 "tests/lib/annotationlib.py", "tests/lib/compression.py", "tests/lib/telnetlib.py"])
 def test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused(cli_task_dir, rel):
     """pytest runs a conftest.py and obeys its settings files without a test asking for them, and
     Python loads compiled files and files named like its own modules in their place."""
@@ -303,8 +319,24 @@ def test_a_helper_is_a_file_of_the_helper_folder_only(cli_task_dir):
     for folder in ("'data'", "'/opt'", "'lib.zip'"):
         line = PATH_LINE.replace("'lib'", folder)
         assert with_added(cli_task_dir, TEST, "import sys\nfrom pathlib import Path\n\n" + line), folder
-    write(cli_task_dir, "tests/lib/expected.py", "def value():\n    return 1\n")
+    for deep in ("parents[0]", "parents[2]"):
+        line = PATH_LINE.replace("parents[1]", deep)
+        assert with_added(cli_task_dir, TEST, "import sys\nfrom pathlib import Path\n\n" + line), deep
+    write(cli_task_dir, "tests/lib/expected.py", "def value():\n    return 1\n\n\n_hidden = 1\n")
     assert with_added(cli_task_dir, TEST, head + "from expected import value  # noqa: E402\n") == []
+    assert with_added(cli_task_dir, TEST, head + "from expected import _hidden  # noqa: E402\n")
+
+
+def test_a_test_imports_from_a_helper_only_what_the_helper_defines(cli_task_dir):
+    """A helper's own line for the search path imports sys and Path; a test does not get them, nor
+    anything else the helper imported, through the helper."""
+    write(cli_task_dir, "tests/lib/paths.py", "import json\nimport sys\nfrom pathlib import Path\n\n"
+          + PATH_LINE + "VALUE = json.dumps(1)\n")
+    assert refused_in(cli_task_dir, "tests/lib/paths.py") == []
+    head = "import sys\nfrom pathlib import Path\n\n" + PATH_LINE
+    for name in ("Path", "sys", "json"):
+        assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), name
+    assert with_added(cli_task_dir, TEST, head + "from paths import VALUE  # noqa: E402\n") == []
 
 
 def test_a_link_in_the_tests_folder_is_refused(cli_task_dir, tmp_path):
