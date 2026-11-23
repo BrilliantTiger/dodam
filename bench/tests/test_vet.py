@@ -640,3 +640,18 @@ def test_the_judging_code_is_handed_the_record_on_every_path(tmp_path, monkeypat
     task = load_task(cli_task_dir)
     vetted_with(tmp_path, monkeypatch, fake_docker, task, path, *judges_result(task, "change-1"))
     assert handed and all(type(j) is vetting.Judged for j in handed), handed
+
+
+@pytest.mark.parametrize("name", ["reward.json", "details.json", "judge-fault.json"])
+def test_a_file_nested_too_deep_to_read_is_a_fault(tmp_path, monkeypatch, fake_docker, cli_task_dir, name):
+    """However deeply a file a judging left is nested, reading it gives a fault of the judge, never a
+    trace of an error, whichever Python reads it."""
+    import dodambench.vet as vetting
+    task = load_task(cli_task_dir)
+    reward, details = judges_result(task, "change-1")
+    (fake_docker / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    (fake_docker / name).write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "3" if name == "judge-fault.json" else "0")
+    results = vetting.vet_in_image(task, "python", tmp_path / "out", "dodam-bench/python:dev")
+    assert results and all(r["ok"] is False and r.get("judge_fault") is True for r in results), results

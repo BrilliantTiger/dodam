@@ -554,3 +554,14 @@ def test_a_file_of_every_allowed_kind_of_syntax_is_accepted(cli_task_dir):
     text = path.read_text(encoding="utf-8") + "\n\n" + EVERY_ALLOWED_KIND
     assert {type(n).__name__ for n in ast_module.walk(ast_module.parse(text))} >= ALLOWED_SYNTAX
     assert with_added(cli_task_dir, TEST, EVERY_ALLOWED_KIND) == []
+
+
+def test_the_modules_of_the_judges_packages_are_read_from_the_installed_records(monkeypatch):
+    """A package the judge's requirements name gives every module its installed record says it
+    provides, whatever the module is called."""
+    import importlib.metadata
+    import dodambench.task as task_module
+    monkeypatch.setattr(importlib.metadata, "packages_distributions",
+                        lambda: {"made_up_module": ["pytest"], "unrelated_module": ["unrelated-package"]})
+    names = task_module._judge_packages()
+    assert "made_up_module" in names and "unrelated_module" not in names, sorted(names)
