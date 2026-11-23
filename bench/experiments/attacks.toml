@@ -651,20 +651,42 @@ tests = [
 class = "memory"
 name = "records made after earlier activity, or while the kernel takes old ones back"
 tries = "an earlier case leaves cache and records behind, and the case then makes records and holds them, also while the container is held at its cap"
-must = "what the case's records grow by beyond the amount left out counts as its memory"
+must = "what the case's records grow by beyond the amount left out counts as its memory; and the case passes only where its memory and every record of the kernel's that stands, beyond that amount, lie within its limit"
 tests = [
     "tests/test_cli_isolation.py::test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left",
     "tests/test_cli_isolation.py::test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound",
 ]
 
 [[attack]]
+class = "memory"
+name = "records that stood before the case, held"
+tries = "the case holds the records of files its build left, or of files an earlier case looked at, which stand already and make no figure rise"
+must = "the case passes only where its memory and every record of the kernel's that stands, beyond the amount left out, lie within its limit and leave the container its room below the cap; elsewhere it is unmeasured"
+tests = [
+    "tests/test_cli_judge.py::test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_whatever_stood",
+    "tests/test_cli_judge.py::test_records_that_stand_count_against_the_room_below_the_cap",
+    "tests/test_cli_isolation.py::test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left",
+]
+
+[[attack]]
+class = "memory"
+name = "records made while older ones are given back, one for one"
+tries = "the case makes its records at the pace the kernel gives back older ones, between two readings, in pulses or between the two halves of a reading, so that the figure does not rise"
+must = "the case passes only where its memory and every record of the kernel's that stands, beyond the amount left out, lie within its limit; elsewhere it is unmeasured"
+tests = [
+    "tests/test_cli_judge.py::test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_whatever_stood",
+    "tests/test_cli_isolation.py::test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound",
+]
+
+[[attack]]
 class = "passing as unjudged"
 name = "a case whose memory the judge cannot read"
-tries = "after its test passes, or after its test fails, a case's memory cannot be read so as to say on which side of a line it lies"
-must = "such a case never passes: when its test would pass it is unmeasured, and the tool that checks prepared solutions reads it as a fault of measuring; when its test fails, the failure stands"
+tries = "after its test passes, leaves it unjudged or fails, a case's memory cannot be read so as to say on which side of a line it lies; or the case runner's note of it cannot be read"
+must = "such a case never passes: when its test would pass or leave it unjudged it is unmeasured, and the tool that checks prepared solutions reads it as a fault of measuring; when its test fails, the failure stands; a note that cannot be read leaves no case of its file passed or unjudged"
 tests = [
     "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured",
     "tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution",
+    "tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged",
 ]
 
 [[attack]]

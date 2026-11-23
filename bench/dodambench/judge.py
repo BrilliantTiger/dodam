@@ -66,7 +66,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -597,6 +597,21 @@ def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
             "files": files, "moved": moved, "late": int(late)}
 
 
+# the kernel's own part of a container, as memory.stat names it
+KERNEL_PARTS = ("kernel_stack", "pagetables", "sec_pagetables", "percpu", "sock", "vmalloc", "slab_unreclaimable")
+
+
+def kernel_part(group: Path = GROUP) -> int:
+    """What the kernel holds for the container of its own: the stacks and page tables of its
+    processes, memory for each processor, sockets, and the records it cannot give back. Part of
+    what it kept of processes that ended goes a while after them; 0 where it says nothing."""
+    try:
+        stat = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines() if line.strip())
+        return sum(int(stat.get(part, 0)) for part in KERNEL_PARTS)
+    except (OSError, ValueError):
+        return 0
+
+
 def highest_memory(group: Path = GROUP) -> int:
     """The most memory this container ever held, as the kernel keeps it; 0 where it keeps none.
     It never goes down, so it shows only a new high, and it does not count what was swapped out."""
@@ -1116,6 +1131,33 @@ def keep_private(folder: Path) -> None:
                     raise JudgeFault(f"cannot protect {parent}: {exc}") from None
 
 
+# what a case runner's note of a case holds, each of its own type
+NOTE_FIELDS = {"case": str, "unsettled": bool, "undecided": int, "grown": int, "left_out": int, "counted": int,
+               "bound": int, "fell": int}
+
+
+def _note_of(line: bytes) -> dict | None:
+    """One case runner's note of a case, or None where the line is not one whole."""
+    try:
+        note = json.loads(line.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(note, dict):
+        return None
+    for name, kind in NOTE_FIELDS.items():
+        value = note.get(name)
+        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+            return None
+    return note
+
+
+def _note_belongs(note: dict, path: Path, case: dict) -> bool:
+    """Whether a note is of this case: of the same file of tests and the same name, as the judge names
+    a case after its test."""
+    parts = note["case"].split("::")
+    return len(parts) > 1 and PurePosixPath(parts[0]).name == path.name and parts[-1] == case["name"]
+
+
 class CliRun:
     """How the hidden tests of a command-line task reach the program: settings for dodam_cli.py."""
 
@@ -1179,6 +1221,10 @@ class CliRun:
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
                     "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env,
                     "highs_file": str(self.highs_file), "records_file": str(self.records_file)}
+        if run_as:
+            # the judge's own processes besides the case runner, the container's first and this one,
+            # whose memory the runner takes out of every figure
+            settings["judge_statuses"] = ["/proc/1/status", f"/proc/{os.getpid()}/status"]
         self.settings_file = self.private / "settings.json"
         self.settings_file.write_text(json.dumps(settings), encoding="utf-8")
         # the tests get nothing that differs from one language to the next but the settings file itself
@@ -1190,7 +1236,7 @@ class CliRun:
         tests = tests_in(path.read_bytes())
         timeout = file_seconds(tests, self.limits["timeout_sec"])
         cases = run_cases(path, self.test_env, timeout, lambda: self.give_back(not_run), ended)
-        self.note_records(cases)
+        self.note_records(path, cases)
         if self.fault_file.exists():
             raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
         self.sweep()
@@ -1203,26 +1249,50 @@ class CliRun:
             raise JudgeFault(f"{path.name}: pytest listed {len(cases)} cases where the judge counted {tests} tests")
         return cases
 
-    def note_records(self, cases: list[dict]) -> None:
-        """Write into each case's outcome how much of the kernel's records was left out of its
-        memory and how much was counted, as the case runner noted it, so that a case that failed
-        for memory shows why. A case with a reading that could not say on which side of a line the
-        figure lay is UNMEASURED when its test passed or left it unjudged: then the outcome depended
-        on the reading. A case whose test failed stays failed."""
+    def note_records(self, path: Path, cases: list[dict]) -> None:
+        """Write into each case of the file of tests at `path` how much of the kernel's records was
+        left out of its memory and how much was counted, and how many of its readings could not
+        decide, as the case runner noted it, so that a case that failed for memory shows why. A note
+        belongs to the case of its own file and name. A case with a reading that could not say on
+        which side of a line the figure lay is UNMEASURED when its test passed or left it unjudged:
+        then the outcome depended on the reading. A case whose test failed stays failed. A note that
+        cannot be read whole could be the one that marks a case, and which case it belonged to cannot
+        be told: then every case of the file whose test passed or left it unjudged is UNMEASURED. The
+        notes are removed on every path, so that the next file of tests starts with none."""
+        unreadable = False
         try:
-            noted = [json.loads(line) for line in self.records_file.read_text(encoding="utf-8").splitlines() if line]
-            self.records_file.unlink()
-        except (OSError, ValueError):
-            noted = []
+            lines = self.records_file.read_bytes().splitlines()
+        except FileNotFoundError:
+            lines = []
+        except OSError:
+            lines, unreadable = [], True
+        finally:
+            try:
+                self.records_file.unlink(missing_ok=True)
+            except OSError as exc:
+                raise JudgeFault(f"cannot remove the case runners' notes: {exc}") from None
+        noted = []
+        for line in lines:
+            if not line.strip():
+                continue
+            note = _note_of(line)
+            if note is None:
+                unreadable = True
+            else:
+                noted.append(note)
         for case in cases:
-            mine = [n for n in noted if n["case"].split("::")[-1] == case["name"]]
+            mine = [n for n in noted if _note_belongs(n, path, case)]
             if mine:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
                 case["records_counted_bytes"] = max(n["counted"] for n in mine)
+                case["undecided_readings"] = sum(n["undecided"] for n in mine)
+                # the most the case can have held, and how far its figure fell below where it began
+                case["memory_bound_bytes"] = max(n["bound"] for n in mine)
+                case["fell_below_start_bytes"] = max(n["fell"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
-                self.undecided += sum(n.get("undecided", 0) for n in mine)
-                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):
-                    case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING
+                self.undecided += case["undecided_readings"]
+            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):
+                case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,

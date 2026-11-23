@@ -1089,13 +1089,17 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
 
 def test_the_room_of_a_judging_is_the_smallest_room_between_the_memory_bound_and_the_limit():
     """The room a judging leaves is the case's memory limit less the most the upper bound of the
-    case's memory reached, over its cases; where no case says it, there is no room to tell."""
+    case's memory reached, over its cases that passed or were not judged for measuring; where no such
+    case says it, there is no room to tell."""
     from dodambench.vet import room_of
     mb = 2**20
-    details = {"tests": [{"name": "a", "memory_bound_bytes": 100 * mb},
-                         {"name": "b", "memory_bound_bytes": int(110.4 * mb)}, {"name": "c"}]}
+    details = {"tests": [{"name": "a", "outcome": "passed", "memory_bound_bytes": 100 * mb},
+                         {"name": "b", "outcome": "unmeasured", "memory_bound_bytes": int(110.4 * mb)},
+                         {"name": "c", "outcome": "passed"},
+                         # a case ended above its limit by design says nothing of the room
+                         {"name": "d", "outcome": "failed", "memory_bound_bytes": 600 * mb}]}
     assert room_of(details, 512) == 401.6
-    assert room_of({"tests": [{"name": "c"}]}, 512) is None
+    assert room_of({"tests": [{"name": "c", "outcome": "passed"}]}, 512) is None
     assert room_of({"tests": []}, 512) is None
 
 

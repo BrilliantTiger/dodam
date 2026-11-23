@@ -1459,7 +1459,7 @@ EVERY_TRY = {
     # once the program holds its memory, the cases' folder read once more after a reading shows a file of
     # 40 MB gone that the total held
     "the cases' files read after the reading": (way(takes(230, 20), outside="held['files'] - (40 * MB if "
-                                                    "held['current'] > 600 * MB else 0)"), "passed"),
+                                                    "held['current'] > (500 + RECORDS_MB) * MB else 0)"), "passed"),
 }
 LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 
@@ -1470,9 +1470,10 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw."""
     seen = tmp_path / "seen.json"
-    source = (UNDECIDED.replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
+    # the way first, so that it may name the stand-in's own folder and figures as the rest does
+    source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
               .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
-              .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)).replace("WAY", way_code))
+              .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)))
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb)
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
@@ -1715,8 +1716,16 @@ def test_the_judges_own_processes_are_taken_out_of_every_figure(tmp_path):
         status.write_text(f"Name:\tpython3\nRssAnon:\t{anon} kB\nRssFile:\t999 kB\nVmPTE:\t{tables} kB\n"
                           f"VmSwap:\t{swap} kB\n", encoding="ascii")
         statuses.append(str(status))
-    assert runner._own_memory(statuses[0], others=statuses[1:]) == (1320 + 2100 + 4068) * 1024
-    assert runner._own_memory(statuses[0], others=[str(tmp_path / "gone")]) == 1320 * 1024
+    kept = runner._config
+    try:
+        # the judge names its own processes in the case runner's settings
+        runner._config = {"judge_statuses": statuses[1:]}
+        assert runner._own_memory(statuses[0]) == (1320 + 2100 + 4068) * 1024
+        # a process that is gone holds nothing
+        runner._config = {"judge_statuses": [str(tmp_path / "gone")]}
+        assert runner._own_memory(statuses[0]) == 1320 * 1024
+    finally:
+        runner._config = kept
 
 # The notes the case runners hand the judge, one line for each case, and what the judge makes of them.
 NOTE_CASES = [{"name": "test_a", "outcome": "passed", "message": ""},
@@ -1728,19 +1737,40 @@ UNREADABLE = {
     "a line that is not a record": b"[1, 2]",
     "a note without its fields": b'{"case": "test_notes.py::test_b"}',
     "a line that is not text": b"\xff\xfe",
+    "the notes cannot be read at all": None,
 }
+
+
+class Unreadable:
+    """Notes the judge cannot read at all."""
+
+    def __init__(self):
+        self.gone = False
+
+    def read_bytes(self) -> bytes:
+        raise OSError(errno.EIO, "the notes cannot be read")
+
+    def unlink(self, missing_ok: bool = False) -> None:
+        self.gone = True
+
+    def exists(self) -> bool:
+        return not self.gone
 
 
 def note(name: str, unsettled: bool = False, file: str = "test_notes.py") -> bytes:
     return json.dumps({"case": f"{file}::{name}", "unsettled": unsettled, "undecided": int(unsettled),
-                       "grown": 0, "left_out": 0, "counted": 0}).encode()
+                       "grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}).encode()
 
 
-def noted(tmp_path: Path, lines: list[bytes]) -> tuple[object, dict]:
-    """What the judge makes of the notes of the file test_notes.py, whose cases came out as NOTE_CASES."""
+def noted(tmp_path: Path, lines: list[bytes] | None) -> tuple[object, dict]:
+    """What the judge makes of the notes of the file test_notes.py, whose cases came out as NOTE_CASES;
+    None for notes that cannot be read at all."""
     cli = object.__new__(judge_module.CliRun)
     cli.records_file, cli.records_highest, cli.undecided = tmp_path / "records.jsonl", 0, 0
-    cli.records_file.write_bytes(b"\n".join(lines) + b"\n")
+    if lines is None:
+        cli.records_file = Unreadable()
+    else:
+        cli.records_file.write_bytes(b"\n".join(lines) + b"\n")
     cases = [dict(c) for c in NOTE_CASES]
     cli.note_records(tmp_path / "test_notes.py", cases)
     return cli, {c["name"]: c["outcome"] for c in cases}
@@ -1752,7 +1782,7 @@ def test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjud
     be taken, and which case it belonged to cannot be told: every case of the file whose test passed or
     left it unjudged is unmeasured, and a case whose test failed stays failed. The notes are removed on
     every path, so that the next file of tests starts with none."""
-    cli, outcomes_of = noted(tmp_path, [note("test_a"), UNREADABLE[line]])
+    cli, outcomes_of = noted(tmp_path, None if UNREADABLE[line] is None else [note("test_a"), UNREADABLE[line]])
     assert outcomes_of == {"test_a": judge_module.UNMEASURED, "test_b": judge_module.UNMEASURED, "test_c": "failed"}
     assert not cli.records_file.exists()
 

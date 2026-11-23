@@ -490,9 +490,28 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                 else:
                     found = judgement_problems(variant.expect, variant.weakness, judged)
                     result.update(ok=not found, problems=found, reward=dict(judged.reward))
+                    if task.cli.get("case_memory_mb"):
+                        details = out_dir / step.name / variant.label / DETAILS_FILE
+                        try:
+                            result["room_mb"] = room_of(json.loads(details.read_text(encoding="utf-8")),
+                                                        task.cli["case_memory_mb"])
+                        except (OSError, ValueError):
+                            result["room_mb"] = None
                 result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     return results
+
+
+def room_of(details: dict, limit_mb: int) -> float | None:
+    """The room a judging left: the case's memory limit less the most the bound of a case's memory
+    reached, the smallest over its cases that passed or were not judged for measuring, in MB; None
+    where no such case says it. A case that failed is left out: it may have been ended above its limit
+    by design. The bound counts every record of the kernel's that stands, so a language whose build
+    leaves more of them leaves less room."""
+    bounds = [t["memory_bound_bytes"] for t in details.get("tests", [])
+              if isinstance(t, dict) and isinstance(t.get("memory_bound_bytes"), int)
+              and t.get("outcome") in ("passed", UNMEASURED)]
+    return round(limit_mb - max(bounds) / 2**20, 1) if bounds else None
 
 
 def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE,
@@ -601,6 +620,10 @@ def main(argv: list[str] | None = None) -> int:
             mark = "skip" if r.get("skipped") else ("ok" if r["ok"] else "FAIL")
             print(f"{mark:4}  {lang:10}  {r['step']:10}  {r['solution']:34}  {r.get('seconds', 0):6.1f}s  "
                   + "; ".join(r["problems"]))
+        rooms = [r["room_mb"] for r in results if r.get("room_mb") is not None]
+        if rooms:
+            # for whoever writes the task: how close the prepared solutions of this language came; it refuses nothing
+            print(f"room  {lang:10}  the smallest room between the memory bound and the limit: {min(rooms):.1f} MB")
         every += results
     unchecked = [r for r in every if r.get("skipped")]
     if unchecked:

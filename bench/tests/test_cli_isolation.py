@@ -1602,14 +1602,14 @@ def test_the_case_runner_is_told_which_processes_are_the_judges_own(tmp_path):
 def test_pids():
     settings = json.load(open(os.environ["DODAM_CLI_CONFIG"]))
     with open("/logs/verifier/attack.json", "w") as f:
-        json.dump({"judge_pids": settings.get("judge_pids"), "parent": os.getppid()}, f)
+        json.dump({"judge_statuses": settings.get("judge_statuses"), "parent": os.getppid()}, f)
     with case() as c:
         assert c.run(["plain"]).out == "plain\\n"
 """}
     result = judge_attack(tmp_path, PLAIN, tests)
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     seen = found_by(tmp_path / "out", "attack.json")
-    assert seen["judge_pids"] == [1, seen["parent"]], seen
+    assert seen["judge_statuses"] == ["/proc/1/status", f"/proc/{seen['parent']}/status"], seen
     assert outcomes(result) == {"test_pids": "passed"}, lost(result, tmp_path / "out")
 
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
@@ -2690,12 +2690,12 @@ def no_pass_beyond_the_line(seen: dict, outcome: str, limit_mb: int, what: str) 
     """The line every case is held to whatever stood when it began: a case that passes held no more,
     read from outside, than its limit, the amount left out and the tolerance."""
     if outcome != "passed":
-        note_figures(what, outcome=outcome, counted=seen["measured"].get("memory_highest", 0) / 2**20,
+        note_figures(f"{what}, {outcome}", counted=seen["measured"].get("memory_highest", 0) / 2**20,
                      bound=seen["measured"].get("bound_highest", 0) / 2**20)
         return
     assert seen["limit"] is None and seen["exit_code"] == 0, f"{what}: the attempt did not run as written: {seen}"
     really = really_mb(seen)
-    note_figures(what, outcome=outcome, really=really, counted=seen["measured"]["memory_highest"] / 2**20,
+    note_figures(f"{what}, {outcome}", really=really, counted=seen["measured"]["memory_highest"] / 2**20,
                  bound=seen["measured"].get("bound_highest", 0) / 2**20)
     assert really <= limit_mb + left_out_mb(limit_mb) + TOLERANCE_MB, (
         f"{what}: the case passed while the container really held {really:.1f} MB more than when the case "

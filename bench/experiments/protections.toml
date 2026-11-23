@@ -1133,27 +1133,36 @@ what = "A reading cut by time ends no program and keeps its case from passing"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it[cut by time, the total jumps]"]
 [[protection.change]]
-find = '''            if late or self._lowest is None:'''
-put = '''            if self._lowest is None:'''
+find = '''            if not _in_time(now):
+                # it says nothing of either side: it moves no lowest figure and ends nothing'''
+put = '''            if False:
+                # it says nothing of either side: it moves no lowest figure and ends nothing'''
 
 [[protection]]
 what = "Only a reading taken in time moves the case's lowest figure"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_reading_cut_by_time_moves_no_lowest_figure", "tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it[cut by time, the total dips]"]
 [[protection.change]]
-find = '''            if _in_time(now):
-                self._lowest = _lowest(self._lowest, figure)'''
-put = '''            self._lowest = _lowest(self._lowest, figure)'''
+find = '''                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._undecided()
+                return None'''
+put = '''                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._lowest = _lowest(self._lowest, self._figure(now))
+                self._undecided()
+                return None'''
 
 [[protection]]
 what = "Only a reading taken in time moves the lowest figure of the kernel's records"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_reading_cut_by_time_moves_no_lowest_figure", "tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it[cut by time, the records dip]"]
 [[protection.change]]
-find = '''        if not _in_time(now):
-            if self._records_lowest is None:'''
-put = '''        if False:
-            if self._records_lowest is None:'''
+find = '''                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._undecided()
+                return None'''
+put = '''                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._records(now)
+                self._undecided()
+                return None'''
 
 [[protection]]
 what = "A case whose start was read cut by time cannot pass"
@@ -1161,10 +1170,21 @@ file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it[cut by time at the case's start]"]
 [[protection.change]]
 find = '''            if _in_time(held_before):
-                self._lowest = _lowest(self._lowest, self._figure(held_before))
+                figure = self._figure(held_before)
+                self._lowest = _lowest(self._lowest, figure)
+                if self._figure_start is None:
+                    self._figure_start = figure
+                self._records(held_before)
             else:
                 self._undecided()'''
-put = '''            self._lowest = _lowest(self._lowest, self._figure(held_before))'''
+put = '''            if True:
+                figure = self._figure(held_before)
+                self._lowest = _lowest(self._lowest, figure)
+                if self._figure_start is None:
+                    self._figure_start = figure
+                self._records(held_before)
+            else:
+                self._undecided()'''
 
 [[protection]]
 what = "The step that cleans up after a case changes no outcome"
@@ -1184,20 +1204,161 @@ put = '''            self._broken.append(f"{what} ({why})")
 @contextmanager'''
 
 [[protection]]
-what = "A case that would pass, or be left unjudged, after a reading that could not be taken is unmeasured"
+what = "A case that would pass after a reading that could not be taken is unmeasured"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-security]"]
 [[protection.change]]
-find = '''                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):'''
-put = '''                if False:'''
+find = '''            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
+put = '''            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("skipped",):'''
+
+[[protection]]
+what = "A case its test would leave unjudged after a reading that could not be taken is unmeasured"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-unjudged]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-unjudged]"]
+[[protection.change]]
+find = '''            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
+put = '''            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed",):'''
 
 [[protection]]
 what = "What the test decided stands: a case whose test failed stays failed"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]"]
 [[protection.change]]
-find = '''                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):'''
-put = '''                if any(n.get("unsettled") for n in mine):'''
+find = '''            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
+put = '''            if unreadable or any(n["unsettled"] for n in mine):'''
+
+[[protection]]
+what = "A note of the judge's that cannot be read leaves no case of its file passed or unjudged"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a torn last line]", "tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a line that is not a record]", "tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a note without its fields]", "tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a line that is not text]"]
+[[protection.change]]
+find = '''            if note is None:
+                unreadable = True'''
+put = '''            if note is None:
+                continue'''
+
+[[protection]]
+what = "Notes of the judge's that cannot be read at all leave no case of their file passed or unjudged"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[the notes cannot be read at all]"]
+[[protection.change]]
+find = '''        except OSError:
+            lines, unreadable = [], True'''
+put = '''        except OSError:
+            lines, unreadable = [], False'''
+
+[[protection]]
+what = "The judge's notes are removed on every path"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a torn last line]"]
+[[protection.change]]
+find = '''                self.records_file.unlink(missing_ok=True)'''
+put = '''                pass'''
+
+[[protection]]
+what = "A note belongs to a case by its file and its name"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_note_belongs_to_a_case_by_its_file_and_its_name"]
+[[protection.change]]
+find = '''    return len(parts) > 1 and PurePosixPath(parts[0]).name == path.name and parts[-1] == case["name"]'''
+put = '''    return len(parts) > 1 and parts[-1] == case["name"]'''
+
+[[protection]]
+what = "A case counts its readings cut by time exactly"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly"]
+[[protection.change]]
+find = '''                self.measured["late"] = self.measured.get("late", 0) + 1'''
+put = '''                self.measured["late"] = self.measured.get("late", 0) + 2'''
+
+[[protection]]
+what = "A case counts its readings that could not decide exactly"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly"]
+[[protection.change]]
+find = '''        self.measured["undecided"] = self.measured.get("undecided", 0) + 1'''
+put = '''        self.measured["undecided"] = self.measured.get("undecided", 0) + 2'''
+
+[[protection]]
+what = "The result says for each case how many of its readings could not decide"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly"]
+[[protection.change]]
+find = '''                case["undecided_readings"] = sum(n["undecided"] for n in mine)'''
+put = '''                case["undecided_readings"] = sum(n["undecided"] for n in mine) + 1'''
+
+[[protection]]
+what = "The result says for the step how many readings could not decide"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image"]
+[[protection.change]]
+find = '''            report["memory"]["undecided_readings"] = cli.undecided'''
+put = '''            report["memory"]["undecided_readings"] = cli.undecided + 1'''
+
+[[protection]]
+what = "The result says for each case the most it can have held"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image"]
+[[protection.change]]
+find = '''                case["memory_bound_bytes"] = max(n["bound"] for n in mine)
+'''
+put = ''''''
+
+[[protection]]
+what = "A case passes only where the most it can have held, every record of the kernel's that stands counted, lies within its limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_whatever_stood"]
+[[protection.change]]
+find = '''        if bound > max_memory or (bool(now["cap"]) and now["taken"] + beyond > room):'''
+put = '''        if bool(now["cap"]) and now["taken"] + beyond > room:'''
+
+[[protection]]
+what = "A case passes only where every record of the kernel's that stands leaves the container its room below the cap"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_records_that_stand_count_against_the_room_below_the_cap"]
+[[protection.change]]
+find = '''        if bound > max_memory or (bool(now["cap"]) and now["taken"] + beyond > room):'''
+put = '''        if bound > max_memory:'''
+
+[[protection]]
+what = "A case begins once the kernel's own part of the container has stopped falling"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_begins_once_the_kernel_has_given_back_what_it_kept_of_the_previous_one"]
+[[protection.change]]
+find = '''        last = _judge.kernel_part()'''
+put = '''        return True'''
+
+[[protection]]
+what = "A case whose kernel's own part does not stop falling before it begins cannot pass"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_whose_kernel_part_never_stops_falling_cannot_pass"]
+[[protection.change]]
+find = '''            if not self._kernel_settled():'''
+put = '''            if not self._kernel_settled() and False:'''
+
+[[protection]]
+what = "The memory of the judge's own processes is taken out of every figure"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_judges_own_processes_are_taken_out_of_every_figure"]
+[[protection.change]]
+find = '''        others = (_config or {}).get("judge_statuses", [])'''
+put = '''        others = []'''
+
+[[protection]]
+what = "The page tables of the judge's own processes are taken out of every figure"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_judges_own_processes_are_taken_out_of_every_figure"]
+[[protection.change]]
+find = '''                if line.startswith(("RssAnon:", "VmSwap:", "VmPTE:")):'''
+put = '''                if line.startswith(("RssAnon:", "VmSwap:")):'''
+
+[[protection]]
+what = "The judge names its own processes to the case runner"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_isolation.py::test_the_case_runner_is_told_which_processes_are_the_judges_own"]
+[[protection.change]]
+find = '''            settings["judge_statuses"] = ["/proc/1/status", f"/proc/{os.getpid()}/status"]'''
+put = '''            settings["judge_statuses"] = []'''
 
 [[protection]]
 what = "The result names the cases not judged for measuring"
@@ -1278,7 +1439,7 @@ what = "The result says for each case how much of the kernel's records was left 
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_isolation.py::test_a_program_that_looks_at_files_is_free_up_to_the_amount_left_out_and_pays_beyond_it"]
 [[protection.change]]
-find = '''        self.note_records(cases)
+find = '''        self.note_records(path, cases)
 '''
 put = ''''''
 
@@ -1309,16 +1470,25 @@ tests = ["tests/test_cli_judge.py::test_a_run_reads_its_starting_values_before_t
 [[protection.change]]
 find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
+        if separated and not self._began:
+            # what the kernel kept of the previous case's processes goes after them; while it goes it
+            # would hide as much of the program's memory, so the case begins once it has stopped
+            self._began = True
+            if not self._kernel_settled():
+                self._undecided()
         held_before = self._container() if separated else {"taken": 0, "all": 0}
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
             # own files are written; a later run of the case is measured against it as well. A
             # reading cut by time is no starting figure, and its case cannot pass
             if _in_time(held_before):
-                self._lowest = _lowest(self._lowest, self._figure(held_before))
+                figure = self._figure(held_before)
+                self._lowest = _lowest(self._lowest, figure)
+                if self._figure_start is None:
+                    self._figure_start = figure
+                self._records(held_before)
             else:
                 self._undecided()
-            self._records(held_before)
         started = time.monotonic()
 '''
 put = '''        started = time.monotonic()
@@ -2562,8 +2732,10 @@ what = "A case has one starting figure for all its runs"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached", "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it"]
 [[protection.change]]
-find = '''            self._lowest = _lowest(self._lowest, self._figure(held_before))'''
-put = '''            self._lowest = self._figure(held_before)'''
+find = '''                self._lowest = _lowest(self._lowest, figure)
+                if self._figure_start is None:'''
+put = '''                self._lowest = figure
+                if self._figure_start is None:'''
 
 [[protection]]
 what = "A case is counted from the lowest figure it reached"
@@ -2571,8 +2743,10 @@ file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached", "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it"]
 [[protection.change]]
 find = '''            self._lowest = _lowest(self._lowest, figure)
+            self._bound(now, figure, max_memory)
 '''
-put = ''''''
+put = '''            self._bound(now, figure, max_memory)
+'''
 
 [[protection]]
 what = "What the build left in the container's memory-backed folder is removed before the first case"
