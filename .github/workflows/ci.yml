@@ -118,7 +118,9 @@ jobs:
           python-version: "3.13"
       - name: Check that the recorded output is what the script gives
         working-directory: tools/plan
-        run: python ${{ matrix.check }}
+        # In isolated mode: the scripts are in a folder that pull requests from outside may change, so nothing else
+        # placed there or on a search path runs in place of what is named.
+        run: python -I ${{ matrix.check }}
 
   # What a judged program, its build and a served web program can reach, tried from inside the
   # verifier's container: the judge runs as root in a container of the Python image, without network

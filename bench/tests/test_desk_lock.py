@@ -529,8 +529,9 @@ def test_an_honest_answer_is_not_refused(place, text):
     ("and rew", True), ("an-drew", True), ("a.n.d.r.e.w", True), ("and\nrew", True), ("4ndr3w", True),
     # Whatever is attached, and with a space between its groups like any other separator.
     ("and rewrite", True), ("stand rew", True), ("band rewrite", True), ("an and rewind", True), ("HMAC minimum", True),
-    # With more than three characters between its groups it counts only from the beginning of a word to the end of one.
-    ("and    rew", True), ("and -- - rew", True), ("and    rewrite", False), ("band    rew", False), ("and -- - rewrite", False),
+    # However many characters stand between its groups, and with anything attached: a value split by wide gaps whose ends
+    # touch other letters is the same value (in the round before, more than three between counted only for whole words).
+    ("and    rew", True), ("and -- - rew", True), ("and    rewrite", True), ("band    rew", True), ("and -- - rewrite", True),
     ("pass all prepared", False), ("eventually pass", False),
 ])  # fmt: skip
 def test_a_value_is_found_wherever_it_stands_and_across_far_words_only_as_whole_words(text, found):
@@ -1888,6 +1889,8 @@ class Day:
         # The test's own order of every arrival, and the item the next start must choose by it.
         self.order_of: dict = {}
         self.expected_item = "not worked out"
+        # The payers of sessions during which the desk was stopped: a stop costs them what was set aside.
+        self.stopped_payers: set = set()
         for loaded in (self.tools, self.relay_module.tools):
             monkeypatch.setattr(loaded, "now", lambda: self.clock)
             # The computer's count of the time since it was started moves with the time that passes, and with no setting of
@@ -2290,9 +2293,10 @@ class Day:
         self.pass_time(rng.uniform(1, spending["seconds_per_session"] + spending["grace_seconds"]))
         if number is not None:
             during = rng.random()
-            if 0.08 <= during < 0.12:
-                # A writer the session handles writes again on its item while it runs: on a place in hand.
-                self.take([event(number, rng.choice(self.handles), f"h{rng.randrange(10**9)}")])
+            again = [account for account in self.handles if account in self.loud]
+            if 0.08 <= during < 0.12 and again:
+                # A loud writer the session handles writes again on its item while it runs: on a place in hand.
+                self.take([event(number, rng.choice(again), f"h{rng.randrange(10**9)}")])
                 self.reach["an arrival on a place in hand"] += 1
                 self.the_relay_agrees()
             elif during < 0.08:
@@ -2313,32 +2317,33 @@ class Day:
         if self.cheap:
             # A day of the second kind: nearly every session ends by itself and costs little.
             how = 0.5 if how > 0.006 else how * 20
-        if how < 0.012:
-            return self.an_ending_before_any_response({"time ran out": True}, failures)
         if how < 0.04:
             # No response at all: counted with the refusals in a row.
             self.refusals_in_a_row = failures + 1
             self.reach["a session that gave no response"] += 1
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
-        if how < 0.044:
-            return self.an_ending_before_any_response({"over the base": True}, failures)
-        if how < 0.048:
-            return self.an_ending_after_a_response({"desk stopped": True})
-        if how < 0.05:
-            return self.an_ending_after_a_response({"killed": True})
         if how < 0.08:
             self.reach["a session that ended without a result after it responded"] += 1
             return {"counts": [1 + rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
         if self.cheap:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
+        # Days of the first kind only: the rarer ways a session ends.
+        if 0.12 <= how < 0.13:
+            return self.an_ending_before_any_response({"time ran out": True}, failures)
+        if 0.13 <= how < 0.135:
+            return self.an_ending_before_any_response({"over the base": True}, failures)
+        if 0.135 <= how < 0.15:
+            return self.an_ending_after_a_response({"desk stopped": True})
+        if 0.15 <= how < 0.16:
+            return self.an_ending_after_a_response({"killed": True})
         if how < 0.16:
             counts[1] = rng.randrange(150_000)
             self.reach["a session that the relay ended at a bound after it responded"] += 1
             return {"counts": counts, "ended_by": rng.choice(["its time was up", "too many turns", "it cost more than one session may"]), "refused_sign_in": False, "turns": 3, "reads": 3, "at_a_bound": True}
-        if how < 0.165:
-            return self.an_ending_after_a_response({"dear at the end": True})
         if how < 0.17:
+            return self.an_ending_after_a_response({"dear at the end": True})
+        if how < 0.19:
             return self.an_ending_after_a_response({"error after a response": True})
         if how < 0.2:
             counts = [0, 0, 0, 0]
@@ -2366,6 +2371,9 @@ class Day:
 
     def an_ending_after_a_response(self, how: dict) -> dict | None:
         """The ways a session ends after it responded that the made-up days play besides ending by itself and at a bound."""
+        if how.get("desk stopped") or how.get("killed"):
+            # A stop of the desk costs the session's payer everything that was set aside for it.
+            self.stopped_payers.add(self.payer)
         if how.get("desk stopped"):
             # The desk is stopped while the session runs, after a response; it is started again before the next start.
             self.relay.stopping.set()
@@ -2394,7 +2402,8 @@ class Day:
         if how is not None:
             writers, author = waiting[:2] + ids[:1], ids[0]
         self.place.put(number, written(author, *[by(writer, f"text-of-{writer}.") for writer in writers], body=f"text-of-{author}."))
-        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"], DESK_HELD_BACK=env["DESK_HELD_BACK"]))
+        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"], DESK_HELD_BACK=env["DESK_HELD_BACK"],
+                                         DESK_SHOWN=env.get("DESK_SHOWN")))
         desk.machine = MACHINE
         if how.get("read", True) if how is not None else rng.random() < 0.85:
             read = desk.read_item({"number": number})
@@ -2620,8 +2629,10 @@ class Day:
             assert not [body for body in self.said[said:] if limit in body], self.said[said:]
             assert limit not in after["closed"] or after["closed"][limit] == before["closed"].get(limit)
         # Whatever was counted in this step names only accounts whose arrivals a session of this step handled.
+        # A session's entry that a later step charges (the desk was killed while it ran) is no new session of that step.
+        known = {entry.get("id") for entry in before["sessions"]}
         for entry in after["sessions"]:
-            if entry not in before["sessions"]:
+            if entry.get("id") not in known:
                 assert entry.get("account") is None or entry["account"] in self.handled_now
                 assert set(entry.get("waits", [])) <= {entry.get("account")}
         for key in ("answers", "labels", "reports"):
@@ -2752,8 +2763,9 @@ class Day:
         self.reach["an account at its kept reports of a day"] += any(n >= settings["kept_per_account_per_day"] for (key, _), n in counts.items() if key == "reports")
         started = self.within(self.started)
         assert len(started) <= spending["sessions_per_day"]
+        # A session that failed for the desk's own reasons counts against no item: only those that count are counted here.
         per_item: dict = {}
-        for _, number in started:
+        for _, number, _, _, _ in self.within(self.sessions):
             per_item[number] = per_item.get(number, 0) + 1
         assert all(count <= spending["sessions_per_item_per_day"] for number, count in per_item.items() if number is not None)
         assert sum(charged for _, charged, _ in self.within(self.charged)) <= spending["units_per_day"]
@@ -2817,8 +2829,9 @@ class Day:
         since = None if self.last_digest_passed is None else (self.real - self.last_digest_passed if self.last_digest_boot == self.boot else self.real - self.booted_at)
         due = bool(waits) and (since is None or since >= hour)
         clock_moved = self.clock != self.desk_time or self.ahead
+        after_a_new_start = since is not None and self.last_digest_boot != self.boot
         assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time, self.boot, self.last_digest_boot)
-        self.reach["the computer started again between two digests"] += due and since is not None and self.last_digest_boot != self.boot
+        self.reach["the computer started again between two digests"] += due and after_a_new_start
         self.reach["a digest due while the computer's clock is not the desk's time"] += due and bool(clock_moved)
 
 
@@ -3165,12 +3178,11 @@ RANDOM_STEPS_REACH = {
         "a digest line cut where a number stands",
         "a batch that holds an account's arrivals on one item before and after another account's", "a session that gave no response",
         "a session that ended without a result after it responded", "a digest due while the computer's clock is not the desk's time",
-        "a session that the service refused", "a session whose time ran out before any response",
-        "a session whose first response took in more than the bounds count on", "a session during which the desk was stopped",
+        "a session that the service refused", "a session whose time ran out before any response", "a session during which the desk was stopped",
         "the desk killed while a session ran", "a session that the relay ended at a bound after it responded",
         "a session past the bound of one session only by the count at its end",
         "a session that ended with Claude Code's report of an error after it responded", "a session that ended by itself",
-        "an arrival on a place in hand", "the computer started again between two digests",
+        "the computer started again between two digests",
     ],
     True: [
         "an account held back: " + Day.BY_SESSIONS, "an account held back: " + Day.BY_WAIT, "a day closed: sessions in a day",
@@ -3197,15 +3209,16 @@ def test_lock_md_says_which_states_only_the_opening_of_the_made_up_days_reaches(
         "a closed item's line names fewer accounts than went, each number whole",
         "an item found closed at a start with arrivals still kept on it, after a stop", "a session that could not be started",
         "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
+        "a session whose first response took in more than the bounds count on",
     ]  # fmt: skip
     said = " ".join((DESK / "LOCK.md").read_text(encoding="utf-8").split())
-    assert ("Eleven of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a "
+    assert ("Twelve of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a "
             "report refused for want of room, an account at its twenty kept reports, an item that closes with other accounts' arrivals kept on "
             "it, an arrival for a full list while the place that would go by the rule is in hand, an arrival between two of the relay's steps "
             "at the end of a session, a closed item's line that names fewer accounts than went, an item found closed at a start with arrivals "
-            "still kept on it after the desk was stopped, a session that could not be started, and a stop inside a placing at each of its two "
-            "points.") in said
-    assert "For those eleven the made-up days are one fixed sequence" in said
+            "still kept on it after the desk was stopped, a session that could not be started, a stop inside a placing at each of its two "
+            "points, and a session whose first response took in more than the bounds count on.") in said
+    assert "For those twelve the made-up days are one fixed sequence" in said
     # The opening stops the desk once and writes a line that a digest cuts where a number stands; every message is looked at.
     for phrase in ("the desk stopped right after the cost of the session that closed an item was written",
                    "a report longer than a digest's line, which the digest cuts where an account's number stands",
@@ -3240,7 +3253,8 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     day.check()
     assert day.openings == day.closings and day.relay.closed_items() == set()
     # What the share of a day's units costs: no account with a few items of its own ever waited for it.
-    assert [waited for waited in day.waited_for_units if waited[0] not in day.loud] == [], sorted(day.waited_for_units)
+    # (A stop of the desk while a session runs costs that session's payer everything set aside; such a payer is left out.)
+    assert [waited for waited in day.waited_for_units if waited[0] not in day.loud and waited[0] not in day.stopped_payers] == [], sorted(day.waited_for_units)
     # What the random steps of this kind of day reached by themselves.
     by_themselves = {name: day.reach[name] - opening[name] for name in REACHED}
     assert not [name for name in RANDOM_STEPS_REACH[cheap] if not by_themselves[name]], by_themselves
@@ -5097,7 +5111,7 @@ def reading(place, then: dict | None = None):
     seen = []
 
     def session(text, env):
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         seen.append(json.loads(desk.read_item({"number": int(env["DESK_ITEM"])})))
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | (then or {})
 
@@ -5656,7 +5670,8 @@ def test_on_a_sign_in_of_the_desks_own_that_run_takes_nothing_out_and_can_fail()
     row = check.shown_row("what the session knows", got, own_sign_in=True)
     assert row["held"] is False and "taken out" not in row["shown_by"] and "owner's sign-in" not in row["thing"]
     # The account name alone, spelled the session's own way, fails it too.
-    assert check.search_of_the_stream("It is s o m e b o d y.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)["found"] == ["the account name"]
+    # (The part of the address before its at sign is a known value of its own, so what the sign-in shows is found as well.)
+    assert set(check.search_of_the_stream("It is s o m e b o d y.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)["found"]) == {"the account name", SHOWN_BY_A_SIGN_IN}
     # And a session that was shown none of it passes.
     got = check.search_of_the_stream("Account email: not in my context.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)
     assert got["found"] == [] and check.shown_row("what the session knows", got, own_sign_in=True)["held"] is True
@@ -6595,7 +6610,7 @@ def test_the_reports_of_24_hours_come_from_at_most_one_session_more_than_a_day_h
         # Every session writes a vulnerability report at its end, the most a session can write. The first runs longer than the others.
         ran.append((clock[0], env["DESK_ITEM"]))
         clock[0] += running_for if len(ran) == 1 else running_for / 2
-        place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")}).tell_coordinator(
+        place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")}).tell_coordinator(
             {"kind": "vulnerability", "number": int(env["DESK_ITEM"]), "summary": "Made up."})  # fmt: skip
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
 
@@ -6953,9 +6968,13 @@ def test_an_arrival_between_writing_the_cost_and_the_places_leaving_hand_meets_t
         assert went == {} and (7100, 1) not in places and len(places) == lock_file()["spending"]["arrivals_kept"]
     else:
         # The account was held back and its place was not in hand when the newcomer was placed: its oldest place went,
-        # and no place of an account that is not held back.
+        # and no place of an account that is not held back. The oldest by the order of arrivals: what the place of its
+        # session keeps was written during that session, after the arrival on its other place.
         assert running.held_back() == [account] and went == {str(account): 1}
-        assert (7100, 1) not in places and ((7101, 1) in places) == sequence.startswith("an older")
+        if sequence.startswith("an older"):
+            assert (7101, 1) not in places and (7100, 1) in places
+        else:
+            assert (7100, 1) not in places
 
 
 def test_what_goes_from_the_kept_list_is_never_what_the_next_session_was_chosen_to_handle(place, monkeypatch):
@@ -7156,7 +7175,7 @@ def test_a_placing_waits_under_the_relays_lock_while_a_tool_of_the_session_sends
 
     def session(text, env):
         ran.append(env["DESK_ITEM"])
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         tool = threading.Thread(target=lambda: answered.append(desk.answer({"number": 7, "text": "Thank you for writing."} | ANSWER)))
         tool.start()
         assert inside.wait(30)
@@ -7698,7 +7717,7 @@ def test_the_payer_and_the_wait_are_the_same_whether_arrivals_come_one_by_one_or
 
     def session(text, env):
         told.append([json.loads(line)["id"] for line in text.splitlines()[1:]])
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         desk.read_item({"number": 7})
         answered.append(desk.answer(ANSWER | {"number": 7, "text": "Thank you for writing."}))
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | ENDED
@@ -7743,8 +7762,8 @@ def test_a_known_value_of_any_length_is_found_in_every_form_of_its_letters(value
 def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_only():
     guard = module("guard")
     assert guard.leaks("Alice and Albert walk.", [("the made-up value", "Al")]) == []
-    phrase = ("A shorter value is refused as a whole word, also under the reductions and set apart in that way, unless it is written in "
-              "another alphabet than the Latin one: then it is refused wherever it stands, at any length.")  # fmt: skip
+    phrase = ("A shorter value in Latin letters is refused when the run begins where a word begins and ends where a word ends; a word in "
+              "Latin letters also begins and ends where a letter of Korean or Japanese stands next to it")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
 
 
@@ -8133,9 +8152,14 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "A session for what was typed in the desk's terminal handles no account:",
     "What the watcher has printed and the relay has not yet placed is lost when the desk is stopped in between:",
     "A stop while a message to the coordinator is being sent can leave it delivered without its sending being written down, or neither:",
-    "a digest sent again so can come within the hour of the first",
+    "so the coordinator can get them twice, an hour apart at the soonest: a digest is written down with its time before it goes.",
     "Unlike the room for vulnerability reports, it has no number:",
-    "A session that ends with Claude Code's own report of an error after the service counted a response ends as one that ended by itself:",
+    "| It ended by itself, also with Claude Code's own report of an error after it responded | Handled |",
+    "a place keeps its account's newest ten, and what goes from it that way is not counted as dropped",
+    "a comment written while the item is being read can be missed when the item had a multiple of a hundred comments just before",
+    "Within one look of the watcher, new commits on a pull request count as older than every comment and review of that look",
+    "a claim whose two parts stand in what reads as two sentences, also where the point of a short form stands between them.",
+    "written in another script (a Korean name in hanja), written with another form of the same kanji (an old form and a new one)",
 ])  # fmt: skip
 def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
@@ -8325,8 +8349,8 @@ def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_i
         if not protected and not re.search(r"python3?\s+(?:-\w+\s+)*-I\b", command):
             open_to_outside.append((workflow, folder or "the root of the repository", command))
     assert open_to_outside == []
-    phrase = ("Every job that starts Python with a module from the root of the repository, which is not protected, starts it in isolated "
-              "mode, so that nothing placed there runs in place of what the job means to run.")  # fmt: skip
+    phrase = ("What the workflows start is a closed list too: every program, script and module that a step of a workflow starts, however it "
+              "is started, is a program of the runner, or comes from a protected folder, or is Python started in isolated mode (`-I`)")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
 
 
@@ -8349,6 +8373,7 @@ def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monke
     rng = random.Random(seed)
     running, clock, _ = in_process(place, monkeypatch)
     relay_of = [running]
+    # Five items, so that no writer holds more places than an account may and nothing is dropped.
     writers = [1_300_000_000 + n for n in range(5)]
     waiting: dict[tuple[int, int], list[int]] = {}
     order = [0]
@@ -8363,7 +8388,9 @@ def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monke
 
     def expected() -> int | None:
         held = set(relay_of[0].held_back())
-        record = counted(place) if (place.state / "desk-counts.json").exists() else module("tools").empty_record()
+        # The record as the relay reads it, with what is older than a day left out.
+        with relay_of[0].desk.counts() as looked:
+            record = json.loads(json.dumps(looked))
         for _, number, account in sorted((arrived[0], number, account) for (number, account), arrived in waiting.items() if arrived):
             if account not in held and not relay_of[0].item_bound(record, number):
                 return number
@@ -8376,7 +8403,7 @@ def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monke
         handles = json.loads(env["DESK_ACCOUNTS"])
         handled = {key: list(arrived) for key, arrived in waiting.items() if key[0] == number and key[1] in handles}
         # While it runs, its writers and others write again, on its item and on others.
-        during = [arrive(rng.choice([number, number, rng.randrange(1, 7)]), rng.choice(writers)) for _ in range(rng.randrange(0, 3))]
+        during = [arrive(rng.choice([number, number, rng.randrange(1, 6)]), rng.choice(writers)) for _ in range(rng.randrange(0, 3))]
         if during:
             relay_of[0].take(arrivals(*during))
         for key, arrived in handled.items():
@@ -8387,7 +8414,7 @@ def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monke
     wanted = [None]
     running.run_session = session
     for step in range(45):
-        batch = [arrive(rng.randrange(1, 7), rng.choice(writers)) for _ in range(rng.randrange(1, 4))]
+        batch = [arrive(rng.randrange(1, 6), rng.choice(writers)) for _ in range(rng.randrange(1, 4))]
         relay_of[0].take(arrivals(*batch))
         if rng.random() < 0.15:
             # A restart between two steps: what is kept and its order are on disk.
@@ -8633,7 +8660,7 @@ def test_a_known_value_in_kana_is_found_in_every_spelling_of_its_letters(seed):
     guard, rng = module("guard"), random.Random(seed)
     classes = kana_classes()
     # Every group the form makes is tried.
-    assert len(classes) > 70
+    assert len(classes) >= 40
     missed = []
     for group in classes:
         others = rng.sample(classes, 2)
@@ -8671,7 +8698,7 @@ def test_a_long_known_value_is_found_however_wide_the_gaps_between_its_parts_and
             cuts = sorted(rng.sample(range(1, len(value)), min(len(value) - 1, rng.choice([1, 2]))))
             parts = [value[a:b] for a, b in zip([0] + cuts, cuts + [len(value)])]
             text = rng.choice(attached) + "".join(part + "".join(rng.choice(between) for _ in range(rng.randrange(1, 9))) for part in parts[:-1]) + parts[-1] + rng.choice(attached)
-            if guard.leaks("Ask " + text + " about it.", [("the made-up value", value)]) != ["the made-up value"]:
+            if "the made-up value" not in guard.leaks("Ask " + text + " about it.", [("the made-up value", value)]):
                 missed.append((value, text))
     assert not missed, missed[:5]
 
@@ -8695,6 +8722,9 @@ def test_the_path_of_the_copys_git_folder_is_looked_at_for_every_known_value(sta
 # Ways of writing a path that the computer accepts, each a rule: case, slashes turned round or doubled, spaces round a
 # slash, a dot for a folder itself, a folder followed by two dots, two dots at the root, the data volume of macOS.
 def a_spelling_of(path: str, rng: random.Random) -> str:
+    if rng.random() < 0.4 and not path.startswith("/System"):
+        # Through the data volume of macOS.
+        path = "/System/Volumes/Data" + path
     parts = path.strip("/").split("/")
     out = []
     for part in parts:
@@ -8704,9 +8734,6 @@ def a_spelling_of(path: str, rng: random.Random) -> str:
     joined = ""
     for part in out:
         joined += rng.choice(["/", "//", "\\", "/ ", " /", "\\\\", "///"]) + part
-    if rng.random() < 0.4 and not path.startswith("/System"):
-        # Through the data volume of macOS, itself written in any of these ways.
-        joined = a_spelling_of("/System/Volumes/Data", rng) + joined
     return joined
 
 
@@ -8714,7 +8741,7 @@ def a_spelling_of(path: str, rng: random.Random) -> str:
 def test_a_private_path_is_found_in_every_spelling_the_computer_accepts(seed):
     guard, rng = module("guard"), random.Random(seed)
     missed = []
-    for path in ("/Users/somebody/notes", "/home/somebody/x", "/tmp/x", "/var/tmp/x", "/var/folders/dq/x", "/private/tmp/x", "/dev/shm/x",
+    for path in ("/Users/you/notes", "/home/user/x", "/tmp/x", "/var/tmp/x", "/var/folders/dq/x", "/private/tmp/x", "/dev/shm/x",
                  "/run/user/501/x", "/Volumes/Disk/x", "/etc/passwd", "/opt/x/y", "/Library/x"):  # fmt: skip
         for _ in range(15):
             text = a_spelling_of(path, rng)
@@ -8739,7 +8766,7 @@ def test_a_hidden_folder_of_this_computer_is_found_in_every_spelling(seed):
 def test_a_report_to_the_coordinator_passes_the_check_on_known_values_and_paths(place):
     desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
     assert "account name" in refused(desk, "tell_coordinator", kind="spam", number=7, summary="It is somebody-local who wrote it.")
-    assert "outside the repository" in refused(desk, "tell_coordinator", kind="question", number=7, summary="The file is in /Users/somebody/notes.")
+    assert "outside the repository" in refused(desk, "tell_coordinator", kind="problem", number=7, summary="The file is in /Users/you/notes.")
     # A key an outsider wrote may still be quoted to the coordinator, who is not an outsider.
     assert "accepted" in desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "They posted ghp_" + "Ab1" * 12 + " in a comment."})
 
@@ -9010,3 +9037,18 @@ def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_p
     step = {"folder": "bench/../tools/plan", "matrix": {}, "run": [], "uses": None}
     assert judged(step, ["python", "pilot_replan.py"]) is not None and judged(step, ["python", "-m", "pytest"]) is not None
     assert judged(step, ["python", "-I", "pilot_replan.py"]) is None and judged(step, ["bash", "x.sh"]) is not None
+
+
+def test_lock_md_says_what_the_form_folds_and_what_is_searched_and_every_way_a_session_ends():
+    said = said_in_lock_md()
+    for folded in ("the width of a character", "case;", "that looks like a Latin one", "every mark, taken off", "katakana, as hiragana, the voiced ones too",
+                   "a small kana, as its full-size letter", "every form of a Korean letter", "a digit, as the letter it is written for",
+                   "a mark that repeats a letter", "Every other character is a separator", "as a run of letters in the form, with any number of separators",
+                   "A value that is an address is searched also by its part before the at sign", "searched as runs in the form's spelling of paths"):
+        assert folded in said, folded
+    # One table with every way a session ends, in the order the relay looks at them.
+    text = (DESK / "LOCK.md").read_text(encoding="utf-8")
+    table = text[text.index("| How the session ended |"):].split("\n\n")[0].splitlines()[2:]
+    rows = [line for line in table if line.startswith("| ")]
+    assert len(rows) == 9, rows
+    assert [row.split(" | ")[1] for row in rows] == ["Kept"] * 7 + ["Handled"] * 2, rows

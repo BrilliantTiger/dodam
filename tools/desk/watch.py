@@ -979,6 +979,14 @@ def _build_event(
     return event
 
 
+def arrival_order(event: dict[str, object]) -> tuple:
+    """The one order of arrivals, decided here and nowhere else: the time GitHub gives, to the second, and within one second
+    the number GitHub gave the comment, review or pull request, compared as a number, after its kind. The relay numbers the
+    arrivals in the order printed, and the payer, the wait and the place in its queue follow from that number alone."""
+    parts = [part for part in re.split(r"(\d+)", str(event.get("id", ""))) if part]
+    return (str(event.get("time", "")), tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in parts))
+
+
 def _extract_number_from_urls(primary: object, primary_re: re.Pattern[str], fallback_html: object) -> int:
     if isinstance(primary, str):
         m = primary_re.search(primary)
@@ -1428,6 +1436,10 @@ def _poll_once(
     # 1. Pull requests (processed oldest-updated first so stopping on full queue never skips earlier PR updates)
     prev_max_pull_id = int(wm["max_pull_id"])  # type: ignore[arg-type]
     prev_max_pull_upd = str(wm["max_pull_updated_at"])
+    # GitHub gives no time for a push or for marking a pull request ready, and the time of a pull request's last update
+    # is moved by whatever anyone does on it later. Such an arrival counts from the last look at the pull requests, in which
+    # it had not happened yet: never later than it happened, and at a time that nothing another account does can move.
+    unseen_since = prev_max_pull_upd
     prs_with_updated_timestamp: set[int] = set()
     prs_to_check_reviews: list[int] = []
     valid_pulls_seen: dict[int, str] = {}
@@ -1527,7 +1539,7 @@ def _poll_once(
                                     number,
                                     actor,
                                     actor_id,
-                                    updated_at,
+                                    unseen_since or updated_at,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
                             )
@@ -1551,7 +1563,7 @@ def _poll_once(
                                     number,
                                     actor,
                                     actor_id,
-                                    updated_at,
+                                    unseen_since or updated_at,
                                     f"https://github.com/{repo}/pull/{number}",
                                 )
                             )
@@ -2006,9 +2018,9 @@ def _poll_once(
         wm["max_pull_updated_at"] = prev_max_pull_upd
 
     if discovered:
-        discovered.sort(key=lambda e: (str(e["time"]), str(e["id"])))
+        discovered.sort(key=arrival_order)
         pending_list.extend(discovered)
-        pending_list.sort(key=lambda e: (str(e["time"]), str(e["id"])))
+        pending_list.sort(key=arrival_order)
 
     working["seen_ids"] = seen.to_list()
     working["known_pr_numbers"] = sorted(known_prs)

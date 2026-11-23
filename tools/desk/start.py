@@ -33,6 +33,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse  # noqa: E402
+import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
@@ -40,6 +41,7 @@ import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
+from contextlib import ExitStack  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -429,6 +431,8 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "DESK_COPY": str(copy),
         "DESK_COORDINATOR": coordinator,
     }
+    # Where the copy's git folder is, as the copy itself says: a session can read it.
+    pointer = ""
     if stand_in is not None:
         stand_in = stand_in.resolve()
         if not (stand_in / "items").is_dir():
@@ -438,14 +442,16 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         # The copy's git folder holds the names and addresses of whoever worked in it. It is kept outside the copy.
         if (copy / ".git").is_dir():
             raise Problem("The copy's git folder is inside the copy, where a session can read it. Make the copy with its git folder outside (git clone --separate-git-dir).")
-        # The copy holds one line that says where its git folder is, and a session can read that line.
+        # The copy holds one line that says where its git folder is, and a session can read that line. It is looked at below
+        # with every other path a session can be shown, for every known value; a path given from the copy is looked at as
+        # the computer resolves it too.
         try:
             pointer = (copy / ".git").read_text(encoding="utf-8")
         except OSError:
             pointer = ""
-        named = guard.names(pointer, guard.machine_words() if machine is None else machine)
-        if named:
-            raise Problem("The path of the copy's git folder holds " + ", ".join(named) + ". Keep it in a folder whose path names neither.")
+        target = pointer.strip().removeprefix("gitdir:").strip()
+        if target and not target.startswith("/"):
+            pointer += "\n" + os.path.normpath(os.path.join(str(copy), target))
         # Ignored files are looked for too: a session can read them like any other file.
         code, output = run(["git", "-C", str(copy), "status", "--porcelain", "--ignored"])
         if code != 0 or output.strip():
@@ -470,7 +476,8 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     # Every path a session can be shown is looked at for every known value, in reduced form: the copy (its working
     # folder), the state folder with the configuration folder in it, and the command of the check.
     values = (guard.machine_words() if machine is None else list(machine)) + [(kind, value) for kind, value in known]
-    for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook)):
+    for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook),
+                       ("the copy's git folder", pointer)):
         found = guard.names(path, values)
         if found:
             raise Problem(f"The path of {what} holds " + ", ".join(found) + ". A session is shown this path. Use a folder whose path names none of them.")
@@ -554,22 +561,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--say", default=None, help="a first message for a session (for the lock check)")
     parser.add_argument("--exit-when-idle", action="store_true", help="end once there is nothing left to do (for the lock check)")
     options = parser.parse_args(argv)
-    try:
-        planned = plan(options.coordinator, options.state or default_state(), options.stand_in)
-    except Problem as problem:
-        sys.stderr.write(f"The desk was not started. {problem}\n")
-        return 1
-    except Exception as error:  # Whatever was not expected is a reason not to start, said in one line.
-        sys.stderr.write(f"The desk was not started. Something it relies on could not be checked ({type(error).__name__}).\n")
-        return 1
-    watcher_env = planned.pop("watcher_env")
-    if options.show:
-        # What is shown holds no token.
-        planned["env"] = {key: ("<kept out of what is shown>" if key == "CLAUDE_CODE_OAUTH_TOKEN" else value) for key, value in planned["env"].items()}
-        json.dump(planned, sys.stdout, indent=1)
-        sys.stdout.write("\n")
-        return 0
-    return relay.Relay(planned, watcher_env, say=options.say, exit_when_idle=options.exit_when_idle).run()
+    with ExitStack() as stack:
+        try:
+            # One desk for one state folder. Its lock is taken before anything in the folder is read or written, and held
+            # for as long as the desk runs: a second start, or one that only shows what it would start, changes nothing
+            # in a folder that a running desk holds.
+            state = state_folder(options.state or default_state(), COPY)
+            held = stack.enter_context(state_files.opened(state / "desk.lock", "The file desk.lock in the state folder"))
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise Problem("Another desk is already running on this state folder. Nothing in it was changed.") from None
+            planned = plan(options.coordinator, state, options.stand_in)
+        except (Problem, state_files.StateProblem) as problem:
+            sys.stderr.write(f"The desk was not started. {problem}\n")
+            return 1
+        except Exception as error:  # Whatever was not expected is a reason not to start, said in one line.
+            sys.stderr.write(f"The desk was not started. Something it relies on could not be checked ({type(error).__name__}).\n")
+            return 1
+        watcher_env = planned.pop("watcher_env")
+        if options.show:
+            # What is shown holds no token.
+            planned["env"] = {key: ("<kept out of what is shown>" if key == "CLAUDE_CODE_OAUTH_TOKEN" else value) for key, value in planned["env"].items()}
+            json.dump(planned, sys.stdout, indent=1)
+            sys.stdout.write("\n")
+            return 0
+        return relay.Relay(planned, watcher_env, say=options.say, exit_when_idle=options.exit_when_idle, held=held).run()
 
 
 if __name__ == "__main__":

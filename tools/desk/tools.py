@@ -20,6 +20,7 @@ comes from the session except the arguments named in each tool's description.
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import math
 import os
@@ -46,6 +47,11 @@ MAX_NUMBER = 10_000_000
 TOKEN_FILE = "github-token"
 COUNTS_FILE = "desk-counts.json"
 SHOWN_FILE = "shown.json"
+# The relay gives every session a list of its own for whose text it was shown, named here, so that a call of a session
+# that ended can change nothing the relay reads about another.
+SHOWN_NAME = re.compile(r"^shown-[0-9a-f]{16}\.json$")
+# The tools that send something. When its session ends, the tool server waits for these, and for no call that only reads.
+SENDING = ("answer", "add_label", "tell_coordinator")
 # Arrivals that were not kept or did not stay kept, counted one by one for the account that wrote them.
 DROPPED = "arrivals dropped"
 # The lines the relay writes about one session into the kept reports: that it ended the session, and that the session
@@ -92,13 +98,19 @@ PASSING_ON = re.compile(
     r"|전달|알리|알렸|알려|보고|통보|넘기|넘겼|伝え|知らせ|報告|通知|連絡|引き継"
 )
 WHOM = re.compile(
-    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*)\b"
-    r"|에이전트|관리자|담당|메인테이너|코디네이터|エージェント|メンテナ|担当|チーム|管理者|コーディネーター"
+    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*"
+    r"|propietari[oa]s?|due[ñn][oa]s?)\b"
+    r"|에이전트|관리자|담당|메인테이너|코디네이터|소유자|エージェント|メンテナ|担当|チーム|管理者|コーディネーター|所有者|オーナー"
 )
+# Where a sentence ends: a line break, a full stop of Japanese, or a point, an exclamation or a question mark that a space
+# or the end of the text follows. A point inside a word (a version, the name of a file, a number) ends no sentence.
+SENTENCE_END = re.compile(r"[.!?]+(?=\s|$)|[。！？\n]+")
 
 
 def says_agents_were_told(text: str) -> bool:
-    return any(PASSING_ON.search(sentence) and WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+    """Whether a sentence of the text makes the claim in the usual words: read in one width and one case."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return any(PASSING_ON.search(sentence) and WHOM.search(sentence) for sentence in SENTENCE_END.split(folded))
 
 
 def accounts_of(value) -> list[int]:
@@ -121,12 +133,13 @@ def charge_of(session: dict) -> float:
     return session["reserved"] if session["charged"] is None else session["charged"]
 
 
-# A number as it is written: digits, and points or commas between digits (a version, a sum of money, thousands).
-NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+# What is a number to a cut: a word that holds a digit, with everything joined to it (its sign, its points and commas,
+# the hyphens of a date or a range, the letters of a hexadecimal value, a unit or an ending attached to it).
+NUMBER = re.compile(r"\S*\d\S*")
 
 
 def cut(text: str, limit: int) -> str:
-    """The text within its bound. A number is never cut: one that does not fit whole is left out, with its points and commas."""
+    """The text within its bound. A word that holds a digit is never cut: one that does not fit whole is left out."""
     if len(text) <= limit:
         return text
     for found in NUMBER.finditer(text):
@@ -161,16 +174,19 @@ def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
 
 def empty_record() -> dict:
     return {"answers": [], "labels": [], "reports": [], "sent": [], "sessions": [], "uncounted": {}, "last_digest": 0.0, "clock": 0.0,
-            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}, "not_delivered": [], "digest_ticks": None, "placings": []}  # fmt: skip
+            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}, "not_delivered": [], "digest_ticks": None, "digest_boot": None,
+            "placings": []}  # fmt: skip
 
 
 def checked_record(data) -> dict:
     """The record as it was written, or an error when it is not what the tools write."""
     # The desk's time was added later; a record written before it starts at nothing. So were the others named here.
-    later = ("clock", "ended_in_a_row", "closed", "closed_items", "went", "not_delivered", "digest_ticks", "placings")
+    later = ("clock", "ended_in_a_row", "closed", "closed_items", "went", "not_delivered", "digest_ticks", "digest_boot", "placings")
     record = {key: data.get(key, default) if key in later else data[key] for key, default in empty_record().items()}
     if record["digest_ticks"] is not None and (isinstance(record["digest_ticks"], bool) or not isinstance(record["digest_ticks"], (int, float))):
         raise ValueError("digest_ticks")
+    if record["digest_boot"] is not None and not isinstance(record["digest_boot"], str):
+        raise ValueError("digest_boot")
     if not isinstance(record["placings"], list) or not all(isinstance(name, str) for name in record["placings"]):
         raise ValueError("placings")
     if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict) or not isinstance(record["closed_items"], dict):
@@ -203,6 +219,22 @@ now = time.time
 # The computer's count of the time since it was started, which no setting of its clock changes. It keeps the hour
 # between two digests. It may stand still while the computer sleeps, and it begins anew when the computer is started again.
 ticks = time.monotonic
+
+
+@functools.lru_cache(maxsize=1)
+def boot() -> str | None:
+    """Which start of the computer this is, as the computer itself names it; None where it does not say.
+
+    The count of ticks begins anew at every start, so a count is compared only with a count of the same start.
+    """
+    try:
+        if os.path.exists("/proc/sys/kernel/random/boot_id"):
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+                return handle.read().strip() or None
+        done = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, timeout=5)
+        return done.stdout.strip() or None if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 class Refused(Exception):
@@ -453,6 +485,9 @@ class Desk:
         self.shown: set[int] = set()
         # Calls of one session run at once, each in its own thread: whose text was shown is written by one at a time.
         self.showing = threading.Lock()
+        # The session's own list of whose text it was shown, named by the relay for this session alone.
+        named = env.get("DESK_SHOWN")
+        self.shown_name = named if isinstance(named, str) and SHOWN_NAME.fullmatch(named) else SHOWN_FILE
 
     # -- shared checks ------------------------------------------------------
 
@@ -697,10 +732,11 @@ class Desk:
     def report(self, kind: str, number: int | None, summary: str) -> str:
         """Keep one report of a session, and send it at once when its kind is one that cannot wait for the digest."""
         settings = self.lock["coordinator"]
-        # The coordinator is not an outsider, so a summary may quote what an outsider wrote, a key included.
-        # A character that is not on the list of what the desk writes with goes to nobody.
-        if guard.not_allowed(summary):
-            raise Refused(f"Nothing was kept. The summary holds {guard.NOT_ALLOWED}. Write it without that.")
+        # The coordinator is not an outsider, so a summary may quote what an outsider wrote, a key included. Everything else
+        # of the check on text that leaves holds for it: the characters, the known values, the paths and private places.
+        found = guard.outgoing(summary, self.machine + guard.state_paths(self.state), self.copy, self.public, keys=False)
+        if found:
+            raise Refused("Nothing was kept. The summary holds " + ", ".join(found) + ". Write it without that.")
         line = " ".join(summary.split())
         with self.counts() as record:
             moment = record["clock"]
@@ -752,8 +788,12 @@ class Desk:
                 uncounted = {key: value for key, value in record["uncounted"].items() if value}
                 closed = record["closed"]
                 not_delivered = record["not_delivered"]
-                last = record["digest_ticks"]
-                since = math.inf if last is None else (counted - last if counted >= last else counted)
+                last, started = record["digest_ticks"], boot()
+                # Within one start of the computer, the count since the last digest. After a new start, which the computer's
+                # name for its start shows (or, where it gives none, a count smaller than the last), the count since that
+                # start, which is less than what passed.
+                same = record["digest_boot"] == started if started is not None and record["digest_boot"] is not None else counted >= (last or 0)
+                since = math.inf if last is None else (counted - last if same and counted >= last else counted)
                 if not (waiting or uncounted or closed or not_delivered) or (since < settings["digest_seconds"] and not force):
                     return False
                 # A vulnerability never waits for more than one digest: every one that waits is carried, before anything else.
@@ -788,7 +828,12 @@ class Desk:
                 # A notice that a limit was reached is tried once; one that could not be delivered is named here.
                 for name in not_delivered:
                     lines.append(f"- the notice that a limit was reached could not be delivered: {name}")
+                # Written down before it goes, so that a digest that is stopped while it is sent is not sent again within the
+                # hour: the record holds its time from the moment before it leaves. When it could not be sent, the time before.
+                earlier = (record["digest_ticks"], record["digest_boot"])
+                record["digest_ticks"], record["digest_boot"] = counted, started
                 if not self._send(record, "digest", "Desk: digest", lines):
+                    record["digest_ticks"], record["digest_boot"] = earlier
                     return False
                 for entry in carried:
                     entry["digested"] = True
@@ -819,7 +864,7 @@ class Desk:
                         shown = self.shown | set(shows)
                         try:
                             folder = state_files.folder(self.state / "session", "The folder session in the state folder", make=True)
-                            state_files.write(folder / SHOWN_FILE, "The list of whose text a session was shown", json.dumps(sorted(shown)))
+                            state_files.write(folder / self.shown_name, "The list of whose text a session was shown", json.dumps(sorted(shown)))
                         except state_files.StateProblem as problem:
                             raise Refused(f"{problem} Stop and tell the coordinator.") from None
                         self.shown = shown
@@ -1138,16 +1183,18 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, env: dict[str, str] | None = None)
             elif method == "tools/call":
                 # Each call has its own thread, so a slow answer from GitHub does not hold up the next call.
                 thread = threading.Thread(target=run, args=(identifier, params), daemon=True)
-                running.append(thread)
+                if params.get("name") in SENDING:
+                    running.append(thread)
                 thread.start()
             elif method == "ping":
                 send({"jsonrpc": "2.0", "id": identifier, "result": {}})
             elif identifier is not None:
                 send({"jsonrpc": "2.0", "id": identifier, "error": {"code": -32601, "message": "not supported"}})
     finally:
-        # The session is gone: let the calls under way finish.
+        # The session is gone: a call that sends is let finish, within the bound each sending has; a call that only reads is
+        # not waited for, and ends with the server.
         for thread in running:
-            thread.join(timeout=30)
+            thread.join(timeout=65)
     return 0
 
 
