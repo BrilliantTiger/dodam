@@ -12,10 +12,12 @@ import subprocess
 from dodambench.vet import docker_create_cmd, judgement_problems, vet
 
 
-def report(*cases: tuple[str, str | None, str], build_ok: bool = True) -> dict:
-    return {"build_ok": build_ok,
-            "tests": [{"kind": k, "weakness": w, "outcome": o, "file": f"{k}/test_{i}.py", "name": f"test_{i}"}
-                      for i, (k, w, o) in enumerate(cases)]}
+def report(*cases: tuple[str, str | None, str], build_ok: bool = True, step: str = "build"):
+    """The record of a judging, as the judging code takes it."""
+    from dodambench.vet import Case, Judged
+    return Judged(step=step, build_ok=build_ok, left_behind="", reward={},
+                  cases=tuple(Case(name=f"test_{i}", outcome=o, file=f"{k}/test_{i}.py", kind=k, step=step,
+                                   weakness=w, message="") for i, (k, w, o) in enumerate(cases)))
 
 
 FUNCTIONAL = ("functional", None, "passed")
@@ -303,9 +305,29 @@ def fake_docker(tmp_path, monkeypatch):
     return leaves
 
 
+SAMPLE = Path(__file__).resolve().parents[1] / "tasks" / "cli-csv-json"
+
+
+def judges_result(task, step: str) -> tuple[dict, dict]:
+    """What the judge leaves after judging, at `step`, a solution that passes every test it runs there:
+    reward.json and details.json as the judge writes them."""
+    from dodambench.task import TEST_KINDS
+    steps = [s.name for s in task.steps]
+    run = [t for t in task.tests if steps.index(t.step) <= steps.index(step) and step not in t.superseded_in]
+    cases = [{"name": f"test_{i}", "outcome": "passed", "message": "", "file": t.file, "kind": t.kind,
+              "step": t.step, "weakness": t.weakness} for i, t in enumerate(run)]
+    reward = {"build_ok": 1.0}
+    for kind in TEST_KINDS:
+        reward[f"{kind}_pass_rate"] = 1.0
+        reward[f"{kind}_judged"] = float(sum(c["kind"] == kind for c in cases))
+    reward.update({"unjudged": 0.0, "vulns_found": 0.0, "regression_broken": 0.0, "reward": 1.0, "separated": 1.0})
+    return reward, {"step": step, "build_ok": True, "separated": True, "tests": cases}
+
+
 def leave_result(leaves: Path, reward: float = 1.0) -> None:
-    (leaves / "reward.json").write_text(json.dumps({"reward": reward}), encoding="utf-8")
-    (leaves / "details.json").write_text(json.dumps({"build_ok": True, "step": "build", "tests": []}), encoding="utf-8")
+    given, details = judges_result(load_task(SAMPLE), "build")
+    (leaves / "reward.json").write_text(json.dumps({**given, "reward": reward}), encoding="utf-8")
+    (leaves / "details.json").write_text(json.dumps(details), encoding="utf-8")
 
 
 def judged(tmp_path: Path, out: Path):
@@ -314,7 +336,7 @@ def judged(tmp_path: Path, out: Path):
     tests.mkdir(exist_ok=True)
     solution.mkdir(exist_ok=True)
     return judge_in_image("dodam-bench/python:dev", tests, solution, out, "build",
-                          {"memory_mb": 1024, "cpus": 2, "processes": 512}, 600)
+                          {"memory_mb": 1024, "cpus": 2, "processes": 512}, 600, load_task(SAMPLE))
 
 
 def test_an_earlier_runs_result_is_never_read_as_this_runs(tmp_path, fake_docker, monkeypatch):
@@ -336,7 +358,7 @@ def test_an_earlier_runs_fault_is_never_read_as_this_runs(tmp_path, fake_docker,
     (out / "judge-fault.json").write_text(json.dumps({"judge_fault": "an earlier fault"}), encoding="utf-8")
     leave_result(fake_docker)
     monkeypatch.setenv("FAKE_EXIT", "0")
-    assert judged(tmp_path, out)["reward"] == {"reward": 1.0}
+    assert judged(tmp_path, out).reward["reward"] == 1.0
 
 
 def test_a_container_that_ended_without_a_result_is_a_fault_whatever_it_left(tmp_path, fake_docker, monkeypatch):
@@ -417,15 +439,17 @@ def test_a_run_that_checked_nothing_is_no_success_and_says_so(tmp_path, cli_task
 def test_a_vulnerable_solution_fails_a_security_test_of_its_weakness_at_its_own_step():
     """At a change step the earlier step's tests run again. A vulnerable solution written for the
     change step that fails only the earlier step's test of its weakness is not what it was written for."""
-    earlier = {"kind": "security", "weakness": "path-traversal", "outcome": "failed", "file": "security/test_a.py",
-               "name": "test_a", "step": "build"}
-    own = {"kind": "security", "weakness": "path-traversal", "outcome": "passed", "file": "security/test_b.py",
-           "name": "test_b", "step": "change-1"}
-    report_of_step = {"build_ok": True, "step": "change-1", "tests": [earlier, own]}
-    problems = judgement_problems("vulnerable", "path-traversal", report_of_step)
+    from dataclasses import replace
+    from dodambench.vet import Case, Judged
+    earlier = Case(kind="security", weakness="path-traversal", outcome="failed", file="security/test_a.py",
+                   name="test_a", step="build", message="")
+    own = Case(kind="security", weakness="path-traversal", outcome="passed", file="security/test_b.py",
+               name="test_b", step="change-1", message="")
+    of_step = Judged(step="change-1", build_ok=True, left_behind="", reward={}, cases=(earlier, own))
+    problems = judgement_problems("vulnerable", "path-traversal", of_step)
     assert problems and "change-1" in problems[0], problems
-    report_of_step["tests"][1] = {**own, "outcome": "failed"}
-    assert judgement_problems("vulnerable", "path-traversal", report_of_step) == []
+    of_step = replace(of_step, cases=(earlier, replace(own, outcome="failed")))
+    assert judgement_problems("vulnerable", "path-traversal", of_step) == []
 
 
 def test_the_lowered_memory_cap_says_what_the_code_does():
@@ -461,7 +485,7 @@ def test_a_run_that_left_some_solutions_unchecked_is_no_success_and_says_how_man
 def test_a_step_that_judged_no_test_gets_no_judgement():
     """A step whose report holds no test judged nothing: no solution gets the judgement it was
     written for there."""
-    empty = {"build_ok": True, "step": "build", "tests": []}
+    empty = report()
     for expect, weakness in (("secure", None), ("vulnerable", "path-traversal"), ("broken", None)):
         problems = judgement_problems(expect, weakness, empty)
         assert problems and any("no test" in p for p in problems), (expect, problems)
@@ -492,3 +516,127 @@ def test_a_result_of_another_shape_is_a_fault(tmp_path, fake_docker, monkeypatch
     monkeypatch.setenv("FAKE_EXIT", "0")
     with pytest.raises(JudgeFault):
         judged(tmp_path, tmp_path / "out")
+
+
+# --- what the tool reads from a judging: one record, made in one place ---
+
+MISSING = "<missing>"
+# Every part of a judging's files the judging code reads, with values that are not of it: missing, of
+# another kind, outside its set of values, or naming another step than the one judged or than its
+# file's. The demo task is judged at change-1, where every one of its four files of tests runs; the
+# first case is of the functional file of the build step.
+NOT_OF_IT = [
+    ("details", None, []), ("details", None, "details"),
+    ("details", "step", MISSING), ("details", "step", 1), ("details", "step", "build"), ("details", "step", "change-9"),
+    ("details", "build_ok", MISSING), ("details", "build_ok", "false"), ("details", "build_ok", 1),
+    ("details", "build_ok", None),
+    ("details", "left_behind", 1), ("details", "left_behind", None), ("details", "left_behind", ""),
+    ("details", "tests", MISSING), ("details", "tests", {}), ("details", "tests", "none"), ("details", "tests", []),
+    ("left out", "security", None),
+    ("case", "name", MISSING), ("case", "name", 1), ("case", "name", ""),
+    ("case", "outcome", MISSING), ("case", "outcome", 1), ("case", "outcome", "error"), ("case", "outcome", "PASSED"),
+    ("case", "file", MISSING), ("case", "file", 1), ("case", "file", "functional/test_other.py"),
+    ("case", "file", "boundary/test_usage.py"),
+    ("case", "kind", MISSING), ("case", "kind", 1), ("case", "kind", "unit"), ("case", "kind", "boundary"),
+    ("case", "step", MISSING), ("case", "step", 1), ("case", "step", "change-1"), ("case", "step", "change-9"),
+    ("case", "weakness", MISSING), ("case", "weakness", 1), ("case", "weakness", "path-traversal"),
+    ("security case", "weakness", None), ("security case", "weakness", "made-up"), ("security case", "weakness", ""),
+    ("case", "message", MISSING), ("case", "message", 1), ("case", "message", None),
+    ("reward", None, []), ("reward", "reward", MISSING), ("reward", "reward", "1"), ("reward", "reward", True),
+    ("reward", "reward", float("nan")), ("reward", "reward", float("inf")), ("reward", "reward", 0.5),
+    ("reward", "unjudged", MISSING), ("reward", "unjudged", "0"), ("reward", "bonus", 1.0),
+]
+
+
+def not_of_it(reward: dict, details: dict, where: str, part, value) -> tuple:
+    """The judge's result with one part made not of it."""
+    import copy
+    reward, details = copy.deepcopy(reward), copy.deepcopy(details)
+    if where == "left out":                     # the cases of one file the step runs are not there
+        details["tests"] = [c for c in details["tests"] if c["kind"] != part]
+        return reward, details
+    if part is None:
+        return (value, details) if where == "reward" else (reward, value)
+    target = {"reward": reward, "details": details, "case": details["tests"][0],
+              "security case": next((c for c in details["tests"] if c["kind"] == "security"), {})}[where]
+    if value == MISSING:
+        target.pop(part, None)
+    else:
+        target[part] = value
+    return reward, details
+
+
+def vetted_with(tmp_path, monkeypatch, fake_docker, task, path: str, reward, details) -> list[dict]:
+    """The tool's results when every judging of the task leaves these files: in the image, where the
+    container leaves them, or without separation, where the judge on this machine leaves them."""
+    import dodambench.vet as vetting
+    if path == "image":
+        (fake_docker / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+        monkeypatch.setenv("FAKE_EXIT", "0")
+        return vetting.vet_in_image(task, "python", tmp_path / "out", "dodam-bench/python:dev")
+
+    def judge(tests_dir, app_dir, step, out_dir, **kwargs):
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+        (out_dir / "details.json").write_text(json.dumps(details), encoding="utf-8")
+        return {"reward": reward, "report": details}
+    monkeypatch.setattr(vetting, "judge", judge)
+    monkeypatch.setattr(vetting, "_missing_tools", lambda *args, **kwargs: [])
+    monkeypatch.setattr(vetting, "scaffold_cache", lambda *args, **kwargs: None)
+    return vetting.vet(task, "python", tmp_path / "out", unseparated=True)
+
+
+@pytest.mark.parametrize("path", ["image", "unseparated"])
+def test_the_judges_own_result_gives_the_secure_solution_its_judgement(tmp_path, monkeypatch, fake_docker,
+                                                                         cli_task_dir, path):
+    task = load_task(cli_task_dir)
+    reward, details = judges_result(task, "change-1")
+    results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, reward, details)
+    secure = [r for r in results if r["step"] == "change-1" and r["solution"] == "secure"]
+    assert secure and secure[0]["ok"] and secure[0]["reward"] == reward, results
+
+
+@pytest.mark.parametrize("path", ["image", "unseparated"])
+@pytest.mark.parametrize("where, part, value", NOT_OF_IT,
+                         ids=[f"{w}-{p}-{'missing' if v == MISSING else repr(v)}" for w, p, v in NOT_OF_IT])
+def test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success(tmp_path, monkeypatch, fake_docker,
+                                                                        cli_task_dir, path, where, part, value):
+    """The tool turns what a judging left into a record in one place; a result that cannot be turned
+    into it is a fault of the judge, for every solution, and never a success."""
+    task = load_task(cli_task_dir)
+    reward, details = not_of_it(*judges_result(task, "change-1"), where, part, value)
+    results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, reward, details)
+    assert results and all(r["ok"] is False and r.get("judge_fault") is True for r in results), results
+
+
+def test_every_part_the_judging_code_reads_is_tried():
+    """The record holds exactly the parts the judging code reads, and each is tried above."""
+    from dataclasses import fields
+    import dodambench.vet as vetting
+    tried = {(w, p) for w, p, _ in NOT_OF_IT}
+    assert {f.name for f in fields(vetting.Judged)} == {"step", "build_ok", "left_behind", "cases", "reward"}
+    assert {("details", p) for p in ("step", "build_ok", "left_behind", "tests")} <= tried
+    assert {("case", f.name) for f in fields(vetting.Case)} <= tried
+    assert set(vetting.REWARD_KEYS) == set(judges_result(load_task(SAMPLE), "build")[0])
+
+
+def test_the_judging_code_takes_nothing_but_the_record():
+    import dodambench.vet as vetting
+    with pytest.raises(TypeError):
+        vetting.judgement_problems("secure", None, {"build_ok": True, "step": "build", "tests": []})
+
+
+@pytest.mark.parametrize("path", ["image", "unseparated"])
+def test_the_judging_code_is_handed_the_record_on_every_path(tmp_path, monkeypatch, fake_docker, cli_task_dir, path):
+    import dodambench.vet as vetting
+    handed, real = [], vetting.judgement_problems
+
+    def spy(expect, weakness, judged):
+        handed.append(judged)
+        return real(expect, weakness, judged)
+    monkeypatch.setattr(vetting, "judgement_problems", spy)
+    task = load_task(cli_task_dir)
+    vetted_with(tmp_path, monkeypatch, fake_docker, task, path, *judges_result(task, "change-1"))
+    assert handed and all(type(j) is vetting.Judged for j in handed), handed

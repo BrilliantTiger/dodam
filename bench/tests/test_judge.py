@@ -449,7 +449,11 @@ def test_the_entry_the_last_stop_adds_has_a_kind_of_its_own_that_every_reader_ta
     except pilot_record.RecordError as error:
         run = {"failed_checks": str(error)}
     assert [c["kind"] for c in run["failed_checks"]] == [entry["kind"]], run["failed_checks"]
-    problems = judgement_problems("broken", None, details)
+    from dodambench.task import TestFile
+    from dodambench.vet import record_of
+    judged = record_of(reward, details, [TestFile("functional/test_one.py", "functional", "build", None, False, ())],
+                       ["build", "change-1"], "build")
+    problems = judgement_problems("broken", None, judged)
     assert problems and "data folder" in problems[0], problems
 
 
@@ -458,11 +462,12 @@ def test_vetting_does_not_read_a_served_program_that_left_too_much_as_the_judgem
     removes fails its features for that reason, not for the one it was written for. The tool that
     checks prepared solutions says so instead of taking it as broken."""
     left = "the served program's data folder cannot be removed: a folder to remove holds more than 10 entries"
-    report = {"build_ok": True, "left_behind": left,
-              "tests": [{"name": "test_one", "outcome": "passed", "message": "", "kind": "functional",
-                         "file": "functional/test_one.py", "weakness": None},
-                        {"name": "test_two.py", "outcome": "failed", "message": left, "kind": "functional",
-                         "file": "functional/test_two.py", "weakness": None}]}
+    from dodambench.vet import Case, Judged
+    report = Judged(step="build", build_ok=True, left_behind=left, reward={}, cases=(
+        Case(name="test_one", outcome="passed", message="", kind="functional", file="functional/test_one.py",
+             step="build", weakness=None),
+        Case(name="test_two.py", outcome="failed", message=left, kind="functional", file="functional/test_two.py",
+             step="build", weakness=None)))
     problems = judgement_problems("broken", None, report)
     assert problems and "data folder" in problems[0], problems
 
