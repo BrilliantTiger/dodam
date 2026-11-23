@@ -876,8 +876,8 @@ def _give_back(fd: int, mode: int) -> None:
 
 def close_terminal() -> None:
     """While the program runs, its terminal cannot be opened by its name: its permissions are cleared as the program
-    starts and given back as it ends. A process that holds no descriptor of it, agy among them, cannot open it to
-    read what is typed there or to write into it."""
+    starts and given back as it ends. A process that holds no descriptor of it, agy among them, cannot open it as it
+    is; one of the same account that sets the permissions back first can."""
     seen: set[tuple[int, int]] = set()
     for fd in (0, 1, 2):
         try:

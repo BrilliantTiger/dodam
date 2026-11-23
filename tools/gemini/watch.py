@@ -10,7 +10,7 @@ discussion. When the job is done the label is taken off, so that the mark can be
 It is started in a terminal of Orca that holds no coding agent, or in a plain terminal, with a line that
 replaces the terminal's shell, and runs in that terminal only: when the terminal closes, it stops, and so
 does a run of agy it started. Its input is closed as it starts, so that what is typed into the terminal is
-read by nobody. It installs nothing that keeps running. With --polls N it stops after N rounds.
+handed to nothing it starts. It installs nothing that keeps running. With --polls N it stops after N rounds.
 
 Standard output carries one line per finished job, the job's own result line (fixed words, numbers and the
 private answer's path). Standard error carries short notes in fixed words, and the job's lines for each run:
@@ -268,8 +268,8 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
 
 
 def close_input() -> None:
-    """The terminal stops being the watcher's input: what is typed into it while the watcher runs is read by
-    nobody, and nothing the watcher starts can read it either."""
+    """The terminal stops being the watcher's input: the watcher reads nothing of what is typed into it, and hands
+    none of it to what it starts."""
     fd = os.open(os.devnull, os.O_RDONLY)
     if fd != 0:
         os.dup2(fd, 0)
