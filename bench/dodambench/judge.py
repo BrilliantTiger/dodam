@@ -219,6 +219,12 @@ MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the co
 TOGETHER_BYTES = 2**20
 TOGETHER_SECONDS = 0.001
 TOGETHER_TRIES = 8
+# A reading that still moved more than TOGETHER_BYTES after its tries can say only that the figure lies
+# within what moved. When the limit lies in there too, it fails nothing and is taken again; after this
+# many such readings in a row the case is not judged, as a fault of measuring.
+UNSETTLED_READINGS = 25
+NOT_JUDGED_FOR_MEASURING = ("not judged: the judge could not take a reading of the container's memory that says "
+                            "on which side of the limit it lies")
 MACHINE_INFO = Path("/proc/meminfo")   # what the machine has, its swap included
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
@@ -1116,6 +1122,7 @@ class CliRun:
         self.highs_file = self.private / "highs.jsonl"
         self.records_file = self.private / "records.jsonl"
         self.records_highest = 0       # the most the kernel's records grew by in one case of this judging
+        self.not_judged = 0            # cases not judged because no reading of their memory could be taken
         # the case runner gives every case its own home, temporary folder and working folder
         env = {k: v for k, v in for_the_programs_side({**os.environ, **extra_env}).items() if k != "HOME"}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
@@ -1157,6 +1164,9 @@ class CliRun:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
                 case["records_counted_bytes"] = max(n["counted"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
+                if any(n.get("unsettled") for n in mine):
+                    case["not_judged_for_measuring"] = True
+                    self.not_judged += 1
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,
@@ -1697,6 +1707,9 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
                                     "weakness": t.get("weakness")})
     app.stop()
     highs = cli.highs() if cli is not None else None
+    if cli is not None:
+        # cases not judged because no reading of their memory could be taken: no pass, and counted on their own
+        report["not_judged_for_measuring"] = cli.not_judged
     if cli is not None and run_as:
         records["highest_in_a_case"] = cli.records_highest
         records["left_out_of_a_case_at_most"] = min(cli.limits["memory_mb"] * 2**20 // 4, RECORDS_LEFT_OUT_MB * 2**20)

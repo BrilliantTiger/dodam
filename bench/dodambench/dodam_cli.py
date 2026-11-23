@@ -161,6 +161,7 @@ def _lowest(lowest: int | None, figure: int) -> int:
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
+UNSETTLED = "unsettled"     # what the watch says when it gave a run up because no reading could be taken
 PR_SET_CHILD_SUBREAPER = 36
 
 
@@ -291,6 +292,10 @@ class Case:
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
+        # readings in a row that could not say on which side of a line the figure lies, and whether a
+        # run of the case was given up for them
+        self._unsettled_in_a_row = 0
+        self._unsettled = False
         # the kernel's records: the lowest figure since the case began, and the most they stood above it
         self._records_lowest: int | None = None
         self._records_grown = 0
@@ -531,9 +536,13 @@ class Case:
             return self._note(Result(None, b"", str(exc).encode(), None, None, 0.0))
         try:
             result = self._watch(proc, stdin, started, left)
+            # given up because no reading could be taken: no limit is broken, and the case is not judged
+            unsettled = result.limit == UNSETTLED
+            if unsettled:
+                result.limit, self._unsettled = None, True
             # ended by a signal no limit of the case explains
-            signalled = result.limit is None and result.signal is not None
-            if result.limit is None and self._left_processes(proc):
+            signalled = result.limit is None and result.signal is not None and not unsettled
+            if result.limit is None and not unsettled and self._left_processes(proc):
                 result.limit = "left processes"
         finally:
             self._end(proc)
@@ -606,14 +615,17 @@ class Case:
         max_out = limits["output_kb"] * 1024
         max_memory = limits["memory_mb"] * 1024 * 1024
 
-        def above_a_line() -> bool:
+        def above_a_line() -> str | None:
             """One measurement. The case's memory is the container's count (what
             the kernel counts for it, less the pages of files on the kernel's two lists and the
             records it keeps), less the cases' files and the runner's own memory, counted
             from the lowest such figure since the case's first run began, and of the kernel's
             records what grew beyond the amount that is left out. Above the limit the program is
             ended. It is ended as well when the container is about to run out of memory, whatever
-            the case's limit says: that keeps the kernel from having to choose what to end."""
+            the case's limit says: that keeps the kernel from having to choose what to end. A reading
+            whose parts still moved apart can say only that the figure lies within what moved; when a
+            line lies in there too, the reading ends nothing and is taken again, and after
+            UNSETTLED_READINGS such readings in a row the program is ended and its case not judged."""
             now = self._container()
             records = self._records(now)
             figure = self._figure(now)
@@ -622,8 +634,17 @@ class Case:
             self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
             # how far the parts of the reading the figure was made of moved apart
             self.measured["moved_most"] = max(self.measured.get("moved_most", 0), now.get("moved", 0))
-            runs_out = bool(now["cap"]) and now["taken"] + records > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
-            return taken > max_memory or runs_out
+            room = now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+            moved = now.get("moved", 0)
+            high = taken > max_memory or (bool(now["cap"]) and now["taken"] + records > room)
+            if not high:
+                self._unsettled_in_a_row = 0
+                return None
+            low = taken - moved > max_memory or (bool(now["cap"]) and now["taken"] - moved + records > room)
+            if low or moved <= _judge.TOGETHER_BYTES:
+                return "memory"
+            self._unsettled_in_a_row += 1
+            return UNSETTLED if self._unsettled_in_a_row >= _judge.UNSETTLED_READINGS else None
 
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
@@ -695,8 +716,8 @@ class Case:
                     self.measured["longest_gap"] = max(self.measured["longest_gap"], now - last_watch)
                 last_watch = now
                 self.measured["measurements"] += 1
-                if self._side is not None and above_a_line():
-                    limit = "memory"
+                if self._side is not None:
+                    limit = above_a_line()
         if limit is not None:
             self._end(proc)
         # what the program wrote before it ended is still in the pipes
@@ -752,7 +773,7 @@ class Case:
             return
         try:
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"case": self._key, "grown": self._records_grown,
+                f.write(json.dumps({"case": self._key, "unsettled": self._unsettled, "grown": self._records_grown,
                                     "left_out": min(self._records_grown, self._left_out_at_most),
                                     "counted": _records_counted(self._records_grown, self._left_out_at_most)}) + "\n")
         except OSError:
@@ -787,6 +808,10 @@ class Case:
             what = ("left what could not be removed in the step's time" if isinstance(exc, _judge.TooMuchLeft)
                     else "left what cannot be removed")
             self._broken.append(f"{what} ({why})")
+        if self._unsettled and not self.failing():
+            # no reading could say on which side of the limit the program's memory lay: no pass, and no failure
+            import pytest
+            pytest.skip(_judge.NOT_JUDGED_FOR_MEASURING)
 
 
 @contextmanager
