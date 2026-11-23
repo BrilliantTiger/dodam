@@ -9438,3 +9438,74 @@ def test_the_form_folds_the_same_letters_in_another_form_and_nothing_across_scri
     # Hanja and Hangul, katakana and Latin letters are different letters, whatever they sound like.
     assert guard.reduced("洪吉童") != guard.reduced("홍길동") and guard.reduced("スミス") != guard.reduced("smith")
     assert guard.leaks("洪吉童さん", [("the made-up value", "홍길동")]) == [] and guard.leaks("スミスさん", [("the made-up value", "Smith")]) == []
+
+
+# --- What an agent tool reads from a checkout by itself is not for a pull request from outside -------------------
+
+# The names under which the agent tools the charter names (Claude Code, Codex CLI, the Antigravity CLI) read a file as
+# rules, by their documentation, each with a local variant; the test spells them in other cases too.
+RULE_FILE_NAMES = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "AGENT.md", "GEMINI.md", "GEMINI.local.md"]
+HIDDEN_PARTS = [".claude", ".codex", ".gemini", ".agent", ".agents", ".mcp.json", ".cursor", ".vscode", ".github", ".x", ".env", "..."[:2] + "hidden"]
+PLACES = ["", "docs/", "tools/plan/", "bench/tasks/a-brand-new-task/", "bench/tests/", "site/ko/", "a/b/c/"]
+
+
+def classified(files: list[dict]) -> dict:
+    pr_files = module("pr_files")
+    files = files + [{"filename": "bench/tests/test_zz_brand_new.py", "status": "added"}]
+    return pr_files.classify_pr_files(files, changed_files=len(files), draft=False, base_ref="main", task_folders=["web-signup"],
+                                      main_task_folders=["web-signup"], main_test_entries=["test_site.py"], repo_root=None)  # fmt: skip
+
+
+def spelled_otherwise(name: str, rng: random.Random) -> str:
+    return "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in name)
+
+
+@pytest.mark.parametrize("seed", [81, 82])
+def test_a_file_an_agent_tool_reads_as_rules_is_not_for_a_pull_request_from_outside(seed):
+    rng = random.Random(seed)
+    let_through = []
+    for name in RULE_FILE_NAMES:
+        for place in PLACES:
+            for spelled in (name, spelled_otherwise(name, rng)):
+                path = place + spelled
+                for files in ([{"filename": path, "status": rng.choice(["added", "modified", "removed"])}],
+                              [{"filename": "docs/notes.md", "status": "renamed", "previous_filename": path}],
+                              [{"filename": path, "status": "renamed", "previous_filename": "docs/notes.md"}]):  # fmt: skip
+                    got = classified(files)
+                    if got.get("ready_for_review") is not False or not got.get("protected_folders"):
+                        let_through.append((files, got))
+    assert not let_through, let_through[:3]
+
+
+@pytest.mark.parametrize("seed", [83, 84])
+def test_a_path_with_a_part_that_begins_with_a_dot_is_not_for_a_pull_request_from_outside(seed):
+    rng = random.Random(seed)
+    let_through = []
+    for hidden in HIDDEN_PARTS:
+        for place in PLACES:
+            for spelled in (hidden, spelled_otherwise(hidden, rng)):
+                for path in (place + spelled, place + spelled + "/settings.json", place + spelled + "/rules/x.md"):
+                    for files in ([{"filename": path, "status": "added"}], [{"filename": "docs/x.md", "status": "renamed", "previous_filename": path}]):
+                        got = classified(files)
+                        if got.get("ready_for_review") is not False or not got.get("protected_folders"):
+                            let_through.append((files, got))
+    assert not let_through, let_through[:3]
+
+
+def test_the_session_hears_of_such_a_file_in_fixed_words_without_its_name(place):
+    # A new task, and a new test beside it, that carry a rule file and a hidden folder: the reading tool names neither file.
+    files = [{"filename": "bench/tasks/a-brand-new-task/CLAUDE.md", "status": "added"},
+             {"filename": "bench/tasks/a-brand-new-task/.claude/settings.json", "status": "added"},
+             {"filename": "bench/tests/test_brand_new.py", "status": "added"}]  # fmt: skip
+    got = verdict(place, files)
+    assert got["ready_for_review"] is False and len(got["protected_folders"]) >= 2, got
+    # What the project takes from outside stays open: a new task and a new test without such a file.
+    plain = [{"filename": "bench/tasks/a-brand-new-task/task.toml", "status": "added"}, {"filename": "bench/tests/test_brand_new.py", "status": "added"}]
+    assert verdict(place, plain) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
+
+
+def test_no_existing_task_or_test_holds_a_hidden_file_or_a_rule_file():
+    # So the rule refuses nothing the project takes from outside today.
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "bench/tasks", "bench/tests"], capture_output=True, text=True, check=True).stdout.split()
+    assert tracked and [path for path in tracked if any(part.startswith(".") for part in path.split("/"))] == []
+    assert [path for path in tracked if path.split("/")[-1].casefold() in {name.casefold() for name in RULE_FILE_NAMES}] == []
