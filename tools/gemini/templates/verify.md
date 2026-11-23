@@ -8,6 +8,10 @@ Check the change against its done criteria. The current folder holds a clean che
 
 It is not an attack: do not try to break or fool what the change adds. It is not a review of style or of taste. It is not a rewrite: you change no file, you only read.
 
+## Your time
+
+This run is ended {{run_time}} after it starts, and nothing of a run that is ended is kept: no answer and no part of one. Have your answer written by {{answer_time}} into the run, whatever is still open, and say in it what you could not finish.
+
 ## Your answer
 
 Write your answer in two parts, in this order. Each part begins with its own line, written exactly as here and alone on that line:
