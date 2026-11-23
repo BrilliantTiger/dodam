@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -30,6 +31,21 @@ func drain(l net.Listener, done chan<- bool) {
 
 func main() {
 	switch os.Args[1] {
+	case "temp":
+		// a temporary file, made where the runtime makes one
+		made, err := os.CreateTemp("", "temp-")
+		must(err)
+		_, err = made.WriteString("temp")
+		must(err)
+		must(made.Close())
+		back, err := os.ReadFile(made.Name())
+		must(err)
+		if string(back) != "temp" {
+			os.Exit(1)
+		}
+		folder, err := filepath.EvalSymlinks(filepath.Dir(made.Name()))
+		must(err)
+		fmt.Println(folder)
 	case "copy":
 		in, err := os.Open("in.bin")
 		must(err)

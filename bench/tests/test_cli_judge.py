@@ -1577,3 +1577,44 @@ def test_the_flood():
     assert measured["grew"] <= 4 * limit + 2**20, (
         f"the case runner's memory grew by {measured['grew']} bytes while a program flooded its output, "
         f"with a limit of {limit} bytes on output")
+
+
+def test_a_file_whose_cases_are_more_than_the_judge_counted_is_the_judges_fault(tmp_path):
+    """The time a file of tests gets is counted from its tests. Should pytest list more cases than
+    the judge counted, the file would be judged with less time than the document promises: that is
+    a fault of the judge, and no result is written."""
+    tests = {"functional/test_more.py": (
+        "def test_counted():\n    with case() as c:\n        assert c.run(['x'], stdin='a').exit_code == 0\n\n\n"
+        "class TestNotCounted:\n"
+        "    def test_one(self):\n        with case() as c:\n            assert c.run(['x'], stdin='a').exit_code == 0\n\n"
+        "    def test_two(self):\n        with case() as c:\n            assert c.run(['x'], stdin='a').exit_code == 0\n")}
+    with pytest.raises(judge_module.JudgeFault) as fault:
+        judge_program(tmp_path, ECHO, tests)
+    assert "test_more.py" in str(fault.value)
+
+
+def test_the_judge_counts_a_files_tests_as_pytest_collects_them(tmp_path):
+    """A test whose name begins with `test` without an underscore is a case like any other, and the
+    judge's count holds it: the file is judged, not refused."""
+    tests = {"functional/test_names.py": (
+        "def test_with_underscore():\n    with case() as c:\n        assert c.run(['x'], stdin='a').exit_code == 0\n\n\n"
+        "def testwithout():\n    with case() as c:\n        assert c.run(['x'], stdin='a').exit_code == 0\n")}
+    result = judge_program(tmp_path, ECHO, tests)
+    assert outcomes(result) == {"test_with_underscore": "passed", "testwithout": "passed"}
+
+
+def test_javas_temporary_folder_is_the_cases_own(tmp_path):
+    """The Java runtime takes its temporary folder from its own setting, not from the environment
+    the other six runtimes read it from. Its run command sets it to the case's own temporary folder,
+    which is where the environment sends the other six."""
+    from dodambench.languages import LANGUAGES
+    import shlex
+    parts = shlex.split(LANGUAGES["java"].run_cmd)
+    given = [p.split("=", 1)[1] for p in parts if p.startswith("-Djava.io.tmpdir=")]
+    assert len(given) == 1, LANGUAGES["java"].run_cmd
+    program = ("import os, sys\n"
+               "print(os.path.realpath(sys.argv[1]) == os.path.realpath(os.environ['TMPDIR']))\n")
+    tests = {"functional/test_temp.py": (
+        f"def test_the_same_folder():\n    with case() as c:\n        r = c.run([{given[0]!r}])\n"
+        "        assert r.out == 'True\\n', r\n")}
+    assert outcomes(judge_program(tmp_path, program, tests)) == {"test_the_same_folder": "passed"}

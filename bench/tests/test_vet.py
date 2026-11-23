@@ -1,8 +1,11 @@
+import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from conftest import CANARY, unseparated, write
+from conftest import CANARY, edit, unseparated, write
 from dodambench.task import load_task
 import subprocess
 
@@ -264,3 +267,174 @@ def test_vet_in_the_language_image_gives_the_same_judgements(small_task, tmp_pat
         assert by_label[name]["ok"], by_label[name]
     assert not by_label["vulnerable-harmless"]["ok"]
     assert (tmp_path / "out/build/secure/reward.json").exists()
+
+
+# --- the tool that checks prepared solutions, around the container it judges in ---
+
+FAKE_DOCKER = r'''#!/bin/sh
+# Stands in for Docker: a container that "judges" by leaving what the folder named by FAKE_LEAVES
+# holds, and ends with the exit code FAKE_EXIT.
+case "$1" in
+  info) echo 4294967296 ;;
+  create) shift; echo "$@" >> "$FAKE_LOG"; echo made ;;
+  start) exit "${FAKE_EXIT:-0}" ;;
+  cp)
+    case "$2" in
+      *:/logs/verifier/.) if [ -n "$FAKE_LEAVES" ]; then cp -R "$FAKE_LEAVES/." "$3"; fi ;;
+    esac ;;
+  rm) ;;
+esac
+exit 0
+'''
+
+
+@pytest.fixture
+def fake_docker(tmp_path, monkeypatch):
+    """A Docker on PATH that runs no container; what the container leaves is set per test."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(FAKE_DOCKER, encoding="utf-8")
+    (bin_dir / "docker").chmod(0o755)
+    leaves = tmp_path / "leaves"
+    leaves.mkdir()
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_LEAVES", str(leaves))
+    monkeypatch.setenv("FAKE_LOG", str(tmp_path / "docker.log"))
+    return leaves
+
+
+def leave_result(leaves: Path, reward: float = 1.0) -> None:
+    (leaves / "reward.json").write_text(json.dumps({"reward": reward}), encoding="utf-8")
+    (leaves / "details.json").write_text(json.dumps({"build_ok": True, "step": "build", "tests": []}), encoding="utf-8")
+
+
+def judged(tmp_path: Path, out: Path):
+    from dodambench.vet import judge_in_image
+    tests, solution = tmp_path / "t", tmp_path / "s"
+    tests.mkdir(exist_ok=True)
+    solution.mkdir(exist_ok=True)
+    return judge_in_image("dodam-bench/python:dev", tests, solution, out, "build",
+                          {"memory_mb": 1024, "cpus": 2, "processes": 512})
+
+
+def test_an_earlier_runs_result_is_never_read_as_this_runs(tmp_path, fake_docker, monkeypatch):
+    """The place for results is emptied before each judging: a container that ends without a result
+    leaves the result of an earlier judging in that place unread, and is a fault."""
+    from dodambench.judge import JudgeFault
+    out = tmp_path / "out"
+    out.mkdir()
+    leave_result(out, 0.25)                       # what an earlier judging left there
+    monkeypatch.setenv("FAKE_EXIT", "137")        # this container is ended and leaves nothing
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, out)
+    assert not (out / "reward.json").exists()
+
+
+def test_an_earlier_runs_fault_is_never_read_as_this_runs(tmp_path, fake_docker, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "judge-fault.json").write_text(json.dumps({"judge_fault": "an earlier fault"}), encoding="utf-8")
+    leave_result(fake_docker)
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    assert judged(tmp_path, out)["reward"] == {"reward": 1.0}
+
+
+def test_a_container_that_ended_without_a_result_is_a_fault_whatever_it_left(tmp_path, fake_docker, monkeypatch):
+    """The container's exit status is read: a result file from a container that did not end well is
+    no result."""
+    from dodambench.judge import JudgeFault
+    leave_result(fake_docker)
+    monkeypatch.setenv("FAKE_EXIT", "137")
+    with pytest.raises(JudgeFault) as fault:
+        judged(tmp_path, tmp_path / "out")
+    assert "137" in str(fault.value)
+
+
+def test_a_fault_of_the_judge_in_the_image_is_read_as_one(tmp_path, fake_docker, monkeypatch, cli_task_dir):
+    from dodambench.vet import vet_in_image
+    (fake_docker / "judge-fault.json").write_text(json.dumps({"judge_fault": "made-up fault"}), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "3")
+    results = vet_in_image(load_task(cli_task_dir), "python", tmp_path / "out", "dodam-bench/python:dev")
+    assert results and all(r["ok"] is False and r.get("judge_fault") is True for r in results), results
+    assert all("the judge itself failed: made-up fault" in r["problems"][0] for r in results)
+
+
+def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch):
+    import dodambench.vet as vetting
+    edit(cli_task_dir / "task.toml", "verifier_timeout_sec = 1800", "verifier_timeout_sec = 2400")
+    given = []
+    real = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[:2] == ["docker", "start"]:
+            given.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(cmd, 3)
+        if cmd[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(cmd, 0, "4294967296\n", "")
+        if cmd[0] == "docker":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real(cmd, *args, **kwargs)
+    monkeypatch.setattr(vetting.subprocess, "run", run)
+    vetting.vet_in_image(load_task(cli_task_dir), "python", tmp_path / "out", "dodam-bench/python:dev")
+    assert given and set(given) == {2400}, given
+
+
+def run_vet(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-m", "dodambench.vet", *args], capture_output=True, text=True,
+                          cwd=Path(__file__).resolve().parents[1])
+
+
+def test_the_tools_errors_are_json_first_and_no_trace(tmp_path, cli_task_dir):
+    """A task that cannot be read, a language that does not exist and a language the task does not
+    have: each is refused with a JSON diagnostic and exit code 2, never with a trace of an error."""
+    write(tmp_path, "unreadable/task.toml", "schema = = 1\n")
+    for args, key in (([str(tmp_path / "unreadable"), "--unseparated"], "task.toml"),
+                      ([str(cli_task_dir), "--lang", "cobol", "--unseparated"], "lang"),
+                      ([str(cli_task_dir), "--lang", "rust", "--unseparated"], "lang")):
+        done = run_vet(*args, "--out", str(tmp_path / "vet"))
+        assert "Traceback" not in done.stderr, done.stderr[-1500:]
+        assert done.returncode == 2, (args, done.returncode, done.stdout[-500:])
+        first = json.loads(done.stdout.splitlines()[0])
+        assert first["severity"] == "error" and key in (first["file"], first["key"]) and first["message"], first
+
+
+def test_a_step_without_a_secure_solution_is_reported(tmp_path, cli_task_dir):
+    import shutil
+    shutil.rmtree(cli_task_dir / "solutions/secure/python/change-1")
+    done = run_vet(str(cli_task_dir), "--lang", "python", "--unseparated", "--out", str(tmp_path / "vet"))
+    assert done.returncode == 2 and "Traceback" not in done.stderr
+    assert "change-1" in done.stdout and "secure" in done.stdout, done.stdout
+
+
+def test_a_run_that_checked_nothing_is_no_success_and_says_so(tmp_path, cli_task_dir, monkeypatch, capsys):
+    import dodambench.vet as vetting
+    monkeypatch.setattr(vetting, "_missing_tools", lambda *args, **kwargs: ["go"])
+    code = vetting.main([str(cli_task_dir), "--lang", "python", "--unseparated", "--out", str(tmp_path / "vet")])
+    said = capsys.readouterr().out
+    assert code != 0 and "not checked" in said, (code, said)
+
+
+def test_a_vulnerable_solution_fails_a_security_test_of_its_weakness_at_its_own_step():
+    """At a change step the earlier step's tests run again. A vulnerable solution written for the
+    change step that fails only the earlier step's test of its weakness is not what it was written for."""
+    earlier = {"kind": "security", "weakness": "path-traversal", "outcome": "failed", "file": "security/test_a.py",
+               "name": "test_a", "step": "build"}
+    own = {"kind": "security", "weakness": "path-traversal", "outcome": "passed", "file": "security/test_b.py",
+           "name": "test_b", "step": "change-1"}
+    report_of_step = {"build_ok": True, "step": "change-1", "tests": [earlier, own]}
+    problems = judgement_problems("vulnerable", "path-traversal", report_of_step)
+    assert problems and "change-1" in problems[0], problems
+    report_of_step["tests"][1] = {**own, "outcome": "failed"}
+    assert judgement_problems("vulnerable", "path-traversal", report_of_step) == []
+
+
+def test_the_lowered_memory_cap_says_what_the_code_does():
+    """A cap above three quarters of the Docker machine's memory is lowered to three quarters; the
+    message says so and does not say that the machine cannot hold what it can."""
+    from dodambench.vet import container_room
+    task = load_task(Path(__file__).resolve().parents[1] / "tasks/web-signup")
+    task.meta["limits"] = {**task.limits, "memory_mb": 1600}
+    room = container_room(task, 1959)
+    said = room["adjusted"]["message"]
+    assert room["memory_mb"] == 1469 and "1600" in said and "1959" in said and "1469" in said, said
+    assert "three quarters" in said, said

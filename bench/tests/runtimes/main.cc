@@ -7,12 +7,32 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
 
+#include <unistd.h>
+
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "";
+    if (mode == "temp") {
+        // a temporary file, made where the runtime makes one
+        const auto folder = std::filesystem::temp_directory_path();
+        const auto made = folder / ("temp-" + std::to_string(::getpid()));
+        {
+            std::ofstream out(made);
+            out << "temp";
+        }
+        std::ifstream in(made);
+        std::string back;
+        in >> back;
+        if (back != "temp") {
+            return 1;
+        }
+        std::cout << std::filesystem::canonical(folder).string() << std::endl;
+        return 0;
+    }
     if (mode == "copy") {
         std::filesystem::copy_file("in.bin", "out.bin", std::filesystem::copy_options::overwrite_existing);
         std::cout << "ok" << std::endl;

@@ -2844,3 +2844,47 @@ def test_a_build_that_fills_the_containers_process_cap_is_ended_all_the_same(tmp
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     assert result["reward"]["build_ok"] == 0.0 and outcomes(result) == {"test_ground.py": "skipped"}
     assert time.monotonic() - started < 120
+
+
+FILLS_ITS_LIMIT = r'''
+import json, os, threading, time
+stop = threading.Event()
+while True:
+    try:
+        threading.Thread(target=stop.wait, daemon=True).start()
+    except RuntimeError:
+        break
+time.sleep(0.5)
+uid, own, others = os.getuid(), 0, 0
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        for task in os.listdir(f"/proc/{pid}/task"):
+            with open(f"/proc/{pid}/task/{task}/status") as f:
+                owner = int(next(line for line in f if line.startswith("Uid:")).split()[1])
+            own, others = (own + 1, others) if owner == uid else (own, others + 1)
+    except (OSError, StopIteration):
+        pass
+with open("/sys/fs/cgroup/pids.current") as f:
+    print(json.dumps({"own": own, "others": others, "container": int(f.read())}))
+stop.set()
+'''
+
+
+def test_the_judge_needs_no_more_processes_than_the_checker_leaves_it(tmp_path):
+    """While a case runs, the container holds the case's processes and the judge's own: the verifier's
+    script, the judge and the case runner, three, and when a program left processes, one more that
+    ends them. The checker leaves the judge eight above a case's limit. With the container's cap
+    there, a program that makes processes until it is refused reaches its own limit of 16."""
+    tests = {"functional/test_fill.py": '''
+def test_fill():
+    with case() as c:
+        r = c.run([])
+        with open("/logs/verifier/attack.json", "w") as f:
+            f.write(r.out)
+        assert r.exit_code == 0, r
+'''}
+    result = judge_attack(tmp_path, FILLS_ITS_LIMIT, tests, {"processes": 16 + 8}, CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and outcomes(result) == {"test_fill": "passed"}, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    note_figures("processes while a case holds its limit of 16", own=seen["own"], judge=seen["others"])
+    assert seen["own"] == 16 and seen["others"] <= 3 and seen["container"] <= 16 + 3, seen

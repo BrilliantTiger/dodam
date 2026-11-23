@@ -106,12 +106,20 @@ CARRY_THE_CAPS = ("tests/lib/dodam_judge.py", "tests/test.sh", "task.toml", "env
 MEASURING_MACHINE_MB = 1959      # the memory of the Docker machine the measurement runs on
 
 
+def without_the_restrictions(name: str, data: bytes) -> bytes:
+    """What the agent is told, less the line that names the judging environment's restrictions,
+    which every task now carries."""
+    if not name.endswith("instruction.md"):
+        return data
+    return b"".join(line for line in data.splitlines(keepends=True) if b"sendfile" not in line)
+
+
 def test_nothing_changes_in_what_the_web_task_becomes(tmp_path):
     task = load_task(WEB)
     for lang, before in WEB_BEFORE.items():
         digest = hashlib.sha256()
         for name, data in tree(to_harbor(task, lang, tmp_path / "out"), CARRY_THE_CAPS).items():
-            digest.update(name.encode() + b"\0" + data + b"\0")
+            digest.update(name.encode() + b"\0" + without_the_restrictions(name, data) + b"\0")
         assert digest.hexdigest() == before, lang
 
 
@@ -204,3 +212,53 @@ def test_a_command_line_task_carries_its_caps_onto_the_path_the_measurement_uses
     with pytest.raises(vetting.VetError) as refused:
         room_of(task, 400)
     assert json.loads(str(refused.value))["key"] == "limits.memory_mb"
+
+
+def test_the_verifiers_script_makes_its_folder_before_it_says_the_judging_ended(tmp_path):
+    """A judge that is ended before it made the folder for results still leaves the account of it."""
+    import subprocess
+    from dodambench.convert import TEST_SH
+    out = tmp_path / "logs" / "verifier"
+    fake = tmp_path / "judge.sh"
+    fake.write_text("#!/bin/sh\nkill -9 $$\n")
+    fake.chmod(0o755)
+    script = (TEST_SH.replace(". /tests/step.env", "DODAM_STEP=build").replace("/logs/verifier", str(out))
+              .replace("/opt/judge/bin/python /tests/lib/dodam_judge.py", str(fake)))
+    done = subprocess.run(["sh", "-c", script], capture_output=True)
+    assert done.returncode != 0
+    said = json.loads(json.loads((out / "judge-fault.json").read_text())["judge_fault"])
+    assert said["key"] == "ended", said
+
+
+# The four calls the document names that hand a file's pages to a pipe or a socket without copying.
+def restricted_calls_in_the_document() -> set[str]:
+    import re
+    text = (BENCH.parent / "docs/benchmark/command-line-tasks.en.md").read_text(encoding="utf-8")
+    start = text.index("**Pages cannot be handed to a pipe or a socket without copying.**")
+    paragraph = text[start:text.index("\n", start)]
+    return set(re.findall(r"\(`([a-z]+)`\)", paragraph))
+
+
+def restrictions_told(instruction: str) -> list[str]:
+    return [line for line in instruction.splitlines() if "sendfile" in line]
+
+
+def test_the_agent_is_told_the_restrictions_a_correct_program_can_run_into(cli_task_dir, tmp_path):
+    """Both kinds of task carry the same sentence, in every language, and it names exactly the calls
+    the document lists. It says what fails and what to do instead, and nothing about the judging."""
+    import re
+    calls = restricted_calls_in_the_document()
+    assert calls == {"sendfile", "splice", "tee", "vmsplice"}, calls
+    told = set()
+    for task in (load_task(cli_task_dir), load_task(WEB), load_task(SAMPLE)):
+        for lang in task.languages:
+            made = to_harbor(task, lang, tmp_path / "out")
+            for step in task.steps:
+                lines = restrictions_told((made / "steps" / step.name / "instruction.md").read_text(encoding="utf-8"))
+                assert len(lines) == 1, (task.id, lang, step.name, lines)
+                told.add(lines[0])
+    assert len(told) == 1, told
+    sentence = told.pop()
+    assert set(re.findall(r"`([a-z]+)`", sentence)) == calls, sentence
+    for word in ("memory", "count", "judge", "measure", "limit"):
+        assert word not in sentence.lower(), (word, sentence)

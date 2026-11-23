@@ -31,8 +31,6 @@ WORKS = {"python": ("copy", "send", "relay"), "typescript": ("copy", "send", "re
          "java": ("copy", "send", "receive", "relay"), "csharp": ("copy", "relay"),
          "go": ("copy", "send", "relay"), "rust": ("copy", "send", "relay"),
          "cpp": ("copy",)}
-# a case's program writes in its own folder only, so the Java server keeps its working files there
-RUN = {"java": "java -Djava.io.tmpdir=. -jar {app}/target/app.jar"}
 # the library calls that send a file over a socket and have no way of copying it instead
 DOES_NOT_WORK = {"csharp": ("send", "send-async", "send-packets")}
 # what is served, by which way of starting the server, at which path, and whether every byte arrives
@@ -66,6 +64,15 @@ def asked(mode, arrives_in):
         note(mode, {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-300:], "err": r.err[-1200:],
                     "arrived": None if arrived is None else len(arrived), "same": arrived == DATA})
         return r, arrived
+
+
+def test_temp():
+    # a temporary file, made through the runtime's own call, goes to the case's temporary folder,
+    # and the runtime prints nothing about it
+    with case() as c:
+        r = c.run(["temp"])
+        note("temp", {"exit_code": r.exit_code, "out": r.out[-300:], "err": r.err[-1200:]})
+        assert r.exit_code == 0 and r.out.strip() == os.path.realpath(c.home / "tmp") and r.err == "", r
 
 
 def test_copy():
@@ -153,7 +160,8 @@ def _image_ready(image: str) -> bool:
 
 @pytest.mark.parametrize("lang", list(PLACE))
 def test_each_runtime_copies_sends_relays_and_serves_a_file_whole_under_the_judges_filter(tmp_path, monkeypatch, lang):
-    """Every byte arrives, in every language, through the calls its programs use: a file copied,
+    """The run command is the language's own. A temporary file goes to the case's temporary folder in
+    every language, with nothing printed about it. Every byte arrives, in every language, through the calls its programs use: a file copied,
     a file sent over a local socket, one connection copied into another, a file served by the
     web framework. In Java a file also comes out of a socket through the channel's transfer. The
     three calls of C# that send a file over a socket fail, and that is pinned. So is the C++
@@ -169,7 +177,7 @@ def test_each_runtime_copies_sends_relays_and_serves_a_file_whole_under_the_judg
     shutil.copy(RUNTIMES / source, tmp_path / "solution" / place)
     tests = TESTS.replace("WORKS_HERE", repr(WORKS[lang])).replace("DOES_NOT_WORK_HERE", repr(DOES_NOT_WORK.get(lang, ()))).replace("SERVED_HERE", repr(SERVED[lang]))
     result = judge_attack(tmp_path, (RUNTIMES / "python.py").read_text(encoding="utf-8"), {"functional/test_runtime.py": tests},
-                          {"seconds": 1200}, RUN_CMD=RUN.get(lang, language.run_cmd), BUILD_CMD=language.build_cmd,
+                          {"seconds": 1200}, RUN_CMD=language.run_cmd, BUILD_CMD=language.build_cmd,
                           CASE_TIMEOUT_SEC="90", CASE_PROCESSES="128", CASE_MEMORY_MB="512", CASE_DISK_MB="64")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     said = outcomes(result)
@@ -179,8 +187,103 @@ def test_each_runtime_copies_sends_relays_and_serves_a_file_whole_under_the_judg
     for mode, paths in SERVED[lang].items():
         for path, whole in paths.items():
             assert seen[f"{mode} {path}"]["same"] == whole, f"{language.name}, {mode}, {path}: {seen[f'{mode} {path}']}"
-    wanted = {"test_copy": "passed", "test_send": "passed" if "send" in WORKS[lang] or lang in DOES_NOT_WORK else "skipped",
+    assert seen["temp"]["exit_code"] == 0 and seen["temp"]["err"] == "", f"{language.name}, temp: {seen['temp']}"
+    wanted = {"test_temp": "passed", "test_copy": "passed", "test_send": "passed" if "send" in WORKS[lang] or lang in DOES_NOT_WORK else "skipped",
               "test_receive": "passed" if "receive" in WORKS[lang] else "skipped",
               "test_relay": "passed" if "relay" in WORKS[lang] else "skipped", "test_serve": "passed",
               "test_what_does_not_work": "passed"}
     assert said == wanted, lost(result, tmp_path / "out")
+
+
+# A served program of a web task makes a temporary file while it answers, through its runtime's own
+# call: in Java as in Python, which takes its temporary folder from the environment as the other
+# five runtimes do. The served program is started with the language's own start command.
+SERVED_TEMP = {
+    "python": ("main.py", '''
+import os, tempfile
+
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
+
+app = FastAPI()
+
+
+@app.get("/temp", response_class=PlainTextResponse)
+def temp():
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as made:
+            made.write(b"temp")
+        return os.path.dirname(os.path.realpath(made.name))
+    except OSError as error:
+        return f"refused: {error}"
+'''),
+    "java": ("src/main/java/app/App.java", '''
+package app;
+
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
+
+public class App {
+    public static void main(String[] args) throws Exception {
+        var server = HttpServer.create(new InetSocketAddress("0.0.0.0", Integer.parseInt(System.getenv("PORT"))), 0);
+        server.createContext("/temp", exchange -> {
+            String said;
+            try {
+                var made = Files.createTempFile("temp-", ".tmp");
+                Files.writeString(made, "temp");
+                said = Files.readString(made).equals("temp") ? made.toRealPath().getParent().toString() : "unread";
+            } catch (Exception error) {
+                said = "refused: " + error;
+            }
+            var body = said.getBytes();
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+    }
+}
+'''),
+}
+ASK_TEMP = '''
+import urllib.request
+
+
+def test_temp():
+    said = urllib.request.urlopen(os.environ["BASE_URL"] + "/temp", timeout=60).read().decode()
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump({"temp": said}, f)
+    assert said.startswith("/") and not said.startswith("refused"), said
+'''
+
+
+def judge_served(tmp_path: Path, lang: str) -> dict:
+    language = LANGUAGES[lang]
+    tests_dir, solution = tmp_path / "tests", tmp_path / "solution"
+    (tests_dir / "lib").mkdir(parents=True)
+    place, source = SERVED_TEMP[lang]
+    (solution / place).parent.mkdir(parents=True)
+    (solution / place).write_text(source.lstrip(), encoding="utf-8")
+    shutil.copy(test_cli_isolation.BENCH / "dodambench/judge.py", tests_dir / "lib/dodam_judge.py")
+    (tests_dir / "functional").mkdir()
+    (tests_dir / "functional/test_temp.py").write_text(test_cli_isolation.HEAD + ASK_TEMP, encoding="utf-8")
+    (tests_dir / "manifest.toml").write_text('[[test]]\nfile = "functional/test_temp.py"\nkind = "functional"\n'
+                                             'step = "build"\n', encoding="utf-8")
+    env = {"STEPS": "build", "BUILD_CMD": language.build_cmd, "START_CMD": language.start_cmd, "PORT": "8080",
+           "DEPS_DIR": "", "DEPS_LINKS": ""}
+    (tests_dir / "lang.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+    return test_cli_isolation.in_the_image(tests_dir, solution, tmp_path / "out", without=("cases",), seconds=900)
+
+
+def test_a_served_java_program_makes_its_temporary_files_where_a_python_one_does(tmp_path, monkeypatch):
+    for lang in ("python", "java"):
+        if not _image_ready(LANGUAGES[lang].image):
+            pytest.skip(f"needs Docker and the {LANGUAGES[lang].name} image")
+    folders = {}
+    for lang in ("python", "java"):
+        monkeypatch.setattr(test_cli_isolation, "IMAGE", LANGUAGES[lang].image)
+        result = judge_served(tmp_path / lang, lang)
+        assert result["exit_code"] == 0 and outcomes(result) == {"test_temp": "passed"}, lost(result, tmp_path / lang / "out")
+        folders[lang] = found_by(tmp_path / lang / "out", "attack.json")["temp"]
+    assert folders["java"] == folders["python"], folders
