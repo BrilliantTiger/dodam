@@ -91,7 +91,7 @@
   "r4_n": "Triaging",
   "r4_h": "Sort what comes in",
   "r4_p": "Turns incoming proposals and problem reports into pieces of work, or closes them.",
-  "how1": "<strong>The agent that built a change never reviews it.</strong> When a model from another company is available, that model reviews. Gemini reviews what Claude wrote and answers on the pull request, in a job that a script of the project starts. When it cannot, a Claude session that did not write the change reviews.",
+  "how1": "<strong>The agent that built a change never reviews it.</strong> When a model from another company is available, that model reviews. Gemini reviews what Claude wrote, in Orca, where the owner watches: in a job that a script of the project starts, which answers on the pull request, or in a session that the project’s sessions talk with, whose conclusions the coordinating session makes public. When it cannot, a Claude session that did not write the change reviews.",
   "how2": "<strong>Numbers decide.</strong> Every design decision about syntax or meaning is settled by benchmark numbers, not taste, and the numbers are recorded with the decision.",
   "how3": "<strong>Security rules only tighten.</strong> AI may add or tighten a rule. Relaxing a rule or weakening a guarantee needs the owner’s approval.",
   "how4": "<strong>The owner handles payments, contracts and accounts.</strong> Apart from that approval, the agents decide: Claude and Gemini discuss, settle each decision by tests and numbers or by criteria written beforehand, and record the reason. At each merge the owner receives the results of the security, verification and end-to-end tests.",

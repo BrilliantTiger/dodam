@@ -486,32 +486,59 @@ def test_the_charter_renders_google_s_third_party_as_third_party():
             assert words not in row and words not in version, words
 
 
+# Where a Gemini session makes or changes files and what it sends out, the same wherever the rules state it.
+GEMINI_SESSION_KO = ('조율 세션이 메모용으로 준 폴더와, 변경을 볼 때 그 보기를 위해 만든 체크아웃에서만 파일을 만들거나 바꾸고', '그 체크아웃에서 커밋하지 않는다', '테스트의 임시 파일과 Google의 도구가 자기 세션에 대해 남기는 기록은 여기에 들지 않는다', '프로젝트의 작업을 푸시하는 체크아웃에서는 아무것도 바꾸지 않는다', 'Google의 도구가 스스로 Google의 모델에 보내는 요청 말고는 이 컴퓨터 밖으로 아무것도 보내지 않는다', '푸시도, 병합도, 댓글도, 다른 서비스로 보내는 것도 없다', '프로젝트의 세션들과는 Orca로만 이야기한다')
+GEMINI_SESSION_EN = ('makes or changes files only in the folder the coordinating session gives it for its notes and, when it looks at a change, in a checkout made for that look, where it commits nothing', "the temporary files of tests it runs and the records Google's tool keeps of its own sessions are not meant by this", "It changes nothing in the checkouts the project's work is pushed from", "Apart from the requests Google's tool itself makes to Google's model, it sends nothing out of this computer", 'no push, no merge, no comment, no other service', "It talks with the project's sessions through Orca only")
+# What is not known covers both ways of use, and each way stops if Google says otherwise of it.
+NOT_KNOWN_KO = ("이렇게 시작한 작업이 FAQ가 말하는 \"direct scripting\"에 든다는 것도",
+                "프로젝트의 한 세션이 터미널 환경에 띄우고 프로젝트의 세션들이 글을 넣고 읽는 세션이 FAQ가 지원하지 않는다고 적은 것 밖에 있다는 것도",
+                "Google이 글로 확인해 준 적은 없다", "Google이 어느 방식에 대해 그렇지 않다고 하면 그 방식은 멈춘다")
+NOT_KNOWN_EN = ("Google has confirmed in writing neither that a job started this way counts as the \"direct scripting\" its FAQ speaks of",
+                "nor that a session which another session of the project starts in a terminal environment, and which the project's sessions send text to and read, is outside what its FAQ calls not supported",
+                "If Google says otherwise of either way, that way stops")
+
+
 def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_is_not_known():
     ko, en = model_use_rows()
     for row, said in (
-            (ko, ("Google 모델은 Antigravity CLI의 헤드리스 모드(`agy -p`)로만 쓴다",
+            (ko, ("Google 모델은 Antigravity CLI로만, 소유자가 지켜보는 Orca에서 쓴다",
+                  "어디서 일하는지는 계약과 계정을 맡는 소유자가 2026년 11월 23일에 정했다",
+                  "조율 세션이 Orca의 에이전트 실행 명령으로 Orca에 띄우고", *GEMINI_SESSION_KO,
+                  "조율 세션이 공개하거나, 작업의 검사를 거친 글로 작업이 공개한다",
+                  "다른 프로그램이 조종하는 대화형 CLI와 Claude 세션이 `agy`에 글을 넣거나 그 출력을 읽는 것(조율 세션이 소유자가 지켜보는 Orca에 띄운 Gemini 세션에서만 빼고)",
+                  "코딩 에이전트가 자기 셸에서 Google의 도구를 시작하는 것",
+                  "소유자의 판단으로는 11월 19일의 읽기가 Google의 문서를 너무 넓게 읽었다",
                   "소유자는 2026년 11월 18일에 Gemini가 Claude 곁에서 프로젝트 일을 하도록 정했고, 11월 19일에 다시 그렇게 말했다",
                   "어떻게 쓰는지는 조율하는 AI가 2026년 11월 19일에",
                   "프로젝트 자신의 계정이 프로젝트의 풀 리퀘스트나 이슈에 다는 표시",
-                  "다른 프로그램이 조종하는 대화형 CLI", "Claude 세션이 `agy`에 글을 넣거나 그 출력을 읽는 것",
                   "Google 구독에 딸려 오는 다른 회사 모델", "원격 에이전트", "브라우저 기능", "여러 에이전트를 묶어 돌리는 기능",
                   "유료 크레딧", "둘 이상의 계정",
-                  "Google이 글로 확인해 준 적은 없다", "Google이 그렇지 않다고 하면 이 방식도 멈춘다",
+                  *NOT_KNOWN_KO,
                   "이전 규칙은 \"Google은 자동 실행을 서면으로 허락받은 뒤에만 쓴다\"였다",
                   "이 방식은 Google이 공개한 문서가 스크립트와 CI에 쓰라고 적는 헤드리스 모드를 쓴다")),
-            (en, ("Google's models only through the Antigravity CLI's headless mode (`agy -p`)",
+            (en, ("Google's models only through the Antigravity CLI, in Orca where the owner watches",
+                  "where it works, the owner, who handles contracts and accounts, decided on November 23, 2026",
+                  "starts in Orca with Orca's own command for agents", *GEMINI_SESSION_EN,
+                  "made public by the coordinating session, or by the job, whose text passes the job's check",
+                  "the interactive CLI driven by another program and a Claude session passing text into `agy` or reading its output, anywhere but in a Gemini session that the coordinating session starts in Orca, where the owner watches",
+                  "a coding agent starting Google's tool from its own shell",
+                  "in the owner's judgment, the reading of November 19 had taken Google's page too widely",
                   "on November 18, 2026 the owner decided that Gemini works in the project beside Claude, and said so again on November 19",
                   "How it is used, the coordinating AI decided on November 19, 2026",
                   "a mark that the project's own account puts on one of the project's pull requests or issues",
-                  "the interactive CLI driven by another program", "a Claude session passing text into `agy` or reading its output",
                   "models of other companies that come with the Google subscription", "remote agents", "the browser feature",
                   "groups of agents", "paid credits", "more than one account",
-                  "Google has not confirmed in writing", "If Google says otherwise, this way stops too",
+                  *NOT_KNOWN_EN,
                   "The earlier rule was \"Google only after it allows unattended runs in writing\"",
                   "this way uses the headless mode that Google's published pages describe for scripts and CI")),
     ):
         for words in said:
             assert words in row, words
+    # The judgment on Google's page is the owner's, and is said as the owner's; the charter does not state it as a fact.
+    for text in (charter(), english_charter()):
+        for row in text.splitlines():
+            if row.startswith("| v0.14 |"):
+                assert "소유자의 판단으로는" in row or "In the owner's judgment" in row, row
     # the reason claims no more than that the way uses the mode Google describes: Google has not confirmed the rest
     assert "쓰라고 적는 방식이" not in charter() and "is the one Google's published pages describe" not in english_charter()
     # Google's pages are said in the charter's own words; one short phrase of theirs at most is quoted
@@ -521,6 +548,42 @@ def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_i
                   {"README", "An important update: Transitioning Gemini CLI to Antigravity CLI",
                    *(t for t, _ in OTHER_PAGES), "Google only after it allows unattended runs in writing"}]
         assert theirs == ["direct scripting"], theirs
+
+
+# What the page says in each language about how Gemini works: in Orca, in the job and in a session.
+GEMINI_WAYS = {
+    "en": ("in Orca, where the owner watches", "in a job that a script of the project starts",
+           "in a session that the project’s sessions talk with, whose conclusions the coordinating session makes public"),
+    "ko": ("소유자가 지켜보는 Orca에서 Gemini가 검토한다", "프로젝트의 스크립트가 시작하는 작업으로 풀 리퀘스트에 답하거나",
+           "프로젝트의 세션들과 이야기하는 세션에서 검토하고 그 결론은 조율 세션이 공개한다"),
+    "ja": ("オーナーが見守るOrcaの中でGeminiがレビューします", "プロジェクトのスクリプトが始めるジョブとしてプルリクエストに答えるか",
+           "プロジェクトのセッションと話すセッションでレビューし、その結論は調整役のセッションが公開します"),
+    "es": ("en Orca, donde el propietario lo ve", "en un trabajo que inicia un script del proyecto y que responde en la pull request",
+           "en una sesión con la que hablan las sesiones del proyecto, cuyas conclusiones publica la sesión coordinadora"),
+}
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_page_says_gemini_works_in_orca_in_the_job_and_in_a_session(lang):
+    how = all_strings()[lang]["how1"]
+    built = Page(page_path(lang).read_text(encoding="utf-8")).text
+    for words in GEMINI_WAYS[lang]:
+        assert words in how, f"{lang} how1 does not say {words!r}"
+        assert words in built, f"the built {lang} page does not say {words!r}"
+
+
+def test_the_job_s_document_and_the_list_of_open_work_say_both_ways():
+    first = (ROOT / "tools" / "gemini" / "README.md").read_text(encoding="utf-8").split("\n\n")[1]
+    for words in ("one of the two ways in which Google's model takes part in the Dodam project, both in Orca",
+                  "a Gemini session that the coordinating session starts in Orca and that the project's sessions talk with",
+                  "makes or changes files only in the folder for its notes and in a checkout made for a look",
+                  "apart from the requests Google's tool itself makes to Google's model"):
+        assert words in first, words
+    item = next(line for line in (ROOT / "TODO.md").read_text(encoding="utf-8").splitlines() if "Google에 문의 보내기" in line)
+    for words in ("지금 Gemini는 소유자가 지켜보는 Orca에서 두 가지로 쓴다", "`agy -p` 작업", "Gemini 세션",
+                  "Google이 어느 방식에 대해 그렇지 않다고 하면 그 방식은 멈춘다", "두 방식을 모두 묻는다"):
+        assert words in item, words
+    assert "작업으로만 쓰고" not in item, "the list of open work still says Gemini is used in the job alone"
 
 
 def test_the_charter_no_longer_says_google_s_condition_was_met_or_that_nothing_was_loosened():
@@ -608,7 +671,9 @@ def test_the_working_rules_say_how_google_s_models_are_used_and_what_the_owner_r
     rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     line = next((l for l in rules.splitlines() if "subscriptions and official CLIs" in l), "")
     for words in ("Claude Code, Codex CLI, Antigravity CLI", "not the API", "one account per company", "unmodified", "pinned version",
-                  "only through the Antigravity CLI's headless mode (`agy -p`)", "an event in the project's repository",
+                  "only through the Antigravity CLI, in Orca where the owner watches", "headless mode (`agy -p`)",
+                  "an event in the project's repository", "a Gemini session that the coordinating session starts in Orca",
+                  *GEMINI_SESSION_EN, "No coding agent starts Google's tool from its own shell",
                   "not yet in measurement", "Claude and Gemini discuss them", "criteria written beforehand",
                   "results of the security, verification and end-to-end tests at each merge",
                   "how the subscriptions' usage is spent", "approves only changes that weaken a guarantee or relax a rule"):
