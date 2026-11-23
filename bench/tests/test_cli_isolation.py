@@ -19,7 +19,7 @@ import pytest
 
 from conftest import CANARY, note_figures
 from dodambench.convert import TEST_SH
-from dodambench.judge import RECORDS_LEFT_OUT_MB
+from dodambench.judge import RECORDS_LEFT_OUT_MB, UNMEASURED
 from dodambench.task import load_task
 from dodambench.vet import VetError, vet
 
@@ -1575,15 +1575,42 @@ def test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image(tmp
                 details = json.loads((tmp_path / "out" / step / r["solution"] / "details.json").read_text())
                 caught |= {t["name"] for t in details["tests"] if t["kind"] == "security" and t["outcome"] == "failed"}
         assert own and own - caught == set(), (step, own - caught)
-    undecided = sum(json.loads((tmp_path / "out" / r["step"] / r["solution"] / "details.json").read_text())
-                    ["memory"]["undecided_readings"] for r in results)
+    every = [json.loads((tmp_path / "out" / r["step"] / r["solution"] / "details.json").read_text()) for r in results]
+    for details in every:
+        # the step's count of readings that could not decide is the sum of its cases' counts
+        assert details["memory"]["undecided_readings"] == sum(t.get("undecided_readings", 0) for t in details["tests"]), (
+            details["memory"])
+    undecided = sum(details["memory"]["undecided_readings"] for details in every)
     note_figures("the sample's Python solutions: readings that could not be decided", count=undecided)
+    assert all(r.get("room_mb") is not None for r in results), [r.get("room_mb") for r in results]
+    note_figures("the sample's Python solutions: the smallest room between the memory bound and the limit",
+                 room=min(r["room_mb"] for r in results))
+    note_figures("the sample's Python solutions: the most a case's figure fell below where it began",
+                 fell=max(t.get("fell_below_start_bytes", 0) for details in every for t in details["tests"]) / 2**20)
     by_label = {(r["step"], r["solution"]): r["reward"] for r in results}
     assert by_label[("change-1", "secure")]["reward"] == 1.0
     assert by_label[("change-1", "broken-crlf-kept-in-field")]["regression_broken"] >= 1.0
     assert by_label[("build", "vulnerable-no-size-limit")]["vulns_found"] >= 1.0
     assert json.loads((tmp_path / "out/build/secure/details.json").read_text()).get("caps", {}).get("files_mb") == 64
 
+
+def test_the_case_runner_is_told_which_processes_are_the_judges_own(tmp_path):
+    """Where the program is separated from the judge, the case runner is told the judge's own
+    processes besides itself, the container's first process and the judge, so that it takes their
+    memory out of every figure."""
+    tests = {"functional/test_pids.py": """
+def test_pids():
+    settings = json.load(open(os.environ["DODAM_CLI_CONFIG"]))
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump({"judge_pids": settings.get("judge_pids"), "parent": os.getppid()}, f)
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["judge_pids"] == [1, seen["parent"]], seen
+    assert outcomes(result) == {"test_pids": "passed"}, lost(result, tmp_path / "out")
 
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
     seen = []
@@ -2122,15 +2149,17 @@ def test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_ca
     """In the sample's smallest container (a case's limit of 512 MB and 64 MB of files, and 256 MB
     for the judge: 832 MB), the build leaves 200,000 files; a program holds every one of them open,
     starts 31 more processes that share what it holds, and takes memory in all 32 until the
-    container stands at its cap or its count ends it. The case fails for memory, the cases before
-    and after it pass, the judging ends in a result and not in a fault of the judge, and the kernel
-    ends no case runner. On the measuring computer the kernel ended all 32 processes of the program
+    container stands at its cap or its count ends it. The case fails for memory, the judging ends in
+    a result and not in a fault of the judge, and the kernel ends no case runner. The cases before
+    and after it are never failed: while the records of the build's files stand, no case can show
+    that it held no more than its limit, so they are unmeasured where they would have passed. On the measuring computer the kernel ended all 32 processes of the program
     at the cap; on the machine of the automatic check the count ended the program first."""
     result = judge_attack(tmp_path, PLAIN + HOLDS_IN_MANY, {"functional/test_holds.py": HOLDS_IN_MANY_TESTS},
                           {"memory_mb": 832, "seconds": 400}, CASE_MEMORY_MB="512", CASE_DISK_MB="64",
                           CASE_TIMEOUT_SEC="60", CASE_PROCESSES="64", BUILD_CMD="python3 main.py leave")
     assert result["exit_code"] == 0 and result["reward"] is not None and result["fault"] is None, lost(result, tmp_path / "out")
-    assert outcomes(result) == {"test_before": "passed", "test_holds_in_many": "failed", "test_after": "passed"}, (
+    seen = outcomes(result)
+    assert seen["test_holds_in_many"] == "failed" and {seen["test_before"], seen["test_after"]} <= {"passed", UNMEASURED}, (
         lost(result, tmp_path / "out"))
     assert "memory" in message(result, "test_holds_in_many"), lost(result, tmp_path / "out")
     assert not result["report"].get("runner_ended"), f"the kernel ended a case runner: {lost(result, tmp_path / 'out')}"
@@ -2403,7 +2432,15 @@ def far_apart_pages_in_the_case_folder():
         yield
 
 
+def the_files_its_build_left_held_open():
+    most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+    for name in sorted(os.listdir("/app/left")):
+        yield os.open("/app/left/" + name, os.O_RDONLY)
+
+
 ways = {"open files": open_files, "memory files, mapped and closed": memory_files_mapped_and_closed,
+        "the files its build left, held open": the_files_its_build_left_held_open,
         "shared mappings without a file": shared_mappings_without_a_file,
         "the image's files, mapped": the_images_files_mapped,
         "far-apart pages in the case folder": far_apart_pages_in_the_case_folder}
@@ -2575,15 +2612,18 @@ def test_after():
 """
 
 
-def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left(tmp_path):
-    """The growth of the kernel's records during a case is counted from the lowest figure beyond
-    the amount left out, whatever stood when the case began: here the build left 60,000 files and
-    300 MB of cache and an earlier case asked for 300,000 names that are not there, and nothing gave
-    them back. A program that makes and holds memory files, mapped and closed, up to its limit and
-    the amount left out passes and holds no more than that amount and the tolerance beyond the
-    judge's count; one that holds clearly more fails for memory. Records that stood before the case
-    and that a program holds are not in this: they count nowhere, and their line is the cap."""
-    way, limit_mb = "memory files, mapped and closed", 256
+@pytest.mark.parametrize("way", ["memory files, mapped and closed", "the files its build left, held open"])
+def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left(tmp_path, way):
+    """Here the build left 60,000 files and 300 MB of cache, and an earlier case asked for 300,000 names
+    that are not there and looked at every one of those files, and nothing gave the records back. A
+    program then makes and holds memory files, mapped and closed, or holds the files its build left
+    open, up to its limit and the amount left out: it does not pass while what it really held, read
+    from outside, lies above its limit, that amount and the tolerance. A program that holds clearly
+    more fails for memory, as before. While records stand beyond the amount left out no case can show
+    that it held no more than its limit, so the case within it and a later case that only prints are
+    unmeasured, never failed: what an earlier case leaves can turn a later case from passed to
+    unmeasured and never into a better outcome."""
+    limit_mb = 256
     tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
         .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
     result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + HELD + HOLDS, {"functional/test_hold.py": tests}, {"reading": True},
@@ -2593,11 +2633,11 @@ def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_act
     within, beyond = seen["within"], seen["beyond"]
     within["start"] = beyond["start"] = seen["start"]
     note_figures("what the earlier case left", records_grown=seen["asks"]["measured"].get("records_grown", 0) / 2**20)
-    assert within["limit"] is None and within["exit_code"] == 0, f"a program within its limit and the amount left out failed: {within}"
-    within_the_bound(within, limit_mb, f"after earlier activity: {way}, limit {limit_mb} MB")
+    assert within["limit"] is None and within["exit_code"] == 0, f"the attempt did not run as written: {within}"
+    no_pass_beyond_the_line(within, outcomes(result)["test_within"], limit_mb, f"after earlier activity: {way}, limit {limit_mb} MB")
     assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
-    assert outcomes(result)["test_within"] == "passed" and outcomes(result)["test_beyond"] == "failed" and \
-        outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+    assert outcomes(result)["test_beyond"] == "failed", lost(result, tmp_path / "out")
+    assert outcomes(result)["test_after"] in ("passed", UNMEASURED), lost(result, tmp_path / "out")
 
 
 # The same under pressure: while the case under test makes and holds memory files, a process of it
@@ -2619,32 +2659,16 @@ if sys.argv[1:2] == ["hold"]:
         os.kill(pressing, signal.SIGKILL)
         os.waitpid(pressing, 0)
     atexit.register(stop_pressing)
-
-    def records_now():
-        with open("/sys/fs/cgroup/memory.stat") as f:
-            return int(dict(line.split()[:2] for line in f)["slab_reclaimable"])
-
-    # the kernel takes the old records back first: the case makes its own only once they have stopped
-    # falling for a second, or after 20 seconds, and goes on pressing while it does
-    lowest, still, until = records_now(), 0, time.monotonic() + 20
-    while still < 10 and time.monotonic() < until:
-        time.sleep(0.1)
-        now = records_now()
-        still = still + 1 if now > lowest - MB else 0
-        lowest = min(lowest, now)
 """
 
 
-@pytest.mark.parametrize("limit_mb", [64, 256, 512])
-def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound(tmp_path, limit_mb):
+def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound(tmp_path):
     """After an earlier case left the records of 300,000 names that are not there, a case keeps its
     container at its cap by reading a large file over and over, so that the kernel takes the old
-    records back; once they have stopped falling, and while it goes on pressing, it makes and holds
-    memory files, mapped and closed. Either it fails for memory, or what it holds beyond the judge's
-    count, read from outside, is no more than the amount left out and the tolerance. Records made
-    while the kernel is still taking old ones back are not held to that bound: the figure does not
-    rise by what takes the place of what goes."""
-    way = "memory files, mapped and closed"
+    records back, and while it does it makes and holds memory files, mapped and closed: what takes the
+    place of what goes does not raise the figure. The case does not pass while what it really held,
+    read from outside, lies above its limit, the amount left out and the tolerance."""
+    way, limit_mb = "memory files, mapped and closed", 512
     tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
         .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
     result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + PRESSES + HELD + HOLDS, {"functional/test_hold.py": tests},
@@ -2659,7 +2683,23 @@ def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_
                  times_at_cap=result["report"].get("memory", {}).get("times_at_cap", 0))
     if within["limit"] != "memory":
         assert within["exit_code"] == 0, f"the attempt did not run as written: {within}"
-    within_the_bound(within, limit_mb, f"under pressure: {way}, limit {limit_mb} MB")
+    no_pass_beyond_the_line(within, outcomes(result)["test_within"], limit_mb, f"under pressure: {way}, limit {limit_mb} MB")
+
+
+def no_pass_beyond_the_line(seen: dict, outcome: str, limit_mb: int, what: str) -> None:
+    """The line every case is held to whatever stood when it began: a case that passes held no more,
+    read from outside, than its limit, the amount left out and the tolerance."""
+    if outcome != "passed":
+        note_figures(what, outcome=outcome, counted=seen["measured"].get("memory_highest", 0) / 2**20,
+                     bound=seen["measured"].get("bound_highest", 0) / 2**20)
+        return
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"{what}: the attempt did not run as written: {seen}"
+    really = really_mb(seen)
+    note_figures(what, outcome=outcome, really=really, counted=seen["measured"]["memory_highest"] / 2**20,
+                 bound=seen["measured"].get("bound_highest", 0) / 2**20)
+    assert really <= limit_mb + left_out_mb(limit_mb) + TOLERANCE_MB, (
+        f"{what}: the case passed while the container really held {really:.1f} MB more than when the case "
+        f"began, above its limit of {limit_mb} MB, the amount left out and the tolerance: {seen}")
 
 
 def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:

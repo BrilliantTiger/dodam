@@ -663,7 +663,7 @@ name = "a case whose memory the judge cannot read"
 tries = "after its test passes, or after its test fails, a case's memory cannot be read so as to say on which side of a line it lies"
 must = "such a case never passes: when its test would pass it is unmeasured, and the tool that checks prepared solutions reads it as a fault of measuring; when its test fails, the failure stands"
 tests = [
-    "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured",
+    "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured",
     "tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution",
 ]
 

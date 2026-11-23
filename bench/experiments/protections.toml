@@ -1169,7 +1169,7 @@ put = '''            self._lowest = _lowest(self._lowest, self._figure(held_befo
 [[protection]]
 what = "The step that cleans up after a case changes no outcome"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[broken-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]"]
 [[protection.change]]
 find = '''            self._broken.append(f"{what} ({why})")
 
@@ -1186,7 +1186,7 @@ put = '''            self._broken.append(f"{what} ({why})")
 [[protection]]
 what = "A case that would pass, or be left unjudged, after a reading that could not be taken is unmeasured"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-ordinary]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-security]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-security]"]
 [[protection.change]]
 find = '''                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):'''
 put = '''                if False:'''
@@ -1194,7 +1194,7 @@ put = '''                if False:'''
 [[protection]]
 what = "What the test decided stands: a case whose test failed stays failed"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[broken-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]"]
 [[protection.change]]
 find = '''                if any(n.get("unsettled") for n in mine) and case["outcome"] in ("passed", "skipped"):'''
 put = '''                if any(n.get("unsettled") for n in mine):'''
@@ -1202,7 +1202,7 @@ put = '''                if any(n.get("unsettled") for n in mine):'''
 [[protection]]
 what = "The result names the cases not judged for measuring"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]"]
 [[protection.change]]
 find = '''    report[UNMEASURED] = [f"{c['file']}::{c['name']}" for c in report["tests"] if c["outcome"] == UNMEASURED]'''
 put = '''    report[UNMEASURED] = []'''
@@ -1210,7 +1210,7 @@ put = '''    report[UNMEASURED] = []'''
 [[protection]]
 what = "The reward counts the cases not judged for measuring"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]"]
 [[protection.change]]
 find = '''        "unmeasured": float(sum(c["outcome"] == UNMEASURED for c in cases)),'''
 put = '''        "unmeasured": 0.0,'''
@@ -1218,7 +1218,7 @@ put = '''        "unmeasured": 0.0,'''
 [[protection]]
 what = "In the reward a case not judged for measuring is neither passed nor judged"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]"]
 [[protection.change]]
 find = '''    judged = [c for c in cases if c["outcome"] in ("passed", "failed")]'''
 put = '''    judged = [c for c in cases if c["outcome"] != "skipped"]'''
@@ -1226,7 +1226,7 @@ put = '''    judged = [c for c in cases if c["outcome"] != "skipped"]'''
 [[protection]]
 what = "The tool that checks prepared solutions reads a case not judged for measuring as a fault of measuring"
 file = "dodambench/vet.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_pass_becomes_unmeasured[right-ordinary]", "tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]", "tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution"]
 [[protection.change]]
 find = '''    if unmeasured:
         # the judging is no judgement'''

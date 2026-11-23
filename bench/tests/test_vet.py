@@ -1085,3 +1085,31 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
     details = picture(judges_result(task, "change-1", path == "image")[1], how)
     results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, consistent(details, path == "image"), details)
     assert faults_for_every_solution(results), results
+
+
+def test_the_room_of_a_judging_is_the_smallest_room_between_the_memory_bound_and_the_limit():
+    """The room a judging leaves is the case's memory limit less the most the upper bound of the
+    case's memory reached, over its cases; where no case says it, there is no room to tell."""
+    from dodambench.vet import room_of
+    mb = 2**20
+    details = {"tests": [{"name": "a", "memory_bound_bytes": 100 * mb},
+                         {"name": "b", "memory_bound_bytes": int(110.4 * mb)}, {"name": "c"}]}
+    assert room_of(details, 512) == 401.6
+    assert room_of({"tests": [{"name": "c"}]}, 512) is None
+    assert room_of({"tests": []}, 512) is None
+
+
+def test_the_tool_prints_for_each_language_the_smallest_room_its_prepared_solutions_left(tmp_path, monkeypatch, capsys):
+    """Whoever writes a task sees, for each language, the smallest room between the memory bound and the
+    limit that a prepared solution's judging left. It refuses nothing for it."""
+    import dodambench.vet as tool
+    rooms = {"python": [496.8, 500.1], "go": [None, 401.6]}
+    monkeypatch.setattr(tool, "vet", lambda task, lang, out, **kwargs: [
+        {"step": "build", "solution": f"s{n}", "ok": True, "problems": [], "seconds": 1.0, "room_mb": room}
+        for n, room in enumerate(rooms[lang])])
+    code = tool.main([str(SAMPLE), "--lang", "python",
+                      "--lang", "go", "--out", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "room  python      the smallest room between the memory bound and the limit: 496.8 MB" in out, out
+    assert "room  go          the smallest room between the memory bound and the limit: 401.6 MB" in out, out
