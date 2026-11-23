@@ -89,30 +89,44 @@ EXIT_CODES = {
 
 # --- Inside a coding agent ----------------------------------------------------------------------------
 
-# Names that Claude Code sets in the shells it starts (seen in a session of version 2.1.327), and those of two
-# other coding agents. Orca's names are no reason to refuse: the job runs in a terminal of Orca that holds no
-# coding agent, where the owner sees what runs.
+# Names that Claude Code sets in the shells it starts (seen in a session of version 2.1.327), those of two other
+# coding agents and of Antigravity's own shells (a guess on the safe side), and the names Orca sets only in a
+# terminal where it started an agent (seen in Orca 1.4.266). Orca's other names are no reason to refuse: the job
+# runs in a terminal of Orca that holds no coding agent, where the owner sees what runs.
 ENV_MARK_NAMES = frozenset({"CLAUDECODE", "AI_AGENT", "OPENCODE"})
-ENV_MARK_PREFIXES = ("CLAUDE_", "CODEX_")
-# Coding agents of other companies, by the name of their program, among the parent processes.
+ENV_MARK_PREFIXES = ("CLAUDE_", "CODEX_", "ANTIGRAVITY_", "ORCA_AGENT_LAUNCH")
+# Orca names its own plugin for Claude Code in every terminal (seen in Orca 1.4.266): this name, holding that
+# plugin's folder and nothing else, is Orca's and no reason to refuse.
+ORCA_PLUGIN_NAME = "ORCA_CLAUDE_AGENT_VIEW_PLUGIN_DIR"
+# Coding agents, by the name of their program, among the parent processes: those of other companies, and Google's
+# own CLI, whose shells start nothing either.
 AGENT_PROGRAMS = frozenset(
     {
         "claude", "claude-code", "codex", "opencode", "cursor-agent", "aider", "goose", "amp", "crush",
-        "copilot", "droid", "qwen", "grok", "kimi", "cline", "jcode",
+        "copilot", "droid", "qwen", "grok", "kimi", "cline", "jcode", "agy", "antigravity",
     }
 )
 AGENT_ARGUMENT_MARKS = ("@anthropic-ai/claude-code", "/claude-code/", "@openai/codex", "opencode-ai")
 # A value marks Orca or a coding agent when it holds Orca's name or the name of an agent's program, standing alone
 # (not inside a longer word). The model's process gets no such value.
+# Google's own CLI is the program the job runs: its name does not mark a value.
+VALUE_MARK_WORDS = frozenset({"orca", "claudecode", *AGENT_PROGRAMS} - {"agy", "antigravity"})
 VALUE_MARK_RE = re.compile(
     r"(?i)(?<![a-z0-9])(?:"
-    + "|".join(re.escape(name) for name in sorted({"orca", "claudecode", *AGENT_PROGRAMS}, key=len, reverse=True))
+    + "|".join(re.escape(name) for name in sorted(VALUE_MARK_WORDS, key=len, reverse=True))
     + r")(?![a-z0-9])"
 )
 
 
 def environment_marks(env: dict[str, str]) -> list[str]:
-    return [name for name in sorted(env) if name in ENV_MARK_NAMES or name.startswith(ENV_MARK_PREFIXES)]
+    found = []
+    for name in sorted(env):
+        if name not in ENV_MARK_NAMES and not name.startswith(ENV_MARK_PREFIXES):
+            continue
+        if name == "CLAUDE_CODE_PLUGIN_DIRS" and env.get(ORCA_PLUGIN_NAME) and env[name] == env[ORCA_PLUGIN_NAME]:
+            continue
+        found.append(name)
+    return found
 
 
 def marks(value: str) -> bool:
@@ -155,11 +169,10 @@ def process_table() -> dict[int, tuple[int, str, str]] | None:
 
 
 def _agent_name(program: str, arguments: str) -> str | None:
-    tokens = arguments.split()
-    first = os.path.basename(tokens[0]) if tokens else ""
-    second = os.path.basename(tokens[1]) if len(tokens) > 1 else ""
+    # The program's own name, then every word of its command line: an agent may come after flags, or in a folder
+    # whose name holds spaces.
     own = os.path.basename(program.rstrip("/"))
-    for candidate in (first, own, second):
+    for candidate in (own, *(os.path.basename(token) for token in arguments.split())):
         name = candidate.lstrip("-")
         if name and name.lower() in AGENT_PROGRAMS:
             return name
@@ -702,13 +715,6 @@ def signed_out_environment(work: Path) -> dict[str, str]:
         }
     )
     return env
-
-
-def temporary_folder_marks() -> bool:
-    """Whether the folder for temporary files, where the job makes the folders of a run and whose path the model's
-    environment would carry, marks Orca or a coding agent."""
-    folder = tempfile.gettempdir()
-    return marks(folder) or marks(str(Path(folder).resolve()))
 
 
 def _git(args: list[str], env: dict[str, str], cwd: Path | None = None) -> str:
@@ -1373,6 +1379,10 @@ def _job(
         if work.is_relative_to(ROOT.resolve()) or work.is_relative_to(private.resolve()):
             raise JobError("work_folder")
         env = signed_out_environment(work)
+        if marks(str(work)) or any(marks(value) for value in env.values()):
+            # The folders made for the run lie in the folder for temporary files (its links followed), and agy's
+            # environment names them: when their paths mark Orca or a coding agent, agy does not start.
+            raise JobError("temporary_folder")
         repo, head = make_checkout(settings, item, work, env)
         prompt = build_prompt(settings, kind, item, comments, head, run_label)
         if isinstance(prompt, str):
@@ -1507,8 +1517,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not 0 < args.number < 10**8:
             raise SettingsError("number")
-        if temporary_folder_marks():
-            raise SettingsError("temporary_folder")
         settings = load_settings(args.settings)
         private = prepare_private(args.private or default_private())
         run_id = tell_run(args.tell)

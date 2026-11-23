@@ -230,6 +230,11 @@ def one_round(settings, private: Path, state_path: Path, state: dict[str, object
         if not result.get("ran") and status in ("quota", "day_bound"):
             note("the job was held back by its own bounds; trying again later")
             break
+        if not result.get("ran") and "temporary_folder" in (result.get("reasons") or []):  # type: ignore[operator]
+            # The folder for temporary files marks Orca or a coding agent: no run can start from this terminal.
+            save_state(state_path, state)
+            note("stopping: the folder for temporary files marks Orca or a coding agent (temporary_folder)")
+            return job.EXIT_CODES["settings"]
         print(json.dumps(result), flush=True)
         if status == "quota" and result.get("ran"):
             returns[str(event_id)] = put_back + 1
@@ -290,8 +295,6 @@ def main(argv: list[str] | None = None) -> int:
         note("refused: it runs inside a coding agent (" + ", ".join(refusal) + ")")
         return job.EXIT_CODES["refused"]
     try:
-        if job.temporary_folder_marks():
-            raise job.SettingsError("temporary_folder")
         settings = job.load_settings(args.settings)
         private = job.prepare_private(args.private or job.default_private())
         tell = job.tell_run(args.tell)
