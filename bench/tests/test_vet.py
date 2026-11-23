@@ -308,7 +308,7 @@ def fake_docker(tmp_path, monkeypatch):
 SAMPLE = Path(__file__).resolve().parents[1] / "tasks" / "cli-csv-json"
 
 
-def test_names(task, file: str) -> list[str]:
+def names_of_tests(task, file: str) -> list[str]:
     """The tests a file of the task holds, read here on their own: the functions at its top whose
     names begin with test."""
     import ast
@@ -345,7 +345,7 @@ def judges_result(task, step: str, separated: bool = True) -> tuple[dict, dict]:
     steps = [s.name for s in task.steps]
     run = [t for t in task.tests if steps.index(t.step) <= steps.index(step) and step not in t.superseded_in]
     cases = [{"name": name, "outcome": "passed", "message": "", "file": t.file, "kind": t.kind,
-              "step": t.step, "weakness": t.weakness} for t in run for name in test_names(task, t.file)]
+              "step": t.step, "weakness": t.weakness} for t in run for name in names_of_tests(task, t.file)]
     return (reward_of_cases(cases, True, step, separated),
             {"step": step, "build_ok": True, "separated": separated, "tests": cases})
 
