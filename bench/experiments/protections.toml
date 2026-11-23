@@ -520,6 +520,7 @@ put = '''            pass
 what = "A fault file of another shape is a fault, never a trace of an error"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_fault_file_of_any_shape_is_read_as_a_fault"]
+second_line = "without it, an account of a fault of another shape is an error inside the one place that reads a judging, which is a fault of the judge; nothing of it is read as a result"
 [[protection.change]]
 find = '''if isinstance(said, dict) and isinstance(said.get("judge_fault"), str):'''
 put = '''if True:'''

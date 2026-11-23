@@ -1012,13 +1012,14 @@ def test_a_result_from_before_this_run_is_never_read(tmp_path, monkeypatch, fake
 
 # --- a served task: a test may be parametrized, so its cases are the test's name with what it was given ---
 
+SERVED = Path(__file__).resolve().parents[1] / "tasks" / "web-signup"   # read only; whatever is made goes to tmp_path
+
 @pytest.mark.parametrize("path", ["image", "unseparated"])
-def test_a_served_tasks_cases_may_be_the_parametrized_cases_of_its_tests(tmp_path, monkeypatch, fake_docker,
-                                                                         small_task, path):
-    task = load_task(small_task)
-    details = picture(judges_result(task, "build", path == "image")[1], "a parametrized case of a test")
+def test_a_served_tasks_cases_may_be_the_parametrized_cases_of_its_tests(tmp_path, monkeypatch, fake_docker, path):
+    task = load_task(SERVED)
+    details = picture(judges_result(task, "change-1", path == "image")[1], "a parametrized case of a test")
     results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, consistent(details, path == "image"), details)
-    secure = [r for r in results if r["solution"] == "secure"]
+    secure = [r for r in results if r["step"] == "change-1" and r["solution"] == "secure"]
     assert secure and secure[0]["ok"], results
 
 
@@ -1027,8 +1028,8 @@ def test_a_served_tasks_cases_may_be_the_parametrized_cases_of_its_tests(tmp_pat
                                  "a whole-file entry that passed", "a whole-file entry beside the file's cases",
                                  "a case more, of a file the step does not run"])
 def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path, monkeypatch, fake_docker,
-                                                                        small_task, path, how):
-    task = load_task(small_task)
-    details = picture(judges_result(task, "build", path == "image")[1], how)
+                                                                        path, how):
+    task = load_task(SERVED)
+    details = picture(judges_result(task, "change-1", path == "image")[1], how)
     results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, consistent(details, path == "image"), details)
     assert faults_for_every_solution(results), results
