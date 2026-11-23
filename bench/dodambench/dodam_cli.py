@@ -620,6 +620,8 @@ class Case:
             self._lowest = _lowest(self._lowest, figure)
             taken = figure - self._lowest + records
             self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
+            # how far the parts of the reading the figure was made of moved apart
+            self.measured["moved_most"] = max(self.measured.get("moved_most", 0), now.get("moved", 0))
             runs_out = bool(now["cap"]) and now["taken"] + records > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
             return taken > max_memory or runs_out
 

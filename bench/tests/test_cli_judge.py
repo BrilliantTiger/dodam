@@ -1136,7 +1136,7 @@ class Side:
 
 
 def stand_in(group, held):
-    for name, value in (("memory.current", held["current"]), ("memory.max", 1024 * MB), ("memory.swap.current", 0)):
+    for name, value in (("memory.current", held["current"]), ("memory.max", 1024 * MB), ("memory.swap.current", held["swap"])):
         (group / name).write_text(f"{value}\n")
     (group / "memory.stat").write_text(f"anon {held['current'] - held['file'] - held['files']}\nfile {held['file'] + held['files']}\n"
                                        f"inactive_file {held['file']}\nactive_file 0\nshmem {held['files']}\nslab_reclaimable 0\n")
@@ -1145,7 +1145,7 @@ def stand_in(group, held):
 def test_between():
     group = Path(GROUP)
     group.mkdir()
-    held = {"current": 400 * MB, "file": 100 * MB, "files": FILES * MB}
+    held = {"current": 400 * MB, "file": 100 * MB, "files": FILES * MB, "swap": 0}
     stand_in(group, held)
     reads = {"total": 0}
     real_open = builtins.open
@@ -1186,6 +1186,8 @@ BETWEEN_TWO_READINGS = {
     # a program that keeps reading: 40 MB more of the cache of files each time the judge has read the total,
     # for longer than the judge reads again
     "the cache of files keeps growing while the judge reads": (0, 'held["current"] += 40 * MB; held["file"] += 40 * MB'),
+    # the kernel moves 100 MB of the program's memory out to swap
+    "memory moves out to swap": (0, 'held["current"] -= 100 * MB; held["swap"] += 100 * MB'),
 }
 
 

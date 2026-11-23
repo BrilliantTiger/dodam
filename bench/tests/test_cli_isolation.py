@@ -2487,6 +2487,106 @@ def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_
     assert cases["test_beyond"].get("records_counted_bytes", 0) >= 0 and "records_left_out_bytes" in cases["test_beyond"], cases["test_beyond"]
 
 
+# The same, in a case that begins after earlier activity that nothing gave back: the build left 60,000
+# files and a file of 300 MB, and an earlier case, after the reading from outside that every bound
+# test takes first, read that file into the cache, looked at every one of those files and asked for
+# 300,000 names that are not there.
+LEFT_BEFORE = r"""
+if sys.argv[1:2] == ["leave"]:
+    os.makedirs("/app/left", exist_ok=True)
+    for n in range(60000):
+        with open(f"/app/left/{n:06d}", "w") as f:
+            f.write("x")
+    with open("/app/large.bin", "wb") as f:
+        for _ in range(300):
+            f.write(b"\0" * MB)
+    sys.exit(0)
+if sys.argv[1:2] == ["asks"]:
+    # the cache of the file the build left, the records of its files, and records of names that are not there
+    with open("/app/large.bin", "rb") as f:
+        while f.read(MB):
+            pass
+    for name in os.listdir("/app/left"):
+        os.lstat("/app/left/" + name)
+    for n in range(300000):
+        try:
+            os.lstat(f"/usr/lib/not-there-{n}")
+        except OSError:
+            pass
+    print("asked")
+    sys.exit(0)
+"""
+
+LEFT_BEFORE_TESTS = READING + """
+def keep(name, value):
+    seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+    seen[name] = value
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump(seen, f)
+
+
+def test_start():
+    with case() as c:
+        keep("start", reading("start"))
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_asks():
+    with case() as c:
+        r = c.run(["asks"])
+        keep("asks", {"limit": r.limit, "out": r.out, "measured": c.measured})
+
+
+def hold(aim):
+    with case() as c:
+        while_held = {}
+        after_the_run = read_while_held(c, aim + "-held", while_held)
+        r = c.run(["hold", WAY, aim, LIMIT_MB, LEFT_OUT_MB, FILES_MB])
+        after_the_run()
+        keep(aim, {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
+                   "held": while_held, "measured": c.measured})
+        assert r.exit_code == 0, r
+
+
+def test_within():
+    hold("within")
+
+
+def test_beyond():
+    hold("beyond")
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left(tmp_path):
+    """The growth of the kernel's records during a case is counted from the lowest figure beyond
+    the amount left out, whatever stood when the case began: here the build left 60,000 files and
+    300 MB of cache and an earlier case asked for 300,000 names that are not there, and nothing gave
+    them back. A program that makes and holds memory files, mapped and closed, up to its limit and
+    the amount left out passes and holds no more than that amount and the tolerance beyond the
+    judge's count; one that holds clearly more fails for memory. Records that stood before the case
+    and that a program holds are not in this: they count nowhere, and their line is the cap."""
+    way, limit_mb = "memory files, mapped and closed", 256
+    tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
+        .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + HELD + HOLDS, {"functional/test_hold.py": tests}, {"reading": True},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    within, beyond = seen["within"], seen["beyond"]
+    within["start"] = beyond["start"] = seen["start"]
+    note_figures("what the earlier case left", records_grown=seen["asks"]["measured"].get("records_grown", 0) / 2**20)
+    assert within["limit"] is None and within["exit_code"] == 0, f"a program within its limit and the amount left out failed: {within}"
+    within_the_bound(within, limit_mb, f"after earlier activity: {way}, limit {limit_mb} MB")
+    assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
+    assert outcomes(result)["test_within"] == "passed" and outcomes(result)["test_beyond"] == "failed" and \
+        outcomes(result)["test_after"] == "passed", lost(result, tmp_path / "out")
+
+
 def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:
     """The line every attempt on a case's memory is held to: the case fails for memory, or what
     the container really held beyond the judge's count, read from outside, is no more than the

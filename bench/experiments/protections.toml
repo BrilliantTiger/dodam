@@ -603,8 +603,10 @@ what = "What can be given back and the cases' files are read before and after th
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_a_figure_is_made_of_readings_that_belong_together[the cache of files keeps growing while the judge reads]"]
 [[protection.change]]
-find = '''        reading = (moved, took, current, swapped, min(file_before, file_after), min(records_before, records_after),'''
-put = '''        reading = (moved, took, current, swapped, file_after, records_after,'''
+find = '''min(file_before, file_after),
+                   min(records_before, records_after), min(files_before, files_after))'''
+put = '''file_after,
+                   records_after, files_after)'''
 
 [[protection]]
 what = "A reading whose parts moved apart is read again"

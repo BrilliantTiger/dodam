@@ -563,21 +563,24 @@ def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
         began = time.monotonic()
         file_before, records_before = _given_back(group)
         files_before = outside() if outside is not None else 0
+        swapped_before = _group_number(group, "memory.swap.current") or 0
         current = int((group / "memory.current").read_text())
-        swapped = _group_number(group, "memory.swap.current") or 0
+        swapped_after = _group_number(group, "memory.swap.current") or 0
         file_after, records_after = _given_back(group)
         files_after = outside() if outside is not None else 0
         took = time.monotonic() - began
-        moved = abs(file_after - file_before) + abs(records_after - records_before) + abs(files_after - files_before)
-        reading = (moved, took, current, swapped, min(file_before, file_after), min(records_before, records_after),
-                   max(records_before, records_after), min(files_before, files_after))
+        moved = (abs(file_after - file_before) + abs(records_after - records_before) + abs(files_after - files_before)
+                 + abs(swapped_after - swapped_before))
+        # one value of the records for the figure and for their own count, so that nothing is counted twice
+        reading = (moved, took, current, max(swapped_before, swapped_after), min(file_before, file_after),
+                   min(records_before, records_after), min(files_before, files_after))
         if best is None or (moved, took) < best[:2]:
             best = reading
         if moved <= TOGETHER_BYTES and took <= TOGETHER_SECONDS:
             break
-    moved, took, current, swapped, can_be_given_back, gives_back, records, files = best
+    moved, took, current, swapped, can_be_given_back, records, files = best
     memory_max = _group_number(group, "memory.max") or 0
-    return {"taken": current - can_be_given_back + swapped - gives_back,
+    return {"taken": current - can_be_given_back + swapped - records,
             "all": current, "cap": memory_max + swap_allowed(group) if memory_max else 0, "records": records,
             "files": files, "moved": moved}
 
