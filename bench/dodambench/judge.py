@@ -739,15 +739,47 @@ BUILD_ENDING_SECONDS = 30          # how long the judge waits for a build it has
 ENDING_ROUNDS, ENDING_PAUSE = 500, 0.01   # ending a user's processes: at most so many rounds, each with this pause
 
 
-def tests_in(source: bytes | str) -> int:
-    """How many tests pytest collects from a file of tests that the format checker accepts: the
-    functions at the top of the file whose names begin with test. The checker refuses whatever would
-    make pytest collect another number; a file that is no Python counts none."""
+def names_of_tests(source: bytes | str) -> list[str]:
+    """The tests of a file of tests: the functions at the top of the file whose names begin with test.
+    A file that is no Python holds none."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
-        return 0
-    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test") for node in tree.body)
+        return []
+    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test")]
+
+
+def tests_in(source: bytes | str) -> int:
+    """How many tests pytest collects from a file of tests of a command-line task, which the format
+    checker accepts: one for each of its tests. The checker refuses whatever would make pytest collect
+    another number."""
+    return len(names_of_tests(source))
+
+
+def reward_of(cases: list[dict], build_ok: bool, step: str, separated: bool) -> dict:
+    """The reward of a judging at `step`, from its cases: what the judge writes, and what the tool
+    that checks prepared solutions compares a judging's reward with."""
+    judged = [c for c in cases if c["outcome"] != "skipped"]
+    failed = [c for c in judged if c["outcome"] == "failed"]
+    reward = {"build_ok": 1.0 if build_ok else 0.0}
+    for kind in ("functional", "boundary", "security"):
+        of_kind = [c for c in judged if c["kind"] == kind]
+        passed = sum(c["outcome"] == "passed" for c in of_kind)
+        # A check that could not be judged is not a pass: the rate is over every check of the kind
+        # that was to be run, so an unjudged one lowers it just as a failed one does.
+        asked = sum(c["kind"] == kind for c in cases)
+        reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
+        reward[f"{kind}_judged"] = float(len(of_kind))
+    reward.update({
+        "unjudged": float(len(cases) - len(judged)),
+        "vulns_found": float(sum(c["kind"] == "security" for c in failed)),
+        "regression_broken": float(sum(c["step"] != step for c in failed)),
+        "reward": 1.0 if build_ok and cases and all(c["outcome"] == "passed" for c in cases) else 0.0,
+        # 0 when nothing separated the program from the judge: such a result says nothing about a
+        # program somebody else wrote
+        "separated": 1.0 if separated else 0.0,
+    })
+    return reward
 
 
 def build_seconds(lang_env: dict[str, str]) -> float:
@@ -1673,27 +1705,7 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
             # the runs that made a new high of the container's memory above the case's limit
             report["memory"]["highs_above_the_limit"] = highs
 
-    judged = [c for c in report["tests"] if c["outcome"] != "skipped"]
-    failed = [c for c in judged if c["outcome"] == "failed"]
-    reward = {"build_ok": 1.0 if report["build_ok"] else 0.0}
-    for kind in ("functional", "boundary", "security"):
-        cases = [c for c in judged if c["kind"] == kind]
-        passed = sum(c["outcome"] == "passed" for c in cases)
-        # A check that could not be judged is not a pass: the rate is over every check of the kind
-        # that was to be run, so an unjudged one lowers it just as a failed one does.
-        asked = sum(c["kind"] == kind for c in report["tests"])
-        reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
-        reward[f"{kind}_judged"] = float(len(cases))
-    reward.update({
-        "unjudged": float(len(report["tests"]) - len(judged)),
-        "vulns_found": float(sum(c["kind"] == "security" for c in failed)),
-        "regression_broken": float(sum(c["step"] != step for c in failed)),
-        "reward": 1.0 if report["build_ok"] and report["tests"] and all(
-            c["outcome"] == "passed" for c in report["tests"]) else 0.0,
-        # 0 when nothing separated the program from the judge: such a result says nothing about a
-        # program somebody else wrote
-        "separated": 1.0 if run_as else 0.0,
-    })
+    reward = reward_of(report["tests"], report["build_ok"], step, bool(run_as))
     write_output(out_dir / "details.json", json.dumps(report, indent=1, ensure_ascii=False))
     write_output(out_dir / "reward.json", json.dumps(reward, indent=1))
     return {"reward": reward, "report": report}

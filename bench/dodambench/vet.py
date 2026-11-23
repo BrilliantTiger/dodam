@@ -17,6 +17,7 @@ import math
 import os
 import shlex
 import shutil
+import stat
 import socket
 import subprocess
 import sys
@@ -24,13 +25,13 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from .convert import to_harbor, verifier_env
-from .judge import LEFT_BEHIND, JudgeFault, judge
+from .judge import LEFT_BEHIND, JudgeFault, judge, names_of_tests, reward_of
 from .languages import LANGUAGES, Language
-from .task import (PROCESS_CAP, TEST_KINDS, Task, TaskError, TestFile, cases_mount, container_memory_mb, load_task,
+from .task import (PROCESS_CAP, Task, TaskError, TestFile, cases_mount, container_memory_mb, load_task,
                    materialize, task_problems)
 
 FEATURE_KINDS = ("functional", "boundary")
@@ -56,10 +57,11 @@ class VetError(Exception):
 # --- what a judging left, as the one record the judging code reads ---
 
 OUTCOMES = ("passed", "failed", "skipped")         # every outcome the judge gives a case
-# The parts of the judge's reward, each a number; the tool keeps them as the judge gave them.
-REWARD_KEYS = ("build_ok", *(f"{kind}_{part}" for kind in TEST_KINDS for part in ("pass_rate", "judged")),
-               "unjudged", "vulns_found", "regression_broken", "reward", "separated")
-YES_OR_NO = ("build_ok", "reward", "separated")    # the parts of the reward that are 0 or 1
+REWARD_KEYS = tuple(reward_of([], True, "", True))  # the parts of the judge's reward
+# The most a file a judging left may hold. The largest of 70 results of earlier judgings held 17,130
+# bytes; a case's message is at most 300 characters and the build's log 2,000.
+READ_LIMIT = 2 ** 20
+FAULT_FILE, REWARD_FILE, DETAILS_FILE = "judge-fault.json", "reward.json", "details.json"
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,7 @@ class Judged:
     build_ok: bool
     left_behind: str          # what the program's side left that the judge could not take back; empty when nothing
     cases: tuple[Case, ...]
-    reward: dict              # the judge's reward, kept as the result of the judging
+    reward: dict              # the judge's reward, the one the cases give
 
 
 def _not_of_the_shape(file: str, key: str, what: str) -> JudgeFault:
@@ -90,93 +92,171 @@ def _not_of_the_shape(file: str, key: str, what: str) -> JudgeFault:
                                   "message": f"the judging's result is not of the shape the tool reads: {what}"}))
 
 
-def record_of(reward: object, details: object, tests: Sequence[TestFile], steps: Sequence[str], step: str) -> Judged:
-    """The record of a judging at `step`, from the judge's reward and details as JSON. Whatever does not
-    fit it is a fault of the judge: a part that is missing, of another kind, outside its set of values,
-    or naming another step than the one judged or than the manifest gives its file."""
-    steps = list(steps)
-    if step not in steps:
-        raise _not_of_the_shape("details.json", "step", f"{step} is no step of the task")
-    runs = {t.file: t for t in tests if t.step in steps and steps.index(t.step) <= steps.index(step)
-            and step not in t.superseded_in}
-    if not isinstance(reward, dict) or set(reward) != set(REWARD_KEYS):
-        raise _not_of_the_shape("reward.json", "", f"an object of exactly {', '.join(REWARD_KEYS)}")
-    for key in REWARD_KEYS:
-        value = reward[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise _not_of_the_shape("reward.json", key, "a finite number")
-        if key in YES_OR_NO and value not in (0, 1):
-            raise _not_of_the_shape("reward.json", key, "0 or 1")
+def _whole_picture(cases: list[dict], test: TestFile, names: list[str], build_ok: bool, left: str, cli: bool) -> bool:
+    """Whether a file's cases are the whole picture the judge gives of it: a case for every test the
+    file holds, each once (on a served task, a test's parametrized cases), or the one entry the judge
+    writes for the whole file, which never passed. On a command-line task the judge writes that entry
+    only where the build failed or the program's side left something, as a case that was not run."""
+    whole = PurePosixPath(test.file).name
+    if len(cases) == 1 and cases[0]["name"] == whole:
+        if cli:
+            return (not build_ok or bool(left)) and cases[0]["outcome"] == ("skipped" if test.kind == "security"
+                                                                            else "failed")
+        return cases[0]["outcome"] != "passed"
+    given = [case["name"] for case in cases]
+    if len(set(given)) != len(given):
+        return False
+    if cli:
+        return sorted(given) == sorted(names)
+    of_test = {name: [g for g in given if g == name or (g.startswith(f"{name}[") and g.endswith("]"))]
+               for name in names}
+    return all(of_test.values()) and sum(len(found) for found in of_test.values()) == len(given)
+
+
+def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[TestFile], step: str,
+              separated: bool, cli: bool) -> Judged:
+    """The record of a judging at `step`, from the judge's reward and details as JSON. `run` is what the
+    judge runs at that step and `tests_dir` the task's own tests, from which the tests of each file
+    are counted. Whatever does not fit is a fault of the judge: a part that is missing, of another kind,
+    outside its set of values or naming another step; a case too few or too many; a reward other than
+    the one the cases give."""
     if not isinstance(details, dict):
-        raise _not_of_the_shape("details.json", "", "an object")
+        raise _not_of_the_shape(DETAILS_FILE, "", "an object")
     if details.get("step") != step:
-        raise _not_of_the_shape("details.json", "step", f"the step judged, {step}")
+        raise _not_of_the_shape(DETAILS_FILE, "step", f"the step judged, {step}")
     if not isinstance(details.get("build_ok"), bool):
-        raise _not_of_the_shape("details.json", "build_ok", "true or false")
+        raise _not_of_the_shape(DETAILS_FILE, "build_ok", "true or false")
+    build_ok = details["build_ok"]
     left = details.get("left_behind", "")
     if "left_behind" in details and not (isinstance(left, str) and left):
-        raise _not_of_the_shape("details.json", "left_behind", "a text that is not empty, where there is one")
+        raise _not_of_the_shape(DETAILS_FILE, "left_behind", "a text that is not empty, where there is one")
     given = details.get("tests")
     if not isinstance(given, list):
-        raise _not_of_the_shape("details.json", "tests", "a list")
-    cases = []
+        raise _not_of_the_shape(DETAILS_FILE, "tests", "a list")
+    files = {t.file: t for t in run}
+    cases: list[Case] = []
+    of_file: dict[str, list[dict]] = {t.file: [] for t in run}
+    left_entries = 0
     for i, case in enumerate(given):
         key = f"tests[{i}]"
         if not isinstance(case, dict):
-            raise _not_of_the_shape("details.json", key, "an object")
+            raise _not_of_the_shape(DETAILS_FILE, key, "an object")
         for name in ("name", "outcome", "file", "kind", "step", "message"):
             if not isinstance(case.get(name), str):
-                raise _not_of_the_shape("details.json", f"{key}.{name}", "a text")
+                raise _not_of_the_shape(DETAILS_FILE, f"{key}.{name}", "a text")
         if "weakness" not in case or not (case["weakness"] is None or isinstance(case["weakness"], str)):
-            raise _not_of_the_shape("details.json", f"{key}.weakness", "a text or null")
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.weakness", "a text or null")
         if not case["name"]:
-            raise _not_of_the_shape("details.json", f"{key}.name", "a text that is not empty")
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.name", "a text that is not empty")
         if case["outcome"] not in OUTCOMES:
-            raise _not_of_the_shape("details.json", f"{key}.outcome", f"one of {', '.join(OUTCOMES)}")
-        own = runs.get(case["file"])
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.outcome", f"one of {', '.join(OUTCOMES)}")
+        own = files.get(case["file"])
         if own is None:
-            raise _not_of_the_shape("details.json", f"{key}.file", f"a file of tests the judge runs at step {step}")
-        # an entry for what the program's side left has a kind of its own, the step judged and no weakness
-        expected = (LEFT_BEHIND, step, None) if case["kind"] == LEFT_BEHIND else (own.kind, own.step, own.weakness)
-        for name, value in zip(("kind", "step", "weakness"), expected):
-            if case[name] != value:
-                raise _not_of_the_shape("details.json", f"{key}.{name}", f"{value} for {case['file']}")
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.file", f"a file of tests the judge runs at step {step}")
+        if case["kind"] == LEFT_BEHIND:
+            # the judge writes this entry once, only where the result says what was left: failed with
+            # that reason, named after its file, of the step judged and without a weakness
+            if (not left or left_entries or case["outcome"] != "failed" or case["message"] != left
+                    or case["name"] != PurePosixPath(case["file"]).name or case["step"] != step
+                    or case["weakness"] is not None):
+                raise _not_of_the_shape(DETAILS_FILE, key, "an entry for what was left behind only as the judge "
+                                                           "writes it, once, where the result says what was left")
+            left_entries += 1
+        else:
+            for name, value in (("kind", own.kind), ("step", own.step), ("weakness", own.weakness)):
+                if case[name] != value:
+                    raise _not_of_the_shape(DETAILS_FILE, f"{key}.{name}", f"{value} for {case['file']}")
+            of_file[case["file"]].append(case)
         cases.append(Case(**{name: case[name] for name in ("name", "outcome", "file", "kind", "step", "weakness",
                                                            "message")}))
-    missing = sorted(set(runs) - {case.file for case in cases})
-    if missing:
-        raise _not_of_the_shape("details.json", "tests", f"cases of every file of tests the judge runs at step "
-                                                         f"{step}, and none of {', '.join(missing)}")
-    return Judged(step=step, build_ok=details["build_ok"], left_behind=left, cases=tuple(cases), reward=dict(reward))
+    for test in run:
+        # the count comes from the task's own file of tests, not from what the judging left
+        names = names_of_tests((tests_dir / test.file).read_bytes())
+        if not _whole_picture(of_file[test.file], test, names, build_ok, left, cli):
+            raise _not_of_the_shape(DETAILS_FILE, "tests", f"a case for every test of {test.file}, each once, or "
+                                                           f"the one entry the judge writes for the whole file")
+    expected = reward_of([{"outcome": c.outcome, "kind": c.kind, "step": c.step} for c in cases], build_ok, step,
+                         separated)
+    if not isinstance(reward, dict) or set(reward) != set(expected):
+        raise _not_of_the_shape(REWARD_FILE, "", f"an object of exactly {', '.join(expected)}")
+    for key, value in expected.items():
+        if isinstance(reward[key], bool) or not isinstance(reward[key], (int, float)):
+            raise _not_of_the_shape(REWARD_FILE, key, "a number")
+        if reward[key] != value:
+            raise _not_of_the_shape(REWARD_FILE, key, f"{value}, what the cases give")
+    return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward))
 
 
-def _read_json(path: Path):
-    """A file a judging left, as JSON; None when it is not JSON, or nested too deep for this Python to read."""
+def _present(folder: int, name: str) -> bool:
+    """Whether anything at all, a link as well, stands at `name` in the folder."""
     try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        os.lstat(name, dir_fd=folder)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _read_json(folder: int, name: str):
+    """A file a judging left directly in the folder, as JSON; None when it is no plain file of one name
+    of at most READ_LIMIT bytes, not UTF-8, not JSON, nested too deep for this Python to read, or
+    holds a text that is no Unicode. A link is never followed and a pipe never waited on."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    except OSError:
+        return None
+    try:
+        found = os.fstat(fd)
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+            return None
+        if found.st_size > READ_LIMIT:
+            return None
+        raw = b""
+        while len(raw) <= found.st_size:
+            more = os.read(fd, found.st_size + 1 - len(raw))
+            if not more:
+                break
+            raw += more
+        loaded = json.loads(raw.decode("utf-8"))
+        # half of a pair of surrogates is no text: what holds one is no JSON the tool takes
+        json.dumps(loaded, ensure_ascii=False).encode("utf-8")
+        return loaded
     except (ValueError, RecursionError):
         return None
+    finally:
+        os.close(fd)
 
 
-def read_judging(out_dir: Path, task: Task, step: str, ended: int | None = 0, timeout: float | None = None) -> Judged:
-    """The one place the tool reads what a judging left in out_dir: the judge's account of a fault, or
-    its result turned into the record the judging code reads. A judging that did not end well, left
-    no result, or left one that cannot be turned into the record is a fault of the judge, never a result."""
-    fault = out_dir / "judge-fault.json"
-    if fault.is_file():
-        said = _read_json(fault)
-        if isinstance(said, dict) and isinstance(said.get("judge_fault"), str):
-            raise JudgeFault(said["judge_fault"])
-        raise JudgeFault(json.dumps({"severity": "error", "file": "judge-fault.json", "key": "",
-                                     "message": "the judge's account of a fault has another shape"}))
-    results = (out_dir / "reward.json", out_dir / "details.json")
-    missing = not all(path.is_file() for path in results)
-    if ended != 0 or missing:
-        how = (f"the container did not end within {timeout:g} seconds" if ended is None
-               else f"the container ended with exit code {ended}" if ended != 0 else "the judging ended")
-        said = how + (" and left no result" if missing else ", so what it left is no result")
-        raise JudgeFault(json.dumps({"severity": "error", "file": "container", "key": "ended", "message": said}))
-    return record_of(_read_json(results[0]), _read_json(results[1]), task.tests, [s.name for s in task.steps], step)
+def read_judging(out_dir: Path, task: Task, step: str, ended: int | None = 0, timeout: float | None = None,
+                 separated: bool = True) -> Judged:
+    """The one place the tool reads what a judging left in out_dir, the folder it made empty for this
+    judging: the judge's account of a fault, or its result turned into the record the judging code
+    reads. It is total: for anything it finds it gives the record or a fault of the judge, never a
+    result otherwise, and any error inside it is such a fault."""
+    try:
+        folder = os.open(out_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if _present(folder, FAULT_FILE):
+                said = _read_json(folder, FAULT_FILE)
+                if isinstance(said, dict) and isinstance(said.get("judge_fault"), str):
+                    raise JudgeFault(said["judge_fault"])
+                raise JudgeFault(json.dumps({"severity": "error", "file": FAULT_FILE, "key": "",
+                                             "message": "the judge's account of a fault has another shape"}))
+            missing = not (_present(folder, REWARD_FILE) and _present(folder, DETAILS_FILE))
+            if ended != 0 or missing:
+                how = (f"the container did not end within {timeout:g} seconds" if ended is None
+                       else f"the container ended with exit code {ended}" if ended != 0 else "the judging ended")
+                said = how + (" and left no result" if missing else ", so what it left is no result")
+                raise JudgeFault(json.dumps({"severity": "error", "file": "container", "key": "ended",
+                                             "message": said}))
+            return record_of(_read_json(folder, REWARD_FILE), _read_json(folder, DETAILS_FILE), task.root / "tests",
+                             task.tests_for(step), step, separated, task.meta.get("interface") == "cli")
+        finally:
+            os.close(folder)
+    except JudgeFault:
+        raise
+    except Exception as exc:
+        raise JudgeFault(json.dumps({"severity": "error", "file": "result", "key": "",
+                                     "message": f"the judging's result could not be read: {type(exc).__name__}"}))
 
 
 def _files(cases: Sequence[Case]) -> str:
@@ -371,7 +451,7 @@ def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Pat
         subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out_dir)], capture_output=True)
     finally:
         subprocess.run(["docker", "rm", "--force", name], capture_output=True)
-    return read_judging(out_dir, task, step, ended, timeout)
+    return read_judging(out_dir, task, step, ended, timeout, separated=True)
 
 
 def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]:
@@ -463,7 +543,7 @@ def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_
                     judge(tests_dir, app_dir, step.name, place, lang_env=lang_env, extra_env=extra_env,
                           unseparated=True)
                     # what the judge left is read through the one place, as in the image
-                    judged = read_judging(place, task, step.name)
+                    judged = read_judging(place, task, step.name, separated=False)
                 except JudgeFault as exc:
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
                 else:

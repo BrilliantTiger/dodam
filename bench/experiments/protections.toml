@@ -375,7 +375,7 @@ what = "A result without separation says so"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_judging_without_separation_must_be_asked_for_and_marks_its_result"]
 [[protection.change]]
-find = '''"separated": 1.0 if run_as else 0.0,'''
+find = '''"separated": 1.0 if separated else 0.0,'''
 put = '''"separated": 1.0,'''
 
 [[protection]]
@@ -558,6 +558,7 @@ put = '''        if False:
 what = "Every case of a judging names a file of tests the judge runs at the step judged"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+second_line = "without it, a case of a file the step does not run finds no file of the step to be compared with, which is an error inside the one place and so a fault of the judge; and the files the step runs no longer hold the whole picture"
 [[protection.change]]
 find = '''        if own is None:
 '''
@@ -575,16 +576,6 @@ put = '''            if False:
 '''
 
 [[protection]]
-what = "What a judging left holds cases of every file of tests the judge runs at the step"
-file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
-[[protection.change]]
-find = '''    missing = sorted(set(runs) - {case.file for case in cases})
-'''
-put = '''    missing = []
-'''
-
-[[protection]]
 what = "The texts of a case of a judging are texts"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
@@ -598,38 +589,9 @@ put = '''            if False:
 what = "Every case of a judging says its weakness, or that it has none"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+second_line = "without it, a case that says nothing of its weakness is an error inside the one place, which is a fault of the judge, and a weakness of another kind differs from the one the manifest gives its file, which is refused there"
 [[protection.change]]
 find = '''        if "weakness" not in case or not (case["weakness"] is None or isinstance(case["weakness"], str)):
-'''
-put = '''        if False:
-'''
-
-[[protection]]
-what = "The reward of a judging holds exactly the judge's parts"
-file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
-[[protection.change]]
-find = '''    if not isinstance(reward, dict) or set(reward) != set(REWARD_KEYS):
-'''
-put = '''    if not isinstance(reward, dict):
-'''
-
-[[protection]]
-what = "Every part of the reward of a judging is a finite number"
-file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
-[[protection.change]]
-find = '''        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-'''
-put = '''        if False:
-'''
-
-[[protection]]
-what = "The parts of the reward of a judging that say yes or no are 0 or 1"
-file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
-[[protection.change]]
-find = '''        if key in YES_OR_NO and value not in (0, 1):
 '''
 put = '''        if False:
 '''
@@ -645,9 +607,173 @@ put = '''    if False:
 '''
 
 [[protection]]
+what = "The reward of a judging holds exactly the judge's parts"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''    if not isinstance(reward, dict) or set(reward) != set(expected):
+'''
+put = '''    if not isinstance(reward, dict):
+'''
+
+[[protection]]
+what = "Every part of the reward of a judging is a number, never true, false or a text"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
+[[protection.change]]
+find = '''        if isinstance(reward[key], bool) or not isinstance(reward[key], (int, float)):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "The reward of a judging is the one its cases give"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_reward_that_differs_from_what_the_cases_give_is_a_fault"]
+[[protection.change]]
+find = '''        if reward[key] != value:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "An entry for what was left behind is only the one the judge writes"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_an_entry_for_what_was_left_behind_is_only_the_one_the_judge_writes"]
+[[protection.change]]
+find = '''            if (not left or left_entries or case["outcome"] != "failed" or case["message"] != left
+'''
+put = '''            if False and (not left or left_entries or case["outcome"] != "failed" or case["message"] != left
+'''
+
+[[protection]]
+what = "The cases of each file a step runs are the whole picture the judge gives of it"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_that_is_not_the_whole_picture_is_a_fault"]
+[[protection.change]]
+find = '''        if not _whole_picture(of_file[test.file], test, names, build_ok, left, cli):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "On a command-line task the judge's entry for a whole file stands only where the build failed or something was left, as a case not run"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_that_is_not_the_whole_picture_is_a_fault"]
+[[protection.change]]
+find = '''            return (not build_ok or bool(left)) and cases[0]["outcome"] == ('''
+put = '''            return cases[0]["outcome"] != "passed" and ('''
+
+[[protection]]
+what = "On a command-line task a file's cases are exactly its tests"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_that_is_not_the_whole_picture_is_a_fault"]
+[[protection.change]]
+find = '''        return sorted(given) == sorted(names)
+'''
+put = '''        return True
+'''
+
+[[protection]]
+what = "On a served task every test of a file has a case and every case is one of a test of the file"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_that_is_not_the_whole_picture_is_a_fault", "tests/test_vet.py::test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault"]
+[[protection.change]]
+find = '''    return all(of_test.values()) and sum(len(found) for found in of_test.values()) == len(given)
+'''
+put = '''    return True
+'''
+
+[[protection]]
+what = "A case of a judging stands once"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault"]
+[[protection.change]]
+find = '''    if len(set(given)) != len(given):
+        return False
+'''
+put = '''    if False:
+        return False
+'''
+
+[[protection]]
+what = "What a judging left is never read through a link"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+[[protection.change]]
+find = '''        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+'''
+put = '''        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK, dir_fd=folder)
+'''
+
+[[protection]]
+what = "A file a judging left has one name, so no file of another judging is read as it"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+[[protection.change]]
+find = '''        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+'''
+put = '''        if not stat.S_ISREG(found.st_mode):
+'''
+
+[[protection]]
+what = "A file a judging left larger than the bound is a fault"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+[[protection.change]]
+find = '''        if found.st_size > READ_LIMIT:
+            return None
+'''
+put = '''        if False:
+            return None
+'''
+
+[[protection]]
+what = "Bytes of a judging's files that are no UTF-8 are a fault"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+[[protection.change]]
+find = '''        loaded = json.loads(raw.decode("utf-8"))
+'''
+put = '''        loaded = json.loads(raw.decode("utf-8", errors="replace"))
+'''
+
+[[protection]]
+what = "A text of a judging's files that is no Unicode is a fault"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+[[protection.change]]
+find = '''        json.dumps(loaded, ensure_ascii=False).encode("utf-8")
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "Any error inside the one place that reads a judging is a fault of the judge"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_an_error_inside_the_one_place_is_a_fault"]
+[[protection.change]]
+find = '''    except Exception as exc:
+        raise JudgeFault(json.dumps({"severity": "error", "file": "result",'''
+put = '''    except ZeroDivisionError as exc:
+        raise JudgeFault(json.dumps({"severity": "error", "file": "result",'''
+
+[[protection]]
+what = "What a judging left is read only from plain files"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_one_place_gives_a_record_or_a_fault_for_anything_a_judging_leaves"]
+second_line = "a folder has more than one name and is refused for that; a pipe is opened without waiting and gives no bytes, and a device holds 0 bytes by its size, so at most one byte is read: neither is JSON, and the result is a fault of the judge"
+[[protection.change]]
+find = '''        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+'''
+put = '''        if found.st_nlink != 1:
+'''
+
+[[protection]]
 what = "A file a judging left that is nested too deep to read is a fault"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_file_nested_too_deep_to_read_is_a_fault[details.json]"]
+second_line = "the one place turns any error inside it into a fault of the judge, so the error of reading a file nested too deep becomes one there. Without both this and that, the test fails on Python 3.13 and on 3.14: it nests half a million deep, which stays within the bound of what is read"
 [[protection.change]]
 find = '''    except (ValueError, RecursionError):
         return None'''
@@ -1930,8 +2056,8 @@ what = "The judge and the format checker count a file's tests as pytest collects
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_the_judge_counts_a_files_tests_as_pytest_collects_them", "tests/test_cli_test_code.py::test_the_checker_counts_what_pytest_collects"]
 [[protection.change]]
-find = '''    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test") for node in tree.body)'''
-put = '''    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test_") for node in tree.body)'''
+find = '''    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test")]'''
+put = '''    return [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")]'''
 
 [[protection]]
 what = "A file of tests whose cases are not as many as the judge counted is the judge's fault"
