@@ -125,6 +125,12 @@ LEARNS_SOMETHING = {
     "a method of the case that gives a path, from a function": (
         "def look():\n    with case() as c:\n        (lambda: c.sparse)()('y', 1)\n"),
     "a way of a path that copies a file": "def look(q):\n    return q.copy\n",
+    "a folder of the case given to the case's symlink": (
+        "def look():\n    with case() as c:\n        c.symlink('x', c.outside)\n"),
+    "a folder of the case given to a symlink that is not the case's": (
+        "class Holder:\n    def symlink(self, p):\n        return p\n\n\ndef look():\n    h = Holder()\n"
+        "    with case() as c:\n        h.symlink(c.work)\n"),
+    "the case runner's name bound again": "def case():\n    return 1\n",
     "a way of a path that asks about a file": "def look(q):\n    return q.group\n",
     "a path a method of the case returns, made a string": (
         "def look():\n    with case() as c:\n        return str(c.write('a', 'b'))\n"),
@@ -167,6 +173,10 @@ MULTIPLIES = {
                                       "            c.run([])\n"),
     "a test taken away": "del test_upper\n",
     "a test name made global": "def bind():\n    global test_late\n    test_late = bind\n",
+    "a function with type parameters": "def f[T]():\n    return 1\n",
+    "a test with type parameters": "def test_generic[T]():\n    with case() as c:\n        c.run([])\n",
+    "a class with type parameters": "class Box[T]:\n    pass\n",
+    "a type alias": "type Alias = int\n",
 }
 
 
@@ -241,7 +251,14 @@ def test_every_python_file_of_the_tests_is_held_to_the_same_rules(cli_task_dir):
                                  "tests/setup.cfg", "tests/lib/fast.so", "tests/functional/__pycache__/x.pyc",
                                  "tests/lib/sitecustomize.py", "tests/lib/json.py", "tests/functional/dodam_cli.py",
                                  "tests/lib/anyio.py", "tests/lib/httpx.py", "tests/lib/pluggy.py",
-                                 "tests/lib/annotationlib.py", "tests/lib/compression.py", "tests/lib/telnetlib.py"])
+                                 "tests/lib/annotationlib.py", "tests/lib/compression.py", "tests/lib/telnetlib.py",
+                                 "tests/functional/judge.py", "tests/functional/dodam_cli/__init__.py",
+                                 "tests/functional/pytest/__main__.py", "tests/functional/json/x.txt",
+                                 "tests/lib/helpers/__init__.py", "tests/README.md", "tests/data/x.json",
+                                 "tests/functional/sub/test_x.py", "tests/lib/sub/x.py", "tests/functional/notes.txt",
+                                 "tests/lib/data.json", "tests/lib/Dodam_Cli.py", "tests/lib/JSON.py", "tests/lib/task.py",
+                                 "tests/lib/pip.py", "tests/lib/typing_extensions.py", "tests/lib/_private.py",
+                                 "tests/lib/test_helper.py", "tests/lib/pytest_helper.py"])
 def test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused(cli_task_dir, rel):
     """pytest runs a conftest.py and obeys its settings files without a test asking for them, and
     Python loads compiled files and files named like its own modules in their place."""
@@ -339,6 +356,11 @@ def test_a_test_imports_from_a_helper_only_what_the_helper_defines(cli_task_dir)
     for name in ("Path", "sys", "json"):
         assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), name
     assert with_added(cli_task_dir, TEST, head + "from paths import VALUE  # noqa: E402\n") == []
+    # what a helper hands out is reached by the same lists: a module handed out gives no more than importing it
+    write(cli_task_dir, "tests/lib/paths.py", "import json\nimport sys\nfrom pathlib import Path\n\n"
+          + PATH_LINE + "VALUE = json\n")
+    assert with_added(cli_task_dir, TEST, head + "from paths import VALUE  # noqa: E402\n\nX = VALUE.dumps(1)\n") == []
+    assert with_added(cli_task_dir, TEST, head + "from paths import VALUE  # noqa: E402\n\nX = VALUE.codecs\n")
     # an annotation without a value binds nothing, and a name the helper imported stays the imported one
     for line in ("Path: int\n", "sys: int\n", "Path: int = 1\n", "json = 1\n"):
         name = line.split(":")[0].split("=")[0].strip()
@@ -408,3 +430,125 @@ def test_from_what_a_test_may_import_and_reach_no_module_or_dangerous_function_i
         reached += level
     bad = [expr for expr, obj in reached if type(obj).__name__ == "module" or any(obj is d for d in DANGEROUS)]
     assert not bad, bad[:20]
+
+
+# The kinds of Python's syntax a test or a helper may hold, as the document lists them; every other kind
+# is refused. Kinds that no source code makes are placed apart.
+ALLOWED_SYNTAX = {
+    "Module", "FunctionDef", "ClassDef", "Return", "Assign", "AugAssign", "AnnAssign", "For", "While", "If",
+    "With", "Raise", "Try", "Assert", "Import", "ImportFrom", "Expr", "Pass", "Break", "Continue",
+    "BoolOp", "BinOp", "UnaryOp", "Lambda", "IfExp", "Dict", "Set", "ListComp", "SetComp", "DictComp",
+    "GeneratorExp", "Compare", "Call", "FormattedValue", "JoinedStr", "Constant", "Attribute", "Subscript",
+    "Starred", "Name", "List", "Tuple", "Slice", "Load", "Store", "And", "Or", "Add", "Sub", "Mult", "Div",
+    "Mod", "Pow", "LShift", "RShift", "BitOr", "BitXor", "BitAnd", "FloorDiv", "Invert", "Not", "UAdd", "USub",
+    "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn", "comprehension", "ExceptHandler",
+    "arguments", "arg", "keyword", "alias", "withitem",
+}
+NO_SOURCE = {"mod", "stmt", "expr", "expr_context", "boolop", "operator", "unaryop", "cmpop", "excepthandler",
+             "pattern", "type_ignore", "type_param", "slice", "Interactive", "Expression", "FunctionType",
+             "TypeIgnore", "AugLoad", "AugStore", "ExtSlice", "Index", "Param", "Suite", "Num", "Str", "Bytes",
+             "NameConstant", "Ellipsis"}
+REFUSED_SYNTAX = {
+    "AsyncFunctionDef": "async def f():\n    pass\n",
+    "AsyncFor": "async def f(y):\n    async for x in y:\n        pass\n",
+    "AsyncWith": "async def f(y):\n    async with y:\n        pass\n",
+    "Await": "async def f(y):\n    await y\n",
+    "Delete": "X = 1\ndel X\n",
+    "Del": "X = 1\ndel X\n",
+    "Global": "def f():\n    global X\n",
+    "Nonlocal": "def f():\n    x = 1\n\n    def g():\n        nonlocal x\n",
+    "NamedExpr": "X = (y := 1)\n",
+    "Yield": "def f():\n    yield 1\n",
+    "YieldFrom": "def f():\n    yield from []\n",
+    "Match": "match 1:\n    case 1:\n        pass\n",
+    "match_case": "match 1:\n    case 1:\n        pass\n",
+    "MatchValue": "match 1:\n    case 1:\n        pass\n",
+    "MatchAs": "match 1:\n    case x:\n        pass\n",
+    "MatchSingleton": "match 1:\n    case None:\n        pass\n",
+    "MatchSequence": "match 1:\n    case [1]:\n        pass\n",
+    "MatchMapping": "match 1:\n    case {1: 2}:\n        pass\n",
+    "MatchClass": "match 1:\n    case int():\n        pass\n",
+    "MatchStar": "match 1:\n    case [*rest]:\n        pass\n",
+    "MatchOr": "match 1:\n    case 1 | 2:\n        pass\n",
+    "TryStar": "try:\n    pass\nexcept* ValueError:\n    pass\n",
+    "TypeAlias": "type A = int\n",
+    "TypeVar": "def f[T]():\n    pass\n",
+    "ParamSpec": "def f[**P]():\n    pass\n",
+    "TypeVarTuple": "def f[*Ts]():\n    pass\n",
+    "TemplateStr": "X = t'x'\n",
+    "Interpolation": "X = t'{1}'\n",
+    "MatMult": "X = [] @ []\n",
+}
+EVERY_ALLOWED_KIND = """
+import json
+
+
+class Kind:
+    pass
+
+
+def every_kind(values):
+    total = 0
+    for v in values:
+        if v is None or v is not 1 and not v:
+            continue
+        total += v % 3 // 1 ** 2 << 1 >> 1 | 1 ^ 2 & 3
+        total = total - -v + +v * 2 / 1
+    while total > 100:
+        total -= 1
+        break
+    try:
+        assert total >= 0
+    except ValueError as error:
+        raise ValueError("x") from error
+    data = {"a": [1, 2][0:1], "b": (1, 2), "c": {1, 2}}
+    picked = [x for x in values if x in data and x not in data]
+    seen = {x for x in values}
+    keyed = {x: x for x in values}
+    lazy = sum(x for x in values)
+    pick = (lambda y: y)(1) if total < 5 or total <= 6 else ~1
+    note: int = 1
+    words = f"{total!r:>4}" + str(len(picked)) + str(seen) + str(keyed) + str(lazy) + str(pick)
+    first, *rest = values
+    with case() as c:
+        c.run([words, *rest], stdin=str(note))
+    return total != 0 and total == first
+"""
+
+
+def _syntax_kinds() -> set[str]:
+    import ast as ast_module
+
+    def below(cls):
+        found = set()
+        for sub in cls.__subclasses__():
+            found.add(sub)
+            found |= below(sub)
+        return found
+    return {cls.__name__ for cls in below(ast_module.AST) if cls.__module__ in ("ast", "_ast")}
+
+
+def test_every_kind_of_syntax_of_this_python_is_allowed_or_refused():
+    """A kind of syntax that a later Python adds is placed here, or this test fails."""
+    unplaced = _syntax_kinds() - ALLOWED_SYNTAX - set(REFUSED_SYNTAX) - NO_SOURCE
+    assert not unplaced, sorted(unplaced)
+
+
+@pytest.mark.parametrize("kind", sorted(REFUSED_SYNTAX))
+def test_a_kind_of_syntax_off_the_list_is_refused(cli_task_dir, kind):
+    import ast as ast_module
+    code = REFUSED_SYNTAX[kind]
+    try:
+        tree = ast_module.parse(code)
+    except SyntaxError:
+        pytest.skip(f"this Python has no syntax for {kind}")
+    assert kind in {type(n).__name__ for n in ast_module.walk(tree)}, kind
+    assert with_added(cli_task_dir, TEST, code), f"{kind} was accepted"
+
+
+def test_a_file_of_every_allowed_kind_of_syntax_is_accepted(cli_task_dir):
+    import ast as ast_module
+    path = cli_task_dir / TEST
+    text = path.read_text(encoding="utf-8") + "\n\n" + EVERY_ALLOWED_KIND
+    assert {type(n).__name__ for n in ast_module.walk(ast_module.parse(text))} >= ALLOWED_SYNTAX
+    assert with_added(cli_task_dir, TEST, EVERY_ALLOWED_KIND) == []

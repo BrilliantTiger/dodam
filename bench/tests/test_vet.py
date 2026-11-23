@@ -456,3 +456,39 @@ def test_a_run_that_left_some_solutions_unchecked_is_no_success_and_says_how_man
     said = capsys.readouterr().out
     checked = [line for line in said.splitlines() if line.startswith("ok ")]
     assert checked and code != 0 and "not checked" in said and "nothing was checked" not in said, (code, said)
+
+
+def test_a_step_that_judged_no_test_gets_no_judgement():
+    """A step whose report holds no test judged nothing: no solution gets the judgement it was
+    written for there."""
+    empty = {"build_ok": True, "step": "build", "tests": []}
+    for expect, weakness in (("secure", None), ("vulnerable", "path-traversal"), ("broken", None)):
+        problems = judgement_problems(expect, weakness, empty)
+        assert problems and any("no test" in p for p in problems), (expect, problems)
+
+
+@pytest.mark.parametrize("said", ["[]", "null", "\"fault\"", "{"])
+def test_a_fault_file_of_any_shape_is_read_as_a_fault(tmp_path, fake_docker, monkeypatch, said):
+    from dodambench.judge import JudgeFault
+    (fake_docker / "judge-fault.json").write_text(said, encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "3")
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, tmp_path / "out")
+
+
+
+@pytest.mark.parametrize("reward, details", [
+    ("[]", '{"build_ok": true, "step": "build", "tests": []}'),
+    ('{"reward": "high"}', '{"build_ok": true, "step": "build", "tests": []}'),
+    ('{"reward": 1.0}', '{"build_ok": true, "step": "build", "tests": "none"}'),
+    ('{"reward": 1.0}', '{"build_ok": true, "step": "build", "tests": [{"name": "test_a"}]}'),
+    ('{"reward": 1.0}', '[]'),
+])
+def test_a_result_of_another_shape_is_a_fault(tmp_path, fake_docker, monkeypatch, reward, details):
+    """Every file the tool reads is checked for its shape before it is used."""
+    from dodambench.judge import JudgeFault
+    (fake_docker / "reward.json").write_text(reward, encoding="utf-8")
+    (fake_docker / "details.json").write_text(details, encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, tmp_path / "out")

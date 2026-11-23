@@ -385,3 +385,15 @@ def test_an_output_limit_above_the_file_limit_is_refused(cli_task_dir):
         toml.write_text(given.replace("case_output_kb = 64", f"case_output_kb = {output_kb}"), encoding="utf-8")
         said = [p for p in cli_problems(load_task(cli_task_dir)) if p["key"] == "cli.case_output_kb"]
         assert bool(said) == refused, (output_kb, said)
+
+
+
+@pytest.mark.parametrize("given", ["functional/../lib/helper.py", "functional/sub/test_more.py", "functional/helper.py",
+                                   "functional/test_upper.py"])
+def test_a_file_of_tests_is_named_kind_slash_test_name(cli_task_dir, given):
+    """A file of tests is a test file directly in the folder of its kind, and listed once."""
+    write(cli_task_dir, "tests/lib/helper.py", "X = 1\n")
+    with open(cli_task_dir / "tests/manifest.toml", "a", encoding="utf-8") as f:
+        f.write(f'\n[[test]]\nfile = "{given}"\nkind = "functional"\nstep = "build"\n')
+    report = report_of(check(cli_task_dir))
+    assert [p for p in report["problems"] if p["file"] == "tests/manifest.toml" and p["key"] == "test[4].file"], report
