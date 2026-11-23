@@ -1120,6 +1120,7 @@ put = '''            low = taken - moved > max_memory'''
 [[protection]]
 what = "A reading that cannot say on which side of a line the figure lies keeps its case from passing"
 file = "dodambench/dodam_cli.py"
+second_line = "where the count of a reading lies above the limit, or above the stop below the cap, the most the case can have held lies above it as well: it counts every record of the kernel's that stands and is never less than the count, and above the limit or the room it keeps the case from passing. The reading is still counted among those that could not decide"
 tests = ["tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it[every try moved]"]
 [[protection.change]]
 find = '''                return "memory"

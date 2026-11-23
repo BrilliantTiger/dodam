@@ -1411,7 +1411,7 @@ WAYS = {
 SLOWER = {"every try moved, and the program ends first": 0.001}
 # the kernel's records that stand when the case begins, in MB, where a way takes more of them away
 # than the 10 MB that stand otherwise, which lie within the amount left out
-RECORDS_OF = {"cut by time, the records dip": 100, "records fall": 100}
+RECORDS_OF = {"cut by time, the records dip": 100, "records fall": 40}
 
 # Ways in which every try of a reading moved, each taking one part of a try away from the other half,
 # or one try away from the others, from the 20th try on, when the program takes its memory; and what
