@@ -6,9 +6,11 @@ issue of the project, with the public part of the answer posted as one comment.
                                 [--settings FILE] [--private DIR] [--tell RUN_ID]
 
 The watcher (watch.py, beside this file) starts it when the project's account marks an item; it can also
-be started by hand in a plain terminal. It refuses to do anything inside a coding agent or a terminal that
-an agent can type into. It prints one JSON line on standard output, made of fixed words, numbers and the
-path of the private answer, and never any text of the model.
+be started by hand, in a terminal of Orca that holds no coding agent or in a plain terminal. It refuses to do
+anything inside a coding agent. It prints one JSON line on standard output, made of fixed words, numbers and
+the path of the private answer. On standard error it shows each run: its kind, number and title when it
+starts, a line a minute, and how it ended, with the public part once it was posted; never the private part,
+and nothing of an answer that was held.
 
 Exit codes: 0 a comment was posted or the answer was held; 1 an error; 3 refused inside a coding agent; 4 settings,
 private folder, an item that is not the project's own, or no question; 5 another job is running; 6 Google's
@@ -87,10 +89,11 @@ EXIT_CODES = {
 
 # --- Inside a coding agent ----------------------------------------------------------------------------
 
-# Names that Claude Code sets in the shells it starts (seen in a session of version 2.1.327), names that
-# Orca sets in its terminals (an agent can type into those), and those of two other coding agents.
+# Names that Claude Code sets in the shells it starts (seen in a session of version 2.1.327), and those of two
+# other coding agents. Orca's names are no reason to refuse: the job runs in a terminal of Orca that holds no
+# coding agent, where the owner sees what runs.
 ENV_MARK_NAMES = frozenset({"CLAUDECODE", "AI_AGENT", "OPENCODE"})
-ENV_MARK_PREFIXES = ("CLAUDE_", "ORCA_", "CODEX_")
+ENV_MARK_PREFIXES = ("CLAUDE_", "CODEX_")
 # Coding agents of other companies, by the name of their program, among the parent processes.
 AGENT_PROGRAMS = frozenset(
     {
@@ -99,13 +102,22 @@ AGENT_PROGRAMS = frozenset(
     }
 )
 AGENT_ARGUMENT_MARKS = ("@anthropic-ai/claude-code", "/claude-code/", "@openai/codex", "opencode-ai")
+# A value marks Orca or a coding agent when it holds Orca's name or the name of an agent's program, standing alone
+# (not inside a longer word). The model's process gets no such value.
+VALUE_MARK_RE = re.compile(
+    r"(?i)(?<![a-z0-9])(?:"
+    + "|".join(re.escape(name) for name in sorted({"orca", "claudecode", *AGENT_PROGRAMS}, key=len, reverse=True))
+    + r")(?![a-z0-9])"
+)
 
 
 def environment_marks(env: dict[str, str]) -> list[str]:
-    found = [name for name in sorted(env) if name in ENV_MARK_NAMES or name.startswith(ENV_MARK_PREFIXES)]
-    if env.get("TERM_PROGRAM", "").strip().lower() == "orca":
-        found.append("TERM_PROGRAM")
-    return found
+    return [name for name in sorted(env) if name in ENV_MARK_NAMES or name.startswith(ENV_MARK_PREFIXES)]
+
+
+def marks(value: str) -> bool:
+    """Whether a value carries a mark of Orca or of a coding agent."""
+    return VALUE_MARK_RE.search(value) is not None
 
 
 def _run_ps(options: list[str]) -> str | None:
@@ -147,14 +159,9 @@ def _agent_name(program: str, arguments: str) -> str | None:
     first = os.path.basename(tokens[0]) if tokens else ""
     second = os.path.basename(tokens[1]) if len(tokens) > 1 else ""
     own = os.path.basename(program.rstrip("/"))
-    for candidate, may_be_orca in ((first, True), (own, True), (second, False)):
+    for candidate in (first, own, second):
         name = candidate.lstrip("-")
-        low = name.lower()
-        if not low:
-            continue
-        if low in AGENT_PROGRAMS:
-            return name
-        if may_be_orca and (low == "orca" or low.startswith(("orca-", "orca "))):
+        if name and name.lower() in AGENT_PROGRAMS:
             return name
     low_args = arguments.lower()
     for mark in AGENT_ARGUMENT_MARKS:
@@ -669,12 +676,21 @@ class JobError(Exception):
 
 def signed_out_environment(work: Path) -> dict[str, str]:
     """The whole environment of agy and of git in the checkout: a fixed list of names, no token, no key,
-    and empty settings for gh and git so that a gh command or a push started inside is signed out."""
+    and empty settings for gh and git so that a gh command or a push started inside is signed out. Nothing in
+    it marks Orca or a coding agent: PATH loses its entries that do, and another value that does is left out."""
     gh_config = work / "gh-config"
     gh_config.mkdir(mode=0o700)
     git_config = work / "gitconfig"
     git_config.write_bytes(b"")
-    env = {name: os.environ[name] for name in PASSED_THROUGH if name in os.environ}
+    env: dict[str, str] = {}
+    for name in PASSED_THROUGH:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        if name == "PATH":
+            value = os.pathsep.join(entry for entry in value.split(os.pathsep) if not marks(entry))
+        if not marks(value):
+            env[name] = value
     env.update(
         {
             "GH_CONFIG_DIR": str(gh_config),
@@ -686,6 +702,13 @@ def signed_out_environment(work: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def temporary_folder_marks() -> bool:
+    """Whether the folder for temporary files, where the job makes the folders of a run and whose path the model's
+    environment would carry, marks Orca or a coding agent."""
+    folder = tempfile.gettempdir()
+    return marks(folder) or marks(str(Path(folder).resolve()))
 
 
 def _git(args: list[str], env: dict[str, str], cwd: Path | None = None) -> str:
@@ -781,6 +804,17 @@ def gate(settings: Settings, state: dict[str, object]) -> str | None:
 # --- Running agy ----------------------------------------------------------------------------------------
 
 _RUNNING: dict[int, subprocess.Popen[bytes]] = {}
+MINUTE = 60
+
+
+def say(text: str) -> None:
+    """A line for the terminal the job runs in, on standard error."""
+    print(f"gemini job: {text}", file=sys.stderr, flush=True)
+
+
+def shown(text: str) -> str:
+    """Text of the project's account as one line for the terminal, without control characters."""
+    return " ".join(normalize(text).split())
 
 
 def _stop_group(proc: subprocess.Popen[bytes], wait_first: float) -> None:
@@ -839,7 +873,7 @@ class AgyRun:
 
 def run_agy(
     settings: Settings, kind: str, prompt: str, repo: Path, env: dict[str, str], answer: Path,
-    lock: int, on_start: "Callable[[], None]",
+    lock: int, on_start: "Callable[[], None]", on_minute: "Callable[[int], None]",
 ) -> AgyRun:
     program = shutil.which("agy", path=os.environ.get("PATH"))
     if program is None:
@@ -869,18 +903,29 @@ def run_agy(
         )
         _RUNNING[proc.pid] = proc
         timed_out = False
+        began = time.monotonic()
+        told = 0
         try:
-            try:
-                proc.wait(timeout=settings.job_seconds)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _stop_group(proc, wait_first=5)
-            else:
+            while True:
+                run_for = time.monotonic() - began
+                if run_for >= settings.job_seconds:
+                    timed_out = True
+                    _stop_group(proc, wait_first=5)
+                    break
+                minutes = int(run_for // MINUTE)
+                if minutes > told:
+                    told = minutes
+                    on_minute(minutes)
+                try:
+                    proc.wait(timeout=min(settings.job_seconds, (minutes + 1) * MINUTE) - run_for)
+                except subprocess.TimeoutExpired:
+                    continue
                 # Whatever agy started and left behind stops with it.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
+                break
         finally:
             _RUNNING.pop(proc.pid, None)
     size = stdout_path.stat().st_size
@@ -1263,6 +1308,7 @@ def run_job(
         result["status"] = "busy"
         return result
     stopped: SystemExit | None = None
+    posted_public: str | None = None
     try:
         state = load_job_state(private)
         held_back = gate(settings, state)
@@ -1271,7 +1317,7 @@ def run_job(
         elif held_back == "day_bound":
             result.update(status="day_bound", reasons=["day_bound"])
         else:
-            _job(kind, number, settings, private, result, lock, state, last_quota_try)
+            posted_public = _job(kind, number, settings, private, result, lock, state, last_quota_try)
     except SystemExit as exc:
         # Stopped by a signal: agy's group is ended already; the result and the line say so, and the run
         # stays counted in the day.
@@ -1287,6 +1333,15 @@ def run_job(
         result.update(status="error", reasons=[f"internal_{type(exc).__name__}"])
     finally:
         os.close(lock)
+    if result["ran"]:
+        # How the run ended: fixed words, and the public part once it was posted; nothing of a held answer.
+        reasons = ",".join(map(str, result["reasons"])) if result["reasons"] else ""  # type: ignore[call-overload]
+        say(f"{kind} for {number} ended: status {result['status']}, verdict {result['verdict']}"
+            + (f", reasons {reasons}" if reasons else ""))
+        if result["status"] == "posted" and posted_public is not None:
+            say("the public part, as it was posted:")
+            print(posted_public, file=sys.stderr, flush=True)
+            say("end of the public part")
     if result["private"] is not None:
         _write_private(Path(str(result["private"])) / "result.json", json.dumps(result, indent=2) + "\n")
         tell_coordinator(private, result, tell)
@@ -1298,12 +1353,13 @@ def run_job(
 def _job(
     kind: str, number: int, settings: Settings, private: Path, result: dict[str, object], lock: int,
     state: dict[str, object], last_quota_try: bool = False,
-) -> None:
+) -> str | None:
+    """Run the job's steps; returns the public part when it was posted."""
     item = read_item(settings, number)
     reason = eligibility(settings, item)
     if reason is not None:
         result.update(status="not_eligible", reasons=[reason])
-        return
+        return None
     comments = gh_pages(f"repos/{settings.repo}/issues/{number}/comments", settings.max_comment_pages)
     # The run's own label: the attack template asks for it on every container the run starts.
     run_label = new_run_label()
@@ -1311,7 +1367,7 @@ def _job(
         draft = build_prompt(settings, kind, item, comments, "0" * 40, run_label)
         if draft == "no_question":
             result.update(status="no_question", reasons=["no_question"])
-            return
+            return None
     work = Path(tempfile.mkdtemp(prefix="dodam-gemini-")).resolve()
     try:
         if work.is_relative_to(ROOT.resolve()) or work.is_relative_to(private.resolve()):
@@ -1321,7 +1377,7 @@ def _job(
         prompt = build_prompt(settings, kind, item, comments, head, run_label)
         if isinstance(prompt, str):
             result.update(status="no_question" if prompt == "no_question" else "error", reasons=[prompt])
-            return
+            return None
         answer = answer_folder(private, kind, number)
         result["private"] = str(answer)
         _write_private(answer / "prompt.txt", prompt.text)
@@ -1334,9 +1390,13 @@ def _job(
             state["days"] = {day: (count if isinstance(count, int) else 0) + 1}
             save_job_state(private, state)
             result["ran"] = True
+            say(f"{kind} for {number} started: {shown(item.title)}")
+
+        def tell_the_minute(minutes: int) -> None:
+            say(f"{kind} for {number} has run {minutes} minute" + ("" if minutes == 1 else "s"))
 
         try:
-            run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run)
+            run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run, tell_the_minute)
         finally:
             # However the run ended (an answer, its time up, an error, a signal), its containers go.
             if kind == "attack" and result["ran"]:
@@ -1357,7 +1417,7 @@ def _job(
             status, reasons = "error", ["quota", "quota_returns_spent"]
     if response is None:
         result.update(status=status, reasons=reasons)
-        return
+        return None
     _write_private(answer / "answer.md", response)
     public, _private_part = split_answer(response)
     if public is None:
@@ -1371,7 +1431,7 @@ def _job(
             result.update(status="no_public_part", reasons=["no_public_part"])
         else:
             result.update(status="settings", reasons=["account"])
-        return
+        return None
     verdict, verdict_reasons = verdict_of(public)
     result["verdict"] = verdict
     public = normalize(public)
@@ -1379,15 +1439,16 @@ def _job(
     _write_private(answer / "public.md", comment)
     if len(public) > settings.max_public_chars:
         result.update(status="held", reasons=["too_long", *verdict_reasons])
-        return
+        return None
     held = hold_reasons(comment, settings, private)
     if held:
         result.update(status="held", reasons=[*held, *verdict_reasons])
-        return
+        return None
     if not post_as_project(settings, number, comment):
         result.update(status="settings", reasons=["account"])
-        return
+        return None
     result.update(status="posted", reasons=verdict_reasons)
+    return public
 
 
 def hold_reasons(comment: str, settings: Settings, private: Path) -> list[str]:
@@ -1441,11 +1502,13 @@ def main(argv: list[str] | None = None) -> int:
     if refusal:
         result.update(status="refused", reasons=refusal)
         print(json.dumps(result), flush=True)
-        print("gemini job: refused: it runs inside a coding agent or a terminal an agent can type into", file=sys.stderr)
+        print("gemini job: refused: it runs inside a coding agent", file=sys.stderr)
         return EXIT_CODES["refused"]
     try:
         if not 0 < args.number < 10**8:
             raise SettingsError("number")
+        if temporary_folder_marks():
+            raise SettingsError("temporary_folder")
         settings = load_settings(args.settings)
         private = prepare_private(args.private or default_private())
         run_id = tell_run(args.tell)

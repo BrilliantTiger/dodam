@@ -1046,8 +1046,7 @@ def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_
     home.mkdir()
     if case == "marks in every value":
         planted = {"HOME": str(home), "USER": "orca", "LOGNAME": "claude", "SHELL": "/opt/codex/bin/sh",
-                   "LANG": "orca.UTF-8", "LC_ALL": "claude", "LC_CTYPE": "codex", "TERM": "xterm-orca",
-                   "TZ": "Orca/Island"}
+                   "LANG": "orca.UTF-8", "LC_ALL": "claude", "TERM": "xterm-orca", "TZ": "Orca/Island"}
     else:
         tmp = world.root / "orca-tmp"
         tmp.mkdir()
@@ -1070,7 +1069,12 @@ def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_
     for name, value in got.items():
         assert not MARK_RE.search(f"{name}={value}"), f"agy got {name} with a value that marks Orca or an agent"
     # What is passed on is the watcher's own value, PATH without its entries that mark, and nothing that marks.
+    # LC_CTYPE is not compared: a Python program sets it to a locale of its own as it starts when it cannot use
+    # the locale it was given, and the watcher and the stand-in for agy are both Python programs (what they set
+    # marks nothing, as checked above).
     for name in PASSED_THROUGH:
+        if name == "LC_CTYPE":
+            continue
         expected = env.get(name)
         if name == "PATH":
             expected = os.pathsep.join(e for e in env["PATH"].split(os.pathsep) if not MARK_RE.search(e))
@@ -1078,7 +1082,8 @@ def test_agy_gets_the_environment_the_job_builds_and_nothing_that_marks_orca_or_
             expected = None
         assert got.get(name) == expected, f"{name}: {got.get(name)!r}, not {expected!r}"
     kept = json.loads((answer_folder(result) / "agy.json").read_text(encoding="utf-8"))
-    assert set(kept["environment_names"]) == set(got) - {"__CF_USER_TEXT_ENCODING"}
+    own = {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    assert set(kept["environment_names"]) - own == set(got) - own
 
 
 def _start_line(program: str) -> str:
