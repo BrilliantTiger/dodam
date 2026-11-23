@@ -1198,7 +1198,8 @@ for line in sys.stdin:
             time.sleep(600)
         if how.get("no_result"):
             break
-        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {k: v * how.get("turns", 1) for k, v in usage.items()}}), flush=True)
+        final = how.get("result_usage", {k: v * how.get("turns", 1) for k, v in usage.items()})
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": final}), flush=True)
 """
 
 
@@ -1882,10 +1883,17 @@ class Day:
         self.place, self.lock = place, lock_file()
         self.tools, self.relay_module = module("tools"), module("relay")
         self.clock, self.real = 20_000_000.0, 0.0
+        # Which start of the computer this is, and when it began, by the time that passed.
+        self.boot, self.booted_at, self.last_digest_boot = 0, 0.0, 0
+        # The test's own order of every arrival, and the item the next start must choose by it.
+        self.order_of: dict = {}
+        self.expected_item = "not worked out"
         for loaded in (self.tools, self.relay_module.tools):
             monkeypatch.setattr(loaded, "now", lambda: self.clock)
-            # The computer's count of the time since it was started moves with the time that passes, and with no setting of the clock.
-            monkeypatch.setattr(loaded, "ticks", lambda: self.real, raising=False)
+            # The computer's count of the time since it was started moves with the time that passes, and with no setting of
+            # the clock; it begins anew when the computer is started again.
+            monkeypatch.setattr(loaded, "ticks", lambda: self.real - self.booted_at, raising=False)
+            monkeypatch.setattr(loaded, "boot", lambda: f"start {self.boot} of the computer", raising=False)
             # The values of this computer are not looked up for every made-up session.
             monkeypatch.setattr(loaded.guard, "machine_words", lambda known=None: MACHINE)
         self.started, self.charged, self.answered, self.messages, self.vulnerabilities = [], [], [], [], []
@@ -1962,7 +1970,7 @@ class Day:
             outer.messages.append((outer.desk_time, kind))
             outer.messages_passed.append((outer.real, kind))
             if kind == "digest":
-                outer.last_digest_passed = outer.real
+                outer.last_digest_passed, outer.last_digest_boot = outer.real, outer.boot
                 for account, count in record["uncounted"].get("arrivals dropped", {}).items():
                     outer.dropped_carried[account] = outer.dropped_carried.get(account, 0) + count
             outer.said.append(body)
@@ -2212,6 +2220,9 @@ class Day:
         self.handled_places = [p for p in self.relay.kept.entries() if p["number"] == number and p["account"] in self.handles] if number is not None else []
         self.shown = set()
         self.handled_now |= set(self.handles)
+        if number is not None and self.expected_item != "not worked out":
+            # Which item starts follows the order of arrivals alone.
+            assert number == self.expected_item, (number, self.expected_item)
         # No session starts for an item while it is closed.
         assert number not in self.closed_now(), number
         if number is not None:
@@ -2244,27 +2255,47 @@ class Day:
                 self.take(how["during"])
                 self.reach["an arrival during a session"] += 1
                 self.the_relay_agrees()
+            if how.get("again") and number is not None:
+                # A writer the session handles writes again on its item while it runs: on a place in hand.
+                self.take([event(number, self.handles[0], f"again-{self.arrived}")])
+                self.reach["an arrival on a place in hand"] += 1
+                self.the_relay_agrees()
             if how.get("no response"):
                 # Claude Code ended without one response.
                 self.refusals_in_a_row = failures + 1
                 self.reach["a session that gave no response"] += 1
                 return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
+            ending = self.an_ending_before_any_response(how, failures)
+            if ending is not None:
+                return ending
             if number is not None:
                 self.act(number, env, how)
+            ending = self.an_ending_after_a_response(how)
+            if ending is not None:
+                return ending
             if how.get("ended"):
+                self.reach["a session that the relay ended at a bound after it responded"] += 1
                 return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
             if how.get("no result"):
                 self.reach["a session that ended without a result after it responded"] += 1
                 return {"counts": [10, 0, 0, 10], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
+            self.reach["a session that ended by itself"] += 1
             return {"counts": [how.get("units", 20), 0, 0, 0], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
         if rng.random() < 0.04 or self.refusals_in_a_row and rng.random() < 0.6:
             # Sessions in a row that the service refused or that gave no response.
             self.refusals_in_a_row += 1
+            self.reach["a session that the service refused"] += 1
             return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
         failures, self.refusals_in_a_row = self.refusals_in_a_row, 0
         self.pass_time(rng.uniform(1, spending["seconds_per_session"] + spending["grace_seconds"]))
         if number is not None:
-            if rng.random() < 0.08:
+            during = rng.random()
+            if 0.08 <= during < 0.12:
+                # A writer the session handles writes again on its item while it runs: on a place in hand.
+                self.take([event(number, rng.choice(self.handles), f"h{rng.randrange(10**9)}")])
+                self.reach["an arrival on a place in hand"] += 1
+                self.the_relay_agrees()
+            elif during < 0.08:
                 # Something arrives on the item while its session runs, written by an account the session does not handle.
                 self.take([event(number, rng.choice([a for a in (N + 11, N + 12, N + 13, N + 14) if a not in self.handles]), f"d{rng.randrange(10**9)}")])
                 self.reach["an arrival during a session"] += 1
@@ -2282,11 +2313,19 @@ class Day:
         if self.cheap:
             # A day of the second kind: nearly every session ends by itself and costs little.
             how = 0.5 if how > 0.006 else how * 20
+        if how < 0.012:
+            return self.an_ending_before_any_response({"time ran out": True}, failures)
         if how < 0.04:
             # No response at all: counted with the refusals in a row.
             self.refusals_in_a_row = failures + 1
             self.reach["a session that gave no response"] += 1
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
+        if how < 0.044:
+            return self.an_ending_before_any_response({"over the base": True}, failures)
+        if how < 0.048:
+            return self.an_ending_after_a_response({"desk stopped": True})
+        if how < 0.05:
+            return self.an_ending_after_a_response({"killed": True})
         if how < 0.08:
             self.reach["a session that ended without a result after it responded"] += 1
             return {"counts": [1 + rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
@@ -2295,13 +2334,56 @@ class Day:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
         if how < 0.16:
             counts[1] = rng.randrange(150_000)
+            self.reach["a session that the relay ended at a bound after it responded"] += 1
             return {"counts": counts, "ended_by": rng.choice(["its time was up", "too many turns", "it cost more than one session may"]), "refused_sign_in": False, "turns": 3, "reads": 3, "at_a_bound": True}
+        if how < 0.165:
+            return self.an_ending_after_a_response({"dear at the end": True})
+        if how < 0.17:
+            return self.an_ending_after_a_response({"error after a response": True})
         if how < 0.2:
             counts = [0, 0, 0, 0]
         while self.relay_module.units(counts, spending["weights"]) > spending["units_per_session"]:
             # A session that the relay did not end stayed under the bound of one session.
             counts = [count // 2 for count in counts]
+        self.reach["a session that ended by itself"] += 1
         return {"counts": counts, "ended_by": None, "refused_sign_in": False, "turns": 3, "reads": 2}
+
+    def an_ending_before_any_response(self, how: dict, failures: int) -> dict | None:
+        """The ways a session ends before any response, where the desk itself failed: no outside text reached the model."""
+        if how.get("refused"):
+            self.refusals_in_a_row = failures + 1
+            self.reach["a session that the service refused"] += 1
+            return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
+        if how.get("time ran out"):
+            self.refusals_in_a_row = failures + 1
+            self.reach["a session whose time ran out before any response"] += 1
+            return {"counts": None, "ended_by": "its time was up", "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": True}
+        if how.get("over the base"):
+            self.reach["a session whose first response took in more than the bounds count on"] += 1
+            return {"counts": [30_000, 0, 0, 10], "ended_by": "its first response took in more than the bounds count on", "refused_sign_in": False,
+                    "turns": 1, "reads": 0, "at_a_bound": False, "over_the_base": True}  # fmt: skip
+        return None
+
+    def an_ending_after_a_response(self, how: dict) -> dict | None:
+        """The ways a session ends after it responded that the made-up days play besides ending by itself and at a bound."""
+        if how.get("desk stopped"):
+            # The desk is stopped while the session runs, after a response; it is started again before the next start.
+            self.relay.stopping.set()
+            self.reach["a session during which the desk was stopped"] += 1
+            return {"counts": [10, 0, 0, 10], "ended_by": "the desk is stopping", "refused_sign_in": False, "turns": 1, "reads": 1}
+        if how.get("killed"):
+            # The desk is killed while the session runs: its end never comes, and the next start charges what was set aside.
+            self.reach["the desk killed while a session ran"] += 1
+            self.in_session = False
+            raise Stopped()
+        if how.get("dear at the end"):
+            # Its responses stayed under the bound of one session; the count at its end did not.
+            self.reach["a session past the bound of one session only by the count at its end"] += 1
+            return {"counts": [0, 0, 0, 13_000], "ended_by": None, "refused_sign_in": False, "turns": 2, "reads": 1}
+        if how.get("error after a response"):
+            self.reach["a session that ended with Claude Code's report of an error after it responded"] += 1
+            return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 2, "reads": 1, "error": True}
+        return None
 
     def act(self, number: int, env: dict, how: dict | None = None) -> None:
         rng, tools = self.random, self.tools
@@ -2402,6 +2484,7 @@ class Day:
             if isinstance(e, dict) and isinstance(e.get("actor_id"), int) and isinstance(e.get("number"), int) and e["number"] not in closed:
                 self.arrived += 1
                 self.latest[(e["number"], e["actor_id"])] = self.arrived
+                self.order_of[(e["number"], e["actor_id"], e.get("id"))] = self.arrived
                 on_item.setdefault(e["number"], []).append(e["actor_id"])
         for writers in on_item.values():
             again = [n for n in range(len(writers)) if writers[n] in writers[:n] and writers[n - 1] != writers[n]]
@@ -2441,12 +2524,20 @@ class Day:
             # closed it was written: this start takes them out.
             assert self.left_on_closed is not None and self.left_on_closed[0] in closed
             self.reach["an item found closed at a start with arrivals still kept on it, after a stop"] += 1
+        self.expected_item = self.oldest_waiting_item()
         try:
             self.relay.start_one()
         except Stopped:
-            # The desk was stopped in a session's end. When that session closed its item, the next start finds the rest.
+            # The desk was stopped in a session's end, or while a session ran. When that session closed its item, the next
+            # start finds the rest.
+            self.in_session = False
             self.left_on_closed = (self.started[-1][1], before, dict(self.went_with_the_item)) if self.closings > closings else None
             return len(self.started) > started
+        finally:
+            self.expected_item = "not worked out"
+        if self.relay.stopping.is_set():
+            # The desk was stopped while a session ran, and is started again.
+            self.restart()
         if self.left_on_closed is not None:
             # What was kept on the item that closed before the stop went at this start, counted and named once.
             self.went_whole(*self.left_on_closed)
@@ -2461,6 +2552,28 @@ class Day:
         if self.closings > closings:
             self.went_whole(self.started[-1][1], before, self.went_with_the_item)
         return len(self.started) > started
+
+    def oldest_waiting_item(self):
+        """The item the next start must choose, by the test's own order alone: the item of the place whose oldest arrival still
+        waiting came first, among places whose account is not held back and whose item has no bound of its own."""
+        record = self.record()
+        # The record as the relay looks at it: sessions of the last day and the one whose cost is not written; items closed
+        # for their days.
+        record["sessions"] = [x for x in record["sessions"] if self.desk_time - x["t"] < self.DAY or x["charged"] is None]
+        closed_for = self.lock["spending"]["item_closed_days"] * self.DAY
+        record["closed_items"] = {n: at for n, at in record["closed_items"].items() if self.desk_time - at < closed_for}
+        if self.relay.day_bound(record["sessions"]):
+            return None
+        held, closed = self.held_back_by_the_record(), self.closed_now()
+
+        def oldest(place):
+            return min(self.order_of.get((place["number"], place["account"], e.get("id")), 10**12) for e in place["events"])
+
+        for place in sorted(self.relay.kept.entries(), key=oldest):
+            if place["account"] in held or place["number"] in closed or self.relay.item_bound(record, place["number"]):
+                continue
+            return place["number"]
+        return None
 
     def went_whole(self, number: int, before: dict, went: dict) -> None:
         """What was kept on an item that closed went: each arrival counted once for its account, and one line names the item."""
@@ -2573,6 +2686,9 @@ class Day:
                 # The computer's clock alone is set a day or more ahead. A later step puts it right again.
                 self.set_the_clock_ahead(rng.uniform(1.2, 2.5) * self.DAY)
         elif what < 0.95:
+            if what >= 0.94:
+                # The computer itself is started again: its count of time begins anew.
+                self.boot, self.booted_at = self.boot + 1, self.real
             self.restart()
             self.refusals_in_a_row = 0
             self.reach["a restart between two steps"] += 1
@@ -2696,9 +2812,13 @@ class Day:
         waits = (any(not r["digested"] and not r["sent"] for r in record["reports"]) or any(record["uncounted"].values()) or record["closed"]
                  or record["not_delivered"])  # fmt: skip
         hour = self.lock["coordinator"]["digest_seconds"]
-        due = bool(waits) and (self.last_digest_passed is None or self.real - self.last_digest_passed >= hour)
+        # Within one start of the computer, the time that passed since the last digest; after a new start, the time since it,
+        # which is less than what passed.
+        since = None if self.last_digest_passed is None else (self.real - self.last_digest_passed if self.last_digest_boot == self.boot else self.real - self.booted_at)
+        due = bool(waits) and (since is None or since >= hour)
         clock_moved = self.clock != self.desk_time or self.ahead
-        assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time)
+        assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time, self.boot, self.last_digest_boot)
+        self.reach["the computer started again between two digests"] += due and since is not None and self.last_digest_boot != self.boot
         self.reach["a digest due while the computer's clock is not the desk's time"] += due and bool(clock_moved)
 
 
@@ -2727,6 +2847,12 @@ REACHED = [
     "a session that gave no response", "a session that ended without a result after it responded",
     "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
     "a digest due while the computer's clock is not the desk's time",
+    "a session that the service refused", "a session whose time ran out before any response",
+    "a session whose first response took in more than the bounds count on", "a session during which the desk was stopped",
+    "the desk killed while a session ran", "a session that the relay ended at a bound after it responded",
+    "a session past the bound of one session only by the count at its end",
+    "a session that ended with Claude Code's report of an error after it responded", "a session that ended by itself",
+    "an arrival on a place in hand", "the computer started again between two digests",
 ]  # fmt: skip
 
 
@@ -2964,6 +3090,49 @@ def the_opening(day) -> None:
             day.reach["a restart between two steps"] += 1
     assert one(44, 901_000) and (901_000, 44) not in kept_places()
     go(lambda: day.pass_time(DAY + 1))
+    # The other ways a session ends without handling what it was started for. Before any response (the service refused
+    # it, its time ran out, its first response took in more than the bounds count on): the arrival stays kept and nobody
+    # is charged or waits. After a response (the desk stopped while it ran, or killed): the arrival stays kept and its payer
+    # is charged everything that was set aside. Each on a day of its own, so that no bound of a day is met on the way.
+    go(lambda: day.take([ev(902_000, 45, "asks")]))
+    for how in ({"refused": True}, {"time ran out": True}, {"over the base": True}, {"desk stopped": True}, {"killed": True}):
+        day.forced.append(how)
+        go(day.start)
+        assert (902_000, 45) in kept_places(), how
+        if not (how.get("desk stopped") or how.get("killed")):
+            assert 45 not in held(), how
+        if day.relay.starts_nothing:
+            go(day.restart)
+            day.refusals_in_a_row = 0
+        go(lambda: day.pass_time(DAY + 1))
+    day.refusals_in_a_row = 0
+    day.forced.append({})
+    go(day.start)
+    assert (902_000, 45) not in kept_places()
+    # A writer the session handles writes again while it runs; the session then ends with Claude Code's report of an error
+    # after it responded, which ends it as one that ended by itself. What was written meanwhile waits behind older places.
+    go(lambda: day.take([ev(903_000, 46, "first"), ev(904_000, 47, "second")]))
+    day.forced.append({"again": True, "error after a response": True})
+    go(day.start)
+    assert (903_000, 46) in kept_places() and (904_000, 47) in kept_places()
+    day.forced.append({})
+    go(day.start)
+    assert day.started[-1][1] == 904_000
+    # A session whose responses stayed under the bound of one session and whose count at its end did not.
+    go(lambda: day.pass_time(DAY + 1))
+    assert one(48, 905_000, **{"dear at the end": True})
+    go(lambda: day.pass_time(DAY + 1))
+    # The computer is started again, twice, with a digest between: after the second start its new count passes the count
+    # at that digest before the next digest is due, and the hour is counted from the start all the same.
+    def a_new_start_of_the_computer():
+        day.boot, day.booted_at = day.boot + 1, day.real
+        day.restart()
+
+    for _ in range(2):
+        go(a_new_start_of_the_computer)
+        go(lambda: day.relay.desk.note("session_ended", "A line that waits for a digest.", 905_000))
+        go(lambda: day.pass_time(2 * 3600))
+    assert day.reach["the computer started again between two digests"] >= 2
     # Every place is taken, and a newcomer's arrival makes the oldest place of the account that holds the most go. The
     # desk is stopped inside that placing: before what went is counted, and once after. Started again, the next start
     # counts it, once.
@@ -2996,6 +3165,12 @@ RANDOM_STEPS_REACH = {
         "a digest line cut where a number stands",
         "a batch that holds an account's arrivals on one item before and after another account's", "a session that gave no response",
         "a session that ended without a result after it responded", "a digest due while the computer's clock is not the desk's time",
+        "a session that the service refused", "a session whose time ran out before any response",
+        "a session whose first response took in more than the bounds count on", "a session during which the desk was stopped",
+        "the desk killed while a session ran", "a session that the relay ended at a bound after it responded",
+        "a session past the bound of one session only by the count at its end",
+        "a session that ended with Claude Code's report of an error after it responded", "a session that ended by itself",
+        "an arrival on a place in hand", "the computer started again between two digests",
     ],
     True: [
         "an account held back: " + Day.BY_SESSIONS, "an account held back: " + Day.BY_WAIT, "a day closed: sessions in a day",
@@ -3005,6 +3180,8 @@ RANDOM_STEPS_REACH = {
         "an arrival during a session", "a restart between two steps", "the clock set back", "the clock set a day or more ahead and put right again",
         "a digest line cut where a number stands", "a session that gave no response", "a session that ended without a result after it responded",
         "a digest due while the computer's clock is not the desk's time",
+        "a session that the service refused", "a session that ended by itself", "an arrival on a place in hand",
+        "the computer started again between two digests",
     ],
 }  # fmt: skip
 # What the random steps of neither kind reach in every seed: for these the made-up days are the opening's one sequence.
@@ -8151,3 +8328,685 @@ def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_i
     phrase = ("Every job that starts Python with a module from the root of the repository, which is not protected, starts it in isolated "
               "mode, so that nothing placed there runs in place of what the job means to run.")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
+
+
+# =================================================================================================
+# Classes, not cases: what the second attack look found, each as the class it belongs to
+# =================================================================================================
+
+import posixpath  # noqa: E402
+import random  # noqa: E402
+import shlex  # noqa: E402
+
+
+# --- One order of arrivals: which item starts next follows it alone -----------------------------
+
+
+@pytest.mark.parametrize("seed", [20261123, 515, 9091])
+def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monkeypatch, seed):
+    """Over generated days: arrivals in batches, some on the places a running session holds in hand, restarts between
+    steps. The next item is always the one whose oldest arrival that is still waiting came first."""
+    rng = random.Random(seed)
+    running, clock, _ = in_process(place, monkeypatch)
+    relay_of = [running]
+    writers = [1_300_000_000 + n for n in range(5)]
+    waiting: dict[tuple[int, int], list[int]] = {}
+    order = [0]
+    went_against_the_order: list = []
+
+    def arrive(number: int, account: int) -> dict:
+        order[0] += 1
+        on_place = waiting.setdefault((number, account), [])
+        # A place keeps its account's newest ten arrivals on its item.
+        on_place[:] = (on_place + [order[0]])[-10:]
+        return event(number, account, f"g{order[0]}")
+
+    def expected() -> int | None:
+        held = set(relay_of[0].held_back())
+        record = counted(place) if (place.state / "desk-counts.json").exists() else module("tools").empty_record()
+        for _, number, account in sorted((arrived[0], number, account) for (number, account), arrived in waiting.items() if arrived):
+            if account not in held and not relay_of[0].item_bound(record, number):
+                return number
+        return None
+
+    def session(text, env):
+        number = int(env["DESK_ITEM"])
+        if number != wanted[0]:
+            went_against_the_order.append((wanted[0], number, {k: v[:2] for k, v in waiting.items() if v}))
+        handles = json.loads(env["DESK_ACCOUNTS"])
+        handled = {key: list(arrived) for key, arrived in waiting.items() if key[0] == number and key[1] in handles}
+        # While it runs, its writers and others write again, on its item and on others.
+        during = [arrive(rng.choice([number, number, rng.randrange(1, 7)]), rng.choice(writers)) for _ in range(rng.randrange(0, 3))]
+        if during:
+            relay_of[0].take(arrivals(*during))
+        for key, arrived in handled.items():
+            waiting[key] = [n for n in waiting[key] if n not in arrived]
+        clock[0] += 3 * 3600
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
+
+    wanted = [None]
+    running.run_session = session
+    for step in range(45):
+        batch = [arrive(rng.randrange(1, 7), rng.choice(writers)) for _ in range(rng.randrange(1, 4))]
+        relay_of[0].take(arrivals(*batch))
+        if rng.random() < 0.15:
+            # A restart between two steps: what is kept and its order are on disk.
+            relay_of[0] = a_relay(place)
+            relay_of[0].run_session = session
+        if rng.random() < 0.7:
+            wanted[0] = expected()
+            relay_of[0].start_one()
+    assert not went_against_the_order, went_against_the_order[:3]
+
+
+# --- The ways a session ends: what stays kept, who is charged, which item counts -----------------
+
+NO_RESPONSE_AT_THE_TIME_BOUND = {"counts": None, "ended_by": "its time was up", "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": True}
+OVER_THE_BASE = {"counts": [30_000, 0, 0, 10], "ended_by": "its first response took in more than the bounds count on", "refused_sign_in": False,
+                 "turns": 1, "reads": 0, "at_a_bound": False, "over_the_base": True}  # fmt: skip
+
+
+def test_a_session_whose_time_ran_out_before_any_response_is_a_failure_of_the_desk_itself(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    running.run_session = lambda text, env: dict(NO_RESPONSE_AT_THE_TIME_BOUND)
+    writer = 1_300_000_101
+    running.take(arrivals(event(7, writer, "t1")))
+    running.start_one()
+    record = counted(place)
+    (session,) = record["sessions"]
+    # No outside text reached the model before its first response: nobody's doing. The arrival stays kept; no account and
+    # no item is counted or waits; the day is charged everything that was set aside.
+    assert session["let_in"] is False and session["ended"] is False and session["waits"] == [] and session["charged"] == session["reserved"]
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)]
+    assert running.item_bound(record, 7) is None and running.held_back() == [] and record["ended_in_a_row"] == {}
+    assert len(notices(place, "desk_down")) == 1
+    # Three in a row, and nothing more is started until the desk is started again.
+    running.start_one()
+    running.start_one()
+    assert running.starts_nothing and running.start_one() is False
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)]
+
+
+def test_a_session_whose_first_response_took_in_more_than_the_bounds_count_on_charges_no_account(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    running.run_session = lambda text, env: dict(OVER_THE_BASE)
+    writer = 1_300_000_102
+    running.take(arrivals(event(7, writer, "o1")))
+    running.start_one()
+    record = counted(place)
+    (session,) = record["sessions"]
+    # A fault of the desk, not of an outsider: the day is charged, no account and no item.
+    assert session["let_in"] is False and session["charged"] >= session["reserved"]
+    assert module("tools").most_used(record["sessions"]) == [] and running.held_back() == [] and running.item_bound(record, 7) is None
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)] and running.starts_nothing
+
+
+def test_what_a_session_cost_is_the_larger_count_of_each_class_of_tokens(place):
+    # Its responses report one count and its result another; the cost is weighed on the larger count of each class, so that
+    # neither can hide what the other says. Here the result's count of output alone is past the bound of one session.
+    behaviour = {"turns": 1, "usage": {"cache_read_input_tokens": 20_000, "output_tokens": 100},
+                 "result_usage": {"cache_creation_input_tokens": 1_000, "output_tokens": 13_000}}  # fmt: skip
+    watcher(place, [event(7, 1_300_000_103, "c1")])
+    code, _, _ = run_relay(place, behaviour=behaviour)
+    (session,) = counted(place)["sessions"]
+    assert session["counts"] == [0, 1_000, 20_000, 13_000], session
+    assert session["ended"] is True and session["charged"] == session["reserved"]
+
+
+# --- Tools that outlive their session ------------------------------------------------------------
+
+
+def test_the_tool_server_ends_with_its_session_and_waits_for_no_reading_call(place, monkeypatch):
+    tools = module("tools")
+    begun, release = threading.Event(), threading.Event()
+    real = tools.StandIn.item
+
+    def slow(self, number):
+        begun.set()
+        release.wait(60)
+        return real(self, number)
+
+    monkeypatch.setattr(tools.StandIn, "item", slow)
+
+    def lines():
+        yield json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_item", "arguments": {"number": 7}}}) + "\n"
+        begun.wait(10)
+
+    started = time.monotonic()
+    code = tools.serve(lines(), io.StringIO(), place.env(DESK_ITEM="7"))
+    took = time.monotonic() - started
+    release.set()
+    assert code == 0 and took < 10, took
+
+
+def test_a_reading_call_of_an_ended_session_changes_nothing_the_relay_reads_about_the_next(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    first, second = 1_300_000_201, 1_300_000_202
+    place.put(7, written(first, by(second)))
+    place.put(8, written(second))
+    envs = []
+
+    def session(text, env):
+        envs.append(env)
+        if env["DESK_ITEM"] == "7":
+            return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+        # The session for item 8 runs; the reading call of the session for item 7 finishes only now, in that session's tools.
+        late = module("tools").Desk(place.env() | {key: value for key, value in envs[0].items() if key.startswith("DESK_")})
+        late.read_item({"number": 7})
+        # The session for item 8 reads nothing and is ended at a bound.
+        return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 0, "at_a_bound": True}
+
+    running.run_session = session
+    running.take(arrivals(event(7, first, "s1")))
+    running.start_one()
+    clock[0] += 60
+    running.take(arrivals(event(8, second, "s2")))
+    running.start_one()
+    record = counted(place)
+    # Its payer was shown nothing in it, so the payer does not wait, and the item's count toward closing does not move.
+    assert record["sessions"][-1]["waits"] == [] and record["ended_in_a_row"] == {}
+    assert second not in running.held_back()
+
+
+def test_the_start_command_changes_nothing_in_a_state_folder_that_a_running_desk_holds(start, monkeypatch):
+    start.own_sign_in()
+    start.plan()
+    configuration = sorted(start.state.glob("claude-config-*"))
+    assert len(configuration) == 1
+    session_files = {path.name: path.read_bytes() for path in (start.state / "session").iterdir() if path.is_file()}
+    original = start.start.plan
+
+    def as_made_up(coordinator, state, stand_in=None, **_):
+        return original(coordinator=coordinator, state=state, stand_in=start.place.stand_in, environ=start.environ, copy=start.copy, machine=MACHINE)
+
+    monkeypatch.setattr(start.start, "plan", as_made_up)
+    # A desk runs on this state folder: it holds the folder's lock.
+    with open(start.state / "desk.lock", "a+") as held:
+        os.chmod(start.state / "desk.lock", 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for argv in (["--print"], []):
+            code = start.start.main(["--coordinator", "the-coordinator", "--state", str(start.state), "--stand-in", str(start.place.stand_in)] + argv)
+            assert code != 0
+            assert sorted(start.state.glob("claude-config-*")) == configuration and configuration[0].is_dir()
+            assert {path.name: path.read_bytes() for path in (start.state / "session").iterdir() if path.is_file()} == session_files
+
+
+# --- The digest's hour across a restart of the computer, and before every start ------------------
+
+
+def test_after_the_computer_was_started_again_the_hour_counts_from_that_start(place, monkeypatch):
+    tools = module("tools")
+    count, boot = [100_000.0], ["the first start of the computer"]
+    monkeypatch.setattr(tools, "ticks", lambda: count[0])
+    monkeypatch.setattr(tools, "boot", lambda: boot[0], raising=False)
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "First."})
+    assert place.desk().digest() is True
+    # The computer is started again, and its new count has passed the count at the last digest before anything waits.
+    boot[0], count[0] = "the second start of the computer", 100_001.0
+    place.desk(DESK_ITEM="8", DESK_ACCOUNTS=accounts(802)).tell_coordinator({"kind": "spam", "number": 8, "summary": "Second."})
+    # More than an hour passed: the whole of the new count, and the time before it.
+    assert place.desk().digest() is True
+    # Within one start of the computer the hour holds as before.
+    place.desk(DESK_ITEM="9", DESK_ACCOUNTS=accounts(803)).tell_coordinator({"kind": "spam", "number": 9, "summary": "Third."})
+    count[0] += 1_800
+    assert place.desk().digest() is False
+    count[0] += 1_800
+    assert place.desk().digest() is True
+
+
+def test_the_relay_looks_at_the_digest_before_its_first_session_and_before_it_ends(place, monkeypatch):
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "It waited for a digest."})
+    watcher(place, [])
+    running = a_relay(place)
+    # Only the digest's own hour decides; the relay's other looks are far apart. The arrival is kept already, so the
+    # relay's first look finds a session to start.
+    running.retry_seconds = 3_600
+    running.take(arrivals(event(8, 1_300_000_301, "r1")))
+    subjects_at_start = []
+
+    def session(text, env):
+        subjects_at_start.append([m["subject"] for m in place.sent("coordinator")])
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    running.run()
+    assert subjects_at_start and "Desk: digest" in subjects_at_start[0], subjects_at_start
+
+
+def test_a_digest_stopped_while_it_is_sent_is_not_sent_again_within_the_hour(place, monkeypatch):
+    tools = module("tools")
+    count = [50_000.0]
+    monkeypatch.setattr(tools, "ticks", lambda: count[0])
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "Waiting for a digest."})
+    real = tools.Desk.deliver
+
+    def stopped(self, subject, body):
+        real(self, subject, body)
+        raise Stopped()
+
+    monkeypatch.setattr(tools.Desk, "deliver", stopped)
+    with pytest.raises(Stopped):
+        place.desk().digest()
+    monkeypatch.setattr(tools.Desk, "deliver", real)
+    count[0] += 600
+    assert place.desk().digest() is False
+    count[0] += 3_000
+    assert place.desk().digest() is True
+    digests = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
+    # It comes twice, an hour apart: what it carried was not written down as carried.
+    assert len(digests) == 2 and all("Waiting for a digest." in body for body in digests)
+
+
+# --- Text that leaves: one form, the variants generated from its tables --------------------------
+
+# The tables of the form, said here a second time: what is one letter. Small kana are their full-size letter; a voiced or
+# half-voiced kana is its plain letter; katakana is hiragana; a mark that repeats a letter is that letter again.
+SMALL_KANA = dict(zip("ぁぃぅぇぉっゃゅょゎゕゖ", "あいうえおつやゆよわかけ"))
+REPEATS = {"々": "the kanji before it", "ゝ": "the kana before it", "ゞ": "the kana before it, voiced", "ヽ": "the kana before it",
+           "ヾ": "the kana before it, voiced"}  # fmt: skip
+
+
+def stated_letter(character: str) -> str:
+    """What one written character is to the form, worked out here from the rules LOCK.md states, not from guard.py."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", character).casefold()) if unicodedata.category(c) != "Mn")
+    plain = "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in plain)
+    return "".join(SMALL_KANA.get(c, c) for c in plain)
+
+
+def kana_classes() -> list[list[str]]:
+    """Every kana the desk writes with, in groups that are one letter to the form; only groups of two or more."""
+    groups: dict[str, list[str]] = {}
+    for code in sorted(allowed_code_points()):
+        character = chr(code)
+        if (0x3041 <= code <= 0x3096 or 0x30A1 <= code <= 0x30FA) and character not in REPEATS:
+            groups.setdefault(stated_letter(character), []).append(character)
+    return [group for group in groups.values() if len(group) >= 2]
+
+
+def separators() -> list[str]:
+    """Every character the desk writes with that is no letter or digit: each may stand between the parts of a name."""
+    return [chr(c) for c in sorted(allowed_code_points()) if not chr(c).isalnum() and chr(c) not in REPEATS] + ["ー"]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_known_value_in_kana_is_found_in_every_spelling_of_its_letters(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    classes = kana_classes()
+    # Every group the form makes is tried.
+    assert len(classes) > 70
+    missed = []
+    for group in classes:
+        others = rng.sample(classes, 2)
+        value = rng.choice(others[0]) + rng.choice(group) + rng.choice(others[1])
+        for variant in group:
+            text = value[0] + variant + value[2] + rng.choice(["さん", "に聞いてください。", "です"])
+            if guard.leaks(text, [("the made-up value", value)]) != ["the made-up value"]:
+                missed.append((value, text))
+    assert not missed, missed[:5]
+
+
+def test_a_mark_that_repeats_a_letter_is_that_letter_again():
+    guard, rng = module("guard"), random.Random(7)
+    kanji = [chr(c) for c in rng.sample(range(0x4E00, 0x9FFF), 6)]
+    hiragana = [g[0] for g in kana_classes() if 0x3041 <= ord(g[0]) <= 0x3096][:6]
+    missed = []
+    for repeat, letters in (("々", kanji), ("ゝ", hiragana), ("ゞ", hiragana), ("ヽ", hiragana), ("ヾ", hiragana)):
+        for letter in letters:
+            value = letter + letter + rng.choice(kanji if repeat == "々" else hiragana)
+            written = value[0] + repeat + value[2]
+            for known, text in ((value, written + "さん"), (written, value + "さん")):
+                if guard.leaks(text, [("the made-up value", known)]) != ["the made-up value"]:
+                    missed.append((known, text))
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [11, 12, 13])
+def test_a_long_known_value_is_found_however_wide_the_gaps_between_its_parts_and_whatever_is_attached(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    between = separators()
+    attached = ["", "x", "s", "에게", "님", "은", "さん", "たち", "の", "ing", "2"]
+    missed = []
+    for value in ("홍길동", "홍길", "たなかたろう", "佐藤一郎", "somebody", "gildonghong", "node42x7b"):
+        for _ in range(12):
+            cuts = sorted(rng.sample(range(1, len(value)), min(len(value) - 1, rng.choice([1, 2]))))
+            parts = [value[a:b] for a, b in zip([0] + cuts, cuts + [len(value)])]
+            text = rng.choice(attached) + "".join(part + "".join(rng.choice(between) for _ in range(rng.randrange(1, 9))) for part in parts[:-1]) + parts[-1] + rng.choice(attached)
+            if guard.leaks("Ask " + text + " about it.", [("the made-up value", value)]) != ["the made-up value"]:
+                missed.append((value, text))
+    assert not missed, missed[:5]
+
+
+def test_the_part_of_a_known_address_before_its_at_sign_is_a_known_value_of_its_own():
+    guard = module("guard")
+    known = [("the owner's git name or address", "gildong.hong@example.invalid")]
+    for text in ("Ask gildong.hong about it.", "It was gildonghong who wrote it.", "Write to gildong hong at example dot invalid.", "길동 gildong_hong입니다"):
+        assert guard.leaks(text, known) == ["the owner's git name or address"], text
+
+
+def test_the_path_of_the_copys_git_folder_is_looked_at_for_every_known_value(start, tmp_path):
+    # The owner's git name is a known value that the computer itself does not tell.
+    (tmp_path / "home" / ".gitconfig").write_text("[user]\n\tname = Gildong Hong\n\temail = gildong@example.invalid\n")
+    start.own_sign_in()
+    (tmp_path / "gildong-hong").mkdir()
+    start.committed(tmp_path / "gildong-hong" / "git")
+    assert "git folder" in start.refuses(stand_in=None)
+
+
+# Ways of writing a path that the computer accepts, each a rule: case, slashes turned round or doubled, spaces round a
+# slash, a dot for a folder itself, a folder followed by two dots, two dots at the root, the data volume of macOS.
+def a_spelling_of(path: str, rng: random.Random) -> str:
+    parts = path.strip("/").split("/")
+    out = []
+    for part in parts:
+        for _ in range(rng.randrange(0, 3)):
+            out.append(rng.choice([".", rng.choice(["x", "a.b", "..x", "-"]) + "/..", ".."]) if not out else rng.choice([".", "x/.."]))
+        out.append("".join(c.upper() if rng.random() < 0.5 else c for c in part))
+    joined = ""
+    for part in out:
+        joined += rng.choice(["/", "//", "\\", "/ ", " /", "\\\\", "///"]) + part
+    if rng.random() < 0.4 and not path.startswith("/System"):
+        # Through the data volume of macOS, itself written in any of these ways.
+        joined = a_spelling_of("/System/Volumes/Data", rng) + joined
+    return joined
+
+
+@pytest.mark.parametrize("seed", [21, 22, 23])
+def test_a_private_path_is_found_in_every_spelling_the_computer_accepts(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for path in ("/Users/somebody/notes", "/home/somebody/x", "/tmp/x", "/var/tmp/x", "/var/folders/dq/x", "/private/tmp/x", "/dev/shm/x",
+                 "/run/user/501/x", "/Volumes/Disk/x", "/etc/passwd", "/opt/x/y", "/Library/x"):  # fmt: skip
+        for _ in range(15):
+            text = a_spelling_of(path, rng)
+            if "a path outside the repository" not in guard.leaks(f"It is kept in {text} for now.", []):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [31, 32])
+def test_a_hidden_folder_of_this_computer_is_found_in_every_spelling(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for name in (".dodam", ".dodam-desk", ".ssh", ".coworker", ".aws", ".gnupg", ".claude", ".claude-config"):
+        for _ in range(10):
+            spelled = "".join(c.upper() if rng.random() < 0.5 else c for c in name)
+            text = spelled + rng.choice(["/", "\\", " / ", "//", "\\\\", "/./"]) + rng.choice(["secret", "watch-state.json", "id_rsa"])
+            if "a hidden folder of this computer" not in guard.leaks(f"Look at {text} now.", []):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+def test_a_report_to_the_coordinator_passes_the_check_on_known_values_and_paths(place):
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    assert "account name" in refused(desk, "tell_coordinator", kind="spam", number=7, summary="It is somebody-local who wrote it.")
+    assert "outside the repository" in refused(desk, "tell_coordinator", kind="question", number=7, summary="The file is in /Users/somebody/notes.")
+    # A key an outsider wrote may still be quoted to the coordinator, who is not an outsider.
+    assert "accepted" in desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "They posted ghp_" + "Ab1" * 12 + " in a comment."})
+
+
+# The usual words of the claim, in the four languages: who was told, and that they were told. A point inside a word (a
+# version, the name of a file, a number) ends no sentence.
+TOLD_WORDS = {
+    "en": (["agents", "owner", "maintainers", "team"], ["told", "notified", "informed"], "The project's {whom} (see {inside}) have been {told}."),
+    "ko": (["에이전트", "소유자", "관리자"], ["알렸습니다", "전달했습니다", "보고했습니다"], "이 내용은 {inside} 기준으로 {whom}에게 {told}."),
+    "ja": (["エージェント", "所有者", "オーナー"], ["伝えました", "知らせました", "報告しました"], "{inside} について{whom}に{told}。"),
+    "es": (["agentes", "propietario", "dueño"], ["avisado", "informado", "notificado"], "Se ha {told} al {whom} sobre {inside}."),
+}
+POINTS_INSIDE_WORDS = ["v2.4", "README.md", "1.5", "docs.index", "3.14.2"]
+
+
+def test_the_claim_that_someone_was_told_is_refused_in_every_usual_wording(place):
+    desk = place.desk(DESK_ITEM="7")
+    missed = []
+    for language, (whom_words, told_words, sentence) in TOLD_WORDS.items():
+        for whom in whom_words:
+            for told in told_words:
+                for inside in POINTS_INSIDE_WORDS:
+                    text = sentence.format(whom=whom, told=told, inside=inside)
+                    try:
+                        desk.answer(ANSWER | {"number": 7, "text": text, "language": language})
+                        missed.append(text)
+                    except desk.tools.Refused as refusal:
+                        if "were or will be told" not in str(refusal):
+                            missed.append(text)
+    assert not missed, missed[:5]
+
+
+# --- Reads past the end, and the exemption for paths of the copy --------------------------------
+
+
+def a_read(path: str, offset: int, limit: int = 1) -> dict:
+    return {"tool_name": "Read", "tool_input": {"file_path": path, "offset": offset, "limit": limit}}
+
+
+def test_a_reading_call_past_the_last_line_or_of_an_empty_file_is_refused_before_it_runs(tmp_path):
+    guard, lock = module("guard"), lock_file()
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "two.md").write_text("one\ntwo\n")
+    (copy / "open.md").write_text("one\ntwo")
+    (copy / "empty.md").write_text("")
+    for path, offset in (("two.md", 3), ("two.md", 4), ("open.md", 3), ("empty.md", 1)):
+        assert isinstance(guard.bytes_of(a_read(path, offset), lock, copy), str), (path, offset)
+    assert guard.bytes_of(a_read("two.md", 2), lock, copy) == 3 + 12
+    assert guard.bytes_of(a_read("open.md", 1, 5), lock, copy) == 2 * (3 + 12)
+
+
+def test_only_a_path_of_the_copy_spelled_exactly_and_not_through_a_link_is_exempt_from_the_search_for_keys(tmp_path):
+    guard = module("guard")
+    copy = tmp_path / "copy"
+    (copy / "docs").mkdir(parents=True)
+    name = "Notes0123456789AbCdEfGh.md"
+    (copy / "docs" / name).write_text("x")
+    (copy / "Linked0123456789AbCdEfGh").symlink_to(copy / "docs")
+    (copy / "docs" / "Link0123456789AbCdEfGh.md").symlink_to(copy / "docs" / name)
+    key = "a long string shaped like a key"
+    assert key not in guard.leaks(f"See docs/{name} for it.", [], copy)
+    for word in (f"Linked0123456789AbCdEfGh/{name}", "docs/Link0123456789AbCdEfGh.md", f"docs/{name.upper()}", f"DOCS/{name}"):
+        assert key in guard.leaks(f"See {word} for it.", [], copy), word
+
+
+# --- Numbers that are cut --------------------------------------------------------------------------
+
+NUMBER_SHAPES = ["2025-01-31", "-77", "−9", "+45", "a1b2c3d4e", "1.2.3", "1,234.56", "08:15:42", "#1234", "v2.4", "3개", "12%", "(42)", "4.5e-3"]
+
+
+def test_no_line_of_the_desk_cuts_a_word_that_holds_a_digit():
+    tools = module("tools")
+    cut_inside = []
+    for shape in NUMBER_SHAPES:
+        text = "word " + shape + " end"
+        for limit in range(6, 5 + len(shape)):
+            if tools.cut(text, limit) != "word ":
+                cut_inside.append((shape, limit, tools.cut(text, limit)))
+    assert not cut_inside, cut_inside[:5]
+
+
+# --- What is handed to a tool of a live session ---------------------------------------------------
+
+
+def test_what_is_handed_to_a_live_session_tool_is_checked_whole():
+    guard, lock = module("guard"), lock_file()
+    # Opening the bridge takes its public name and nothing else.
+    for extra in ({"resume": "another-session"}, {"session": "x"}, {"host": "example.invalid"}):
+        call = {"tool_name": "mcp__coworker__open_bridge", "tool_input": {"name": "Dodam · desk"} | extra}
+        assert guard.judge_call(call, lock, Ways(True), MACHINE) is not None, extra
+    # A number is text too.
+    call = {"tool_name": "mcp__coworker__reply", "tool_input": {"thread": "t", "text": "Hello.", "count": 4242}}
+    assert guard.judge_call(call, lock, Ways(True), [("the computer's name", "4242")]) is not None
+
+
+# --- What the workflows start on a pull request --------------------------------------------------
+
+# The turned-round list: everything a step of a workflow may start, and why nothing a pull request from outside placed can run in
+# its place. A program of the runner: the runner's own image provides it. Python is the one that setup-python installs, or a
+# virtual environment that a step made in a protected folder.
+PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "grep", "exit", "set", "[", "test", "true", "false", "docker"}
+SHELL_WORDS = {"if", "then", "else", "elif", "fi", "!", "{", "}", "do", "done", "for", "while", "in"}
+# Options of Python that take a value, written attached or as the next word.
+PYTHON_TAKES_A_VALUE = set("mcWXQ")
+
+
+def python_start(words: list[str]) -> dict:
+    """What one start of Python runs: in isolated mode or not, and a module, code or a script."""
+    flags, n = set(), 1
+    while n < len(words):
+        word = words[n]
+        if word == "--":
+            return {"isolated": "I" in flags, "script": words[n + 1] if n + 1 < len(words) else None}
+        if word.startswith("--"):
+            n += 1
+            continue
+        if word.startswith("-") and len(word) > 1:
+            for at, letter in enumerate(word[1:], start=1):
+                if letter in PYTHON_TAKES_A_VALUE:
+                    value = word[at + 1 :] or (words[n + 1] if n + 1 < len(words) else "")
+                    if letter == "m":
+                        return {"isolated": "I" in flags, "module": value}
+                    if letter == "c":
+                        return {"isolated": "I" in flags, "code": value}
+                    n += 0 if word[at + 1 :] else 1
+                    break
+                flags.add(letter)
+            n += 1
+            continue
+        return {"isolated": "I" in flags, "script": word}
+    return {"isolated": "I" in flags}
+
+
+def test_every_way_of_writing_pythons_options_is_read():
+    assert python_start(["python", "-Im", "pip"]) == {"isolated": True, "module": "pip"}
+    assert python_start(["python", "-mpip"]) == {"isolated": False, "module": "pip"}
+    assert python_start(["python", "-B", "-I", "-m", "pip"]) == {"isolated": True, "module": "pip"}
+    assert python_start(["python3", "-BIm", "pytest"]) == {"isolated": True, "module": "pytest"}
+    assert python_start(["python", "-X", "utf8", "-m", "pip"]) == {"isolated": False, "module": "pip"}
+    assert python_start(["python", "-Wignore", "-c", "print(1)"]) == {"isolated": False, "code": "print(1)"}
+    assert python_start(["python", "-I", "--", "x.py"]) == {"isolated": True, "script": "x.py"}
+    assert python_start(["python", "-u", "x.py", "-m", "y"]) == {"isolated": False, "script": "x.py"}
+
+
+def steps_of_the_workflows() -> list[dict]:
+    """Every step of every workflow: its file, its job's matrix, its folder, the script it runs, or the action it uses."""
+    found = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        matrix: dict[str, list[str]] = {}
+        key = None
+        for n, line in enumerate(lines):
+            if re.match(r"^  [A-Za-z0-9_-]+:\s*$", line):
+                matrix, key = {}, None  # A job begins.
+            if (named := re.match(r"^\s{8,}([A-Za-z0-9_-]+):\s*$", line)) and "matrix:" in "".join(lines[max(0, n - 3) : n]):
+                key = named.group(1)
+                matrix[key] = []
+            elif key and (value := re.match(r"^\s+- (.+)$", line)) and not re.match(r"^\s*- (?:uses|name|run):", line):
+                matrix[key].append(value.group(1).strip())
+            elif key and not line.strip().startswith("#") and not re.match(r"^\s+- ", line):
+                key = None
+            if re.match(r"^\s*- (?:name|uses):", line):
+                found.append({"workflow": path.name, "matrix": {k: list(v) for k, v in matrix.items()}, "folder": None, "run": [], "uses": None})
+            if found and (uses := re.match(r"^\s*-?\s*uses:\s*(\S+)", line)):
+                found[-1]["uses"] = uses.group(1)
+            elif found and (folder := re.match(r"^\s+working-directory:\s*(\S+)", line)):
+                found[-1]["folder"] = folder.group(1)
+            elif found and (run := re.match(r"^(\s+)run:\s*(.*)$", line)):
+                if run.group(2) not in ("|", ">"):
+                    found[-1]["run"].append(run.group(2))
+                else:
+                    for later in lines[n + 1 :]:
+                        if later.strip() and len(later) - len(later.lstrip()) <= len(run.group(1)):
+                            break
+                        found[-1]["run"].append(later.strip())
+    return found
+
+
+def commands_of(step: dict) -> list[list[str]]:
+    """Every simple command a step's script starts, with the values of its job's matrix put in."""
+    scripts = ["\n".join(step["run"])]
+    for name, values in step["matrix"].items():
+        marker = "${{ matrix." + name + " }}"
+        if any(marker in script for script in scripts):
+            scripts = [script.replace(marker, value) for script in scripts for value in values]
+    commands = []
+    for script in scripts:
+        lexer = shlex.shlex(script.replace("\\\n", " "), posix=True, punctuation_chars=True)
+        lexer.whitespace = " \t"
+        lexer.commenters = "#"
+        words: list[str] = []
+        skip_next = False
+        for token in list(lexer) + ["\n"]:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in ("\n", ";", "&&", "||", "|", "(", ")", ";;", "&", "$(", "`"):
+                if words:
+                    commands.append(words)
+                words = []
+                continue
+            if re.fullmatch(r"[<>]+&?|&>", token):
+                skip_next = True  # A redirection and the file or stream it names.
+                continue
+            if not words and (token in SHELL_WORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token)):
+                continue  # A word of the shell itself, or a variable set before the command.
+            words.append(token)
+        if words:
+            commands.append(words)
+    return [c for c in commands if c and c[0] not in ("", "$")]
+
+
+def protected(path: str) -> bool:
+    """Whether a path of the repository is protected from pull requests from outside; one that climbs above the root is not."""
+    pr_files = module("pr_files")
+    normal = posixpath.normpath(path)
+    if normal.startswith("../") or normal == ".." or normal.startswith("/"):
+        return False
+    return any(pr_files._matches_folder(normal, folder) for folder in pr_files.PROTECTED_FOLDERS)
+
+
+def judged(step: dict, words: list[str]) -> str | None:
+    """Why this start could run something a pull request from outside placed, or None when it cannot."""
+    folder = step["folder"] or "."
+    program = words[0]
+    if program in PROGRAMS_OF_THE_RUNNER:
+        return None
+    is_python = re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", program)
+    if not is_python:
+        return "a program that is not on the list"
+    if "/" in program and not protected(posixpath.join(folder, program, "..")):
+        return "a Python from a folder that is not protected"
+    started = python_start(words)
+    if started.get("isolated"):
+        return None
+    if "script" in started:
+        return None if started["script"] and protected(posixpath.join(folder, started["script"])) else "a script from a folder that is not protected, not in isolated mode"
+    # A module or code given on the command line: Python looks in the folder it runs in first.
+    return None if protected(posixpath.join(folder, "x")) else "a module or code started from a folder that is not protected, not in isolated mode"
+
+
+def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mode():
+    open_to_outside, starts = [], 0
+    for step in steps_of_the_workflows():
+        if step["uses"] is not None:
+            # An action is named by the forty digits of its commit, from outside the repository.
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}", step["uses"]):
+                open_to_outside.append((step["workflow"], step["uses"], "an action that is not pinned, or from the repository itself"))
+        for words in commands_of(step):
+            starts += 1
+            why = judged(step, words)
+            if why:
+                open_to_outside.append((step["workflow"], step["folder"] or "the root of the repository", " ".join(words), why))
+    assert starts >= 25, starts
+    assert open_to_outside == [], open_to_outside
+    # Nothing a step sets can make a later start look elsewhere: no search path for Python or the shell, no folder put on the path.
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"^\s*(?:PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|PYTHONSAFEPATH|LD_PRELOAD|BASH_ENV|ENV)\s*:", text, re.M), path.name
+        assert "GITHUB_ENV" not in text and "GITHUB_PATH" not in text, path.name
+
+
+def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_protected():
+    assert protected("bench/x.py") and protected("tools/desk/relay.py")
+    for path in ("bench/../tools/plan/x.py", "bench/../../x.py", "../bench/x.py", "tools/desk/../plan/x.py", "/bench/x.py"):
+        assert not protected(path), path
+    step = {"folder": "bench/../tools/plan", "matrix": {}, "run": [], "uses": None}
+    assert judged(step, ["python", "pilot_replan.py"]) is not None and judged(step, ["python", "-m", "pytest"]) is not None
+    assert judged(step, ["python", "-I", "pilot_replan.py"]) is None and judged(step, ["bash", "x.sh"]) is not None

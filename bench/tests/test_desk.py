@@ -699,7 +699,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "number": 6,
                 "actor": "nia",
                 "actor_id": 2106,
-                "time": "2026-11-18T07:05:30Z",
+                "time": "2026-11-17T01:00:00Z",
                 "url": f"https://github.com/{REPO}/pull/6",
             },
         ),
@@ -736,7 +736,7 @@ def test_wait_blocks_until_outside_event_arrives_and_prints_strictly_one_json_ob
                 "number": 5,
                 "actor": "grace",
                 "actor_id": 2108,
-                "time": "2026-11-18T07:07:00Z",
+                "time": "2026-11-17T01:00:00Z",
                 "url": f"https://github.com/{REPO}/pull/5",
             },
         ),
@@ -3730,3 +3730,49 @@ def test_outside_input_rules_from_agents_md_stand_word_for_word_in_brief_and_dri
         agents_text,
         brief_text.replace(want[-1], ""),
     )
+
+
+# --- One order of arrivals: the watcher prints them in the order in which they happened ----------
+
+
+def test_arrivals_of_one_second_are_printed_in_the_order_github_numbered_them(monkeypatch, tmp_path):
+    """Generated comments, several in one second, with numbers of different lengths: GitHub gives a time to the second
+    and numbers each comment in the order it was written, so that is the order of what the watcher prints."""
+    import random
+
+    rng = random.Random(20261123)
+    for round_ in range(3):
+        gh = FakeGitHub()
+        gh.issues.append(make_issue(100, 1, login="old-contributor", created_at="2026-11-17T01:00:00Z"))
+        state_file = tmp_path / f"state-{round_}.json"
+        code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+        assert code0 == 0
+        seconds = ["2026-11-18T09:00:00Z", "2026-11-18T09:00:01Z"]
+        ids = rng.sample([3, 4, 97, 98, 101, 998, 1002, 9999, 10001, 123456, 1234567], 9)
+        comments = [make_issue_comment(cid, 1, login=f"writer{n}", user_id=3000 + n, created_at=rng.choice(seconds)) for n, cid in enumerate(ids)]
+        # As GitHub lists them: the newest first.
+        gh.issue_comments[0:0] = sorted(comments, key=lambda c: (c["created_at"], c["id"]), reverse=True)
+        code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+        assert code == 0 and err == ""
+        printed = [e["actor_id"] for e in json.loads(out)["events"]]
+        assert printed == [c["user"]["id"] for c in sorted(comments, key=lambda c: (c["created_at"], c["id"]))], (ids, printed)
+
+
+def test_new_commits_on_a_pull_request_count_from_before_what_others_wrote_in_the_same_look(monkeypatch, tmp_path):
+    """GitHub gives no time for a push. The time of a pull request's last update is moved by whatever anyone does on it
+    later, so it is not the push's time: new commits count from the last look in which the watcher saw the pull request
+    without them, and a comment that another account wrote after the push is the newer arrival."""
+    gh = FakeGitHub()
+    gh.pulls.append(make_pr(600, 5, sha="0000999988887777", login="grace", user_id=2108, created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z"))
+    state_file = tmp_path / "state.json"
+    code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], gh)
+    assert code0 == 0
+    later = "2026-11-18T09:00:05Z"
+    # The author pushes; then another account comments, which moves the pull request's time of update to the comment's.
+    gh.pulls[0] = make_pr(600, 5, sha="aaaa111122223333", login="grace", user_id=2108, created_at="2026-11-17T01:00:00Z", updated_at=later)
+    gh.issue_comments.insert(0, make_issue_comment(4001, 5, login="stranger", user_id=2202, created_at=later, is_pr=True))
+    code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], gh)
+    assert code == 0 and err == ""
+    events = json.loads(out)["events"]
+    assert [(e["kind"], e["actor_id"]) for e in events] == [("pull_request_commits", 2108), ("pull_request_comment", 2202)], events
+    assert events[0]["time"] < later
