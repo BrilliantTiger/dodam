@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import ast
 import builtins
-import importlib.machinery
+import importlib.metadata
 import json
 import math
 import os
@@ -394,6 +394,11 @@ def task_problems(task: Task) -> list[dict]:
     listed = set()
     manifest = "tests/manifest.toml"
     for i, t in enumerate(task.tests):
+        if t.file in listed:
+            found.append(problem(manifest, f"test[{i}].file", f"{t.file} is listed more than once"))
+        elif t.file and t.kind in TEST_KINDS and not re.fullmatch(rf"{t.kind}/test_\w+\.py", t.file, flags=re.ASCII):
+            found.append(problem(manifest, f"test[{i}].file",
+                                 f"{t.file} must be {t.kind}/test_<name>.py, a test file directly in the folder of its kind"))
         listed.add(t.file)
         path = task.root / "tests" / t.file
         if t.kind not in TEST_KINDS:
@@ -644,42 +649,68 @@ TEST_ATTRIBUTES = {
     "dedent", "fill", "indent", "shorten", "wrap",
     "adler32", "compress", "decompress",
 }
-# The case's methods that give back a path, and the case's folders as paths. A path may only be made a
-# string, put into an f-string or given to the case's symlink: the value of such a method is not used,
-# and a folder is reached only there.
+# The case's methods that give back a path, and the case's folders as paths. A folder is only made a
+# string or put into an f-string, and the value of such a method is not used.
 GIVES_A_PATH = {"write", "write_outside", "sparse", "mkdir", "symlink"}
 CASE_FOLDERS = {"work", "outside"}
-# Files pytest runs or obeys on its own, without a test asking for them.
-PYTEST_FILES = {"conftest.py", "pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"}
-# Files Python loads in place of a source file of the same name.
-COMPILED = tuple({".pyc", ".pyo", ".pyd", ".so", *importlib.machinery.EXTENSION_SUFFIXES})
+# The kinds of Python's syntax a test or a helper may hold. Every other kind is refused, so a later
+# Python adds nothing by itself: a test sorts every kind of the running Python into this list or out.
+TEST_SYNTAX = {
+    "Module", "FunctionDef", "ClassDef", "Return", "Assign", "AugAssign", "AnnAssign", "For", "While", "If",
+    "With", "Raise", "Try", "Assert", "Import", "ImportFrom", "Expr", "Pass", "Break", "Continue",
+    "BoolOp", "BinOp", "UnaryOp", "Lambda", "IfExp", "Dict", "Set", "ListComp", "SetComp", "DictComp",
+    "GeneratorExp", "Compare", "Call", "FormattedValue", "JoinedStr", "Constant", "Attribute", "Subscript",
+    "Starred", "Name", "List", "Tuple", "Slice", "Load", "Store", "And", "Or", "Add", "Sub", "Mult", "Div",
+    "Mod", "Pow", "LShift", "RShift", "BitOr", "BitXor", "BitAnd", "FloorDiv", "Invert", "Not", "UAdd", "USub",
+    "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn", "comprehension", "ExceptHandler",
+    "arguments", "arg", "keyword", "alias", "withitem",
+}
 HELPERS = "lib"                    # the task's helper folder, inside its tests folder
 JUDGE_REQUIREMENTS = Path(__file__).resolve().parents[1] / "images" / "judge" / "requirements.txt"
+JUDGE_OWN = Path(__file__).resolve().parent   # the judge's own modules, loadable by these names when it judges here
+# The top-level modules installed beside the judge's own Python in every language image, as read there;
+# a test reads them in every image there is and fails when one is not among the names below.
+JUDGE_PACKAGE_MODULES = {"_pytest", "anyio", "certifi", "colorama", "h11", "httpcore", "httpx", "idna",
+                         "iniconfig", "packaging", "pip", "pluggy", "py", "pygments", "pytest", "typing_extensions"}
 
 
 def _judge_packages() -> set[str]:
-    """The top-level names of the packages in the judge's own Python, which a case runner may have
-    loaded before a test runs."""
-    names = {"_pytest", "py"}
+    """The top-level modules of the packages of the judge's own Python: those the images hold, the names
+    the judge's requirements give, and the modules the Python that runs the checker says those
+    packages provide."""
+    names = set(JUDGE_PACKAGE_MODULES)
     try:
         lines = JUDGE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return names
-    for line in lines:
-        line = line.strip()
-        if line and not line.startswith(("#", "-")):
-            names.add(re.split(r"[=<>;\[ ]", line, maxsplit=1)[0].lower().replace("-", "_"))
+        lines = []
+    wanted = {re.split(r"[=<>;\[ ]", line.strip(), maxsplit=1)[0].lower().replace("-", "_")
+              for line in lines if line.strip() and not line.strip().startswith(("#", "-"))}
+    names |= wanted
+    for module, packages in importlib.metadata.packages_distributions().items():
+        if {package.lower().replace("-", "_") for package in packages} & wanted:
+            names.add(module)
     return names
 
 
 # The judge's own Python differs between the language images: 3.12, 3.13 or 3.14. The modules of the
-# standard library that one of them has and another has not, so that a helper is named like none of
-# them, whatever Python runs the checker.
+# standard library that one of them has and another has not, as read in the images; a test reads the
+# standard library in every image there is.
 STANDARD_ELSEWHERE = {'_android_support', '_apple_support', '_ast_unparse', '_colorize', '_compression', '_crypt', '_hmac', '_interpchannels', '_interpqueues', '_interpreters', '_ios_support', '_msi', '_opcode_metadata', '_py_warnings', '_pyrepl', '_remote_debugging', '_suggestions', '_sysconfig', '_types', '_wmi', '_zstd', 'aifc', 'annotationlib', 'audioop', 'cgi', 'cgitb', 'chunk', 'compression', 'crypt', 'imghdr', 'lib2to3', 'mailcap', 'msilib', 'nis', 'nntplib', 'ossaudiodev', 'pipes', 'sndhdr', 'spwd', 'sunau', 'telnetlib', 'uu', 'xdrlib'}
-# Names a Python file of the tests may not have: Python would load the module of that name in its place,
-# or run it on its own.
-NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages() | STANDARD_ELSEWHERE
-                | {"dodam_cli", "dodam_judge", "conftest", "sitecustomize", "usercustomize"})
+# Names, in lower case, a Python file of the tests may not have: something loadable in the judging
+# process answers to them, so Python could load that in its place, or run it on its own. Compared in
+# lower case, since a file system may not tell the cases apart.
+NOT_A_HELPER = {name.lower() for name in (set(sys.stdlib_module_names) | _judge_packages() | STANDARD_ELSEWHERE
+                                          | {path.stem for path in JUDGE_OWN.glob("*.py")}
+                                          | {"dodam_cli", "dodam_judge", "conftest", "sitecustomize", "usercustomize"})}
+
+
+def _helper_name(stem: str) -> bool:
+    """Whether a helper may have this name: no module answers to it, and it begins with no underscore,
+    no test and no pytest."""
+    lower = stem.lower()
+    return lower not in NOT_A_HELPER and not lower.startswith(("_", "test", "pytest"))
+
+
 # The one line that puts the task's helper folder on the search path, with any number and folder name;
 # the number and the name are checked apart.
 PATH_LINE = ast.dump(ast.parse("sys.path.insert(0, str(Path(__file__).resolve().parents[0] / 'x'))").body[0])
@@ -733,8 +764,10 @@ class _TestCode(ast.NodeVisitor):
         super().generic_visit(node)
 
     # every binding of a name, wherever it is
-    def bound(self, node: ast.AST, name: str, at_top: bool, by_def: bool = False) -> None:
-        if name in vars(builtins):
+    def bound(self, node: ast.AST, name: str, at_top: bool, by_def: bool = False, case_runner: bool = False) -> None:
+        if name in CASE_RUNNER_NAMES and not case_runner:
+            self.refuse(node, f"binds {name}, a name of the case runner, otherwise than by importing it")
+        elif name in vars(builtins):
             self.refuse(node, f"binds {name}, a built-in name")
         elif name.startswith("__"):
             self.refuse(node, f"binds {name}")
@@ -779,7 +812,7 @@ class _TestCode(ast.NodeVisitor):
                     self.refuse(node, f"imports {alias.name} from {module}, which the helper does not define itself")
             else:
                 self.refuse(node, f"imports {alias.name} from {module}, a module a test may not import")
-            self.bound(node, alias.asname or alias.name, True)
+            self.bound(node, alias.asname or alias.name, True, case_runner=module == "dodam_cli")
 
     # names
     def visit_Name(self, node: ast.Name) -> None:
@@ -820,21 +853,14 @@ class _TestCode(ast.NodeVisitor):
         return isinstance(call, ast.Call) and call.func is node and isinstance(self.parents.get(call), ast.Expr)
 
     def made_a_string(self, node: ast.AST) -> bool:
-        """Whether a path is only made a string, put into an f-string or given to the case's symlink."""
+        """Whether a path is only made a string by str or put into an f-string."""
         up = self.parents.get(node)
         while isinstance(up, ast.BinOp) and isinstance(up.op, ast.Div):
             node, up = up, self.parents.get(up)
         if isinstance(up, ast.FormattedValue):
             return True
-        return isinstance(up, ast.Call) and node in up.args and (
-            (isinstance(up.func, ast.Name) and up.func.id == "str" and len(up.args) == 1 and not up.keywords)
-            or (isinstance(up.func, ast.Attribute) and up.func.attr == "symlink"))
-
-    def visit_Global(self, node: ast.Global) -> None:
-        for name in node.names:
-            self.bound(node, name, True)
-
-    visit_Nonlocal = visit_Global
+        return (isinstance(up, ast.Call) and isinstance(up.func, ast.Name) and up.func.id == "str"
+                and up.args == [node] and not up.keywords)
 
     # definitions
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -848,8 +874,6 @@ class _TestCode(ast.NodeVisitor):
                 self.refuse(node, f"gives {node.name} parameters")
             if node.decorator_list:
                 self.refuse(node, f"decorates {node.name}")
-            if self.yields(node):
-                self.refuse(node, f"makes {node.name} yield")
         # what is worked out when the function is defined: its decorators, defaults and annotations
         for part in node.decorator_list:
             self.visit(part)
@@ -863,18 +887,6 @@ class _TestCode(ast.NodeVisitor):
             self.visit(statement)
         self.depth -= 1
 
-    @staticmethod
-    def yields(function: ast.FunctionDef) -> bool:
-        """Whether a function's own body yields, which pytest does not collect as a test."""
-        found, todo = False, list(function.body)
-        while todo:
-            node = todo.pop()
-            if isinstance(node, (ast.Yield, ast.YieldFrom)):
-                found = True
-            elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                todo.extend(ast.iter_child_nodes(node))
-        return found
-
     def visit_arg(self, node: ast.arg) -> None:
         self.bound(node, node.arg, False)
         self.generic_visit(node)
@@ -883,9 +895,6 @@ class _TestCode(ast.NodeVisitor):
         self.depth += 1
         self.generic_visit(node)
         self.depth -= 1
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.refuse(node, f"defines {node.name} as asynchronous")
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.bound(node, node.name, self.depth == 0)  # the name of a class
@@ -898,19 +907,18 @@ class _TestCode(ast.NodeVisitor):
             self.bound(node, node.name, self.depth == 0)  # the name an exception is caught as
         self.generic_visit(node)
 
-    def visit_match_case(self, node: ast.match_case) -> None:
-        # a name a pattern captures is bound like an assignment's
-        for part in ast.walk(node.pattern):
-            name = getattr(part, "name", None) or getattr(part, "rest", None)
-            if isinstance(name, str):
-                self.bound(part, name, self.depth == 0)
-        self.generic_visit(node)
-
     def check(self, tree: ast.Module) -> None:
         self.top = list(tree.body)
+        seen: set[tuple[str, int]] = set()
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 self.parents[child] = node
+            kind = type(node).__name__
+            if kind not in TEST_SYNTAX and (kind, getattr(node, "lineno", 0)) not in seen:
+                seen.add((kind, getattr(node, "lineno", 0)))
+                self.refuse(node, f"holds {kind}, a kind of syntax that is not on the list a test may hold")
+            elif isinstance(node, ast.AnnAssign) and node.value is None:
+                self.refuse(node, "annotates a name without giving it a value")
         # every name the file binds, wherever it does: a name used before its binding is no problem here,
         # and a binding of a built-in name is refused, so a built-in name always means the built-in
         for node in ast.walk(tree):
@@ -922,10 +930,8 @@ class _TestCode(ast.NodeVisitor):
                 self.defined.add(node.arg)
             elif isinstance(node, ast.alias):
                 self.defined.add(node.asname or node.name.split(".")[0])
-            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            elif isinstance(node, ast.ExceptHandler) and node.name:
                 self.defined.add(node.name)
-            elif isinstance(node, ast.MatchMapping) and node.rest:
-                self.defined.add(node.rest)
         names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and _is_test_name(n.name)]
         for name in sorted({n for n in names if names.count(n) > 1}):
             self.found.append(problem(self.rel, "", f"defines {name} more than once: {WHY}"))
@@ -952,14 +958,19 @@ def _defined_at_top(path: Path) -> set[str]:
     return names - imported
 
 
-def _tests_tree(tests: Path) -> tuple[list[Path], list[dict]]:
-    """Every file of the tests folder, and a problem for every link and for whatever is neither a
-    file nor a folder: the converter copies what a link points at, which the checker would not read."""
-    files, found = [], []
+def _tests_shape(tests: Path) -> tuple[list[Path], list[dict]]:
+    """The Python files of the tests folder, and a problem for everything the folder may not hold. It
+    holds manifest.toml, the folder of each kind of test with its test files, and the helper folder
+    with its helpers, each flat; nothing else, no link and no folder beyond these."""
+    shape = (f"the tests folder of a cli task holds only manifest.toml, the folders {', '.join(TEST_KINDS)} "
+             f"with their test_*.py files and the folder {HELPERS} with its helpers, each flat")
+    files: list[Path] = []
+    found: list[dict] = []
     if tests.is_symlink():
-        return files, [problem("tests", "", "the tests folder is a link")]
+        return files, [problem("tests", "", f"the tests folder is a link: {WHY}")]
     for folder, dirs, names in os.walk(tests, followlinks=False):
         here = Path(folder)
+        depth = len(here.relative_to(tests).parts)
         for name in sorted(dirs + names):
             path = here / name
             rel = f"tests/{path.relative_to(tests).as_posix()}"
@@ -967,35 +978,35 @@ def _tests_tree(tests: Path) -> tuple[list[Path], list[dict]]:
                 found.append(problem(rel, "", f"is a link: {WHY}"))
             elif name in names and not path.is_file():
                 found.append(problem(rel, "", f"is neither a file nor a folder: {WHY}"))
-            elif name in names:
+            elif depth == 0 and (name == "manifest.toml" if name in names else name in (*TEST_KINDS, HELPERS)):
+                pass
+            elif depth == 1 and name in names and here.name in TEST_KINDS and name.startswith("test_") \
+                    and name.endswith(".py") and path.stem.lower() not in NOT_A_HELPER:
                 files.append(path)
-        dirs[:] = [d for d in dirs if not (here / d).is_symlink()]
+            elif depth == 1 and name in names and here.name == HELPERS and name.endswith(".py"):
+                if _helper_name(path.stem):
+                    files.append(path)
+                else:
+                    found.append(problem(rel, "", f"a helper is named like no module or package of any Python "
+                                                  f"the judge runs nor of the judge itself, and begins with no "
+                                                  f"_, test or pytest: {WHY}"))
+            else:
+                found.append(problem(rel, "", f"{shape}: {WHY}"))
+        dirs[:] = [d for d in dirs if depth == 0 and d in (*TEST_KINDS, HELPERS) and not (here / d).is_symlink()]
     return sorted(files), found
 
 
 def test_code_problems(task: Task) -> list[dict]:
-    """The rules on the code of a command-line task's tests, for every Python file of its tests folder."""
+    """The rules on the shape of a command-line task's tests folder, and on the code of every Python
+    file in it."""
     tests = task.root / "tests"
     if not tests.is_dir():
         return []
-    every, found = _tests_tree(tests)
-    helpers = {p.stem: _defined_at_top(p) for p in every
-               if p.parent == tests / HELPERS and p.suffix == ".py" and p.stem != "__init__"
-               and not _is_test_name(p.stem) and not p.stem.startswith("_") and p.stem not in NOT_A_HELPER}
+    every, found = _tests_shape(tests)
+    helpers = {p.stem: _defined_at_top(p) for p in every if p.parent == tests / HELPERS}
     listed = {f"tests/{t.file}" for t in task.tests}
     for path in every:
         rel = f"tests/{path.relative_to(tests).as_posix()}"
-        if path.name in PYTEST_FILES:
-            found.append(problem(rel, "", f"pytest runs or obeys {path.name} without a test asking for it: {WHY}"))
-            continue
-        if path.name.endswith(COMPILED):
-            found.append(problem(rel, "", f"Python would load this file in place of a source file: {WHY}"))
-            continue
-        if path.suffix != ".py":
-            continue
-        if path.stem in NOT_A_HELPER:
-            found.append(problem(rel, "", f"Python would load or run the module {path.stem} in place of this file: {WHY}"))
-            continue
         try:
             tree = ast.parse(path.read_bytes(), filename=rel)
         except (SyntaxError, ValueError) as exc:

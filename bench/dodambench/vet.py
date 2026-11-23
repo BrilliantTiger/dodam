@@ -64,6 +64,9 @@ def judgement_problems(expect: str, weakness: str | None, report: dict) -> list[
         return [f"the program's side left what the judge cannot take back: {report['left_behind']}"]
     tests = report.get("tests", [])
     step = report.get("step")
+    if not tests:
+        # a step that judged no test shows nothing a solution was written for
+        return [f"no test was judged at step {step}" if step else "no test was judged"]
     if any(t.get("message") == "program did not start" for t in tests):
         return ["the program did not start"]
     failed = [t for t in tests if t["outcome"] == "failed"]
@@ -238,15 +241,52 @@ def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Pat
         subprocess.run(["docker", "rm", "--force", name], capture_output=True)
     fault = out_dir / "judge-fault.json"
     if fault.is_file():
-        raise JudgeFault(json.loads(fault.read_text(encoding="utf-8")).get("judge_fault", "unknown"))
+        said = _read_json(fault)
+        if isinstance(said, dict) and isinstance(said.get("judge_fault"), str):
+            raise JudgeFault(said["judge_fault"])
+        raise JudgeFault(json.dumps({"severity": "error", "file": "judge-fault.json", "key": "",
+                                     "message": "the judge's account of a fault has another shape"}))
     results = (out_dir / "reward.json", out_dir / "details.json")
     missing = not all(path.is_file() for path in results)
     if ended != 0 or missing:
         how = f"did not end within {timeout:g} seconds" if ended is None else f"ended with exit code {ended}"
         said = f"the container {how}" + (" and left no result" if missing else ", so what it left is no result")
         raise JudgeFault(json.dumps({"severity": "error", "file": "container", "key": "ended", "message": said}))
-    return {"reward": json.loads(results[0].read_text(encoding="utf-8")),
-            "report": json.loads(results[1].read_text(encoding="utf-8"))}
+    reward, report = _read_json(results[0]), _read_json(results[1])
+    wrong = _result_shape(reward, report)
+    if wrong:
+        raise JudgeFault(json.dumps({"severity": "error", "file": wrong[0], "key": wrong[1],
+                                     "message": "the container's result has another shape"}))
+    return {"reward": reward, "report": report}
+
+
+def _read_json(path: Path):
+    """A file the container left, as JSON; None when it is not JSON."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except ValueError:
+        return None
+
+
+# What every case of a judge's result says, and of what kind.
+CASE_FIELDS = {"name": str, "outcome": str, "file": str}
+
+
+def _result_shape(reward, report) -> tuple[str, str] | None:
+    """Where a result the container left is not of the shape the tool reads, as its file and key;
+    None when it is."""
+    if not isinstance(reward, dict) or not isinstance(reward.get("reward"), (int, float)) \
+            or isinstance(reward.get("reward"), bool):
+        return "reward.json", "reward"
+    if not isinstance(report, dict) or not isinstance(report.get("tests"), list):
+        return "details.json", "tests"
+    for i, case in enumerate(report["tests"]):
+        if not isinstance(case, dict):
+            return "details.json", f"tests[{i}]"
+        for name, kind in CASE_FIELDS.items():
+            if not isinstance(case.get(name), kind):
+                return "details.json", f"tests[{i}].{name}"
+    return None
 
 
 def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]:

@@ -86,6 +86,7 @@ STARTS_SOMETHING = {
     "a built-in name bound by importing a module": "import json as open\n",
     "a built-in name bound by importing a name": "from json import loads as open\n",
     "storing an attribute on the list": "import json\n\njson.dumps = None\n",
+    "a name annotated without a value": "X: int\n",
 }
 
 # Ways a test could learn which language it judges, or anything else of the judge's settings.
@@ -263,7 +264,8 @@ def test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused(cli_tas
     """pytest runs a conftest.py and obeys its settings files without a test asking for them, and
     Python loads compiled files and files named like its own modules in their place."""
     write(cli_task_dir, rel, "X = 1\n")
-    assert [p for p in problems(cli_task_dir) if p["file"] == rel], f"{rel} was accepted"
+    # the problem names the file, or the folder above it that the tests folder may not hold
+    assert [p for p in problems(cli_task_dir) if rel == p["file"] or rel.startswith(p["file"] + "/")], f"{rel} was accepted"
 
 
 def test_each_file_of_tests_calls_the_case_helper_itself(cli_task_dir):
@@ -373,7 +375,7 @@ def test_a_test_imports_from_a_helper_only_what_the_helper_defines(cli_task_dir)
     # a name imported inside a function of the helper, and made global there, is still an imported name
     write(cli_task_dir, "tests/lib/paths.py", "Path = None\nsys = None\n\n\ndef keep():\n    global Path, sys\n"
           "    import sys\n    from pathlib import Path\n\n\nkeep()\n" + PATH_LINE)
-    assert refused_in(cli_task_dir, "tests/lib/paths.py") == []
+    assert refused_in(cli_task_dir, "tests/lib/paths.py"), "global is not on the list of syntax"
     for name in ("Path", "sys"):
         assert with_added(cli_task_dir, TEST, head + f"from paths import {name} as other  # noqa: E402\n"), name
 

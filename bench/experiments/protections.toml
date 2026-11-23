@@ -423,16 +423,6 @@ put = '''    if False:
 '''
 
 [[protection]]
-what = "A fault of the judge inside the image is read as one"
-file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_fault_of_the_judge_in_the_image_is_read_as_one"]
-[[protection.change]]
-find = '''        raise JudgeFault(json.loads(fault.read_text(encoding="utf-8")).get("judge_fault", "unknown"))
-'''
-put = '''        pass
-'''
-
-[[protection]]
 what = "A vetting container gets the task's own judging time"
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_the_container_gets_the_tasks_own_judging_time"]
@@ -504,6 +494,44 @@ tests = ["tests/test_cli_convert.py::test_a_command_line_task_carries_its_caps_o
 find = '''        caps += ["--tmpfs", room["cases"]]
 '''
 put = '''        pass
+'''
+
+[[protection]]
+what = "A step that judged no test gives no solution its judgement"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_step_that_judged_no_test_gets_no_judgement"]
+[[protection.change]]
+find = '''    if not tests:
+        # a step that judged no test'''
+put = '''    if False:
+        # a step that judged no test'''
+
+[[protection]]
+what = "A fault of the judge inside the image is read as one"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_fault_of_the_judge_in_the_image_is_read_as_one"]
+[[protection.change]]
+find = '''            raise JudgeFault(said["judge_fault"])
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A fault file of another shape is a fault, never a trace of an error"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_fault_file_of_any_shape_is_read_as_a_fault"]
+[[protection.change]]
+find = '''if isinstance(said, dict) and isinstance(said.get("judge_fault"), str):'''
+put = '''if True:'''
+
+[[protection]]
+what = "A result of another shape from the container is a fault"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_result_of_another_shape_is_a_fault"]
+[[protection.change]]
+find = '''    wrong = _result_shape(reward, report)
+'''
+put = '''    wrong = None
 '''
 
 [[protection]]
@@ -1226,16 +1254,6 @@ put = '''                pass
 '''
 
 [[protection]]
-what = "The format checker refuses asynchronous code in a test"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[an asynchronous test]"]
-[[protection.change]]
-find = '''        self.refuse(node, f"defines {node.name} as asynchronous")
-'''
-put = '''        pass
-'''
-
-[[protection]]
 what = "The format checker refuses a test defined twice"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test defined twice]"]
@@ -1243,48 +1261,6 @@ tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cas
 find = '''            self.found.append(problem(self.rel, "", f"defines {name} more than once: {WHY}"))
 '''
 put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a file pytest runs or obeys without a test asking for it"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/conftest.py]"]
-[[protection.change]]
-find = '''            found.append(problem(rel, "", f"pytest runs or obeys {path.name} without a test asking for it: {WHY}"))
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a file Python would load in place of a source file"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/fast.so]"]
-[[protection.change]]
-find = '''            found.append(problem(rel, "", f"Python would load this file in place of a source file: {WHY}"))
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a helper named like a module Python would load or run in its place"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/sitecustomize.py]"]
-[[protection.change]]
-find = '''            found.append(problem(rel, "", f"Python would load or run the module {path.stem} in place of this file: {WHY}"))
-'''
-put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker holds every Python file of a command-line task's tests to the rules of a test"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_every_python_file_of_the_tests_is_held_to_the_same_rules"]
-[[protection.change]]
-find = '''        if path.suffix != ".py":
-            continue
-'''
-put = '''        if path.suffix != ".py" or rel not in listed:
-            continue
 '''
 
 [[protection]]
@@ -1388,22 +1364,6 @@ put = '''            pass
 '''
 
 [[protection]]
-what = "A helper of a test is a file of the helper folder"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
-[[protection.change]]
-find = '''if p.parent == tests / HELPERS and p.suffix == ".py"'''
-put = '''if p.suffix == ".py"'''
-
-[[protection]]
-what = "The format checker refuses a Python file named like a package of the judge's environment"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/anyio.py]"]
-[[protection.change]]
-find = '''NOT_A_HELPER = (set(sys.stdlib_module_names) | _judge_packages()'''
-put = '''NOT_A_HELPER = (set(sys.stdlib_module_names)'''
-
-[[protection]]
 what = "The format checker refuses a link in a command-line task's tests folder"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_link_in_the_tests_folder_is_refused"]
@@ -1451,16 +1411,6 @@ tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cas
 find = '''            self.refuse(node, f"defines the class {node.name}, whose name pytest collects tests by")
 '''
 put = '''            pass
-'''
-
-[[protection]]
-what = "The format checker refuses a test that yields"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test that yields]"]
-[[protection.change]]
-find = '''                self.refuse(node, f"makes {node.name} yield")
-'''
-put = '''                pass
 '''
 
 [[protection]]
@@ -1622,26 +1572,6 @@ put = '''            pass
 '''
 
 [[protection]]
-what = "A name a pattern captures is held to the rules on binding"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by a pattern]"]
-[[protection.change]]
-find = '''                self.bound(part, name, self.depth == 0)
-'''
-put = '''                pass
-'''
-
-[[protection]]
-what = "A name made global is held to the rules on binding"
-file = "dodambench/task.py"
-tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name made global]"]
-[[protection.change]]
-find = '''            self.bound(node, name, True)
-'''
-put = '''            pass
-'''
-
-[[protection]]
 what = "A name bound by importing a module is held to the rules on binding"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by importing a module]"]
@@ -1652,11 +1582,137 @@ put = '''            pass
 '''
 
 [[protection]]
+what = "The format checker refuses a kind of syntax that is not on the list a test may hold"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_kind_of_syntax_off_the_list_is_refused[NamedExpr]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"holds {kind}, a kind of syntax that is not on the list a test may hold")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name annotated without a value"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a name annotated without a value]"]
+[[protection.change]]
+find = '''                self.refuse(node, "annotates a name without giving it a value")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The tests folder of a command-line task holds only the files and folders the document names"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/data/x.json]"]
+[[protection.change]]
+find = '''                found.append(problem(rel, "", f"{shape}: {WHY}"))
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker holds every Python file of a command-line task's tests to the rules of a test"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_every_python_file_of_the_tests_is_held_to_the_same_rules"]
+[[protection.change]]
+find = '''    for path in every:
+'''
+put = '''    for path in [p for p in every if p.parent != tests / HELPERS]:
+'''
+
+[[protection]]
+what = "A helper of a test is a file of the helper folder"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_helper_is_a_file_of_the_helper_folder_only"]
+[[protection.change]]
+find = '''for p in every if p.parent == tests / HELPERS}'''
+put = '''for p in every}'''
+
+[[protection]]
+what = "No helper is named like anything loadable in the judging process"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/sitecustomize.py]", "tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/JSON.py]"]
+[[protection.change]]
+find = '''    return lower not in NOT_A_HELPER and not lower.startswith(("_", "test", "pytest"))
+'''
+put = '''    return not lower.startswith(("_", "test", "pytest"))
+'''
+
+[[protection]]
+what = "No helper's name begins with an underscore, test or pytest"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/test_helper.py]"]
+[[protection.change]]
+find = '''    return lower not in NOT_A_HELPER and not lower.startswith(("_", "test", "pytest"))
+'''
+put = '''    return lower not in NOT_A_HELPER
+'''
+
+[[protection]]
+what = "Helper names are compared without regard to case"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/JSON.py]"]
+[[protection.change]]
+find = '''    lower = stem.lower()
+'''
+put = '''    lower = stem
+'''
+
+[[protection]]
+what = "No helper is named like a module of the judge itself"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/task.py]"]
+[[protection.change]]
+find = '''                                          | {path.stem for path in JUDGE_OWN.glob("*.py")}
+'''
+put = '''
+'''
+
+[[protection]]
+what = "No helper is named like a package installed beside the judge's Python"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/pip.py]"]
+[[protection.change]]
+find = '''    names = set(JUDGE_PACKAGE_MODULES)
+'''
+put = '''    names = set()
+'''
+
+[[protection]]
+what = "The format checker refuses binding a name of the case runner otherwise than by importing it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the case runner's name bound again]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name}, a name of the case runner, otherwise than by importing it")
+'''
+put = '''            pass
+'''
+
+[[protection]]
 what = "A name bound by importing a name is held to the rules on binding"
 file = "dodambench/task.py"
 tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a built-in name bound by importing a name]"]
 [[protection.change]]
-find = '''            self.bound(node, alias.asname or alias.name, True)
+find = '''            self.bound(node, alias.asname or alias.name, True, case_runner=module == "dodam_cli")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "A file of tests is a test file directly in the folder of its kind"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_file_of_tests_is_named_kind_slash_test_name[functional/../lib/helper.py]"]
+[[protection.change]]
+find = '''        elif t.file and t.kind in TEST_KINDS and not re.fullmatch('''
+put = '''        elif False and not re.fullmatch('''
+
+[[protection]]
+what = "A file of tests is listed once"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_file_of_tests_is_named_kind_slash_test_name[functional/test_upper.py]"]
+[[protection.change]]
+find = '''            found.append(problem(manifest, f"test[{i}].file", f"{t.file} is listed more than once"))
 '''
 put = '''            pass
 '''
