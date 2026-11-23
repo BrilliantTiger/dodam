@@ -782,6 +782,11 @@ class Relay:
         """Run one session to its end within its bounds. Returns what was seen of it."""
         spending = self.spending
         seen = {"counts": None, "ended_by": None, "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": False, "over_the_base": False}
+        source = self.plan.get("program_source")
+        if source and not state_files.program_holds(Path(self.plan["argv"][0]), source):
+            # What is started is what was checked, at the moment it is started.
+            self.show("relay: the desk's copy of the program changed after it was checked; the session was not started")
+            return seen | {"ended_by": NOT_STARTED, "not_started": True}
         try:
             with self.guard:
                 if self.stopping.is_set():

@@ -4332,8 +4332,9 @@ def test_a_sign_in_of_the_desks_own_that_still_shows_an_address_is_refused(start
     start.committed()
     (start.bin / "own-status").write_text('{"loggedIn": true, "email": "desk@example.invalid"}')
     assert "email address" in start.refuses(stand_in=None)
+    # An empty address shows none, but neither is it exactly what the lock names for the desk's own sign-in: refused.
     (start.bin / "own-status").write_text('{"loggedIn": true, "email": ""}')
-    start.plan(stand_in=None)
+    assert "cannot tell" in start.refuses(stand_in=None)
 
 
 @pytest.mark.parametrize("status", ['{"loggedIn": false}', "not json", "[]", '{"loggedIn": "yes"}', ""])
@@ -9155,7 +9156,8 @@ CLOSED_LIST: dict[str, list] = {
         'name: pages',
         'on:',
         '  push:',
-        '    branches: [main]',
+        '    branches:',
+        '      - main',
         '  schedule:',
         '    - cron: "17 * * * *"',
         'permissions:',
@@ -9270,7 +9272,8 @@ CLOSED_LIST: dict[str, list] = {
 
 def the_workflows() -> dict[str, str]:
     """Every workflow of the repository, by its name, as it is written."""
-    return {path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))}
+    folder = ROOT / ".github" / "workflows"
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")])}
 
 
 def steps_of_the_workflows(workflows: dict[str, str] | None = None) -> list[dict]:
@@ -9448,6 +9451,52 @@ def with_the_matrix(command: str, matrix: dict[str, list[str]]) -> list[str]:
     return commands
 
 
+# The one notation the closed list reads, line by line: a key that opens what follows it (one of a short list, a job or
+# an axis of a matrix), a key with a plain value on its line, an item with a plain value, or a key run with a block of
+# commands below it. A plain value holds no flow, anchor, alias, tag or folded text: no brace or bracket outside GitHub's
+# own expressions, and none of these signs at its start. Every other line fails, whatever YAML would make of it.
+OPENING_KEYS = {"on", "push", "pull_request", "workflow_dispatch", "schedule", "permissions", "concurrency", "env", "jobs", "steps", "with",
+                "strategy", "matrix", "outputs", "branches", "paths", "types", "inputs", "environment"}  # fmt: skip
+KEY_LINE = re.compile(r"( *)(- )?([A-Za-z_][A-Za-z0-9_-]*):(?: (.*))?")
+ITEM_LINE = re.compile(r"( *)- (.+)")
+NOT_THE_NOTATION = "a line not in the one notation the closed list reads"
+
+
+def plain(value: str) -> bool:
+    bare = re.sub(r"\$\{\{[^{}]*\}\}", "", value).strip()
+    return bool(value.strip()) and (not bare or bare[0] not in "{[&*!|>%@`") and not any(sign in bare for sign in "{}[]")
+
+
+def notation_findings(name: str, lines: list[str]) -> list[tuple[str, ...]]:
+    found: list[tuple[str, ...]] = []
+    block, parents = None, []
+    for line in lines:
+        indent = len(line) - len(line.lstrip(" "))
+        if block is not None and indent > block:
+            continue  # A command of a block of run, which its mark reads.
+        block = None
+        key = KEY_LINE.fullmatch(line) if "\t" not in line else None
+        item = ITEM_LINE.fullmatch(line) if "\t" not in line else None
+        if key:
+            depth = indent + (2 if key.group(2) else 0)
+            while parents and parents[-1][0] >= depth:
+                parents.pop()
+            parent = parents[-1][1] if parents else None
+            value = key.group(4)
+            if value is None and (key.group(3) in OPENING_KEYS or parent in ("jobs", "matrix")):
+                parents.append((depth, key.group(3)))
+                continue
+            if value == "|" and key.group(3) == "run":
+                block = depth
+                continue
+            if value is not None and plain(value):
+                continue
+        elif item and plain(item.group(2)):
+            continue
+        found.append((name, line.strip(), NOT_THE_NOTATION))
+    return found
+
+
 def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[str, ...]]:
     """What the closed list refuses in the given workflows, or in the repository's own. The list is the workflows
     themselves, line by line: nothing that is not on it runs, and every line that starts something carries a mark that
@@ -9463,6 +9512,7 @@ def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[
             at = next(n for n, (one, other) in enumerate(itertools.zip_longest(written, [e if isinstance(e, str) else e[0] for e in held])) if one != other)
             found.append((name, f"line {at + 1} of those that count", "a line that is not on the closed list"))
             continue
+        found += notation_findings(name, written)
         marked = [(entry[0].strip().removeprefix("- ").removeprefix("run:").strip(), entry[1]) for entry in held if not isinstance(entry, str)]
         steps = steps_of_the_workflows({name: text})
         commands = [(line.strip(), step) for step in steps for line in step["run"] if line.strip() and not line.strip().startswith("#")]
@@ -9871,8 +9921,24 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
                 return value(node.args[0])
             if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
                 return [posixpath.join(a, b) for a in value(node.left) for b in value(node.right)]
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path" and len(node.args) == 1:
+                return value(node.args[0])
             if isinstance(node, ast.Subscript) and "parents" in ast.unparse(node.value) and "__file__" in ast.unparse(node.value):
-                return [""] if ast.unparse(node.slice) == "2" else []
+                # The folders above the file itself, counted from its own folder.
+                if not re.fullmatch(r"\d", ast.unparse(node.slice)):
+                    return []
+                folder = posixpath.dirname(name)
+                for _ in range(int(ast.unparse(node.slice))):
+                    folder = posixpath.dirname(folder)
+                return [folder]
+            if isinstance(node, ast.Attribute) and node.attr == "parent" and "__file__" in ast.unparse(node.value) and "parent" not in ast.unparse(node.value):
+                return [posixpath.dirname(name)]
+            if isinstance(node, ast.JoinedStr):
+                texts = [""]
+                for part in node.values:
+                    pieces = [part.value] if isinstance(part, ast.Constant) else (value(part.value) if isinstance(part, ast.FormattedValue) and part.format_spec is None and part.conversion == -1 else [])
+                    texts = [text + piece for text in texts for piece in pieces]
+                return texts
             return []
 
         for statement in tree.body:
@@ -9886,31 +9952,127 @@ def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            called = ast.unparse(node.func)
+            called, text = ast.unparse(node.func), ast.unparse(node)
+
+            def read(what: str, paths: list[str]) -> None:
+                found.extend((name, node.lineno, what, p, text) for p in (paths or [CANNOT_BE_READ]))
+
             if called in ("sys.path.insert", "sys.path.append") and node.args:
-                found += [(name, node.lineno, "put on the search path", p) for p in value(node.args[-1])]
-            elif called.endswith("spec_from_file_location") and len(node.args) >= 2 or called.endswith("run_path") and node.args:
-                found += [(name, node.lineno, "loaded from a file", p) for p in value(node.args[-1] if called.endswith("spec_from_file_location") else node.args[0])]
-            elif called.startswith("subprocess.") and node.args and isinstance(node.args[0], ast.List) and node.args[0].elts:
-                words = node.args[0].elts
-                # Python by its own path, or by its name, which the search path of programs finds.
-                program = ast.unparse(words[0])
-                if program != "sys.executable" and not (isinstance(words[0], ast.Constant) and isinstance(words[0].value, str)
-                                                        and re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", words[0].value)):  # fmt: skip
-                    continue
-                cwd = [value(k.value) for k in node.keywords if k.arg == "cwd"]
-                # Python's options read as a workflow's are: a script is the code of its own file and, in isolated mode
-                # too, must come from a protected folder; code or a module given on the command line is no script.
-                spelled = ["python"] + [str(w.value) if isinstance(w, ast.Constant) else "<computed>" for w in words[1:]]
-                started = python_start(spelled)
-                if "script" not in started or started["script"] in (None, "<computed>"):
-                    continue
-                script = words[1:][spelled[1:].index(started["script"])]
-                for p in value(script):
-                    for folder in (cwd[0] if cwd else [""]):
-                        found.append((name, node.lineno, "started with Python", posixpath.join(folder, p) if not p.startswith("/") else p))
+                read("put on the search path", value(node.args[-1]))
+            elif called.endswith("spec_from_file_location") or called.endswith("run_path") or called.endswith("run_module"):
+                given = node.args[-1] if called.endswith("spec_from_file_location") and len(node.args) >= 2 else (node.args[0] if node.args else None)
+                read("loaded from a file", value(given) if given is not None and not called.endswith("run_module") else [])
+            elif called in STARTS or re.fullmatch(r"os\.(?:exec|spawn|posix_spawn)\w*", called):
+                read("started", started_words(node, called, value))
     # A name without a folder is a file of the folder the process starts in, which no test fixes: it is read from the root.
-    return [(name, line, what, posixpath.normpath(p)) for name, line, what, p in found if p and not p.startswith("/")]
+    return [(name, line, what, posixpath.normpath(p), text) for name, line, what, p, text in found if p and not p.startswith("/")]
+
+
+# What the scan reads as a start: calls written with the module's own name. A shell's text, a program or a script that
+# is computed while the test runs, and a function of these modules taken under another name are what it cannot read.
+STARTS = {"subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen", "subprocess.getoutput",
+          "subprocess.getstatusoutput", "os.system", "os.popen", "pty.spawn", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}  # fmt: skip
+CANNOT_BE_READ = "<what the scan cannot read>"
+MODULE_OR_CODE = "<a module or code given to Python>"
+PROGRAM_OF_THE_COMPUTER = "<a program of the computer, by its name>"
+# The starts and loads of the project's own tests that the scan cannot read: each word for word, with its reason. A start
+# the scan cannot read and that is not here fails, and so does an entry here that no longer stands in a test.
+READ_BY_HAND = [
+    ('bench/tests/test_cli_convert.py', "subprocess.run(['sh', '-c', script], capture_output=True)",
+     "a shell given the task's test script, which the test builds from a text of the same file"),
+    ('bench/tests/test_cli_isolation.py', "subprocess.run([sys.executable, f'experiments/{script}', '--quick'], cwd=BENCH, capture_output=True, text=True, timeout=seconds)",
+     "an experiment script of the protected folder of experiments, by a name from the test's own list"),
+    ('bench/tests/test_cli_isolation.py', 'subprocess.run(reader_command(name, group), check=True, capture_output=True)',
+     "docker started with the reader helper's command, which a function of the same file builds"),
+    ('bench/tests/test_cli_judge.py', "subprocess.Popen([sys.executable, str(tmp_path / 'watched.py'), str(tmp_path / 'log'), str(tmp_path / 'helper.py')], cwd=tmp_path, stderr=subprocess.PIPE)",
+     'a helper the test writes into its own temporary folder from a text of the same file'),
+    ('bench/tests/test_desk_lock.py', 'subprocess.run(command, shell=True, input=json.dumps(call), capture_output=True, text=True, timeout=60)',
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', "subprocess.run(command, shell=True, input=json.dumps({'tool_name': 'Read', 'tool_input': {'file_path': 'x', 'limit': 1}}), capture_output=True, text=True)",
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', "subprocess.run(command, shell=True, input=json.dumps(call | {'session_id': 's1'}), capture_output=True, text=True, timeout=60)",
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', 'subprocess.run(command, shell=True, input=call, capture_output=True, text=True, timeout=60)',
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_experiment_scripts.py', "importlib.util.spec_from_file_location(name, BENCH / 'experiments' / f'{name}.py')",
+     'an experiment script of the protected folder of experiments, by the name the test gives'),
+    ('bench/tests/test_gemini.py', 'subprocess.run([GIT, *args], cwd=cwd, env=env, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)',
+     'git of the computer, found on its search path'),
+    ('bench/tests/test_gemini.py', 'subprocess.run([\'/bin/sh\', \'-c\', f\'{ssh} "$@"\', \'ssh\', \'git@example.invalid\', \'git-receive-pack x\'], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)',
+     'the command the job gives git for ssh, run as git runs it, with made-up arguments'),
+    ('bench/tests/test_gemini.py', "subprocess.run([sys.executable, '-I', str(self.root / 'runner.py'), str(spec_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)",
+     "the job's runner, which the test copies into its own temporary folder"),
+    ('bench/tests/test_harbor_patch.py', "subprocess.run([str(HARBOR_VENV / 'bin' / 'python'), '-I', str(PROBE)], capture_output=True, text=True, timeout=120, env={'DODAM_PROBE_SECRET': FAKE_SECRET, 'PATH': HOST_PATH, 'HOME': os.environ.get('HOME', '/tmp'), **HOST_CLI_ENV})",
+     "a probe beside this test file, with Python of the benchmark's own environment for the released Harbor"),
+    ('bench/tests/test_harbor_patch.py', "subprocess.run([str(HARBOR_VENV / 'bin' / 'python'), '-I', str(USES_PROBE)], capture_output=True, text=True, timeout=120, cwd=tmp_path, env={'PATH': HOST_PATH, 'HOME': str(tmp_path), 'LITELLM_LOCAL_MODEL_COST_MAP': 'True'})",
+     "a probe beside this test file, with Python of the benchmark's own environment for the released Harbor"),
+    ('bench/tests/test_pilot.py', "subprocess.Popen([sys.executable, str(tmp_path / 'driver.py'), str(BENCH), str(tmp_path), stage, str(int(sig))], env={**os.environ, 'STAND_IN_MODE': mode}, stdout=subprocess.DEVNULL, stderr=said)",
+     'a driver the test writes into its own temporary folder from a text of the same file'),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'build.py'], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'anchors.py'], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'build_doc.py', str(out)], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', 'subprocess.run([sys.executable, *command], cwd=plan_copy, check=True, capture_output=True)',
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_variants.py', "subprocess.run([sys.executable, '-m', 'pytest', '-q', '-rfp', '-p', 'no:cacheprovider', f'tests/{file}::{test}'], cwd=folder / 'bench', capture_output=True, text=True)",
+     "pytest in the test's own copy of the repository, on the test it has broken"),
+    ('bench/tests/test_pilot_variants.py', "subprocess.run([sys.executable, 'render.py'], cwd=folder / 'tools' / 'pilot', check=True, capture_output=True)",
+     "the trial run's renderer in the test's own copy of the repository"),
+]  # fmt: skip
+PYTHON_NAME = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?")
+
+
+def started_words(node: ast.Call, called: str, value) -> list[str]:
+    """The paths in the repository that one start runs, as the file names them; empty when the scan cannot read it."""
+    keywords = {k.arg: k.value for k in node.keywords}
+    shell = keywords.get("shell")
+    if (called in ("os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "asyncio.create_subprocess_shell")
+            or called.startswith(("os.exec", "os.spawn", "os.posix_spawn")) or "executable" in keywords or None in keywords
+            or shell is not None and not (isinstance(shell, ast.Constant) and shell.value is False)):  # fmt: skip
+        return []
+    if called == "asyncio.create_subprocess_exec":
+        words = list(node.args)
+    else:
+        argv = node.args[0] if node.args else keywords.get("args")
+        if not isinstance(argv, (ast.List, ast.Tuple)):
+            return []
+        words = list(argv.elts)
+    if not words or isinstance(words[0], ast.Starred):
+        return []
+    folders = [""]
+    if "cwd" in keywords:
+        folders = value(keywords["cwd"])
+        if not folders:
+            return []
+
+    def spelled(word) -> list[str]:
+        if isinstance(word, ast.Constant) and isinstance(word.value, str):
+            return [word.value]
+        return value(word)
+
+    def placed(paths: list[str]) -> list[str]:
+        return [p if p.startswith("/") else posixpath.join(folder, p) for p in paths for folder in folders]
+
+    first = "python" if ast.unparse(words[0]) == "sys.executable" else (spelled(words[0]) or [None])[0]
+    if first is None:
+        return []
+    if PYTHON_NAME.fullmatch(first):
+        named = ["python"] + [word.value if isinstance(word, ast.Constant) and isinstance(word.value, str) else f"<word {n}>" for n, word in enumerate(words[1:], start=1)]
+        started = python_start(named)
+        if "script" not in started:
+            return [MODULE_OR_CODE]
+        if started["script"] is None:
+            return []
+        script = words[named.index(started["script"])]
+        return placed(spelled(script)) or []
+    if posixpath.basename(first) in ("sh", "bash", "dash", "zsh"):
+        if len(words) < 2 or isinstance(words[1], ast.Starred) or any(isinstance(word, ast.Constant) and str(word.value).startswith("-") for word in words[1:]):
+            return []
+        return placed(spelled(words[1]))
+    # Another program: by its name, a program of the computer; by a path, that path.
+    return placed([first]) if "/" in first else [PROGRAM_OF_THE_COMPUTER]
 
 
 @pytest.mark.parametrize("seed", [161, 162])
@@ -9961,7 +10123,12 @@ def test_the_scan_finds_every_start_it_reads_and_fails_on_every_start_it_cannot_
 def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protected_folder():
     found = started_by_the_tests()
     assert len(found) >= 5, found
-    assert [entry for entry in found if not protected(entry[3])] == []
+    unread = {(entry[0], entry[4]) for entry in found if entry[3] == CANNOT_BE_READ}
+    listed = {(file, call) for file, call, _ in READ_BY_HAND}
+    assert sorted(unread - listed) == [], "a start the scan cannot read, and that is not on the list"
+    assert sorted(listed - unread) == [], "an entry of the list that no longer stands in a test"
+    marks = (CANNOT_BE_READ, MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER)
+    assert [entry[:4] for entry in found if entry[3] not in marks and not protected(entry[3])] == []
 
 
 def test_docker_is_started_only_to_build_an_image_from_a_protected_folder():
