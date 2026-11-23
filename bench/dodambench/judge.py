@@ -44,6 +44,7 @@ says "separated": 0.
 from __future__ import annotations
 
 import argparse
+import ast
 import ctypes
 import grp
 import json
@@ -669,6 +670,17 @@ BUILD_ENDING_SECONDS = 30          # how long the judge waits for a build it has
 ENDING_ROUNDS, ENDING_PAUSE = 500, 0.01   # ending a user's processes: at most so many rounds, each with this pause
 
 
+def tests_in(source: bytes | str) -> int:
+    """How many tests pytest collects from a file of tests that the format checker accepts: the
+    functions at the top of the file whose names begin with test. The checker refuses whatever would
+    make pytest collect another number; a file that is no Python counts none."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return 0
+    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test") for node in tree.body)
+
+
 def build_seconds(lang_env: dict[str, str]) -> float:
     """The build's time limit: BUILD_SECONDS, unless the settings handed to the judge give another.
     The format checker refuses a task whose settings would."""
@@ -880,7 +892,7 @@ class CliRun:
                          "PYTHONDONTWRITEBYTECODE": "1", "DODAM_CLI_CONFIG": str(self.settings_file)}
 
     def run_file(self, path: Path, ended: list[dict]) -> list[dict]:
-        tests = len(re.findall(r"^def test_", path.read_text(encoding="utf-8"), flags=re.M))
+        tests = tests_in(path.read_bytes())
         timeout = file_seconds(tests, self.limits["timeout_sec"])
         cases = run_cases(path, self.test_env, timeout, self.sweep, ended)
         self.note_records(cases)
@@ -891,6 +903,9 @@ class CliRun:
         if whole:
             # a program cannot make a file of tests run out of time or be impossible to list: its cases are limited
             raise JudgeFault(f"{path.name}: {whole[0]['message']}")
+        if len(cases) != tests:
+            # the file's time was counted from its tests: other cases would be judged with other time
+            raise JudgeFault(f"{path.name}: pytest listed {len(cases)} cases where the judge counted {tests} tests")
         return cases
 
     def note_records(self, cases: list[dict]) -> None:

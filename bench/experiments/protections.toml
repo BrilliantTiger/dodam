@@ -387,7 +387,7 @@ find = '''    if image is None and not unseparated:'''
 put = '''    if False:'''
 
 [[protection]]
-what = "Every vetting container is capped in memory and processes"
+what = "Every vetting container is capped in processes"
 file = "dodambench/vet.py"
 tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
 [[protection.change]]
@@ -395,12 +395,108 @@ find = '''"--cpus", str(room["cpus"]), "--pids-limit", str(room["processes"])]''
 put = '''"--cpus", str(room["cpus"])]'''
 
 [[protection]]
-what = "A memory cap the Docker machine cannot hold is lowered and reported"
+what = "A memory cap above three quarters of the Docker machine's memory is lowered and reported"
 file = "dodambench/vet.py"
 tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
 [[protection.change]]
-find = '''    memory = asked if machine_mb is None else min(asked, int(machine_mb * MACHINE_SHARE))'''
+find = '''    memory = asked if share is None else min(asked, share)'''
 put = '''    memory = asked'''
+
+[[protection]]
+what = "The place for a vetting's results is emptied before the judging"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_an_earlier_runs_result_is_never_read_as_this_runs", "tests/test_vet.py::test_an_earlier_runs_fault_is_never_read_as_this_runs"]
+[[protection.change]]
+find = '''    empty_place(out_dir)
+'''
+put = '''    out_dir.mkdir(parents=True, exist_ok=True)
+'''
+
+[[protection]]
+what = "A vetting container that did not end well, or ended without a result, is a fault of the judging"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_container_that_ended_without_a_result_is_a_fault_whatever_it_left"]
+[[protection.change]]
+find = '''    if ended != 0 or missing:
+'''
+put = '''    if False:
+'''
+
+[[protection]]
+what = "A fault of the judge inside the image is read as one"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_fault_of_the_judge_in_the_image_is_read_as_one"]
+[[protection.change]]
+find = '''        raise JudgeFault(json.loads(fault.read_text(encoding="utf-8")).get("judge_fault", "unknown"))
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "A vetting container gets the task's own judging time"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_container_gets_the_tasks_own_judging_time"]
+[[protection.change]]
+find = '''                                            task.limits["verifier_timeout_sec"])'''
+put = '''                                            1800)'''
+
+[[protection]]
+what = "The tool that checks prepared solutions refuses a language that is not the task's"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_tools_errors_are_json_first_and_no_trace"]
+[[protection.change]]
+find = '''    if lang not in LANGUAGES or lang not in task.languages:
+'''
+put = '''    if False:
+'''
+
+[[protection]]
+what = "A vetting that left solutions unchecked is no success and says so"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_run_that_checked_nothing_is_no_success_and_says_so"]
+[[protection.change]]
+find = '''    if unchecked:
+'''
+put = '''    if False:
+'''
+
+[[protection]]
+what = "A vulnerable solution has to fail a security test of its weakness at its own step"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_vulnerable_solution_fails_a_security_test_of_its_weakness_at_its_own_step"]
+[[protection.change]]
+find = '''        if not [t for t in own if t.get("step") == step]:
+'''
+put = '''        if not own:
+'''
+
+[[protection]]
+what = "Every vetting container is capped in memory"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
+[[protection.change]]
+find = '''    caps = ["--memory", f"{room['memory_mb']}m", '''
+put = '''    caps = ['''
+
+[[protection]]
+what = "A vetting container gets no swap beyond its memory cap"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"]
+[[protection.change]]
+find = '''"--memory-swap", f"{room['memory_mb']}m",
+'''
+put = '''
+'''
+
+[[protection]]
+what = "A vetting container of a command-line task gives the cases their capped folder"
+file = "dodambench/vet.py"
+tests = ["tests/test_cli_convert.py::test_a_command_line_task_carries_its_caps_onto_the_path_the_measurement_uses"]
+[[protection.change]]
+find = '''        caps += ["--tmpfs", room["cases"]]
+'''
+put = '''        pass
+'''
 
 [[protection]]
 what = "Vetting containers have no network"
@@ -1034,6 +1130,382 @@ find = '''            if given != BUILD_SECONDS:'''
 put = '''            if False:'''
 
 [[protection]]
+what = "The format checker refuses a test that imports a module it may not use"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[the operating system module]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"imports {alias.name}")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that imports a name from a module it may not use"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a name of the operating system module]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"imports {alias.name} from {module}")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that imports anything of the case runner but case and need"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the case runner's settings]"]
+[[protection.change]]
+find = '''                    self.refuse(node, f"imports {alias.name} from dodam_cli")
+'''
+put = '''                    pass
+'''
+
+[[protection]]
+what = "The format checker refuses a relative import in a test"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[a relative import]"]
+[[protection.change]]
+find = '''            self.refuse(node, "imports relatively")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that imports every name of a module"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[every name of a module]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"imports every name of {module}")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name a test does not define and may not use"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_start_something_itself_is_refused[evaluating text]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"uses {name}, which the file does not define and which is no name a test may use")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name of a test that begins with two underscores"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the built-in names]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"uses {name}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses sys and Path beyond the line that puts the helper folder on the search path"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[the system module beside the line for the helper folder]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"uses {name} beyond the line that puts the helper folder on the search path")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses an attribute a test may not reach"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_learn_the_language_or_the_judges_settings_is_refused[a hidden attribute]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"reaches .{node.attr}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test name bound at the top of a file in another way than by a def"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test bound twice]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"binds {name} at the top of the file in another way than by a def")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test name bound by an import"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name bound by an import]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"binds {name} by an import")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test name bound by a pattern"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name bound by a pattern]"]
+[[protection.change]]
+find = '''                self.refuse(part, f"binds {name} by a pattern")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test name made global"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test name made global]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"makes {name} global")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a function named like a hook of pytest"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a hook of pytest by its name]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"defines {node.name}")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a name bound like a setting of pytest"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[plug-ins named by the file]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"binds {name}")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test defined elsewhere than at the top of a file"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test defined only sometimes]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"defines {node.name} elsewhere than at the top of the file")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a class pytest would collect"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a class pytest would collect, even an empty one]"]
+[[protection.change]]
+find = '''            self.refuse(node, f"defines the class {node.name}, which pytest would collect")
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test that takes parameters"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test that asks for a fixture]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"gives {node.name} parameters")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses a decorated test"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a decorated test]"]
+[[protection.change]]
+find = '''                self.refuse(node, f"decorates {node.name}")
+'''
+put = '''                pass
+'''
+
+[[protection]]
+what = "The format checker refuses asynchronous code in a test"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[an asynchronous test]"]
+[[protection.change]]
+find = '''        self.refuse(node, f"defines {node.name} as asynchronous")
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "The format checker refuses a test defined twice"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_test_that_could_become_several_cases_is_refused[a test defined twice]"]
+[[protection.change]]
+find = '''            self.found.append(problem(self.rel, "", f"defines {name} more than once: {WHY}"))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a file pytest runs or obeys without a test asking for it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/conftest.py]"]
+[[protection.change]]
+find = '''            found.append(problem(rel, "", f"pytest runs or obeys {path.name} without a test asking for it: {WHY}"))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a file Python would load in place of a source file"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/fast.so]"]
+[[protection.change]]
+find = '''            found.append(problem(rel, "", f"Python would load this file in place of a source file: {WHY}"))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker refuses a helper named like a module Python would load or run in its place"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_a_file_pytest_or_python_would_run_or_obey_on_its_own_is_refused[tests/lib/sitecustomize.py]"]
+[[protection.change]]
+find = '''            found.append(problem(rel, "", f"Python would load or run the module {path.stem} in place of this file: {WHY}"))
+'''
+put = '''            pass
+'''
+
+[[protection]]
+what = "The format checker holds every Python file of a command-line task's tests to the rules of a test"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_every_python_file_of_the_tests_is_held_to_the_same_rules"]
+[[protection.change]]
+find = '''        if path.suffix != ".py":
+            continue
+'''
+put = '''        if path.suffix != ".py" or rel not in listed:
+            continue
+'''
+
+[[protection]]
+what = "Each file of tests of a command-line task imports case from the case runner and calls it"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_test_code.py::test_each_file_of_tests_calls_the_case_helper_itself"]
+[[protection.change]]
+find = '''        if rel in listed and not (code.imports_case and code.calls_case):
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "The smallest container memory the format checker accepts holds the case's memory"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[the case's memory]"]
+[[protection.change]]
+find = '''    return {"the case's memory": cli["case_memory_mb"],
+'''
+put = '''    return {"the case's memory": 0,
+'''
+
+[[protection]]
+what = "The smallest container memory the format checker accepts holds the case's files"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[the case's files]"]
+[[protection.change]]
+find = '''            "the case's files": cli["case_disk_mb"],
+'''
+put = '''            "the case's files": 0,
+'''
+
+[[protection]]
+what = "The smallest container memory the format checker accepts holds what the case runner keeps of a program's output"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[what the case runner keeps of the program's output]"]
+[[protection.change]]
+find = '''                OUTPUT_KEPT_TIMES * cli["case_output_kb"] / 1024 + OUTPUT_KEPT_MB,
+'''
+put = '''                0,
+'''
+
+[[protection]]
+what = "The smallest container memory the format checker accepts holds the standard input a test gives"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[what the case runner keeps of the standard input a test gives]"]
+[[protection.change]]
+find = '''            "what the case runner keeps of the standard input a test gives": cli["case_disk_mb"],
+'''
+put = '''            "what the case runner keeps of the standard input a test gives": 0,
+'''
+
+[[protection]]
+what = "The smallest container memory the format checker accepts holds the judge's own room"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_checker_refuses_a_container_memory_that_leaves_out_any_term[the judge's own room]"]
+[[protection.change]]
+find = '''            "the judge's own room": JUDGE_ROOM_MB}
+'''
+put = '''            "the judge's own room": 0}
+'''
+
+[[protection]]
+what = "The container's cap on processes leaves the judge room above a case's limit"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_the_container_leaves_the_judge_room_above_the_cases_processes"]
+[[protection.change]]
+find = '''"case_processes": PROCESS_CAP - JUDGE_PROCESSES,'''
+put = '''"case_processes": PROCESS_CAP,'''
+
+[[protection]]
+what = "The format checker refuses a task without a language"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_task_without_a_language_is_refused"]
+[[protection.change]]
+find = '''        found.append(problem("task.toml", "languages", "a task needs at least one language"))
+'''
+put = '''        pass
+'''
+
+[[protection]]
+what = "The format checker refuses a task without the right solution of a language and step"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_task_without_the_right_solution_of_a_language_and_step_is_refused[solutions/secure/go]"]
+[[protection.change]]
+find = '''            if SLUG.match(s.name) and not task.secure_dir(lang, s.name).is_dir():
+'''
+put = '''            if False:
+'''
+
+[[protection]]
+what = "The format checker refuses a vulnerable variant without a security test of its weakness at its own step"
+file = "dodambench/task.py"
+tests = ["tests/test_cli_format.py::test_a_vulnerable_variant_needs_a_security_test_of_its_weakness_at_its_own_step"]
+[[protection.change]]
+find = '''t.kind == "security" and t.weakness == v.weakness and t.step == v.step for t in task.tests'''
+put = '''t.kind == "security" and t.weakness == v.weakness for t in task.tests'''
+
+[[protection]]
+what = "The judge and the format checker count a file's tests as pytest collects them"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_judge_counts_a_files_tests_as_pytest_collects_them", "tests/test_cli_test_code.py::test_the_checker_counts_what_pytest_collects"]
+[[protection.change]]
+find = '''    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test") for node in tree.body)'''
+put = '''    return sum(isinstance(node, ast.FunctionDef) and node.name.startswith("test_") for node in tree.body)'''
+
+[[protection]]
+what = "A file of tests whose cases are not as many as the judge counted is the judge's fault"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_file_whose_cases_are_more_than_the_judge_counted_is_the_judges_fault"]
+[[protection.change]]
+find = '''        if len(cases) != tests:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
+what = "A test gives no more standard input than the case's file limit"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_test_gives_no_more_standard_input_than_the_cases_file_limit"]
+[[protection.change]]
+find = '''        if len(stdin) > limits["disk_mb"] * 1024 * 1024:
+'''
+put = '''        if False:
+'''
+
+[[protection]]
 what = "A file whose cases cannot be listed gets two case runners and no more"
 file = "dodambench/judge.py"
 tests = ["tests/test_judge.py::test_a_file_whose_cases_cannot_be_listed_needs_two_case_runners_and_no_more"]
@@ -1118,6 +1590,15 @@ tests = ["tests/test_cli_convert.py::test_the_verifiers_script_says_so_when_the_
 [[protection.change]]
 find = '''printf '{"judge_fault"'''
 put = '''true '{"judge_fault"'''
+
+[[protection]]
+what = "The verifier's script makes its folder before it says the judging ended"
+file = "dodambench/convert.py"
+tests = ["tests/test_cli_convert.py::test_the_verifiers_script_makes_its_folder_before_it_says_the_judging_ended"]
+[[protection.change]]
+find = '''mkdir -p "$out"
+'''
+put = ''''''
 
 [[protection]]
 what = "A result the judge was ended over does not stay"
