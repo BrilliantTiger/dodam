@@ -2070,7 +2070,7 @@ HOLDS_IN_MANY = r"""
 import resource
 if sys.argv[1:] == ["leave"]:
     os.makedirs("/app/left", exist_ok=True)
-    for n in range(int(sys.argv[2]) if len(sys.argv) > 2 else 120000):
+    for n in range(int(sys.argv[2]) if len(sys.argv) > 2 else 200000):
         with open(f"/app/left/{n:06d}-" + "n" * 200, "w") as f:
             f.write("x")
     sys.exit(0)
@@ -2114,7 +2114,7 @@ def test_after():
 
 def test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_case_runner(tmp_path):
     """In the sample's smallest container (a case's limit of 512 MB and 64 MB of files, and 256 MB
-    for the judge: 832 MB), the build leaves 120,000 files; a program holds every one of them open,
+    for the judge: 832 MB), the build leaves 200,000 files; a program holds every one of them open,
     starts 31 more processes that share what it holds, and takes memory in all 32 until the
     container stands at its cap. The case fails for memory, the cases before and after it pass, the
     judging ends in a result and not in a fault of the judge, and the kernel ends no case runner."""
@@ -2126,7 +2126,9 @@ def test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_ca
         lost(result, tmp_path / "out"))
     assert "memory" in message(result, "test_holds_in_many"), lost(result, tmp_path / "out")
     assert not result["report"].get("runner_ended"), f"the kernel ended a case runner: {lost(result, tmp_path / 'out')}"
-    note_figures("records many processes hold at the cap", kernel_ended=result["report"].get("memory", {}).get("ended_by_the_kernel", 0))
+    ended = result["report"].get("memory", {}).get("ended_by_the_kernel", 0)
+    note_figures("records many processes hold at the cap", kernel_ended=ended)
+    assert ended >= 1, f"the container never stood at its cap: the program was ended before the kernel came in: {lost(result, tmp_path / 'out')}"
 
 
 # Programs that make the figures the judge reads move while it reads them: they read a file of 200 MB
