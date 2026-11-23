@@ -9273,7 +9273,7 @@ def test_no_line_of_the_desk_is_cut_inside_a_word(seed):
     word, and a short value is found as a whole word. Between letters of Korean or Japanese a cut may fall."""
     tools, rng = module("tools"), random.Random(seed)
     sentences = [s for found in honest_sentences().values() for s in found]
-    latin = re.compile(r"[A-Za-z0-9]")
+    latin = re.compile(r"[A-Za-z0-9ÁÉÍÑÓÚÜáéíñóúüªº]")
     inside = []
     for sentence in rng.sample(sentences, 400):
         limit = rng.randrange(1, len(sentence))
@@ -9557,3 +9557,205 @@ def test_no_existing_task_or_test_holds_a_hidden_file_or_a_rule_file():
     tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "bench/tasks", "bench/tests"], capture_output=True, text=True, check=True).stdout.split()
     assert tracked and [path for path in tracked if any(part.startswith(".") for part in path.split("/"))] == []
     assert [path for path in tracked if path.split("/")[-1].casefold() in {name.casefold() for name in RULE_FILE_NAMES}] == []
+
+
+# =================================================================================================
+# What Google's model found at the head before merging: each as its class
+# =================================================================================================
+
+
+def test_what_agent_tools_read_under_a_name_without_a_dot_and_a_name_the_computer_could_read_otherwise_are_not_for_outside():
+    rng = random.Random(91)
+    let_through = []
+    for folder in ("_agents", "_agent"):
+        for place in PLACES:
+            for spelled in (folder, spelled_otherwise(folder, rng)):
+                for rest in ("/hooks.json", "/rules/x.md", "/plugins/p/plugin.json"):
+                    got = classified([{"filename": place + spelled + rest, "status": "added"}])
+                    if got.get("ready_for_review") is not False and not got.get("refused"):
+                        let_through.append((place + spelled + rest, got))
+    # A name with a backslash or a control character could be read as another path: it is refused.
+    for name in ("docs\\CLAUDE.md", "docs\\.claude\\settings.json", "a\\b.md", "docs/x\tCLAUDE.md"):
+        got = classified([{"filename": name, "status": "added"}])
+        if not got.get("refused"):
+            let_through.append((name, got))
+    assert not let_through, let_through[:4]
+
+
+SHORT_LATIN = ["Kim", "Lee", "Yang", "Al", "Jo"]
+
+
+def test_a_mark_that_repeats_a_letter_after_a_latin_letter_takes_nothing_from_the_word_before_it():
+    guard = module("guard")
+    missed = []
+    for value in SHORT_LATIN:
+        for mark in REPEATS:
+            for after in ("", "さん", "です", "에게"):
+                text = value + mark + after
+                if guard.leaks(text, [("name", value)]) != ["name"]:
+                    missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The words for whom as stems, in the languages that bend them, and words of Latin letters with a Korean or Japanese
+# ending attached; and a sentence with an ellipsis inside it.
+TOLD_STEMS = {"es": ["coordinadora", "coordinadoras", "coordinadores", "mantenedora", "mantenedoras", "propietarias", "dueñas", "responsables", "agentes"],
+              "en": ["coordination", "coordinators", "maintainers", "owners", "agents", "team"]}  # fmt: skip
+
+
+def test_the_told_check_knows_every_form_of_its_words_and_reads_through_an_ellipsis():
+    tools = module("tools")
+    missed = []
+    for word in TOLD_STEMS["es"]:
+        for text in (f"Se ha avisado a las {word} del proyecto.", f"Se ha avisado a la {word}."):
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+    for word in TOLD_STEMS["en"] + ["coordinator", "owner", "agentes", "equipo"]:
+        for ending, told in (("에게", "알렸습니다."), ("께", "전달했습니다."), ("に", "伝えました。"), ("へ", "報告しました。")):
+            text = f"이 내용은 {word}{ending} {told}" if told.endswith(".") else f"{word}{ending}{told}"
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+        if not tools.says_agents_were_told(f"The project's {word}... have been told."):
+            missed.append(f"The project's {word}... have been told.")
+        if not tools.says_agents_were_told(f"The project's {word}… have been told."):
+            missed.append(f"The project's {word}… have been told.")
+    assert not missed, missed[:5]
+
+
+def main_as_a_path(text: str) -> str:
+    """How the desk made other spellings of a path plain before this round, kept here word for word: whatever it found, the
+    desk still finds."""
+    text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
+    before = None
+    while before != text:
+        before = text
+        text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![\w./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
+    return text
+
+
+MAIN_PRIVATE_PLACE = re.compile(r"(?i)(?<![\w.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
+                                r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", [101, 102, 103])
+def test_every_path_that_the_desk_found_before_this_round_it_still_finds(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for _ in range(400):
+        before = rng.choice(["", "tmp", "docs", "a.b", "x-", "파일은", "ファイルは", "(", "~"])
+        path = "".join(rng.choice(["/", "\\", "//", "\\\\", "/\\", "\\/", " / ", "/./", "/../"]) + rng.choice(["users", "tmp", "home", "x", "..", ".", "var", "folders", "you"])
+                       for _ in range(rng.randrange(2, 5)))  # fmt: skip
+        text = f"See {before}{path} now."
+        plain = unicodedata.normalize("NFKC", text)
+        if (MAIN_PRIVATE_PLACE.search(plain) or MAIN_PRIVATE_PLACE.search(main_as_a_path(plain))) and "a path outside the repository" not in guard.leaks(text, []):
+            missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("text", ["Look in ./../../tmp/x for it.", "Look in .\\..\\..\\tmp\\x for it.", "Look in docs/../../../Users/you/notes for it.",
+                                  "Look in a/b/../../../../tmp/x for it.", "Look in ~you / notes for it.", "Look in ~ / secret for it.",
+                                  "경로는C:\\secret\\file 입니다.", "ファイルはC:\\data\\notes", "파일은d:/data/notes"])  # fmt: skip
+def test_a_relative_path_that_climbs_out_a_home_folder_with_spaces_and_a_drive_after_any_letter_are_found(text):
+    assert "a path outside the repository" in module("guard").leaks(text, [])
+
+
+def test_a_place_cut_to_its_newest_arrivals_in_a_batch_is_as_old_as_what_it_keeps(tmp_path):
+    relay = module("relay")
+    folder = tmp_path / "state"
+    folder.mkdir(mode=0o700)
+    kept = relay.Kept(folder / "held-events.json", most=6, most_per_account=5)
+    for n, (item, account) in enumerate([(1, 101), (2, 202), (3, 101), (4, 202), (5, 305), (6, 306)], start=1):
+        kept.put_all([event(item, account, f"k{n}")])
+    gone: list = []
+    # One batch: ten new arrivals of the first place's writer on its item, then a newcomer's arrival.
+    kept.put_all([event(1, 101, f"new{n}") for n in range(10)] + [event(99, 505, "newcomer")], gone=gone)
+    places = {(p["number"], p["account"]) for p in kept.entries()}
+    # The oldest place by the order of arrivals went: the second, whose one arrival came before everything the first keeps.
+    assert (99, 505) in places and (1, 101) in places and (2, 202) not in places, (places, gone)
+
+
+def test_desk_down_without_a_record_sends_only_what_passes_the_check(place):
+    (place.state / "desk-counts.json").write_text("{damaged")
+    (place.state / "desk-counts.json").chmod(0o600)
+    desk = place.desk()
+    desk.machine = MACHINE
+    desk.desk_down("Failure caused by somebody-local in /Users/you/secret.")
+    guard = module("guard")
+    assert [m for m in place.sent("coordinator") if guard.leaks(m["body"], MACHINE + guard.state_paths(place.state), place.copy, keys=False)] == []
+    assert place.sent("coordinator"), "the desk said nothing"
+
+
+def test_a_number_of_the_desks_own_lines_never_stops_the_digest(place, monkeypatch):
+    tools = module("tools")
+    monkeypatch.setattr(tools, "ticks", lambda: 70_000.0)
+    machine = MACHINE + [("the owner's git name or address", "Tobias")]
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = machine
+    # An account whose number reads as the value, digit by digit, had arrivals dropped; a vulnerability report waits.
+    desk.count(tools.DROPPED, account=170814500, item=7)
+    real = tools.Desk.deliver
+    monkeypatch.setattr(tools.Desk, "deliver", lambda self, subject, body: (_ for _ in ()).throw(tools.Refused("not now")))
+    desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "Something that looks like one."})
+    monkeypatch.setattr(tools.Desk, "deliver", real)
+    looking = place.desk()
+    looking.machine = machine
+    assert looking.digest() is True
+    (body,) = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
+    assert "- vulnerability, item 7: " in body
+    guard = module("guard")
+    assert guard.leaks(body, machine + guard.state_paths(place.state), place.copy, ("BrilliantTiger", "dodam"), keys=False) == []
+
+
+@pytest.mark.parametrize("text, limit, want", [("Habla español bien", 11, "Habla "), ("Pide a León hoy", 10, "Pide a "), ("Sí, es así", 9, "Sí, es ")])
+def test_a_latin_word_with_an_accent_is_not_cut(text, limit, want):
+    assert module("tools").cut(text, limit) == want
+
+
+def test_the_copys_git_folder_is_looked_at_where_the_computer_resolves_it(start, tmp_path):
+    (tmp_path / "home" / ".gitconfig").write_text("[user]\n\tname = Gildong Hong\n\temail = gildong@example.invalid\n")
+    start.own_sign_in()
+    (tmp_path / "gildong-hong-secret").mkdir()
+    real = tmp_path / "gildong-hong-secret" / "git"
+    start.committed(real)
+    link = tmp_path / "plain-link"
+    link.symlink_to(real)
+    (start.copy / ".git").write_text(f"gitdir: {link}\n")
+    assert "git folder" in start.refuses(stand_in=None)
+
+
+def test_the_public_names_of_the_repository_are_never_refused_in_a_path_at_the_start(tmp_path, monkeypatch):
+    started = Start(tmp_path / "dodam", monkeypatch)
+    (tmp_path / "dodam" / "home" / ".gitconfig").write_text("[user]\n\tname = Somebody Else\n\temail = dodam+desk@example.invalid\n")
+    started.own_sign_in()
+    started.plan()
+
+
+def test_the_closed_list_reads_every_start_however_it_is_written(tmp_path, monkeypatch):
+    plain = {"workflow": "x.yml", "folder": None, "matrix": {}, "run": [], "uses": None}
+    # A script from a folder that is not protected is the pull request's own code, in isolated mode too.
+    assert judged(plain, ["python", "-I", "docs/evil.py"]) is not None
+    # Python that reads its script from standard input, and a command inside a quoted substitution.
+    bench = plain | {"folder": "bench"}
+    assert any(judged(bench, words) for words in commands_of(bench | {"run": ["python < ../docs/evil.py"]}))
+    assert any(judged(plain, words) for words in commands_of(plain | {"run": ['out="$(bash docs/evil.sh)"']}))
+    # A step that begins with its script, without a name, does not take the folder of the step before it.
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "x.yml").write_text(
+        "on: pull_request\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: one\n        working-directory: bench\n"
+        "        run: echo hi\n      - run: python -m shadow_mod\n", encoding="utf-8")
+    # And what a test starts with Python in isolated mode, from a folder that is not protected.
+    (tmp_path / "bench" / "tests").mkdir(parents=True)
+    (tmp_path / "bench" / "tests" / "test_x.py").write_text('import subprocess, sys\nsubprocess.run([sys.executable, "-I", "docs/evil.py"])\n', encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    steps = steps_of_the_workflows()
+    assert [step["folder"] for step in steps] == ["bench", None], steps
+    assert any(judged(steps[1], words) for words in commands_of(steps[1]))
+    assert [entry for entry in started_by_the_tests() if not protected(entry[3])], started_by_the_tests()
+
+
+def test_lock_md_does_not_call_the_plans_folder_open_to_pull_requests_from_outside():
+    assert "The scripts of the plan, in a folder that pull requests from outside may change" not in said_in_lock_md()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "the scripts are in a folder that pull requests from outside may change" not in workflow

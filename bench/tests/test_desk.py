@@ -3789,3 +3789,34 @@ def test_new_commits_on_a_pull_request_count_from_before_what_others_wrote_in_th
     events = json.loads(out)["events"]
     assert [(e["kind"], e["actor_id"]) for e in events] == [("pull_request_commits", 2108), ("pull_request_comment", 2202)], events
     assert events[0]["time"] < later
+
+
+def test_new_commits_count_from_the_last_look_at_the_pull_requests_and_not_from_an_older_update(monkeypatch, tmp_path):
+    """After a look that found nothing new on the pull requests, a push counts from that look, by GitHub's own clock: not
+    from the last update of any pull request, which can be a day older, before arrivals that came after it."""
+    gh = FakeGitHub()
+    gh.pulls.append(make_pr(600, 5, sha="0000999988887777", login="grace", user_id=2108, created_at="2026-11-17T01:00:00Z", updated_at="2026-11-17T01:00:00Z"))
+    state_file = tmp_path / "state.json"
+    looks = {"n": 0, "date": "Wed, 18 Nov 2026 08:59:00 GMT"}
+
+    def dated(args):
+        if args[-1].startswith(f"repos/{REPO}/pulls?"):
+            looks["n"] += 1
+            if looks["n"] == 2:
+                looks["date"] = "Wed, 18 Nov 2026 09:00:05 GMT"
+            elif looks["n"] == 3:
+                # Between the look that found the new issue and the next one, the author pushes.
+                looks["date"] = "Wed, 18 Nov 2026 09:00:20 GMT"
+                gh.pulls[0] = make_pr(600, 5, sha="aaaa111122223333", login="grace", user_id=2108, created_at="2026-11-17T01:00:00Z",
+                                      updated_at="2026-11-18T09:00:12Z")  # fmt: skip
+        code, out, err = gh(args)
+        head, sep, rest = out.partition("\n")
+        return code, head + sep + f"Date: {looks['date']}\n" + rest, err
+
+    code0, _, _, _ = run_watch(monkeypatch, ["--wait", "--max-wait", "0", "--state", str(state_file)], dated)
+    assert code0 == 0
+    gh.issues.insert(0, make_issue(300, 10, login="first-writer", user_id=2101, created_at="2026-11-18T09:00:00Z"))
+    code, out, err, _ = run_watch(monkeypatch, ["--wait", "--state", str(state_file)], dated)
+    assert code == 0 and err == ""
+    events = json.loads(out)["events"]
+    assert [(e["kind"], e["actor_id"]) for e in events] == [("issue_opened", 2101), ("pull_request_commits", 2108)], events
