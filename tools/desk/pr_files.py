@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import posixpath
+import re
 from pathlib import Path
 import sys
 import unicodedata
@@ -70,6 +71,8 @@ PROTECTED_FOLDERS: tuple[str, ...] = (
     "tools/desk/",
     "tools/gemini/",
     "tools/site/",
+    "tools/plan/",
+    "tools/pilot/",
     "bench/",
 )
 ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
@@ -82,7 +85,18 @@ ALWAYS_PROTECTED_FOLDERS: tuple[str, ...] = (
     "tools/desk/",
     "tools/gemini/",
     "tools/site/",
+    "tools/plan/",
+    "tools/pilot/",
 )
+# What an agent tool reads from a checkout by itself is not for a pull request from outside, wherever it lies: every path
+# with a part whose name begins with a dot (the workflows' folder is one case of it), and every file that an agent tool
+# reads as rules by its name. The names are those the documentation of Claude Code, Codex CLI and the Antigravity CLI
+# gives (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md), each with any local variant after a point, a hyphen or an underscore
+# (CLAUDE.local.md, AGENTS.override.md), in any case of its letters. These are fixed words of the tool, as the folders are.
+HIDDEN = "a file or folder whose name begins with a dot"
+RULES = "a file that an agent tool reads as rules"
+PROTECTED_KINDS: tuple[str, ...] = (HIDDEN, RULES)
+RULE_FILE = re.compile(r"(?:claude|agents?|gemini)(?:[._-][^/]*)?\.md")
 # The folder of the benchmark as a whole, for what lies in it outside every folder named above.
 REST_OF_BENCH = "bench/"
 # The folder of the page's tools, and in it the page's text.
@@ -256,6 +270,13 @@ def _matches_folder(path: str, folder: str) -> bool:
 def _protected_by_place(path: str) -> set[str]:
     """The protected folders a path lies in by its place alone, whatever it is: the last of the folders named."""
     found = {folder for folder in ALWAYS_PROTECTED_FOLDERS if _matches_folder(path, folder) and not (folder == PAGE_TOOLS and _is_page_text(path))}
+    # Read part by part as the computer and the agent tools would: compared in one form and in one case.
+    for candidate in _candidate_paths(path):
+        parts = [_norm_segment(part) for part in candidate.split("/") if part not in ("", ".", "..")]
+        if any(part.startswith(".") for part in parts):
+            found.add(HIDDEN)
+        if parts and RULE_FILE.fullmatch(parts[-1]):
+            found.add(RULES)
     named_in_bench = [folder for folder in PROTECTED_FOLDERS if folder.startswith("bench/") and folder != REST_OF_BENCH]
     if _matches_folder(path, REST_OF_BENCH) and not any(_matches_folder(path, folder) for folder in named_in_bench):
         found.add(REST_OF_BENCH)
@@ -398,7 +419,7 @@ def classify_pr_files(
             if not (is_pure_add and _is_unprotected_new_task_file(filename, known_tasks_folded)):
                 touched.add("bench/tasks/")
 
-    ordered_protected = [folder for folder in PROTECTED_FOLDERS if folder in touched]
+    ordered_protected = [folder for folder in (*PROTECTED_FOLDERS, *PROTECTED_KINDS) if folder in touched]
     ready_for_review = (not draft) and adds_new_test and (len(ordered_protected) == 0)
     return {
         "protected_folders": ordered_protected,

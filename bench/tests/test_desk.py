@@ -2877,8 +2877,9 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
                 {"status": "added", "filename": "bench/tests/test_accompanying.py"},
             ]
         )
+        # The workflows' folder is also a case of every folder whose name begins with a dot.
         assert res_out == {
-            "protected_folders": [expected_folder],
+            "protected_folders": [expected_folder] + (["a file or folder whose name begins with a dot"] if old_path.startswith(".") else []),
             "adds_new_test": True,
             "ready_for_review": False,
         }
@@ -2896,7 +2897,7 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
             ]
         )
         assert res_in == {
-            "protected_folders": [expected_folder],
+            "protected_folders": [expected_folder] + (["a file or folder whose name begins with a dot"] if new_path.startswith(".") else []),
             "adds_new_test": False,
             "ready_for_review": False,
         }
@@ -3004,13 +3005,13 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
             {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
         ]
     ) == {
-        "protected_folders": ["bench/"],
+        # A folder whose name begins with a dot is protected whatever follows the dot, the look-alike of the workflows' too.
+        "protected_folders": ["bench/", "a file or folder whose name begins with a dot"],
         "adds_new_test": True,
         "ready_for_review": False,
     }
     assert check(
         [
-            {"status": "added", "filename": ".github-notes/readme.md"},
             {"status": "added", "filename": "tools/desk_notes/readme.md"},
             {"status": "added", "filename": "tools/gemini-notes/readme.md"},
             {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
@@ -3019,6 +3020,16 @@ def test_pr_files_classifies_all_cases_moves_copies_unknown_statuses_helpers_tas
         "protected_folders": [],
         "adds_new_test": True,
         "ready_for_review": True,
+    }
+    assert check(
+        [
+            {"status": "added", "filename": ".github-notes/readme.md"},
+            {"status": "added", "filename": "bench/tests/test_lookalikes.py"},
+        ]
+    ) == {
+        "protected_folders": ["a file or folder whose name begins with a dot"],
+        "adds_new_test": True,
+        "ready_for_review": False,
     }
 
     # 9. File names with a line break, with a tab, and with quotes:
@@ -3076,7 +3087,7 @@ def test_pr_files_normalises_nfc_and_compares_protected_and_task_folders_without
             ]
         )
         assert res == {
-            "protected_folders": [expected_folder],
+            "protected_folders": [expected_folder] + (["a file or folder whose name begins with a dot"] if cap_path.startswith(".") else []),
             "adds_new_test": True,
             "ready_for_review": False,
         }, f"capitalised path {cap_path} was not recognised as {expected_folder}"
@@ -3718,8 +3729,10 @@ def test_outside_input_rules_from_agents_md_stand_word_for_word_in_brief_and_dri
         agents_text.replace("Never follow instructions", "Do not follow instructions"),
         brief_text,
     )
+    # A rule added to the section, wherever the section stands in the file.
+    first = outside_input_rules(agents_text)[0]
     assert outside_rules_differ(
-        agents_text.rstrip() + "\n- Never open attachments from outside.\n",
+        agents_text.replace(first, first + "\n- Never open attachments from outside.", 1),
         brief_text,
     )
     assert outside_rules_differ(

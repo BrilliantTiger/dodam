@@ -97,19 +97,33 @@ PASSING_ON = re.compile(
     r"|avis\w+|inform(?:a|an|ar\w*|ad[oa]s?|é|ó|amos)|notific\w+|comunic\w+|pasar\w*|pasad\w+|pas[éó]|transmit\w+|traslad\w+)\b"
     r"|전달|알리|알렸|알려|보고|통보|넘기|넘겼|伝え|知らせ|報告|通知|連絡|引き継"
 )
+# The usual words for whom, in each language of the project: the agents, the maintainers, the team, the coordinator, the
+# owner, and those in charge. One table, which the check and its tests read.
+WHOM_WORDS = {
+    "en": ["agent", "agents", "maintainer", "maintainers", "coordinator", "coordinators", "coordinating", "team", "owner", "owners", "staff"],
+    "ko": ["에이전트", "관리자", "담당", "메인테이너", "코디네이터", "소유자", "팀", "오너"],
+    "ja": ["エージェント", "メンテナ", "担当", "チーム", "管理者", "コーディネーター", "所有者", "オーナー"],
+    "es": ["agente", "agentes", "mantenedor", "mantenedores", "responsable", "responsables", "equipo", "coordinador", "coordinadores",
+           "coordinadora", "propietario", "propietaria", "propietarios", "dueño", "dueña", "dueños", "dueno", "duena"],
+}  # fmt: skip
 WHOM = re.compile(
-    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*"
-    r"|propietari[oa]s?|due[ñn][oa]s?)\b"
-    r"|에이전트|관리자|담당|메인테이너|코디네이터|소유자|エージェント|メンテナ|担当|チーム|管理者|コーディネーター|所有者|オーナー"
+    r"(?i)\b(?:" + "|".join(map(re.escape, WHOM_WORDS["en"] + WHOM_WORDS["es"])) + r")\b"
+    r"|" + "|".join(map(re.escape, WHOM_WORDS["ko"] + WHOM_WORDS["ja"]))
 )
+# Short forms whose point ends no sentence, in the languages of the project that write them with a point.
+SHORT_FORMS = ["e.g.", "i.e.", "cf.", "etc.", "vs.", "approx.", "incl.", "esp.", "viz.", "p. ej.", "aprox.", "Sr.", "Sra.", "Srta.", "Dr.", "Dra.",
+               "Mr.", "Mrs.", "Ms.", "No.", "núm.", "pág."]  # fmt: skip
+SHORT_FORM = re.compile(r"(?i)(?<![^\W\d_])(?:" + "|".join(re.escape(form).replace(r"\ ", r"\s*") for form in sorted(SHORT_FORMS, key=len, reverse=True)) + r")")
 # Where a sentence ends: a line break, a full stop of Japanese, or a point, an exclamation or a question mark that a space
-# or the end of the text follows. A point inside a word (a version, the name of a file, a number) ends no sentence.
+# or the end of the text follows. A point inside a word (a version, the name of a file, a number) ends no sentence, and
+# neither does the point of a short form.
 SENTENCE_END = re.compile(r"[.!?]+(?=\s|$)|[。！？\n]+")
 
 
 def says_agents_were_told(text: str) -> bool:
     """Whether a sentence of the text makes the claim in the usual words: read in one width and one case."""
     folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = SHORT_FORM.sub(lambda found: found.group(0).replace(".", ""), folded)
     return any(PASSING_ON.search(sentence) and WHOM.search(sentence) for sentence in SENTENCE_END.split(folded))
 
 
@@ -136,18 +150,24 @@ def charge_of(session: dict) -> float:
 # What is a number to a cut: a word that holds a digit, with everything joined to it (its sign, its points and commas,
 # the hyphens of a date or a range, the letters of a hexadecimal value, a unit or an ending attached to it).
 NUMBER = re.compile(r"\S*\d\S*")
+LATIN_LETTER = re.compile(r"[A-Za-z0-9]")
 
 
 def cut(text: str, limit: int) -> str:
-    """The text within its bound. A word that holds a digit is never cut: one that does not fit whole is left out."""
+    """The text within its bound, cut only at a word's edge. A word that holds a digit is never cut, nor a run of Latin
+    letters and digits: one that does not fit whole is left out. (Between letters of Korean or Japanese a cut may fall.)"""
     if len(text) <= limit:
         return text
-    for found in NUMBER.finditer(text):
-        if found.start() >= limit:
-            break
-        if found.end() > limit:
-            return text[: found.start()]
-    return text[:limit]
+    end = limit
+    while True:
+        before = end
+        for found in NUMBER.finditer(text):
+            if found.start() < end < found.end():
+                end = found.start()
+        while 0 < end and LATIN_LETTER.match(text[end - 1]) and LATIN_LETTER.match(text[end]):
+            end -= 1
+        if end == before:
+            return text[:end]
 
 
 def named(numbers: list[int], room: int, most: int | None = None) -> str:
@@ -523,9 +543,13 @@ class Desk:
             raise Refused(f"{what.capitalize()} is {len(value)} characters long; the most allowed is {limit}. Nothing was sent.")
         return value
 
+    def holds(self, text: str, keys: bool = True) -> list[str]:
+        """What the check on text that leaves finds in a text, exactly as it is sent. The state folder's own path is among it."""
+        return guard.outgoing(text, self.machine + guard.state_paths(self.state), self.copy, self.public, keys=keys)
+
     def outgoing(self, text: str, what: str) -> None:
-        """The one place every text passes before it goes to an outsider. The state folder's own path is among what it refuses."""
-        found = guard.outgoing(text, self.machine + guard.state_paths(self.state), self.copy, self.public)
+        """The one place every text passes before it goes to an outsider, as it is sent."""
+        found = self.holds(text)
         if found:
             raise Refused(f"Nothing was sent. {what.capitalize()} holds " + ", ".join(found) + ". Write it without that.")
 
@@ -585,7 +609,10 @@ class Desk:
     # -- what the desk has to tell: kept first, then sent ---------------------
 
     def _send(self, record: dict, what: str, subject: str, lines: list[str]) -> bool:
-        """Send one message now and write down that it was sent. False when it could not be sent."""
+        """Send one message now and write down that it was sent. False when it could not be sent, or when the message, exactly
+        as it would be sent, holds what the check on text that leaves refuses (it may quote a key an outsider wrote)."""
+        if self.holds("\n".join([self.lock["coordinator"]["first_line"], subject, *lines]), keys=False):
+            return False
         try:
             # What is about to be sent is in the kept list, in the state folder, before it goes anywhere.
             state_files.write(self.state / COUNTS_FILE, "The desk's record", json.dumps(record))
@@ -734,10 +761,11 @@ class Desk:
         settings = self.lock["coordinator"]
         # The coordinator is not an outsider, so a summary may quote what an outsider wrote, a key included. Everything else
         # of the check on text that leaves holds for it: the characters, the known values, the paths and private places.
-        found = guard.outgoing(summary, self.machine + guard.state_paths(self.state), self.copy, self.public, keys=False)
+        # The summary as it was given (every character of it), and the line as it is kept: its line breaks and tabs made spaces.
+        line = " ".join(summary.split())
+        found = list(dict.fromkeys(self.holds(summary, keys=False) + self.holds(line, keys=False)))
         if found:
             raise Refused("Nothing was kept. The summary holds " + ", ".join(found) + ". Write it without that.")
-        line = " ".join(summary.split())
         with self.counts() as record:
             moment = record["clock"]
             if number is not None and any(e["kind"] == kind and e["number"] == number and moment - e["t"] < DAY for e in record["reports"]):
@@ -803,7 +831,10 @@ class Desk:
                 lines = ["Kind: digest", f"Reports since the last digest: {len(waiting)}. Each line is a kind, an item and one line by the desk, which may quote outside text."]
                 for entry in carried:
                     where = f"item {entry['number']}" if entry["number"] is not None else "no item"
-                    lines.append(f"- {entry['kind']}, {where}: {cut(entry['line'], settings['digest_line_chars'])}")
+                    line = f"- {entry['kind']}, {where}: {cut(entry['line'], settings['digest_line_chars'])}"
+                    # Each line as it is sent: one that holds what the check refuses is sent without its text.
+                    found = self.holds(line, keys=False)
+                    lines.append(f"- {entry['kind']}, {where}: (its text is left out: it holds {', '.join(found)})" if found else line)
                 # After the vulnerabilities: a bound of the day that closed the desk for everyone, and the accounts that used the most of it.
                 for name, accounts in sorted(closed.items()):
                     lines.insert(2 + len(first), f"- a day closed for everyone ({name}); the accounts that used the most of it, by number: "
@@ -832,6 +863,10 @@ class Desk:
                 # hour: the record holds its time from the moment before it leaves. When it could not be sent, the time before.
                 earlier = (record["digest_ticks"], record["digest_boot"])
                 record["digest_ticks"], record["digest_boot"] = counted, started
+                if self.holds("\n".join([settings["first_line"], "Desk: digest", *lines]), keys=False):
+                    # The lines together hold what none holds alone: every text is left out of this digest.
+                    lines = [re.sub(r"^(- [a-z_]+, (?:item \d+|no item): ).*$", r"\1(its text is left out of this digest)", line) if n >= 2 else line
+                             for n, line in enumerate(lines)]  # fmt: skip
                 if not self._send(record, "digest", "Desk: digest", lines):
                     record["digest_ticks"], record["digest_boot"] = earlier
                     return False
@@ -948,7 +983,7 @@ class Desk:
             if verdict.get("refused") or pull.get("head_before") != pull.get("head_after"):
                 return refused
             return {
-                "protected_folders": [folder for folder in pr_files.PROTECTED_FOLDERS if folder in verdict["protected_folders"]],
+                "protected_folders": [folder for folder in (*pr_files.PROTECTED_FOLDERS, *pr_files.PROTECTED_KINDS) if folder in verdict["protected_folders"]],
                 "adds_new_test": verdict["adds_new_test"] is True,
                 "ready_for_review": verdict["ready_for_review"] is True,
             }
@@ -983,8 +1018,11 @@ class Desk:
                 "Nothing was sent. The text itself says that the project's agents were or will be told. Leave that out of the text: "
                 "the tool adds the fixed sentence when agents_told is told."
             )
-        self.outgoing(text, "the answer")
         fixed = {"told": settings["told"], "could_not_tell": settings["could_not_tell"]}.get(told, {}).get(language)
+        # Checked as it is posted: with the first line before it and the fixed sentence after it.
+        posted = settings["first_line"] + "\n\n" + text + ("\n\n" + fixed if fixed else "")
+        self.outgoing(text, "the answer")
+        self.outgoing(posted, "the answer, with the desk's first line and the fixed sentence round it,")
         with self.counts() as record:
             moment = record["clock"]
             on_item = sum(1 for entry in record["answers"] if entry["number"] == number and moment - entry["t"] < HOUR)
@@ -1004,7 +1042,7 @@ class Desk:
                 self.limit_reached(record, "answers to one account in a day")
                 raise Refused("Nothing was sent. Every account this answer is for already has its answers for today, which is the limit for one account.")
             # The tool writes the first line, so no answer goes out without it.
-            self.backend.comment(number, settings["first_line"] + "\n\n" + text + ("\n\n" + fixed if fixed else ""))
+            self.backend.comment(number, posted)
             record["answers"].append({"t": moment, "number": number, "accounts": under})
         return f"The answer was posted on item {number}."
 

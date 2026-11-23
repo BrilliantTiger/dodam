@@ -161,13 +161,15 @@ WORD_WITH_PATH = re.compile(r"[^\s`'\"()<>\[\],;]+")
 PRIVATE_PLACES = (
     # Every folder for temporary files of the system is one: /tmp, /var/tmp, /private/tmp, /var/folders, /dev/shm, /run/user.
     # Spaces may stand round the slashes; other ways of writing the same folder are made plain first (see as_a_path).
-    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
+    # A path begins at a slash that no Latin letter, digit, point or underscore stands before: a letter of another alphabet may.
+    ("a path outside the repository", re.compile(r"(?i)(?<![A-Za-z0-9_.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
                                                 r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")),
     # A drive of Windows, with either slash.
     ("a path outside the repository", re.compile(r"(?i)\b[a-z]:[\\/]")),
-    ("a path outside the repository", re.compile(r"(?<![\w.])~/+[^\s/]")),
+    # A home folder: ~ alone, or followed by the name of an account.
+    ("a path outside the repository", re.compile(r"(?<![A-Za-z0-9_.])~[A-Za-z0-9._-]*[ \t]*/+[^\s/]")),
     # A hidden folder whose name begins with one of these names, in any case, with either slash and spaces round it.
-    ("a hidden folder of this computer", re.compile(r"(?i)(?<![\w-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)[\w.-]*[ \t]*/+[ \t]*[^\s/]")),
+    ("a hidden folder of this computer", re.compile(r"(?i)(?<![A-Za-z0-9_-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)[\w.-]*[ \t]*/+[ \t]*[^\s/]")),
     (
         "an address inside a private network",
         re.compile(
@@ -360,7 +362,9 @@ def values_of(word: str) -> list[str]:
     which names a person by itself."""
     found = [reduced(word)]
     if "@" in word:
-        found.append(reduced(word.split("@", 1)[0]))
+        local = word.split("@", 1)[0]
+        # The part before the at sign, and that part before a plus sign, which adds a tag to the same address.
+        found += [reduced(local), reduced(local.split("+", 1)[0])]
     return [value for value in dict.fromkeys(found) if value]
 
 
@@ -409,13 +413,15 @@ def path_spelling(text: str) -> str:
     since there they lead to the root itself; the data volume of macOS left out. Each again until nothing changes, so
     that one way hidden in another is found too. Spaces round a slash stay, and the search allows them."""
     text = unicodedata.normalize("NFKC", text).casefold().replace("\\", "/")
+    # Two dots that climb, at the beginning of a path: from the copy they lead out of it and, enough of them, to the root.
+    text = re.sub(r"(?<![a-z0-9_./-])(?:\.\.[ \t]*/[ \t]*)+", "/", text)
     before = None
     while before != text:
         before = text
         text = re.sub(r"/(?:[ \t]*/)+", "/", text)
         text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
         text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
-        text = re.sub(r"(?<![\w./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![a-z0-9_./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
         text = re.sub(r"/[ \t]*system[ \t]*/[ \t]*volumes[ \t]*/[ \t]*data(?=[ \t]*/)", "", text)
     return text
 

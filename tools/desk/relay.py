@@ -585,7 +585,7 @@ class Relay:
                         session["ended"] = bool(ended)
                         session["waits"] = list(waits) if ended else []
                         session["let_in"] = bool(entry.get("let_in", True))
-                        if entry["number"] is not None and session["let_in"]:
+                        if entry["number"] is not None and session["let_in"] and not entry.get("stopped"):
                             # Sessions that had to be ended on one item and were shown its text, one after the other. A session that
                             # was not ended begins the count anew; one that was ended before it was shown anything says nothing about the item.
                             row, name = record["ended_in_a_row"], str(entry["number"])
@@ -955,7 +955,9 @@ class Relay:
             self.stop_watching()
             return False
         if self.stopping.is_set() and not seen.get("at_a_bound"):
-            # The desk is being stopped in the middle of a session: the arrival stays kept, and nobody waits for it.
+            # The desk is being stopped in the middle of a session: the arrival stays kept, nobody waits for it, and the
+            # item's count toward closing stays as it was.
+            entry["stopped"] = True
             self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             return False
         self.failures = 0

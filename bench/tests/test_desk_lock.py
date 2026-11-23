@@ -1893,8 +1893,11 @@ class Day:
         self.stopped_payers: set = set()
         # Whether the session that runs is one during which the desk is stopped, and whether the next digest is stopped.
         self.stopped_now, self.stop_the_digest = False, False
+        # A stream of its own for the rarer ways a session ends, and how many digests were due.
+        self.rare, self.digests_due = random.Random(seed + 1), 0
         # The environment and item of the last session for an item: its tools may still be reading when the next one runs.
         self.previous_session: tuple | None = None
+        self.earlier_session: tuple | None = None
         for loaded in (self.tools, self.relay_module.tools):
             monkeypatch.setattr(loaded, "now", lambda: self.clock)
             # The computer's count of the time since it was started moves with the time that passes, and with no setting of
@@ -2252,7 +2255,7 @@ class Day:
         self.handled_now |= set(self.handles)
         if number is not None:
             # This session's tools may still be reading when the next session runs.
-            self.previous_session = (dict(env), number)
+            self.earlier_session, self.previous_session = self.previous_session, (dict(env), number)
         if number is not None and self.expected_item != "not worked out":
             # Which item starts follows the order of arrivals alone.
             assert number == self.expected_item, (number, self.expected_item)
@@ -2313,6 +2316,7 @@ class Day:
                 return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
             if how.get("no result"):
                 self.reach["a session that ended without a result after it responded"] += 1
+                self.stopped_payers.add(self.payer)
                 return {"counts": [10, 0, 0, 10], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
             self.reach["a session that ended by itself"] += 1
             return {"counts": [how.get("units", 20), 0, 0, 0], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
@@ -2358,27 +2362,30 @@ class Day:
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
         if how < 0.08:
             self.reach["a session that ended without a result after it responded"] += 1
+            self.stopped_payers.add(self.payer)
             return {"counts": [1 + rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
         if self.cheap:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
-        # Days of the first kind only: the rarer ways a session ends.
-        if 0.12 <= how < 0.13:
+        # Days of the first kind only: the rarer ways a session ends, drawn from a stream of their own, so that the steps of
+        # the main stream stay what the seeds were chosen for.
+        rare = self.rare.random() if not self.cheap else 1.0
+        if rare < 0.012:
             return self.an_ending_before_any_response({"time ran out": True}, failures)
-        if 0.13 <= how < 0.135:
+        if rare < 0.016:
             return self.an_ending_before_any_response({"over the base": True}, failures)
-        if 0.135 <= how < 0.15:
+        if rare < 0.03:
             return self.an_ending_after_a_response({"desk stopped": True})
-        if 0.15 <= how < 0.16:
+        if rare < 0.05:
             return self.an_ending_after_a_response({"killed": True})
+        if rare < 0.06:
+            return self.an_ending_after_a_response({"dear at the end": True})
+        if rare < 0.075:
+            return self.an_ending_after_a_response({"error after a response": True})
         if how < 0.16:
             counts[1] = rng.randrange(150_000)
             self.reach["a session that the relay ended at a bound after it responded"] += 1
             return {"counts": counts, "ended_by": rng.choice(["its time was up", "too many turns", "it cost more than one session may"]), "refused_sign_in": False, "turns": 3, "reads": 3, "at_a_bound": True}
-        if how < 0.17:
-            return self.an_ending_after_a_response({"dear at the end": True})
-        if how < 0.19:
-            return self.an_ending_after_a_response({"error after a response": True})
         if how < 0.2:
             counts = [0, 0, 0, 0]
         while self.relay_module.units(counts, spending["weights"]) > spending["units_per_session"]:
@@ -2390,9 +2397,9 @@ class Day:
     def a_late_read(self) -> None:
         """A reading call of the session before this one finishes now, in that session's tools: it changes nothing the relay
         reads about this session."""
-        if self.previous_session is None:
+        if self.earlier_session is None:
             return
-        env, number = self.previous_session
+        env, number = self.earlier_session
         late = self.tools.Desk(self.place.env(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")}))
         try:
             late.read_item({"number": number})
@@ -2418,8 +2425,8 @@ class Day:
 
     def an_ending_after_a_response(self, how: dict) -> dict | None:
         """The ways a session ends after it responded that the made-up days play besides ending by itself and at a bound."""
-        if how.get("desk stopped") or how.get("killed"):
-            # A stop of the desk costs the session's payer everything that was set aside for it.
+        if how.get("desk stopped") or how.get("killed") or how.get("dear at the end"):
+            # A stop of the desk, and a count past the bound at the end, cost the session's payer everything set aside.
             self.stopped_payers.add(self.payer)
         if how.get("desk stopped"):
             # The desk is stopped while the session runs, after a response; it is started again before the next start.
@@ -2884,7 +2891,15 @@ class Day:
         due = bool(waits) and (since is None or since >= hour)
         clock_moved = self.clock != self.desk_time or self.ahead
         after_a_new_start = since is not None and self.last_digest_boot != self.boot
-        assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time, self.boot, self.last_digest_boot)
+        # Every seventh digest that is due is stopped while it is being sent, after it was delivered.
+        self.digests_due += due
+        self.stop_the_digest = due and self.digests_due % 7 == 3
+        try:
+            sent = self.relay.desk.digest()
+        except Stopped:
+            sent = True
+        self.stop_the_digest = False
+        assert sent is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time, self.boot, self.last_digest_boot)
         self.reach["the computer started again between two digests"] += due and after_a_new_start
         self.reach["a digest due while the computer's clock is not the desk's time"] += due and bool(clock_moved)
 
@@ -3170,6 +3185,12 @@ def the_opening(day) -> None:
     assert one(52, 908_000, **{"desk stopped": True})
     go(day.restart)
     go(lambda: day.pass_time(DAY + 1))
+    # What that session was handling stays kept, and the next session handles it.
+    assert (908_000, 52) in kept_places()
+    day.forced.append({})
+    go(day.start)
+    assert (908_000, 52) not in kept_places()
+    go(lambda: day.pass_time(DAY + 1))
     go(lambda: day.take([ev(902_000, 45, "asks")]))
     for how in ({"refused": True}, {"time ran out": True}, {"over the base": True}, {"desk stopped": True}, {"killed": True}):
         day.forced.append(how)
@@ -3210,17 +3231,15 @@ def the_opening(day) -> None:
         go(lambda: day.pass_time(2 * 3600))
     assert day.reach["the computer started again between two digests"] >= 2
     # A digest is stopped while it is being sent, after it was delivered: it is not sent again within the hour.
-    go(lambda: day.relay.desk.note("session_ended", "A line that waits for a digest.", 905_000))
-    go(lambda: day.pass_time(2 * 3600))
-    go(lambda: day.relay.desk.note("session_ended", "Another line that waits for a digest.", 905_000))
-
     def a_stopped_digest():
+        # In one step, so that the checks after each step do not send the digest first.
+        day.relay.desk.note("session_ended", "A line that waits for a digest.", 905_000)
+        day.pass_time(3700)
         day.stop_the_digest = True
         with pytest.raises(Stopped):
             day.relay.desk.digest()
         day.stop_the_digest = False
 
-    go(lambda: day.pass_time(3700))
     go(a_stopped_digest)
     go(lambda: day.pass_time(1800))
     go(lambda: day.pass_time(1900))
@@ -3337,7 +3356,8 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     day.check()
     assert day.openings == day.closings and day.relay.closed_items() == set()
     # What the share of a day's units costs: no account with a few items of its own ever waited for it.
-    # (A stop of the desk while a session runs costs that session's payer everything set aside; such a payer is left out.)
+    # (A stop of the desk while a session runs, a session that ended without a result after it responded, and a count past the
+    # bound at a session's end cost its payer everything set aside; such a payer is left out.)
     assert [waited for waited in day.waited_for_units if waited[0] not in day.loud and waited[0] not in day.stopped_payers] == [], sorted(day.waited_for_units)
     # What the random steps of this kind of day reached by themselves.
     by_themselves = {name: day.reach[name] - opening[name] for name in REACHED}
@@ -5333,7 +5353,7 @@ def test_the_reading_tool_hands_over_the_verdict_of_the_classifying_function(pla
     assert verdict(place, [new_test, {"filename": "README.md", "status": "modified"}]) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
     assert verdict(place, [new_test], draft=True) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": False}
     touched = [{"filename": ".github/workflows/MENTION-@someone.yml", "status": "modified"}, {"filename": "bench/tests/test_site.py", "status": "modified"}]
-    assert verdict(place, touched) == {"protected_folders": [".github/", "bench/tests/"], "adds_new_test": False, "ready_for_review": False}
+    assert verdict(place, touched) == {"protected_folders": [".github/", "bench/tests/", "a file or folder whose name begins with a dot"], "adds_new_test": False, "ready_for_review": False}
     # A task folder that exists at the tip of main, at the base commit or in the desk's own copy is protected.
     assert verdict(place, [{"filename": "bench/tasks/web-signup/x.py", "status": "added"}])["protected_folders"] == ["bench/tasks/"]
     assert verdict(place, [{"filename": "bench/tasks/only-on-main/x.py", "status": "added"}], main_task_folders=["only-on-main"])["protected_folders"] == ["bench/tasks/"]
@@ -5663,7 +5683,8 @@ REAL_PULLS = {
     # test files are modified; the files under bench/tests/runtimes/ are not tests directly in the folder), a file
     # of the existing task web-signup and the security experiments (bench/experiments/). The files of the new task
     # cli-csv-json are a new task and protect nothing. It adds new tests directly in bench/tests/ (test_attack_list.py and others).
-    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/"], "adds_new_test": True,
+    # Its workflow is under a folder whose name begins with a dot, a case of that class as well.
+    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/", "a file or folder whose name begins with a dot"], "adds_new_test": True,
          "ready_for_review": False},
     # 4 files, all added, the desk's watcher among them. It is merged, so the test it added (test_desk.py) is at the tip
     # of main today: by today's answers it is a change to an existing test and not a new one.
@@ -7867,7 +7888,9 @@ def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_on
 def test_an_outside_pull_request_does_not_change_the_desk_the_gemini_job_the_harness_the_security_tests_or_the_workflows(place, path, folder, how):
     new_test = {"filename": "bench/tests/test_brand_new.py", "status": "added"}
     changed = {"filename": path, "status": how} if how != "moved out of it" else {"filename": "docs/moved.md", "status": "renamed", "previous_filename": path}
-    assert verdict(place, [new_test, changed]) == {"protected_folders": [folder], "adds_new_test": True, "ready_for_review": False}
+    # The workflows' folder is also a case of every folder whose name begins with a dot.
+    kinds = ["a file or folder whose name begins with a dot"] if path.startswith(".") else []
+    assert verdict(place, [new_test, changed]) == {"protected_folders": [folder, *kinds], "adds_new_test": True, "ready_for_review": False}
 
 
 class MovingPull(FakeGitHub):
@@ -8241,9 +8264,9 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "| It ended by itself, also with Claude Code's own report of an error after it responded | Handled |",
     "a place keeps its account's newest ten, and what goes from it that way is not counted as dropped",
     "a comment written while the item is being read can be missed when the item had a multiple of a hundred comments just before",
-    "Within one look of the watcher, new commits on a pull request count as older than every comment and review of that look",
-    "a claim whose two parts stand in what reads as two sentences, also where the point of a short form stands between them.",
-    "written in another script (a Korean name in hanja), written with another form of the same kanji (an old form and a new one)",
+    "Arrivals to which GitHub gives no time of their own, and arrivals of different kinds within one second, are put in order by a fixed rule",
+    "and a claim whose two parts stand in two sentences.",
+    "it does not read one script as another, by sound or by reading (a Korean name written in hanja among them), and it does not fold one kanji into another",
 ])  # fmt: skip
 def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
@@ -8952,7 +8975,7 @@ def test_what_is_handed_to_a_live_session_tool_is_checked_whole():
 # The turned-round list: everything a step of a workflow may start, and why nothing a pull request from outside placed can run in
 # its place. A program of the runner: the runner's own image provides it. Python is the one that setup-python installs, or a
 # virtual environment that a step made in a protected folder.
-PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "grep", "exit", "set", "[", "test", "true", "false", "docker"}
+PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "grep", "exit", "set", "[", "test", "true", "false"}
 SHELL_WORDS = {"if", "then", "else", "elif", "fi", "!", "{", "}", "do", "done", "for", "while", "in"}
 # Options of Python that take a value, written attached or as the next word.
 PYTHON_TAKES_A_VALUE = set("mcWXQ")
@@ -9079,6 +9102,22 @@ def judged(step: dict, words: list[str]) -> str | None:
     program = words[0]
     if program in PROGRAMS_OF_THE_RUNNER:
         return None
+    if program == "docker":
+        # Docker of the runner builds an image, and only from a Dockerfile and a context in a protected folder.
+        if words[1:2] != ["build"]:
+            return "docker started for anything but building an image"
+        rest, n, dockerfile, context = words[2:], 0, "Dockerfile", None
+        while n < len(rest):
+            if rest[n] in ("-f", "--file", "-t", "--tag"):
+                dockerfile = rest[n + 1] if rest[n] in ("-f", "--file") else dockerfile
+                n += 2
+            elif rest[n].startswith("-"):
+                n += 1
+            else:
+                context, n = rest[n], n + 1
+        if context is None or not protected(posixpath.join(folder, context, "x")) or not protected(posixpath.join(folder, dockerfile)):
+            return "an image built from a folder that is not protected"
+        return None
     is_python = re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", program)
     if not is_python:
         return "a program that is not on the list"
@@ -9116,9 +9155,9 @@ def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mod
 
 def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_protected():
     assert protected("bench/x.py") and protected("tools/desk/relay.py")
-    for path in ("bench/../tools/plan/x.py", "bench/../../x.py", "../bench/x.py", "tools/desk/../plan/x.py", "/bench/x.py"):
+    for path in ("bench/../docs/x.py", "bench/../../x.py", "../bench/x.py", "tools/desk/../../docs/x.py", "/bench/x.py"):
         assert not protected(path), path
-    step = {"folder": "bench/../tools/plan", "matrix": {}, "run": [], "uses": None}
+    step = {"folder": "bench/../docs", "matrix": {}, "run": [], "uses": None}
     assert judged(step, ["python", "pilot_replan.py"]) is not None and judged(step, ["python", "-m", "pytest"]) is not None
     assert judged(step, ["python", "-I", "pilot_replan.py"]) is None and judged(step, ["bash", "x.sh"]) is not None
 
@@ -9230,13 +9269,21 @@ def test_an_answer_is_checked_as_it_is_posted_with_its_first_line_and_its_fixed_
 
 @pytest.mark.parametrize("seed", [51, 52])
 def test_no_line_of_the_desk_is_cut_inside_a_word(seed):
+    """Never inside a run of Latin letters and digits, nor inside a word that holds a digit: a cut there would make a new
+    word, and a short value is found as a whole word. Between letters of Korean or Japanese a cut may fall."""
     tools, rng = module("tools"), random.Random(seed)
     sentences = [s for found in honest_sentences().values() for s in found]
+    latin = re.compile(r"[A-Za-z0-9]")
     inside = []
-    for sentence in rng.sample(sentences, 300):
+    for sentence in rng.sample(sentences, 400):
         limit = rng.randrange(1, len(sentence))
         got = tools.cut(sentence, limit)
-        if got != sentence and not (len(got) <= limit and (not got or sentence[len(got)].isspace() or got[-1].isspace())):
+        if got == sentence:
+            continue
+        at = len(got)
+        word = re.search(r"\S*$", sentence[:at]).group(0) + re.match(r"\S*", sentence[at:]).group(0)
+        if not sentence.startswith(got) or at > limit or (latin.match(sentence[at - 1:at] or " ") and latin.match(sentence[at])) or (
+                any(c.isdigit() for c in word) and not sentence[at - 1:at].isspace() and not sentence[at].isspace() and at > 0):  # fmt: skip
             inside.append((sentence, limit, got))
     assert not inside, inside[:3]
 
@@ -9288,7 +9335,8 @@ def test_the_part_of_an_address_before_its_tag_is_a_known_value_too():
 @pytest.mark.parametrize("seed", [61, 62])
 def test_a_path_or_a_hidden_folder_is_found_after_a_letter_of_any_alphabet(seed):
     guard, rng = module("guard"), random.Random(seed)
-    letters = [g[0] for g in kana_classes()][:20] + ["파", "일", "은", "名", "前", "a", "é"]
+    # Letters of other alphabets; a Latin letter or digit before a slash makes a relative path of the repository instead.
+    letters = [g[0] for g in kana_classes()][:20] + ["파", "일", "은", "名", "前", "é"]
     missed = []
     for target, kind in (("/Users/you/notes", "a path outside the repository"), ("/tmp/x", "a path outside the repository"),
                          (".ssh/id_rsa", "a hidden folder of this computer"), ("~you/notes", "a path outside the repository")):  # fmt: skip
@@ -9370,7 +9418,7 @@ def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protec
 def test_docker_is_started_only_to_build_an_image_from_a_protected_folder():
     step = {"folder": "bench/images", "matrix": {}, "run": [], "uses": None}
     assert judged(step, ["docker", "build", "--quiet", "-f", "python/Dockerfile", "-t", "x", "."]) is None
-    for words in (["docker", "run", "x"], ["docker", "build", "-f", "../../tools/plan/Dockerfile", "."], ["docker", "build", "../../tools/plan"]):
+    for words in (["docker", "run", "x"], ["docker", "build", "-f", "../../docs/Dockerfile", "."], ["docker", "build", "../../docs"]):
         assert judged(step, words) is not None, words
 
 
