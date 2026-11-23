@@ -92,6 +92,10 @@ def task_dir(tmp_path: Path) -> Path:
     for rel in ("functional/test_health.py", "security/test_injection.py", "functional/test_version.py"):
         write(root, f"tests/{rel}", f"# {CANARY}\ndef test_placeholder():\n    assert True\n")
     write(root, "solutions/secure/python/build/main.py", "app = None\n")
+    # every language of a task has its right solution at every step
+    write(root, "solutions/secure/python/change-1/main.py", "app = None\n")
+    for step in ("build", "change-1"):
+        write(root, f"solutions/secure/go/{step}/main.go", "package main\n\nfunc main() {}\n")
     write(root, "solutions/variants/python.toml", """
         [[variant]]
         name = "no-check"
@@ -220,6 +224,8 @@ def cli_task_dir(tmp_path: Path) -> Path:
     for step in ("build", "change-1"):
         (root / f"solutions/secure/python/{step}").mkdir(parents=True)
         (root / f"solutions/secure/python/{step}/main.py").write_text(CLI_PROGRAM.lstrip(), encoding="utf-8")
+        # every language of a task has its right solution at every step
+        write(root, f"solutions/secure/go/{step}/main.go", "package main\n\nfunc main() {}\n")
     write(root, "solutions/variants/python.toml", '''
         [[variant]]
         name = "copies-anywhere"

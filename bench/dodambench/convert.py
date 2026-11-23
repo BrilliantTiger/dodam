@@ -39,6 +39,18 @@ def _toml_table(name: str, values: dict) -> str:
     return f"[{name}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in values.items())
 
 
+# What a correct program can run into where it runs and cannot find out by itself: the system's
+# temporary folders and /dev/shm, which are closed to a case, and the four calls that hand a file's pages
+# to a pipe or a socket without copying them, which answer "invalid argument". Both kinds of task carry
+# the same sentence.
+RESTRICTIONS = ("- Where the program runs, the system's temporary folders (`/tmp` and `/var/tmp`) and `/dev/shm` may "
+                "be closed to it: make temporary files only through your runtime's own call for them, not with the "
+                "C library's `tmpfile`, and use nothing that needs `/dev/shm`, such as the locks and pools of "
+                "Python's `multiprocessing`. The system calls that hand a file's pages to a pipe or a socket "
+                "without copying them (`sendfile`, `splice`, `tee` and `vmsplice`) fail with \"invalid argument\": "
+                "send or copy a file by reading it and writing it.")
+
+
 def cli_instruction(task: Task, step_text: str, lang: Language) -> str:
     """What an agent is told about a command-line task: how the program is built, run and limited."""
     cli = task.cli
@@ -58,6 +70,7 @@ def cli_instruction(task: Task, step_text: str, lang: Language) -> str:
         f"{cli['case_processes']} processes (threads count as processes) and {cli['case_disk_mb']} MB of files. "
         "A program that breaks a limit, "
         "or leaves a process running when it ends, fails that case.",
+        RESTRICTIONS,
     ]) + "\n"
 
 
@@ -78,6 +91,7 @@ def agent_instruction(task: Task, step_text: str, lang: Language) -> str:
         lines.append("- Use the APP_SECRET environment variable as the only secret for signing or encryption.")
     build = f"`{lang.build_cmd}` and then " if lang.build_cmd else ""
     lines.append(f"- In /app we run {build}`{lang.start_cmd}`. Leave the finished program in /app.")
+    lines.append(RESTRICTIONS)
     return "\n".join(lines) + "\n"
 
 
@@ -123,6 +137,7 @@ if [ "$code" -eq 0 ] && [ -f "$out/reward.json" ]; then exit 0; fi
 if [ "$code" -eq 3 ] && [ -f "$out/judge-fault.json" ]; then exit 3; fi
 rm -rf "$out/reward.json" "$out/reward.txt" "$out/details.json" "$out/judge-fault.json"
 set -C
+mkdir -p "$out"
 printf '{"judge_fault": "{\\"severity\\": \\"error\\", \\"file\\": \\"judge\\", \\"key\\": \\"ended\\", \\"message\\": \\"the judging ended without a result (exit code %s)\\"}"}\n' "$code" > "$out/judge-fault.json"
 if [ "$code" -eq 0 ]; then code=3; fi
 exit "$code"

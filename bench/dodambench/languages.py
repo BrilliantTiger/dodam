@@ -13,7 +13,9 @@ program is always judged with the pinned packages, whatever the agent installed.
 A command-line task uses no framework. The program is built with the same build command and is then
 run once per case with run_cmd followed by the case's arguments; {app} stands for the program's
 folder, because the program is started in the case's working folder, not in its own. cli_layout
-says where the sources go when that differs from a web task.
+says where the sources go when that differs from a web task. Every runtime but Java's takes its
+temporary folder from the environment, which gives each case its own; Java's run command names the
+case's temporary folder, `../home/tmp` from the working folder, to the runtime itself.
 """
 from __future__ import annotations
 
@@ -59,7 +61,7 @@ LANGUAGES: dict[str, Language] = {lang.key: lang for lang in (
              "The Maven project is /app with pom.xml set up; write the sources under /app/src/main/java.",
              "the Spring Boot web starter and the SQLite JDBC driver, plus the Java standard library",
              "mvn -o -q -DskipTests package", "java -jar target/app.jar",
-             run_cmd="java -jar {app}/target/app.jar",
+             run_cmd="java -Djava.io.tmpdir=../home/tmp -jar {app}/target/app.jar",
              cli_layout="The Maven project is /app with pom.xml set up; write the sources under /app/src/main/java, "
                         "with exactly one class that has a main method."),
     Language("csharp", "C#", "ASP.NET Core minimal APIs",

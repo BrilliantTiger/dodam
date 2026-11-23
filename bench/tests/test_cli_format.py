@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from conftest import CANARY, edit, write
 from dodambench.task import load_task, validate
 
@@ -68,9 +70,10 @@ def test_a_missing_limit_and_an_unknown_one_are_reported(cli_task_dir):
 def test_the_containers_memory_must_hold_the_case_its_files_and_the_judge(cli_task_dir):
     """The case's files live in memory, so the container's memory is the case's memory, its files and the judge."""
     assert errors_of(cli_task_dir) == []
-    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 1785")   # 1785 + 8 + 256 > 2048
+    edit(cli_task_dir / "task.toml", "case_memory_mb = 256", "case_memory_mb = 1785")
     errors = errors_of(cli_task_dir)
-    assert any("memory_mb must be at least 2049" in e for e in errors), errors
+    # 1785 + 8 + (4 * 64 / 1024 + 1) + 8 + 256 = 2058.25 > 2048
+    assert any("memory_mb must be at least 2059" in e for e in errors), errors
 
 
 def test_a_command_line_task_takes_no_server_settings(cli_task_dir):
@@ -154,3 +157,243 @@ def test_the_checker_reports_a_task_it_cannot_read_as_json(tmp_path):
     assert done.returncode == 2
     report = report_of(done)
     assert report["ok"] is False and report["problems"][0]["file"] == "task.toml"
+
+
+# --- every problem in the form the document gives: its file, its key and its message ---
+
+def test_every_problem_has_its_file_key_and_message(cli_task_dir):
+    """A task with many problems at once: each comes out as a problem of its own, with the file and
+    the key it is about, and no problem's message holds another's."""
+    toml = cli_task_dir / "task.toml"
+    edit(toml, "schema = 1", "schema = 2")
+    edit(toml, 'title = "Demo tool"\n', "")
+    edit(toml, 'domain = "cli"', 'domain = "games"')
+    edit(toml, "agent_timeout_sec = 1800", "agent_timeout_sec = 0")
+    (cli_task_dir / "steps/change-1/instruction.md").unlink()
+    write(cli_task_dir, "tests/boundary/test_more.py", f"# {CANARY}\n")
+    write(cli_task_dir, "solutions/variants/go.toml", '''
+        [[variant]]
+        name = "one"
+        lang = "python"
+
+        [[variant]]
+        name = "two"
+        lang = "rust"
+    ''')
+    report = report_of(check(cli_task_dir))
+    found = {(p["file"], p.get("key")): p["message"] for p in report["problems"]}
+    for where in [("task.toml", "schema"), ("task.toml", "title"), ("task.toml", "domain"),
+                  ("task.toml", "limits.agent_timeout_sec"), ("task.toml", "steps[1].instruction"),
+                  ("tests/manifest.toml", "test")]:
+        assert where in found, (where, sorted(found))
+    variants = [p for p in report["problems"] if p["file"] == "solutions/variants/go.toml"]
+    assert len(variants) == 2 and {p["key"] for p in variants} == {"variant[0].lang", "variant[1].lang"}, variants
+    assert all("key" in p and p["key"] is not None and p["message"] for p in report["problems"]), report
+    messages = [p["message"] for p in report["problems"]]
+    for one in messages:
+        assert not [other for other in messages if other is not one and one in other and one != other], one
+
+
+WRONG_KIND = [
+    ("task.toml", 'title = "Demo tool"', "title = 5", "task.toml", "title"),
+    ("task.toml", 'domain = "cli"', 'domain = ["cli"]', "task.toml", "domain"),
+    ("task.toml", 'languages = ["python", "go"]', "languages = 123", "task.toml", "languages"),
+    ("task.toml", 'languages = ["python", "go"]', 'languages = ["python", 7]', "task.toml", "languages[1]"),
+    ("task.toml", ("schema = 1\n", "[limits]\n"), ("schema = 1\nlimits = 1\n", "[unused]\n"), "task.toml", "limits"),
+    ("task.toml", ("schema = 1\n", "[cli]\n"), ("schema = 1\ncli = 1\n", "[unused]\n"), "task.toml", "cli"),
+    ("task.toml", ("schema = 1\n", "[[steps]]\n"), ("schema = 1\nsteps = 1\n", "[[unused]]\n"), "task.toml", "steps"),
+    ("task.toml", 'name = "build"', "name = 1", "task.toml", "steps[0].name"),
+    ("tests/manifest.toml", 'kind = "boundary"', "kind = 3", "tests/manifest.toml", "test[1].kind"),
+    ("tests/manifest.toml", 'step = "change-1"\n\n', 'step = "change-1"\nsuperseded_in = "build"\n\n',
+     "tests/manifest.toml", "test[2].superseded_in"),
+    ("tests/manifest.toml", 'file = "functional/test_upper.py"', 'file = "functional/test_upper.py"\nfresh_app = "yes"',
+     "tests/manifest.toml", "test[0].fresh_app"),
+    ("solutions/variants/python.toml", 'name = "lower"', "name = 9", "solutions/variants/python.toml", "variant[1].name"),
+    ("solutions/variants/python.toml", 'old = ".upper()"', "old = 1", "solutions/variants/python.toml",
+     "variant[1].replace[0].old"),
+]
+
+
+@pytest.mark.parametrize("rel, old, new, file, key", WRONG_KIND, ids=[f"{w[4]}" for w in WRONG_KIND])
+def test_a_value_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_task_dir, rel, old, new, file, key):
+    for before, after in zip(*((old, new) if isinstance(old, tuple) else ((old,), (new,)))):
+        text = (cli_task_dir / rel).read_text(encoding="utf-8")
+        assert before in text, before
+        (cli_task_dir / rel).write_text(text.replace(before, after), encoding="utf-8")
+    done = check(cli_task_dir)
+    assert "Traceback" not in done.stderr, done.stderr[-1500:]
+    assert done.returncode == 1, (done.returncode, done.stdout[-500:], done.stderr[-500:])
+    report = report_of(done)
+    assert [p for p in report["problems"] if p["file"] == file and p.get("key") == key], report["problems"]
+
+
+@pytest.mark.parametrize("whole, new", [("test", 'test = "bad"\n'), ("variant", 'variant = "bad"\n')])
+def test_a_table_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_task_dir, whole, new):
+    rel = "tests/manifest.toml" if whole == "test" else "solutions/variants/python.toml"
+    (cli_task_dir / rel).write_text(new, encoding="utf-8")
+    done = check(cli_task_dir)
+    assert "Traceback" not in done.stderr and done.returncode == 1, done.stderr[-1500:]
+    assert [p for p in report_of(done)["problems"] if p["file"] == rel and p.get("key") == whole]
+
+
+def test_a_replacement_of_the_wrong_kind_is_a_problem_and_no_trace_of_an_error(cli_task_dir):
+    edit(cli_task_dir / "solutions/variants/python.toml", '[[variant.replace]]\nfile = "main.py"\nold = ".upper()"',
+         'replace = "bad"\n\n[[variant.unused]]\nfile = "main.py"\nold = ".upper()"')
+    done = check(cli_task_dir)
+    assert "Traceback" not in done.stderr and done.returncode == 1, done.stderr[-1500:]
+    assert [p for p in report_of(done)["problems"] if p.get("key") == "variant[1].replace"], report_of(done)
+
+
+def test_a_task_the_checker_cannot_read_still_says_which_key(tmp_path):
+    write(tmp_path, "broken/task.toml", "schema = = 1\n")
+    report = report_of(check(tmp_path / "broken"))
+    assert report["problems"][0]["file"] == "task.toml" and "key" in report["problems"][0]
+
+
+# --- what the document says a task must have ---
+
+def test_a_task_without_a_language_is_refused(cli_task_dir):
+    edit(cli_task_dir / "task.toml", 'languages = ["python", "go"]', "languages = []")
+    assert [p for p in report_of(check(cli_task_dir))["problems"] if p.get("key") == "languages"]
+
+
+@pytest.mark.parametrize("missing", ["solutions/secure/go/change-1", "solutions/secure/python/build",
+                                     "solutions/secure/go"])
+def test_a_task_without_the_right_solution_of_a_language_and_step_is_refused(cli_task_dir, missing):
+    import shutil
+    shutil.rmtree(cli_task_dir / missing)
+    report = report_of(check(cli_task_dir))
+    assert [p for p in report["problems"] if missing.split("/")[2] in p["message"] and "secure" in p["message"]], report
+
+
+def test_a_vulnerable_variant_needs_a_security_test_of_its_weakness_at_its_own_step(cli_task_dir):
+    """A test of the same weakness at an earlier step does not do: the variant is written for its step."""
+    assert errors_of(cli_task_dir) == []
+    edit(cli_task_dir / "tests/manifest.toml", 'file = "security/test_copy_outside.py"\nkind = "security"\nstep = "change-1"',
+         'file = "security/test_copy_outside.py"\nkind = "security"\nstep = "build"')
+    errors = errors_of(cli_task_dir)
+    assert any("copies-anywhere" in e and "change-1" in e for e in errors), errors
+
+
+# --- the smallest container the checker accepts, term by term ---
+
+# What a container must hold at once while a case runs, in MB, as the code has it: the case's memory;
+# the case's files, which live in memory; what the case runner keeps of the program's output, at most
+# four times the limit on output and 1 MB; the standard input a test gives, at most the case's file
+# limit; and the judge's own room of 256 MB, half of which is the line below which the judge ends a
+# program.
+def memory_terms(memory_mb: int, disk_mb: int, output_kb: int) -> dict[str, float]:
+    return {"the case's memory": memory_mb,
+            "the case's files": disk_mb,
+            "what the case runner keeps of the program's output": 4 * output_kb / 1024 + 1,
+            "what the case runner keeps of the standard input a test gives": disk_mb,
+            "the judge's own room": 256}
+
+
+def memory_refusals(root: Path) -> list[dict]:
+    from dodambench.task import cli_problems
+    return [p for p in cli_problems(load_task(root)) if p["key"] == "limits.memory_mb"]
+
+
+@pytest.mark.parametrize("term", list(memory_terms(1, 1, 1)))
+def test_the_checker_refuses_a_container_memory_that_leaves_out_any_term(cli_task_dir, term):
+    """The smallest memory the checker accepts for a container holds everything a case and the judge
+    can hold at once. One term short is refused, whichever term it is; the whole sum is accepted."""
+    toml = cli_task_dir / "task.toml"
+    edit(toml, "case_output_kb = 64", "case_output_kb = 1024")
+    terms = memory_terms(256, 8, 1024)
+    whole = sum(terms.values())
+    given = toml.read_text(encoding="utf-8")
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {int(whole - terms[term])}"), encoding="utf-8")
+    assert memory_refusals(cli_task_dir), f"a container without {term!r} ({terms[term]} MB) was accepted"
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {int(whole)}"), encoding="utf-8")
+    assert not memory_refusals(cli_task_dir), terms
+
+
+@pytest.mark.parametrize("term", list(memory_terms(1, 1, 1)))
+def test_vetting_refuses_a_machine_whose_container_leaves_out_any_term(cli_task_dir, term):
+    import json as json_module
+
+    import dodambench.vet as vetting
+    edit(cli_task_dir / "task.toml", "case_output_kb = 64", "case_output_kb = 1024")
+    terms = memory_terms(256, 8, 1024)
+    whole = int(sum(terms.values()))
+    task = load_task(cli_task_dir)
+    assert vetting.container_room(task, whole * 4 // 3 + 2)["memory_mb"] >= whole
+    with pytest.raises(vetting.VetError) as refused:
+        vetting.container_room(task, int((whole - terms[term]) * 4 / 3))
+    assert json_module.loads(str(refused.value))["key"] == "limits.memory_mb"
+
+
+def test_the_container_leaves_the_judge_room_above_the_cases_processes(cli_task_dir):
+    """The container's cap on processes holds a case's processes and the judge's own: three while a
+    case runs (the verifier's script, the judge and the case runner) and one more to end what a
+    program left. The checker keeps twice those four, eight."""
+    from dodambench.task import PROCESS_CAP, cli_problems
+    toml = cli_task_dir / "task.toml"
+    given = toml.read_text(encoding="utf-8")
+    for processes, refused in ((PROCESS_CAP, True), (PROCESS_CAP - 7, True), (PROCESS_CAP - 8, False), (64, False)):
+        toml.write_text(given.replace("case_processes = 8", f"case_processes = {processes}"), encoding="utf-8")
+        said = [p for p in cli_problems(load_task(cli_task_dir)) if p["key"] == "cli.case_processes"]
+        assert bool(said) == refused, (processes, said)
+
+
+def test_every_task_of_the_repository_fits_both_sums():
+    for root in sorted((BENCH / "tasks").iterdir()):
+        if (root / "task.toml").is_file():
+            assert errors_of(root) == [], root.name
+
+
+def test_a_replaced_file_that_is_not_utf8_is_a_problem_and_no_trace_of_an_error(cli_task_dir):
+    (cli_task_dir / "solutions/secure/python/change-1/data.bin").write_bytes(b"\xff\xfe upper \x80")
+    edit(cli_task_dir / "solutions/variants/python.toml", 'file = "main.py"\nold = ".upper()"',
+         'file = "data.bin"\nold = "upper"')
+    done = check(cli_task_dir)
+    assert "Traceback" not in done.stderr and done.returncode == 1, done.stderr[-1500:]
+    assert [p for p in report_of(done)["problems"] if p.get("key") == "variant[1].replace[0].file"], report_of(done)
+
+
+def test_a_test_superseded_at_the_variants_own_step_does_not_count_for_it(cli_task_dir):
+    """A security test that a step supersedes is not judged at that step, so it does not count as a test
+    of the variant's weakness at its own step."""
+    edit(cli_task_dir / "tests/manifest.toml", 'step = "change-1"\nweakness = "path-traversal"',
+         'step = "change-1"\nweakness = "path-traversal"\nsuperseded_in = ["change-1"]')
+    errors = errors_of(cli_task_dir)
+    assert any("copies-anywhere" in e and "change-1" in e for e in errors), errors
+
+
+def test_what_the_case_runner_keeps_of_the_output_is_four_times_its_limit_and_one_mb(cli_task_dir):
+    toml = cli_task_dir / "task.toml"
+    edit(toml, "case_output_kb = 64", "case_output_kb = 8192")
+    terms = memory_terms(256, 8, 8192)
+    whole = int(sum(terms.values()))
+    assert terms["what the case runner keeps of the program's output"] == 33
+    given = toml.read_text(encoding="utf-8")
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {whole - 1}"), encoding="utf-8")
+    assert memory_refusals(cli_task_dir)
+    toml.write_text(given.replace("memory_mb = 2048", f"memory_mb = {whole}"), encoding="utf-8")
+    assert not memory_refusals(cli_task_dir)
+
+
+def test_an_output_limit_above_the_file_limit_is_refused(cli_task_dir):
+    """A test may hand a run's output back as standard input, which the case runner bounds by the file
+    limit: the whole output has to fit in it."""
+    from dodambench.task import cli_problems
+    toml = cli_task_dir / "task.toml"
+    given = toml.read_text(encoding="utf-8")
+    for output_kb, refused in ((8 * 1024 + 1, True), (8 * 1024, False)):
+        toml.write_text(given.replace("case_output_kb = 64", f"case_output_kb = {output_kb}"), encoding="utf-8")
+        said = [p for p in cli_problems(load_task(cli_task_dir)) if p["key"] == "cli.case_output_kb"]
+        assert bool(said) == refused, (output_kb, said)
+
+
+
+@pytest.mark.parametrize("given", ["functional/../lib/helper.py", "functional/sub/test_more.py", "functional/helper.py",
+                                   "functional/test_upper.py"])
+def test_a_file_of_tests_is_named_kind_slash_test_name(cli_task_dir, given):
+    """A file of tests is a test file directly in the folder of its kind, and listed once."""
+    write(cli_task_dir, "tests/lib/helper.py", "X = 1\n")
+    with open(cli_task_dir / "tests/manifest.toml", "a", encoding="utf-8") as f:
+        f.write(f'\n[[test]]\nfile = "{given}"\nkind = "functional"\nstep = "build"\n')
+    report = report_of(check(cli_task_dir))
+    assert [p for p in report["problems"] if p["file"] == "tests/manifest.toml" and p["key"] == "test[4].file"], report

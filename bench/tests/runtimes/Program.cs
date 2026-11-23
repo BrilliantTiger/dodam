@@ -4,6 +4,18 @@ using System.Net;
 using System.Net.Sockets;
 
 var mode = args[0];
+if (mode == "temp")
+{
+    // a temporary file, made where the runtime makes one
+    var made = Path.GetTempFileName();
+    File.WriteAllText(made, "temp");
+    if (File.ReadAllText(made) != "temp")
+    {
+        return;
+    }
+    Console.WriteLine(Path.GetDirectoryName(Path.GetFullPath(made)));
+    return;
+}
 if (mode == "copy")
 {
     File.Copy("in.bin", "out.bin", true);

@@ -17,6 +17,14 @@ fn drain(mut from: UnixStream) -> std::thread::JoinHandle<()> {
 fn main() {
     let mode = std::env::args().nth(1).unwrap();
     match mode.as_str() {
+        "temp" => {
+            // a temporary file, made where the runtime makes one
+            let folder = std::env::temp_dir();
+            let made = folder.join(format!("temp-{}", std::process::id()));
+            std::fs::write(&made, b"temp").unwrap();
+            assert_eq!(std::fs::read(&made).unwrap(), b"temp");
+            println!("{}", std::fs::canonicalize(&folder).unwrap().display());
+        }
         "copy" => {
             std::fs::copy("in.bin", "out.bin").unwrap();
         }

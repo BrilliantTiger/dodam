@@ -84,7 +84,7 @@ def test_variants_are_written_with_their_replacements(task_dir, tmp_path):
     variants = out / "steps/build/solution/variants"
     assert (variants / "secure/main.py").read_text() == "app = None\n"
     assert (variants / "vulnerable-no-check/main.py").read_text() == "app = 'open'\n"
-    assert not (out / "steps/change-1/solution/variants").exists()
+    assert [p.name for p in (out / "steps/change-1/solution/variants").iterdir()] == ["secure"]
 
 
 def test_verifier_env_lists_steps_and_commands(task_dir):
