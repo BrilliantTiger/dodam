@@ -162,7 +162,7 @@ def test_the_verifiers_script_says_so_when_the_judge_ends_without_a_result(tmp_p
     out = tmp_path / "out"
 
     def run(judge: str) -> int:
-        for name in ("reward.json", "judge-fault.json"):
+        for name in ("reward.json", "reward.txt", "details.json", "judge-fault.json"):
             (out / name).unlink(missing_ok=True)
         fake = tmp_path / "judge.sh"
         fake.write_text("#!/bin/sh\n" + judge + "\n")
@@ -180,6 +180,9 @@ def test_the_verifiers_script_says_so_when_the_judge_ends_without_a_result(tmp_p
     said = json.loads(json.loads((out / "judge-fault.json").read_text())["judge_fault"])
     assert said["key"] == "ended" and "137" in said["message"], said
     assert run("exit 0") == 3 and (out / "judge-fault.json").is_file()   # no result, yet it said all was well
+    # a judge ended after it wrote its details and before its reward leaves none of its four files
+    assert run(f"echo '{{}}' > {out}/details.json; echo 1 > {out}/reward.txt; kill -9 $$") != 0
+    assert sorted(path.name for path in out.iterdir()) == ["judge-fault.json"], sorted(path.name for path in out.iterdir())
 
 
 def test_a_command_line_task_carries_its_caps_onto_the_path_the_measurement_uses(cli_task_dir, tmp_path):
