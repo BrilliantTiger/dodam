@@ -2,6 +2,7 @@
 // each through the library call a Node.js program would use.
 import * as fs from "node:fs";
 import * as net from "node:net";
+import * as os from "node:os";
 import * as path from "node:path";
 import express from "express";
 
@@ -13,7 +14,13 @@ function drain(from: net.Socket, file: string, done: () => void): void {
   out.on("finish", done);
 }
 
-if (mode === "copy") {
+if (mode === "temp") {
+  // a temporary file, made where the runtime makes one
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "temp-"));
+  fs.writeFileSync(path.join(folder, "file"), "temp");
+  if (fs.readFileSync(path.join(folder, "file"), "utf8") !== "temp") process.exit(1);
+  console.log(fs.realpathSync(path.dirname(folder)));
+} else if (mode === "copy") {
   fs.copyFileSync("in.bin", "out.bin");
   console.log("ok");
 } else if (mode === "send") {

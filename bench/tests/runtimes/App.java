@@ -26,8 +26,19 @@ import org.springframework.web.bind.annotation.RestController;
 @SpringBootApplication
 @RestController
 public class App {
+    /** A temporary file, made where the runtime makes one. */
+    static void temp() throws Exception {
+        var made = Files.createTempFile("temp-", ".tmp");
+        Files.writeString(made, "temp");
+        if (!Files.readString(made).equals("temp")) {
+            System.exit(1);
+        }
+        System.out.println(made.toRealPath().getParent());
+    }
+
     public static void main(String[] args) throws Exception {
         switch (args[0]) {
+            case "temp" -> temp();
             case "copy" -> Files.copy(Paths.get("in.bin"), Paths.get("out.bin"), StandardCopyOption.REPLACE_EXISTING);
             case "send" -> send();
             case "receive" -> receive();

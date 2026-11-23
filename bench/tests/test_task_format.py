@@ -128,8 +128,10 @@ def test_variants_load_with_their_replacements(task_dir):
 def test_solutions_of_a_step_start_with_the_secure_one(task_dir):
     task = load_task(task_dir)
     assert [s.label for s in task.solutions_for("python", "build")] == ["secure", "vulnerable-no-check"]
-    assert task.solutions_for("python", "change-1") == []
-    assert task.solutions_for("go", "build") == []
+    assert [s.label for s in task.solutions_for("python", "change-1")] == ["secure"]
+    import shutil
+    shutil.rmtree(task_dir / "solutions/secure/go/build")
+    assert load_task(task_dir).solutions_for("go", "build") == []
 
 
 def test_variant_expectation_must_be_known(task_dir):
@@ -158,6 +160,8 @@ def test_variant_replacement_must_be_unambiguous(task_dir):
 
 
 def test_variant_needs_a_secure_solution_to_start_from(task_dir):
+    import shutil
+    shutil.rmtree(task_dir / "solutions/secure/python/change-1")
     edit(variants_file(task_dir), 'step = "build"\nexpect', 'step = "change-1"\nexpect')
     assert any("solutions/secure/python/change-1" in e for e in errors_of(task_dir))
 

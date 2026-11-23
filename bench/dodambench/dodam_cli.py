@@ -482,6 +482,10 @@ class Case:
             stdin = stdin.encode("utf-8")
         argv = list(self._cfg["command"]) + [str(a) for a in args]
         limits = self._limits
+        if len(stdin) > limits["disk_mb"] * 1024 * 1024:
+            # what the case runner keeps of the input is bounded by the case's file limit, a term of the
+            # container's memory: more is not given, and the case fails as for a broken limit
+            return self._note(Result(None, b"", b"", "input", None, 0.0))
         left = limits["timeout_sec"] - _spent.get(self._key, 0.0)
         if left <= 0:
             return self._note(Result(None, b"", b"", "time", None, 0.0))
