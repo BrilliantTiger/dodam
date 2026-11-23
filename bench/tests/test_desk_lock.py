@@ -9019,11 +9019,16 @@ def test_every_way_of_writing_pythons_options_is_read():
     assert python_start(["python", "-u", "x.py", "-m", "y"]) == {"isolated": False, "script": "x.py"}
 
 
-def steps_of_the_workflows() -> list[dict]:
+def the_workflows() -> dict[str, str]:
+    """Every workflow of the repository, by its name, as it is written."""
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))}
+
+
+def steps_of_the_workflows(workflows: dict[str, str] | None = None) -> list[dict]:
     """Every step of every workflow: its file, its job's matrix, its folder, the script it runs, or the action it uses."""
     found = []
-    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-        lines = path.read_text(encoding="utf-8").splitlines()
+    for name, text in sorted((the_workflows() if workflows is None else workflows).items()):
+        lines = text.splitlines()
         matrix: dict[str, list[str]] = {}
         key = None
         for n, line in enumerate(lines):
@@ -9038,7 +9043,7 @@ def steps_of_the_workflows() -> list[dict]:
                 key = None
             # A step begins at every item of the list of steps, whatever key it begins with.
             if re.match(r"^\s*- [A-Za-z][\w-]*:", line):
-                found.append({"workflow": path.name, "matrix": {k: list(v) for k, v in matrix.items()}, "folder": None, "run": [], "uses": None})
+                found.append({"workflow": name, "matrix": {k: list(v) for k, v in matrix.items()}, "folder": None, "run": [], "uses": None})
             if found and (uses := re.match(r"^\s*-?\s*uses:\s*(\S+)", line)):
                 found[-1]["uses"] = uses.group(1)
             elif found and (folder := re.match(r"^\s+(?:- )?working-directory:\s*(\S+)", line)):
@@ -9147,25 +9152,75 @@ def judged(step: dict, words: list[str]) -> str | None:
     return None if protected(posixpath.join(folder, "x")) else "a module or code started from a folder that is not protected, not in isolated mode"
 
 
-def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mode():
-    open_to_outside, starts = [], 0
-    for step in steps_of_the_workflows():
+def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[str, ...]]:
+    """What the closed list of what the workflows start refuses, in the given workflows or in the repository's own."""
+    open_to_outside = []
+    for step in steps_of_the_workflows(workflows):
         if step["uses"] is not None:
             # An action is named by the forty digits of its commit, from outside the repository.
             if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}", step["uses"]):
                 open_to_outside.append((step["workflow"], step["uses"], "an action that is not pinned, or from the repository itself"))
         for words in commands_of(step):
-            starts += 1
             why = judged(step, words)
             if why:
                 open_to_outside.append((step["workflow"], step["folder"] or "the root of the repository", " ".join(words), why))
-    assert starts >= 25, starts
-    assert open_to_outside == [], open_to_outside
     # Nothing a step sets can make a later start look elsewhere: no search path for Python or the shell, no folder put on the path.
-    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
-        text = path.read_text(encoding="utf-8")
-        assert not re.search(r"^\s*(?:PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|PYTHONSAFEPATH|LD_PRELOAD|BASH_ENV|ENV)\s*:", text, re.M), path.name
-        assert "GITHUB_ENV" not in text and "GITHUB_PATH" not in text, path.name
+    for name, text in sorted((the_workflows() if workflows is None else workflows).items()):
+        if re.search(r"^\s*(?:PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|PYTHONSAFEPATH|LD_PRELOAD|BASH_ENV|ENV)\s*:", text, re.M):
+            open_to_outside.append((name, "a variable that changes where code is looked for"))
+        if "GITHUB_ENV" in text or "GITHUB_PATH" in text:
+            open_to_outside.append((name, "a step that sets what later steps are given"))
+    return open_to_outside
+
+
+def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mode():
+    assert sum(len(commands_of(step)) for step in steps_of_the_workflows()) >= 25
+    assert closed_list_findings() == []
+
+
+def changed_workflows(rng: random.Random) -> list[tuple[str, dict[str, str]]]:
+    """The repository's workflows, each changed once in a way that decides what a line starts or how it runs: a variable set
+    before a command, an option put before what a program runs, a folder of the job's or of a step's that is not protected,
+    and a shell of the step's own. The names, options and folders are drawn."""
+    workflows, changed = the_workflows(), []
+    def name() -> str:
+        return rng.choice(["PYTHON", "LD_", "BASH_", "DYLD_", "GIT_", "NODE_", ""]) + "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ_") for _ in range(rng.randint(2, 8)))
+    def folder() -> str:
+        return rng.choice(["docs", "site", "tools", ".", "docs/" + "".join(rng.choice("abcdefgh") for _ in range(5))])
+    for file, text in workflows.items():
+        lines = text.splitlines()
+        inside_run = None
+        for n, line in enumerate(lines):
+            indent = len(line) - len(line.lstrip())
+            if inside_run is not None and line.strip() and indent <= inside_run:
+                inside_run = None
+            single = re.match(r"^(\s*(?:- )?run:\s*)(?![|>]\s*$)(\S.*)$", line)
+            command = (single.group(1), single.group(2)) if single else ((line[:indent], line.strip()) if inside_run is not None and line.strip() and not line.strip().startswith("#") else None)
+            if re.match(r"^(\s*(?:- )?)run:\s*[|>]\s*$", line):
+                inside_run = len(re.match(r"^(\s*(?:- )?)", line).group(1)) - (2 if "- run" in line else 0)
+            if command:
+                head, rest = command
+                words = rest.split(" ", 1)
+                for kind, new in (("a variable set before the command", f"{head}{name()}={folder()}/{rng.choice(['x', 'x.so', 'x.sh', 'x.py'])} {rest}"),
+                                  ("an option before what is run", f"{head}{words[0]} --{rng.choice(['rcfile', 'init-file', 'config', 'prefix'])}={folder()}/x {words[1] if len(words) > 1 else ''}".rstrip())):  # fmt: skip
+                    changed.append((f"{file}:{n + 1}: {kind}", workflows | {file: "\n".join(lines[:n] + [new] + lines[n + 1 :]) + "\n"}))
+                if indent >= 8 and single:
+                    shell = " " * (len(head) - len(head.lstrip(" -")) ) + f"shell: bash --rcfile {folder()}/x {{0}}"
+                    changed.append((f"{file}:{n + 1}: a shell of the step's own", workflows | {file: "\n".join(lines[:n] + [shell, line] + lines[n + 1 :]) + "\n"}))
+            if (where := re.match(r"^(\s*(?:- )?working-directory:\s*)(\S+)\s*$", line)):
+                changed.append((f"{file}:{n + 1}: a step's folder that is not protected", workflows | {file: "\n".join(lines[:n] + [where.group(1) + folder()] + lines[n + 1 :]) + "\n"}))
+            if re.match(r"^    runs-on:", line):
+                defaults = ["    defaults:", "      run:", f"        working-directory: {folder()}"]
+                changed.append((f"{file}:{n + 1}: a folder of the job's own", workflows | {file: "\n".join(lines[: n + 1] + defaults + lines[n + 1 :]) + "\n"}))
+    return changed
+
+
+@pytest.mark.parametrize("seed", [151, 152])
+def test_every_change_to_what_decides_how_a_workflow_line_runs_is_refused_by_the_closed_list(seed):
+    changed = changed_workflows(random.Random(seed))
+    assert len(changed) >= 60, len(changed)
+    missed = [where for where, workflows in changed if not closed_list_findings(workflows)]
+    assert missed == [], (len(missed), missed[:8])
 
 
 def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_protected():
@@ -9375,9 +9430,14 @@ def test_a_relative_path_that_climbs_out_of_the_copy_to_a_private_folder_is_refu
 def started_by_the_tests() -> list[tuple[str, int, str, str]]:
     """What the tests of the benchmark's folder put on Python's search path, load from a file, or start with Python, wherever
     the path is written in the test itself: the file, the line, what is done, and the path in the repository."""
+    return started_by({path.name: path.read_text(encoding="utf-8") for path in sorted((ROOT / "bench" / "tests").glob("*.py"))})
+
+
+def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
+    """What the given Python files put on the search path, load from a file, or start with Python."""
     found = []
-    for path in sorted((ROOT / "bench" / "tests").glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for name, source in sorted(sources.items()):
+        tree = ast.parse(source)
         known: dict[str, list[str]] = {}
 
         def value(node) -> list[str]:
@@ -9407,9 +9467,9 @@ def started_by_the_tests() -> list[tuple[str, int, str, str]]:
                 continue
             called = ast.unparse(node.func)
             if called in ("sys.path.insert", "sys.path.append") and node.args:
-                found += [(path.name, node.lineno, "put on the search path", p) for p in value(node.args[-1])]
+                found += [(name, node.lineno, "put on the search path", p) for p in value(node.args[-1])]
             elif called.endswith("spec_from_file_location") and len(node.args) >= 2 or called.endswith("run_path") and node.args:
-                found += [(path.name, node.lineno, "loaded from a file", p) for p in value(node.args[-1] if called.endswith("spec_from_file_location") else node.args[0])]
+                found += [(name, node.lineno, "loaded from a file", p) for p in value(node.args[-1] if called.endswith("spec_from_file_location") else node.args[0])]
             elif called.startswith("subprocess.") and node.args and isinstance(node.args[0], ast.List) and node.args[0].elts:
                 words = node.args[0].elts
                 if ast.unparse(words[0]) != "sys.executable":
@@ -9424,8 +9484,26 @@ def started_by_the_tests() -> list[tuple[str, int, str, str]]:
                 script = words[1:][spelled[1:].index(started["script"])]
                 for p in value(script):
                     for folder in (cwd[0] if cwd else [""]):
-                        found.append((path.name, node.lineno, "started with Python", posixpath.join(folder, p) if not p.startswith("/") else p))
+                        found.append((name, node.lineno, "started with Python", posixpath.join(folder, p) if not p.startswith("/") else p))
     return [(name, line, what, posixpath.normpath(p)) for name, line, what, p in found if p and not p.startswith("/") and "/" in p.strip("/")]
+
+
+@pytest.mark.parametrize("seed", [161, 162])
+def test_a_script_that_a_test_starts_by_a_bare_name_or_with_any_python_is_found_and_is_not_protected(seed):
+    """A name without a folder is a file of the folder the test starts in, which no test fixes: it is read from the root of
+    the repository, which is not protected. Python is started by its own path or by its name."""
+    rng = random.Random(seed)
+    missed = []
+    for _ in range(40):
+        script = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz_") for _ in range(rng.randint(3, 12))) + ".py"
+        python = rng.choice(["sys.executable", '"python"', '"python3"', '"python3.13"'])
+        options = rng.choice(["", '"-I", ', '"-B", ', '"-u", '])
+        call = rng.choice(["subprocess.run", "subprocess.check_call", "subprocess.Popen", "subprocess.check_output"])
+        source = f"import subprocess\nimport sys\n\n\ndef test_it():\n    {call}([{python}, {options}\"{script}\"])\n"
+        found = [entry for entry in started_by({"test_made_up.py": source}) if entry[3] == script]
+        if not found or protected(found[0][3]):
+            missed.append((python, options, script))
+    assert missed == [], missed[:5]
 
 
 def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protected_folder():
@@ -9723,6 +9801,8 @@ def test_a_number_of_the_desks_own_lines_never_stops_the_digest(place, monkeypat
     assert looking.digest() is True
     (body,) = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
     assert "- vulnerability, item 7: " in body
+    # A number of the desk's own replaces no text that passes the check.
+    assert "Something that looks like one." in body
     # The desk's own numbers are fixed fields and are not searched; everything else in the digest passes the check.
     guard = module("guard")
     assert guard.leaks(re.sub(r"\d+", "", body), machine + guard.state_paths(place.state), place.copy, ("BrilliantTiger", "dodam"), keys=False) == []
@@ -9825,6 +9905,35 @@ def test_a_relative_path_is_made_plain_before_its_climb_is_read(path):
     assert "a path outside the repository" in module("guard").leaks(f"Look in {path} now.", [])
 
 
+def characters_of_every_class(rng: random.Random, each: int = 3) -> dict[str, list[str]]:
+    """Characters drawn from every class of Unicode (letters of each case, marks, digits, signs, punctuation, separators,
+    formats) and from every alphabet the form folds (Latin with accents, Korean, kana, kanji, full width)."""
+    by_class: dict[str, list[str]] = {}
+    for code in range(0x21, 0x10000):
+        kind = unicodedata.category(chr(code))
+        if kind not in ("Cc", "Cs", "Co", "Cn"):
+            by_class.setdefault(kind, []).append(chr(code))
+    for alphabet, first, last in (("Latin with accents", 0xC0, 0x17F), ("Korean", 0xAC00, 0xD7A3), ("hiragana", 0x3041, 0x3096),
+                                  ("katakana", 0x30A1, 0x30FA), ("kanji", 0x4E00, 0x9FFF), ("full width", 0xFF01, 0xFF5E)):  # fmt: skip
+        by_class[alphabet] = [chr(code) for code in range(first, last + 1)]
+    return {kind: rng.sample(chars, min(each, len(chars))) for kind, chars in sorted(by_class.items())}
+
+
+@pytest.mark.parametrize("seed", [171, 172])
+def test_a_climbing_step_is_found_whatever_stands_straight_before_it(seed):
+    """Free of position: a climbing step leaves the copy wherever it stands in the text, so what follows it is read from the
+    root, whatever character of whatever class stands straight before it."""
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for kind, chars in characters_of_every_class(rng).items():
+        for char in chars:
+            for place in ("tmp/secret", "Users/you/notes"):
+                for text in (f"{char}./../{place}", f"{char}../{place}", f"word{char}./../../{place}", f"Look in {char}{char}./../{place} now."):
+                    if "a path outside the repository" not in guard.leaks(text, []):
+                        missed.append((kind, hex(ord(char)), text.index(char)))
+    assert missed == [], (len(missed), missed[:8])
+
+
 def test_every_part_of_an_address_split_at_a_plus_is_a_known_value():
     guard = module("guard")
     known = [("the owner's git name or address", "12345+gildong@users.noreply.github.com")]
@@ -9854,9 +9963,49 @@ def test_a_session_on_the_desks_own_sign_in_is_given_no_hidden_value_when_it_sta
     planned = start.plan()
     guard, relay = module("guard"), module("relay")
     known = MACHINE + [tuple(pair) for pair in json.loads((start.state / "session" / "known.json").read_text())]
-    given = [*planned["argv"], *planned["env"].values(), planned["cwd"], relay.news_message([event(7, 1001, "e1")])]
+    given = [*planned["argv"], str(Path(planned["argv"][0]).resolve()), *planned["env"], *planned["env"].values(), planned["cwd"],
+             relay.news_message([event(7, 1001, "e1")])]  # fmt: skip
     found = {piece[:80]: guard.names(piece, known, ("BrilliantTiger", "dodam")) for piece in given}
     assert {piece: kinds for piece, kinds in found.items() if kinds} == {}
+
+
+def test_a_variable_a_session_would_be_given_that_names_a_hidden_value_stops_the_start_which_names_only_its_kind(start):
+    start.own_sign_in()
+    rng = random.Random(181)
+    passed = [name for name in lock_file()["environment"] if name not in ("HOME", "USER", "LOGNAME", "TMPDIR")]
+    assert passed
+    for name in passed:
+        for _, value in MACHINE:
+            environ = start.environ | {name: rng.choice(["", "x-", "en_"]) + value + rng.choice(["", ".UTF-8", "-256color"])}
+            said = start.refuses(environ=environ)
+            assert "a variable" in said and value.casefold() not in said.casefold(), (name, said)
+
+
+def test_an_argument_a_session_would_be_given_that_names_a_hidden_value_stops_the_start_which_names_only_its_kind(start):
+    start.own_sign_in()
+    brief = start.copy / "tools" / "desk" / "brief.md"
+    for _, value in MACHINE:
+        brief.write_text(f"Standing instructions for the desk, kept by {value}.\n", encoding="utf-8")
+        said = start.refuses()
+        assert "an argument" in said and value.casefold() not in said.casefold(), said
+
+
+def test_a_program_whose_real_path_names_a_hidden_value_is_started_from_a_path_of_the_desks_own(start, tmp_path):
+    """The program's own path is part of what a session is given: when its real path names the owner, the start puts the
+    same program in a folder of the desk's own in the state folder and starts it from there."""
+    start.own_sign_in()
+    real = tmp_path / "somebody-local" / ".local" / "share" / "claude" / "claude"
+    real.parent.mkdir(parents=True)
+    version = lock_file()["claude_version"]
+    real.write_text(f"""#!/bin/sh\nif [ "$1" = auth ]; then echo '{{"loggedIn": true, "authMethod": "oauth_token"}}'; else echo "{version} (Claude Code)"; fi\n""")
+    real.chmod(0o755)
+    (start.bin / "claude").unlink()
+    (start.bin / "claude").symlink_to(real)
+    planned = start.plan()
+    program = Path(planned["argv"][0])
+    assert program.resolve() == program and program.is_relative_to(start.state), program
+    assert module("guard").names(str(program), MACHINE, ("BrilliantTiger", "dodam")) == []
+    assert program.read_bytes() == real.read_bytes()
 
 
 def main_says_told(text: str) -> bool:
