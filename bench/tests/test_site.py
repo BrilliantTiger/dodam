@@ -489,21 +489,25 @@ def test_the_charter_renders_google_s_third_party_as_third_party():
 def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_is_not_known():
     ko, en = model_use_rows()
     for row, said in (
-            (ko, ("Google 모델은 Antigravity CLI의 헤드리스 모드(`agy -p`)로만 쓴다",
+            (ko, ("Google 모델은 Antigravity CLI로만, 소유자가 지켜보는 Orca에서 쓴다",
+                  "어디서 일하는지는 소유자가 2026년 11월 23일에 정했다", "조율 세션이 Orca의 에이전트 실행 명령으로 Orca에 띄우고",
+                  "자기 작업 폴더 밖에 아무것도 쓰지 않는다", "푸시도, 병합도, 댓글도 하지 않는다",
+                  "조율 세션이 공개하거나, 작업의 검사를 거친 글로 작업이 공개한다",
                   "소유자는 2026년 11월 18일에 Gemini가 Claude 곁에서 프로젝트 일을 하도록 정했고, 11월 19일에 다시 그렇게 말했다",
                   "어떻게 쓰는지는 조율하는 AI가 2026년 11월 19일에",
                   "프로젝트 자신의 계정이 프로젝트의 풀 리퀘스트나 이슈에 다는 표시",
-                  "다른 프로그램이 조종하는 대화형 CLI", "Claude 세션이 `agy`에 글을 넣거나 그 출력을 읽는 것",
                   "Google 구독에 딸려 오는 다른 회사 모델", "원격 에이전트", "브라우저 기능", "여러 에이전트를 묶어 돌리는 기능",
                   "유료 크레딧", "둘 이상의 계정",
                   "Google이 글로 확인해 준 적은 없다", "Google이 그렇지 않다고 하면 이 방식도 멈춘다",
                   "이전 규칙은 \"Google은 자동 실행을 서면으로 허락받은 뒤에만 쓴다\"였다",
                   "이 방식은 Google이 공개한 문서가 스크립트와 CI에 쓰라고 적는 헤드리스 모드를 쓴다")),
-            (en, ("Google's models only through the Antigravity CLI's headless mode (`agy -p`)",
+            (en, ("Google's models only through the Antigravity CLI, in Orca where the owner watches",
+                  "where it works, the owner decided on November 23, 2026", "starts in Orca with Orca's own command for agents",
+                  "writes nothing outside its own working folder", "no push, no merge, no comment",
+                  "made public by the coordinating session, or by the job, whose text passes the job's check",
                   "on November 18, 2026 the owner decided that Gemini works in the project beside Claude, and said so again on November 19",
                   "How it is used, the coordinating AI decided on November 19, 2026",
                   "a mark that the project's own account puts on one of the project's pull requests or issues",
-                  "the interactive CLI driven by another program", "a Claude session passing text into `agy` or reading its output",
                   "models of other companies that come with the Google subscription", "remote agents", "the browser feature",
                   "groups of agents", "paid credits", "more than one account",
                   "Google has not confirmed in writing", "If Google says otherwise, this way stops too",
@@ -512,6 +516,11 @@ def test_the_charter_says_how_google_s_models_are_used_who_decided_it_and_what_i
     ):
         for words in said:
             assert words in row, words
+    # A Gemini session in Orca, which the project's sessions talk with, is a way of use, no longer among what is not used.
+    for row, gone in ((ko, ("다른 프로그램이 조종하는 대화형 CLI", "Claude 세션이 `agy`에 글을 넣거나 그 출력을 읽는 것")),
+                      (en, ("the interactive CLI driven by another program", "a Claude session passing text into `agy` or reading its output"))):
+        for words in gone:
+            assert words not in row, words
     # the reason claims no more than that the way uses the mode Google describes: Google has not confirmed the rest
     assert "쓰라고 적는 방식이" not in charter() and "is the one Google's published pages describe" not in english_charter()
     # Google's pages are said in the charter's own words; one short phrase of theirs at most is quoted
@@ -608,7 +617,9 @@ def test_the_working_rules_say_how_google_s_models_are_used_and_what_the_owner_r
     rules = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     line = next((l for l in rules.splitlines() if "subscriptions and official CLIs" in l), "")
     for words in ("Claude Code, Codex CLI, Antigravity CLI", "not the API", "one account per company", "unmodified", "pinned version",
-                  "only through the Antigravity CLI's headless mode (`agy -p`)", "an event in the project's repository",
+                  "only through the Antigravity CLI, in Orca where the owner watches", "headless mode (`agy -p`)",
+                  "an event in the project's repository", "a Gemini session that the coordinating session starts in Orca",
+                  "writes nothing outside its own working folder: no push, no merge, no comment",
                   "not yet in measurement", "Claude and Gemini discuss them", "criteria written beforehand",
                   "results of the security, verification and end-to-end tests at each merge",
                   "how the subscriptions' usage is spent", "approves only changes that weaken a guarantee or relax a rule"):
@@ -1027,7 +1038,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.13 (2026-11-20)", "- 판: v0.14 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.14", "2026-12-24")),
+    ("- 판: v0.15 (2026-11-23)", "- 판: v0.16 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.16", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
