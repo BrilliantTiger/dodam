@@ -122,3 +122,44 @@ def test_a_second_line_whose_variant_leaves_the_tests_unlisted_does_not_hold(tmp
              "change": [{"find": "FILE_SECONDS, CASE_SECONDS = 30, 2\n", "put": "FILE_SECONDS, CASE_SECONDS = (30, 2\n"}]}
     result = check.against_judge_tests(entry)
     assert result["verdict"] != "second line", result
+
+
+def load_check():
+    spec = importlib.util.spec_from_file_location("check_protections", BENCH / "experiments/check_protections.py")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    return check
+
+
+def test_a_second_line_holds_only_where_every_run_of_its_tests_passed():
+    """A second line holds only where its tests were listed, ran, and every run of them ended passed:
+    not where no run was started, nor where a run ended otherwise than passed or failed."""
+    check = load_check()
+    assert check.verdict_of({"listed": True, "codes": [0, 0], "failed": []}) == "second line"
+    for run in ({"listed": True, "codes": [], "failed": []}, {"listed": True, "codes": [0, 5], "failed": []},
+                {"listed": True, "codes": [0, 2], "failed": []}, {"listed": True, "codes": [1, 0], "failed": ["t"]},
+                {"listed": False, "codes": [0], "failed": []}):
+        assert check.verdict_of(run) != "second line", run
+
+
+def test_no_second_line_is_judged_by_tests_that_fail_with_nothing_taken_out(monkeypatch):
+    """The job first runs its tests with nothing taken out, as it runs them against a second line: where
+    one fails there, the job fails, and no second line is judged by them."""
+    check = load_check()
+    seen = []
+
+    def run_judge_tests(cwd):
+        seen.append(cwd)
+        return {"listed": True, "codes": [1], "failed": ["tests/test_cli_judge.py::test_x"], "said": ["failed"], "tests": 1}
+    monkeypatch.setattr(check, "run_judge_tests", run_judge_tests)
+    monkeypatch.setattr(check, "against_judge_tests", lambda protection: pytest.fail("a second line was judged"))
+    assert check.second_lines() == 1 and len(seen) == 1
+
+
+def test_the_second_lines_are_checked_against_the_tests_of_the_formats_and_the_converters():
+    """The job's tests take in, besides the judge's and the vetting tool's, the light files that reach
+    the judge's sum of time and the formats: the format of command-line tasks, the task format and the
+    two converters."""
+    check = load_check()
+    for name in ("tests/test_cli_format.py", "tests/test_task_format.py", "tests/test_convert.py", "tests/test_cli_convert.py"):
+        assert name in check.JUDGE_TESTS, name

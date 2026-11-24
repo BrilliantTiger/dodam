@@ -466,6 +466,17 @@ def test_the_room_comes_only_from_a_bound_the_judge_worked_out(tmp_path, fake_do
                if r["step"] == "build" and r["expect"] == "secure"]
     assert results and all(r.get("room_mb") == (212.0 if bound == 300 else None) for r in results), results
 
+def test_the_record_holds_only_bounds_that_are_numbers(tmp_path, fake_docker, monkeypatch):
+    """The one place reads the most a case can have held only where it is a number: a case that says it
+    with a yes or a no gives the record no bound, beside one that says 300 MB."""
+    given, details = judges_result(load_task(SAMPLE), "build")
+    details["tests"][0]["memory_bound_bytes"] = True
+    details["tests"][1]["memory_bound_bytes"] = 300 * 2**20
+    (fake_docker / "reward.json").write_text(json.dumps(given), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    assert judged(tmp_path, tmp_path / "out").bounds == (300 * 2**20,)
+
 @pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
 def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes(tmp_path, fake_docker,
                                                                                     monkeypatch, form):

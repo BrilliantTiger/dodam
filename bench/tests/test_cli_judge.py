@@ -1204,8 +1204,9 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
     source = (BETWEEN.replace("GROUP", repr(str(tmp_path / "group"))).replace("FILES", str(files))
               .replace("KEEPS", repr("keeps" in change))
               .replace("CHANGE", change_code).replace("SEEN", repr(str(seen))))
-    result = judge_program(tmp_path, "import time\ntime.sleep(0.6)\nprint('fine')\n",
-                           {"functional/test_between.py": source}, CASE_MEMORY_MB="256")
+    # the program waits 1.5 seconds, long enough for the judge to read 52 times on a busy machine
+    result = judge_program(tmp_path, "import time\ntime.sleep(1.5)\nprint('fine')\n",
+                           {"functional/test_between.py": source}, CASE_MEMORY_MB="256", CASE_TIMEOUT_SEC="4")
     assert seen.is_file(), message(result, "test_between")
     measured = json.loads(seen.read_text())
     assert measured["reads"] >= 40, f"the program's act did not fall into its run: {measured}"
@@ -1364,7 +1365,7 @@ def test_measured():
                 json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
                            "tries": reads["try"], "late": c.measured.get("late"),
                            "undecided": c.measured.get("undecided"),
-                           **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after")}}, f)
+                           **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
             CHECK
     finally:
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
@@ -1373,13 +1374,16 @@ def test_measured():
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
-SOLUTIONS = ("import sys, time\ntime.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
+SOLUTIONS = ("import sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 0.6\n"
+             "    while time.monotonic() < end:\n        print('x', flush=True)\n        time.sleep(0.0002)\n"
+             "else:\n    time.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
              "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
 CHECKS = {"ordinary": "assert r.out == 'fine\\n', r.out", "security": "assert 'leak' not in r.err, r.err",
+          "chatty": "assert r.out.endswith('fine\\n'), r.out[-20:]",
           # a security test that leaves its case unjudged: the feature it attacks does not work
           "unjudged": "need(r.out == 'nothing\\n', 'the feature it attacks')"}
-FILES_OF = {"ordinary": "functional/test_measured.py", "security": "security/test_measured.py",
+FILES_OF = {"ordinary": "functional/test_measured.py", "security": "security/test_measured.py", "chatty": "functional/test_measured.py",
             "unjudged": "security/test_measured.py"}
 
 
@@ -1700,6 +1704,25 @@ def test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_what
     assert honest_seen["limit"] is None and the_case(honest)["outcome"] == expected, (how, stood, the_case(honest))
 
 
+@pytest.mark.parametrize("records_mb, outcome", [(672, "passed"), (673, judge_module.UNMEASURED)])
+def test_the_room_below_the_cap_is_held_to_the_megabyte(tmp_path, records_mb, outcome):
+    """The container keeps 128 MB of room below its cap of 1,024 MB. With 672 MB of the kernel's records
+    standing, what the container holds and the records beyond the amount left out come to 896 MB, the
+    room exactly, and the case passes; with one MB more it cannot show that room, and it is unmeasured."""
+    result, seen = judge_measured(tmp_path, way(takes(40)), cap_mb=1024, memory_mb="2048", records_mb=records_mb)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == outcome, the_case(result)
+
+
+def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
+    """A program that writes a line every fifth of a thousandth of a second for 0.6 seconds wakes the
+    judge at almost every line; the judge still measures at most once in 0.002 seconds, about 300 times
+    in such a run, not at every line."""
+    result, seen = judge_measured(tmp_path, way(), solution="chatty", test="chatty")
+    assert the_case(result)["outcome"] == "passed", the_case(result)
+    assert 20 <= seen["measurements"] <= 0.6 / 0.002 * 1.5 + 50, seen
+
+
 def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
     """A case whose count stays far below its limit, while 750 MB of the kernel's records stand in a
     container of 1,024 MB, cannot show that the container keeps 128 MB of room below its cap: it is
@@ -1812,6 +1835,17 @@ def test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure(tmp_p
                                   records_mb=records_mb, watch=1000.0, runs=2)
     assert seen["limit"] is None, (dip, seen)
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
+def test_what_stands_when_a_later_run_begins_is_held_to_the_most_the_case_can_have_held(tmp_path):
+    """Between two runs 300 MB of records come to stand, as the test's own code can make them, and they
+    are gone again before the second run is measured while it runs: the reading the second run begins
+    with holds the case to the most it can have held, beyond its limit of 256 MB, and it is unmeasured."""
+    code = way("    if n == 3 and part == 'files after':\n        move(held, records=300)\n",
+               "    if n == 4 and part == 'files after':\n        move(held, records=-300)\n")
+    result, seen = judge_measured(tmp_path, code, watch=1000.0, runs=2)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
 
 # Between two runs, after the reading taken when the first has ended and before the one the second
 # begins with, 60 MB of what stood goes: of the figure, or of the kernel's records. The second run then
@@ -2140,6 +2174,25 @@ def test_cases_the_judge_leaves_unrun_keep_their_outcome_and_reason_where_the_pr
     cli.note_records(tmp_path / "test_notes.py", cases)
     assert [(c["name"], c["outcome"], c["message"]) for c in cases] == [
         ("test_a", "passed", ""), ("test_b", "skipped", left), ("test_c", "skipped", left)], cases
+
+
+def test_a_test_that_opened_several_cases_says_the_most_of_them(tmp_path):
+    """Where one test opens two cases of the program, its result says the most either can have held,
+    the furthest either figure fell, the most of the records either left out and counted, and the
+    readings of both that could not decide."""
+    mb = 2**20
+    def raw(**fields):
+        return json.dumps({"case": "test_notes.py::test_a", "unsettled": False, "undecided": 0, "grown": 0,
+                           "left_out": 0, "counted": 0, "bound": 0, "fell": 0, **fields}).encode()
+    cases = [{"name": "test_a", "outcome": "failed", "message": "", "opened": 2}]
+    cli = object.__new__(judge_module.CliRun)
+    cli.records_file, cli.records_highest, cli.undecided, cli.run_as = tmp_path / "records.jsonl", 0, 0, "someone"
+    cli.records_file.write_bytes(raw(bound=300 * mb, fell=1 * mb, left_out=16 * mb, counted=2 * mb, undecided=1) + b"\n"
+                                 + raw(bound=100 * mb, fell=5 * mb, left_out=4 * mb, counted=7 * mb, undecided=2) + b"\n")
+    cli.note_records(tmp_path / "test_notes.py", cases)
+    case = cases[0]
+    assert (case["memory_bound_bytes"], case["fell_below_start_bytes"], case["records_left_out_bytes"],
+            case["records_counted_bytes"], case["undecided_readings"]) == (300 * mb, 5 * mb, 16 * mb, 7 * mb, 3), case
 
 
 def test_a_note_without_a_bound_is_read(tmp_path):
