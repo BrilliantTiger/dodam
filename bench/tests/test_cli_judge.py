@@ -2274,8 +2274,9 @@ def decided_case(tmp_path: Path, monkeypatch, row: dict) -> dict:
     cli = object.__new__(judge_module.CliRun)
     cli.records_file, cli.records_highest, cli.undecided = tmp_path / "records.jsonl", 0, 0
     cli.run_as = "someone" if row["separated"] else ""
-    lines = [json.dumps({"case": "test_notes.py::test_x", "unsettled": row["undecided"] and n == 0,
-                         "undecided": int(row["undecided"] and n == 0), "grown": 0, "left_out": 0, "counted": 0,
+    lines = [json.dumps({"case": "test_notes.py::test_x", "unsettled": row["undecided"],
+                         "undecided": (n + 1) if row["undecided"] else 0, "grown": 0,
+                         "left_out": (16 if n == 0 else 4) * mb, "counted": (2 if n == 0 else 7) * mb,
                          "bound": (300 if n == 0 else 100) * mb, "fell": (1 if n == 0 else 5) * mb}).encode()
              for n in range(row["notes"])]
     cli.records_file.write_bytes(b"".join(line + b"\n" for line in lines) + (b'{"case": \n' if row["unreadable"] else b""))
@@ -2290,7 +2291,8 @@ def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say
     its note was lost, where the program is separated and the test has fewer notes than cases it opened or
     did not say how many, or where a reading could not decide, each with that reason and in that order;
     and otherwise keeps its outcome. Where its notes were read, the case says the most any of its cases can
-    have held and the furthest any figure fell."""
+    have held, the furthest any figure fell, the most of the records any left out and counted, and the
+    readings of all of them that could not decide."""
     rows = decided_rows()
     assert len(rows) == 620, len(rows)
     wrong = []
@@ -2302,8 +2304,12 @@ def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say
         if (case["outcome"], case["message"]) != expected_of(row):
             wrong.append((row, (case["outcome"], case["message"]), expected_of(row)))
         elif row["who"] == "runner" and row["notes"] and not row["unreadable"]:
-            if (case.get("memory_bound_bytes"), case.get("fell_below_start_bytes")) != (300 * 2**20, (5 if row["notes"] == 2 else 1) * 2**20):
-                wrong.append((row, case, "the most of its cases"))
+            two = row["notes"] == 2
+            said = tuple(case.get(k) for k in ("memory_bound_bytes", "fell_below_start_bytes", "records_left_out_bytes",
+                                               "records_counted_bytes", "undecided_readings"))
+            undecided = (3 if two else 1) if row["undecided"] else 0
+            if said != (300 * 2**20, (5 if two else 1) * 2**20, 16 * 2**20, (7 if two else 2) * 2**20, undecided):
+                wrong.append((row, said, "the most of its cases"))
     assert not wrong, f"{len(wrong)} of {len(rows)} rows: {wrong[:4]}"
 
 

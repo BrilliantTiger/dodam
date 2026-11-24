@@ -1123,7 +1123,8 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
 
 
 # The room the tool tells for a judging, through its own path: how the judging went, and how one case of it
-# came out and what it said of the most it can have held; the other cases say nothing of it.
+# came out and what it said of the most it can have held; another case passed saying 100 MB, and the rest
+# say nothing of it.
 ROOM_BOUNDS = {"none": None, "a number": 300 * 2**20, "nought": 0, "a yes or a no": True}
 ROOM_MESSAGES = {"passed": "", "failed": "the test's own failure", "skipped": "the feature it attacks does not work"}
 
@@ -1141,9 +1142,10 @@ def room_rows() -> list[tuple]:
 def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(tmp_path, fake_docker, monkeypatch):
     """Every row, through the tool's own path: a judging that ran, that could not run, or that has a case
     not judged for measuring; one case of it that passed, failed, was not judged for measuring or was not
-    run, saying the most it can have held with nothing, a number, nought, or a yes or a no. The room is
-    the limit of 512 MB less the largest bound that is a number among the cases that passed or were not
-    judged for measuring; where there is none, no room is told, never the whole limit."""
+    run, saying the most it can have held with nothing, a number, nought, or a yes or a no, beside a
+    case that passed saying 100 MB. The room is the limit of 512 MB less the largest bound that is a
+    number among the cases that passed or were not judged for measuring; where there is none, no room
+    is told, never the whole limit."""
     from dodambench import vet as tool
     from dodambench.judge import NOT_JUDGED_FOR_MEASURING
     rows = room_rows()
@@ -1165,6 +1167,7 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
                     case["memory_bound_bytes"] = ROOM_BOUNDS[bound]
                 if judging == "has an unmeasured case":
                     details["tests"][1].update(outcome="unmeasured", message=NOT_JUDGED_FOR_MEASURING)
+                details["tests"][2]["memory_bound_bytes"] = 100 * 2**20
                 details["unmeasured"] = [f"{c['file']}::{c['name']}" for c in details["tests"] if c["outcome"] == "unmeasured"]
                 (fake_docker / "reward.json").write_text(json.dumps(reward_of_cases(details["tests"], True, "build", True)),
                                                          encoding="utf-8")
@@ -1172,7 +1175,7 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
                 m.setenv("FAKE_EXIT", "0")
                 worked_out = (word in ("passed", "unmeasured") and isinstance(ROOM_BOUNDS[bound], int)
                               and not isinstance(ROOM_BOUNDS[bound], bool))
-                expected = round(512 - ROOM_BOUNDS[bound] / 2**20, 1) if worked_out else None
+                expected = round(512 - max([100 * 2**20] + ([ROOM_BOUNDS[bound]] if worked_out else [])) / 2**20, 1)
             results = [r for r in tool.vet_in_image(load_task(SAMPLE), "python", tmp_path / str(n), "dodam-bench/python:dev")
                        if r["step"] == "build"]
         if not results or any(r.get("room_mb") != expected for r in results):
