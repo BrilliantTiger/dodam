@@ -85,6 +85,7 @@ class Judged:
     left_behind: str          # what the program's side left that the judge could not take back; empty when nothing
     cases: tuple[Case, ...]
     reward: dict              # the judge's reward, the one the cases give
+    bounds: tuple[int, ...] = ()  # the most each case that passed can have held, where the judge worked it out
 
 
 def _not_of_the_shape(file: str, key: str, what: str) -> JudgeFault:
@@ -191,11 +192,19 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(REWARD_FILE, key, "a number")
         if reward[key] != value:
             raise _not_of_the_shape(REWARD_FILE, key, f"{value}, what the cases give")
+    # the most each case that passed, or was not judged for measuring, can have held, where the judge
+    # worked it out: read here, so that nothing else reads the result again
+    bounds = tuple(case["memory_bound_bytes"] for case in given
+                   if isinstance(case, dict) and case.get("outcome") in ("passed", UNMEASURED)
+                   and isinstance(case.get("memory_bound_bytes"), int) and not isinstance(case["memory_bound_bytes"], bool))
     if unmeasured:
-        # the judging is no judgement of the solution, whatever kind it was written as: a fault of measuring
-        raise JudgeFault(json.dumps({"severity": "error", "file": DETAILS_FILE, "key": UNMEASURED,
-                                     "message": f"{NOT_JUDGED_FOR_MEASURING}: {', '.join(unmeasured)}"}))
-    return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward))
+        # the judging is no judgement of the solution, whatever kind it was written as: a fault of measuring;
+        # the room it left is told all the same, from the bounds read here
+        fault = JudgeFault(json.dumps({"severity": "error", "file": DETAILS_FILE, "key": UNMEASURED,
+                                       "message": f"{NOT_JUDGED_FOR_MEASURING}: {', '.join(unmeasured)}"}))
+        fault.bounds = bounds
+        raise fault
+    return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward), bounds=bounds)
 
 
 def _present(folder: int, name: str) -> bool:
@@ -478,6 +487,7 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                 if "adjusted" in room:
                     result["adjusted"] = room["adjusted"]
                 started = time.monotonic()
+                bounds: tuple[int, ...] = ()
                 try:
                     judged = judge_in_image(image, harbor / "tests",
                                             harbor / "steps" / step.name / "solution" / "variants" / variant.label,
@@ -485,18 +495,18 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                                             task.limits["verifier_timeout_sec"], task)
                 except JudgeFault as exc:
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
+                    # a judging with a case not judged for measuring tells its room as well
+                    bounds = getattr(exc, "bounds", ())
                 except (subprocess.SubprocessError, OSError, ValueError) as exc:
                     result.update(ok=False, problems=[f"could not judge in {image}: {exc}"])
                 else:
                     found = judgement_problems(variant.expect, variant.weakness, judged)
                     result.update(ok=not found, problems=found, reward=dict(judged.reward))
-                    if task.cli.get("case_memory_mb"):
-                        details = out_dir / step.name / variant.label / DETAILS_FILE
-                        try:
-                            result["room_mb"] = room_of(json.loads(details.read_text(encoding="utf-8")),
-                                                        task.cli["case_memory_mb"])
-                        except (OSError, ValueError):
-                            result["room_mb"] = None
+                    bounds = judged.bounds
+                if task.cli.get("case_memory_mb"):
+                    # from what the one place read, never from a bound the judge did not work out
+                    result["room_mb"] = room_of({"tests": [{"outcome": "passed", "memory_bound_bytes": b} for b in bounds]},
+                                                task.cli["case_memory_mb"])
                 result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     return results
@@ -510,7 +520,7 @@ def room_of(details: dict, limit_mb: int) -> float | None:
     leaves more of them leaves less room."""
     bounds = [t["memory_bound_bytes"] for t in details.get("tests", [])
               if isinstance(t, dict) and isinstance(t.get("memory_bound_bytes"), int)
-              and t.get("outcome") in ("passed", UNMEASURED)]
+              and not isinstance(t.get("memory_bound_bytes"), bool) and t.get("outcome") in ("passed", UNMEASURED)]
     return round(limit_mb - max(bounds) / 2**20, 1) if bounds else None
 
 

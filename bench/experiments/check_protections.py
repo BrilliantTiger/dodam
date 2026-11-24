@@ -13,6 +13,12 @@ nothing. A second line whose tests fail without it is no second line, and the ch
 
     python experiments/check_protections.py            # every protection
     python experiments/check_protections.py "memory"   # only those whose description holds the word
+    python experiments/check_protections.py --second-lines   # every second line against the judge's tests
+
+A second line is checked against more than the tests its entry names: with "--second-lines", every
+second line is taken out in turn and all the tests of the judge and of the vetting tool that need no
+image are run, in eight processes at once. A second line under which one of them fails is no second
+line: that test catches it, and its entry must name it.
 
 The tests that judge in a container need Docker and the Python language image. Where they are missing
 those tests are skipped, which the check reports as a protection it could not check, and fails.
@@ -80,7 +86,67 @@ def check(protection: dict) -> dict:
             "tests": protection["tests"], "pytest": last}
 
 
+# The tests of the judge and of the vetting tool that need no image, and how many processes run them at once.
+JUDGE_TESTS = ["tests/test_judge.py", "tests/test_cli_judge.py", "tests/test_cli_test_code.py", "tests/test_vet.py"]
+NO_IMAGE = "not test_vet_in_the_language_image"
+PARTS = 8
+
+
+def judge_tests(cwd: Path) -> list[str]:
+    """The node of every test of the judge and of the vetting tool that needs no image, in the folder `cwd`."""
+    listed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--collect-only", "-p", "no:cacheprovider", "-k",
+                             NO_IMAGE, *JUDGE_TESTS], cwd=cwd, capture_output=True, text=True)
+    return [line for line in listed.stdout.splitlines() if "::" in line]
+
+
+def against_judge_tests(protection: dict) -> dict:
+    """One second line taken out, and every test of the judge and of the vetting tool that needs no image run
+    against it, in PARTS processes at once; the tests that fail."""
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
+        copy = broken_copy(protection, Path(where))
+        nodes = judge_tests(copy)
+        parts = [nodes[i::PARTS] for i in range(PARTS)]
+        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part], cwd=copy,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for part in parts if part]
+        try:
+            said = [run.communicate(timeout=HANGS)[0] for run in runs]
+        except subprocess.TimeoutExpired:
+            for run in runs:
+                run.kill()
+            return {"what": protection["what"], "verdict": "the tests did not end", "seconds": HANGS, "failed": []}
+    failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
+              if line.startswith(("FAILED ", "ERROR "))]
+    verdict = "second line" if not failed and all(run.returncode == 0 for run in runs) else "NO SECOND LINE"
+    if verdict != "second line":
+        print("\n".join(out[-4000:] for out in said), file=sys.stderr, flush=True)
+    return {"what": protection["what"], "verdict": verdict, "seconds": round(time.monotonic() - started, 1),
+            "tests": len(nodes), "failed": failed}
+
+
+def second_lines() -> int:
+    """Every second line against every test of the judge and of the vetting tool that needs no image."""
+    chosen = [p for p in protections() if p.get("second_line")]
+    whole = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-k", NO_IMAGE,
+                            *JUDGE_TESTS], cwd=BENCH, capture_output=True, text=True)
+    if whole.returncode != 0:
+        print(whole.stdout[-20000:], file=sys.stderr, flush=True)
+        print(json.dumps({"second_lines": len(chosen), "held": 0,
+                          "not_held": [{"what": "the tests do not pass with every protection in place"}]}, indent=1))
+        return 1
+    results = []
+    for protection in chosen:
+        result = against_judge_tests(protection)
+        results.append(result)
+        print(f"{result['verdict']:22}  {result['seconds']:6.1f}s  {result['what']}", file=sys.stderr, flush=True)
+    bad = [r for r in results if r["verdict"] != "second line"]
+    print(json.dumps({"second_lines": len(results), "held": len(results) - len(bad), "not_held": bad}, indent=1))
+    return 1 if bad or not results else 0
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--second-lines"]:
+        return second_lines()
     chosen = [p for p in protections() if not argv or any(word.lower() in p["what"].lower() for word in argv)]
     # a test that fails as the code is would seem to pin anything: first they must all pass unbroken
     named = sorted({test for p in chosen for test in p["tests"]})

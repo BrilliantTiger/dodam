@@ -1298,7 +1298,7 @@ class CliRun:
             # where the program is separated every case of the program has a note: a test that opened
             # one, or of which that is not known, with none cannot pass; nor can one whose note was lost
             opened = case.pop("opened", None)
-            missing = bool(self.run_as) and not mine and opened != 0
+            missing = bool(self.run_as) and (opened is None or len(mine) < opened)
             missing = missing or case.pop("lost", False)
             if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):
                 case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING

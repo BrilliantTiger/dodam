@@ -231,8 +231,7 @@ put = '''    return False'''
 [[protection]]
 what = "The judge ends a program that leaves the container too little memory"
 file = "dodambench/dodam_cli.py"
-second_line = "a program the kernel ended for memory fails its case, and whatever the kernel ends the other cases are judged; this stop only keeps the kernel from having to choose. What the kernel chooses is settled by the marks the judge sets: in a container of 640 MB the kernel's score was 1,339 for the program (mark 1,000), 1,016 for the case runner (mark 500; 683 before it had a mark) and 676 for the judge (mark 0, about 32 MB held, against about 51 MB held by the case runner). So without this stop the kernel ends the program, and when that is not enough the case runner, in which case the hidden test hands nothing back, the case fails for memory and a new runner judges the rest. The entry's test accepts both and is run twice: with the judge measuring every 0.002 seconds, as it does, and with the measuring switched off, so that the case runner sleeps while the kernel ends the program and wakes at no moment of its own choosing. The measuring cannot end the program in either: the case's limit is set above the container's cap"
-tests = ["tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged"]
+tests = ["tests/test_cli_judge.py::test_each_part_of_a_reading_is_taken_as_it_can_be_trusted[above the stop by more than what moved]", "tests/test_cli_judge.py::test_the_stop_before_the_cap_counts_the_swap_the_container_may_use", "tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged"]
 [[protection.change]]
 find = '''            high = taken > max_memory or (bool(now["cap"]) and now["taken"] + records > room)'''
 put = '''            high = taken > max_memory'''
@@ -878,8 +877,7 @@ put = '''    refused = ""
 [[protection]]
 what = "A result is moved into place, never written through a link"
 file = "dodambench/judge.py"
-second_line = "only root may enter the results, and whatever sat where a result goes is removed before anything runs"
-tests = ["tests/test_cli_isolation.py::test_the_program_cannot_write_replace_or_remove_the_result", "tests/test_judge.py::test_whatever_sits_where_the_results_go_is_replaced_before_anything_runs"]
+tests = ["tests/test_judge.py::test_results_replace_a_planted_link_instead_of_writing_through_it", "tests/test_cli_isolation.py::test_the_program_cannot_write_replace_or_remove_the_result", "tests/test_judge.py::test_whatever_sits_where_the_results_go_is_replaced_before_anything_runs"]
 [[protection.change]]
 find = '''    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
@@ -1430,13 +1428,13 @@ what = "A case with no note cannot pass where the program is separated"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_a_case_with_no_note_cannot_pass_where_the_program_is_separated", "tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can"]
 [[protection.change]]
-find = '''            missing = bool(self.run_as) and not mine and opened != 0'''
+find = '''            missing = bool(self.run_as) and (opened is None or len(mine) < opened)'''
 put = '''            missing = False'''
 
 [[protection]]
 what = "The case runner counts the cases of the program each test opens"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can"]
+tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can", "tests/test_cli_judge.py::test_the_judge_is_told_how_many_cases_of_the_program_each_test_opened"]
 [[protection.change]]
 find = '''        _opened[self._key] = _opened.get(self._key, 0) + 1
 '''
@@ -1445,7 +1443,7 @@ put = ''''''
 [[protection]]
 what = "The judge's plug-in hands on how many cases of the program a test opened"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can"]
+tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can", "tests/test_cli_judge.py::test_the_judge_is_told_how_many_cases_of_the_program_each_test_opened"]
 [[protection.change]]
 find = '''    opened = getattr(runner, "_opened", {}).get(nodeid, 0) if runner is not None else 0'''
 put = '''    opened = 0'''
@@ -1453,7 +1451,7 @@ put = '''    opened = 0'''
 [[protection]]
 what = "A test whose count of opened cases is not handed on is read as one that ran the program"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can"]
+tests = ["tests/test_cli_isolation.py::test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can", "tests/test_cli_judge.py::test_the_judge_is_told_how_many_cases_of_the_program_each_test_opened"]
 [[protection.change]]
 find = '''        said["opened"] = record["opened"]'''
 put = '''        pass'''
@@ -1502,7 +1500,7 @@ put = ''''''
 [[protection]]
 what = "A case says how long it waited for the kernel's own part and how much that part fell"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_isolation.py::test_a_case_begins_once_the_kernel_has_let_go_of_what_the_case_before_it_left"]
+tests = ["tests/test_cli_judge.py::test_each_case_says_how_long_it_waited_and_how_much_the_kernels_part_fell", "tests/test_cli_isolation.py::test_the_case_after_one_that_made_many_mappings_passes_and_says_what_its_wait_saw"]
 [[protection.change]]
 find = '''                self.measured.update(settle_looks=looks, settle_fell=max(first - now, 0), kernel_fell_after=0)
 '''
@@ -1515,6 +1513,148 @@ tests = ["tests/test_cli_judge.py::test_the_judges_work_around_a_case_holds_the_
 [[protection.change]]
 find = '''FILE_SECONDS, CASE_SECONDS = 30, 2'''
 put = '''FILE_SECONDS, CASE_SECONDS = 30, 1'''
+
+[[protection]]
+what = "The judge measures a run at its first look"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_judge_measures_a_run_at_its_first_look"]
+[[protection.change]]
+find = '''        next_watch = last_watch = 0.0'''
+put = '''        next_watch, last_watch = started + WATCH, 0.0'''
+
+[[protection]]
+what = "A reading cut by time when a run has ended is taken for nothing"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure", "tests/test_cli_judge.py::test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing"]
+[[protection.change]]
+find = '''            held_after = self._container()
+            if _in_time(held_after):'''
+put = '''            held_after = self._container()
+            if True:'''
+
+[[protection]]
+what = "A reading cut by time when a run has ended keeps its case from passing"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing"]
+[[protection.change]]
+find = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                self._undecided()'''
+put = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                pass'''
+
+[[protection]]
+what = "A case is named as pytest names its test, spaces and all"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_whose_test_name_holds_spaces_keeps_its_notes"]
+[[protection.change]]
+find = '''        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" (", 1)[0]'''
+put = '''        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]'''
+
+[[protection]]
+what = "A test with fewer notes than cases it opened cannot pass where the program is separated"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_case_with_no_note_cannot_pass_where_the_program_is_separated"]
+[[protection.change]]
+find = '''            missing = bool(self.run_as) and (opened is None or len(mine) < opened)'''
+put = '''            missing = bool(self.run_as) and (opened is None or not mine)'''
+
+[[protection]]
+what = "The case runner hands on no bound where no reading worked one out"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_a_case_says_the_most_it_can_have_held_only_where_a_reading_worked_it_out"]
+[[protection.change]]
+find = '''"bound": self.measured.get("bound_highest"), "fell": fell,'''
+put = '''"bound": self.measured.get("bound_highest", 0), "fell": fell,'''
+
+[[protection]]
+what = "The result names no bound where no reading worked one out"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_case_says_the_most_it_can_have_held_only_where_a_reading_worked_it_out"]
+[[protection.change]]
+find = '''                if bounds:
+                    case["memory_bound_bytes"] = max(bounds)'''
+put = '''                if True:
+                    case["memory_bound_bytes"] = max(bounds, default=0)'''
+
+[[protection]]
+what = "The vetting tool tells the room of a judging with a case not judged for measuring"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution"]
+[[protection.change]]
+find = '''                    bounds = getattr(exc, "bounds", ())'''
+put = '''                    bounds = ()'''
+
+[[protection]]
+what = "A fault for a case not judged for measuring carries the bounds the one place read"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution"]
+[[protection.change]]
+find = '''        fault.bounds = bounds'''
+put = '''        pass'''
+
+[[protection]]
+what = "The bounds the one place reads include those of cases not judged for measuring"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution"]
+[[protection.change]]
+find = '''                   if isinstance(case, dict) and case.get("outcome") in ("passed", UNMEASURED)'''
+put = '''                   if isinstance(case, dict) and case.get("outcome") in ("passed",)'''
+
+[[protection]]
+what = "The reading when a run has ended lowers the lowest figure the case is counted from"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_no_run_is_judged_by_the_count_alone"]
+[[protection.change]]
+find = '''                figure = self._figure(held_after)
+                self._lowest = _lowest(self._lowest, figure)'''
+put = '''                figure = self._figure(held_after)'''
+
+[[protection]]
+what = "The reading when a run has ended notes the kernel's records"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_no_run_is_judged_by_the_count_alone"]
+[[protection.change]]
+find = '''                self._records(held_after)'''
+put = '''                pass'''
+
+[[protection]]
+what = "A note with a yes or a no where a number belongs is not read"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged[a note with a yes or a no where a number belongs]"]
+[[protection.change]]
+find = '''        if not isinstance(value, kind) or isinstance(value, bool) and kind is not bool:'''
+put = '''        if not isinstance(value, kind):'''
+
+[[protection]]
+what = "The reading a later run begins with lowers the lowest figure the case is counted from"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted_from[the figure]"]
+[[protection.change]]
+find = '''                figure = self._figure(held_before)
+                self._lowest = _lowest(self._lowest, figure)'''
+put = '''                figure = self._figure(held_before)
+                if self._figure_start is None:
+                    self._lowest = _lowest(self._lowest, figure)'''
+
+[[protection]]
+what = "A case has one starting figure, read before its first run"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted_from[the figure]"]
+[[protection.change]]
+find = '''                if self._figure_start is None:
+                    self._figure_start = figure'''
+put = '''                if True:
+                    self._figure_start = figure'''
+
+[[protection]]
+what = "The wait for the kernel's own part goes on while the part falls by more than 1 MB a look"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_each_case_says_how_long_it_waited_and_how_much_the_kernels_part_fell[falls 1.5 MB, then still]"]
+[[protection.change]]
+find = '''            if now > last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
+put = '''            if now > last - 2 * _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
 
 [[protection]]
 what = "The memory of the judge's own processes is taken out of every figure"
@@ -1825,8 +1965,7 @@ put = '''        cases = run_cases(path, self.test_env, timeout, None, ended)'''
 [[protection]]
 what = "After each file of tests the judge takes back what its cases left"
 file = "dodambench/judge.py"
-second_line = "after every run of the program the case runner ends what it left running, before every case anything left in the cases' folder is removed, and the judge takes back once more when the judging ends"
-tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running", "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge"]
+tests = ["tests/test_cli_judge.py::test_a_removal_that_fails_for_a_reason_no_program_causes_is_a_fault_of_the_judge", "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running", "tests/test_cli_isolation.py::test_a_program_that_breaks_a_limit_fails_that_case_only_and_never_the_judge"]
 [[protection.change]]
 find = '''        self.sweep()
         whole = '''
@@ -1835,8 +1974,7 @@ put = '''        whole = '''
 [[protection]]
 what = "Before the first file of tests the cases' folder is emptied"
 file = "dodambench/judge.py"
-second_line = "before every case anything left in the cases' folder is removed"
-tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
+tests = ["tests/test_cli_judge.py::test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_of_the_judge", "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
 find = '''            try:
                 remove_tree(self.work_root, keep_top=True)
@@ -1852,8 +1990,7 @@ put = '''            try:
 [[protection]]
 what = "When the judge takes back what cases left, it empties the cases' folder"
 file = "dodambench/judge.py"
-second_line = "before every case anything left in the cases' folder is removed"
-tests = ["tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
+tests = ["tests/test_cli_judge.py::test_no_case_runner_starts_on_a_cases_folder_the_judge_could_not_empty", "tests/test_cli_isolation.py::test_nothing_one_case_leaves_reaches_the_next", "tests/test_cli_isolation.py::test_a_case_runner_that_is_ended_costs_only_the_case_that_was_running"]
 [[protection.change]]
 find = '''        try:
             remove_tree(self.work_root, keep_top=True)

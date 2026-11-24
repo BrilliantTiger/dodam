@@ -314,7 +314,8 @@ class Case:
         self._cfg = cfg
         self._uid, self._gid = cfg.get("uid"), cfg.get("gid")
         self._limits = cfg["limits"]
-        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
+        # the test as pytest names it, spaces and all: the variable is "<name> (<stage>)"
+        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" (", 1)[0]
         _opened[self._key] = _opened.get(self._key, 0) + 1
         self._broken: list[str] = []
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
@@ -766,8 +767,8 @@ class Case:
         else:
             proc.stdin.close()
         deadline = started + timeout
-        # the first measurement comes one look after the reading the run began with
-        next_watch, last_watch = started + WATCH, 0.0
+        # the first look measures: a program that holds much from its first moments is seen at once
+        next_watch = last_watch = 0.0
         open_streams = 2
 
         def take(stream) -> bool:
