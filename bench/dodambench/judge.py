@@ -1289,6 +1289,11 @@ class CliRun:
             else:
                 noted.append(note)
         for case in cases:
+            opened, lost = case.pop("opened", None), case.pop("lost", False)
+            if not case.pop("ran", True):
+                # decided by the judge without a run: it keeps the judge's outcome and reason, and no note,
+                # of an earlier run of its test either, is read against it
+                continue
             mine = [n for n in noted if _note_belongs(n, path, case)]
             if mine:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
@@ -1301,9 +1306,8 @@ class CliRun:
                 case["fell_below_start_bytes"] = max(n["fell"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
                 self.undecided += case["undecided_readings"]
-            opened, lost = case.pop("opened", None), case.pop("lost", False)
-            if not case.pop("ran", True) or case["outcome"] not in ("passed", "skipped"):
-                # decided by the judge without a run, or failed by its test: it keeps its outcome and reason
+            if case["outcome"] not in ("passed", "skipped"):
+                # failed by its test: it keeps its outcome and reason
                 continue
             # where the program is separated every case of the program has a note: a test that opened
             # one, or of which that is not known, with fewer cannot pass
@@ -1632,6 +1636,25 @@ def run_pytest(test_path: Path, env: dict[str, str], timeout: float, said: str) 
                 TREE_CLOCK.left = min(TREE_CLOCK.left, left_now())
 
 
+# The ways a case runner's run ends, as the judge tells them. The cases such an end leaves undecided are
+# decided by the judge with these words.
+RUNNER_ENDS = ("by itself", "its time was up", "the kernel ended it", "a signal ended it", "with an exit code of its own")
+
+
+def runner_end(code: int | None, kernel_ended: bool) -> str:
+    """How a case runner's run ended, in the judge's words: one of RUNNER_ENDS, from its exit code (None
+    where its time was up) and whether the kernel ended a process meanwhile; nothing where it ended by
+    itself, with an exit code pytest gives."""
+    if code is None:
+        return TIMED_OUT
+    if code < 0:
+        return (KERNEL_ENDED.replace("a process", "the case runner") if kernel_ended
+                else f"the case runner was ended by signal {-code}")
+    if code not in (0, 1, 2, 5):
+        return f"the case runner ended with exit code {code}"
+    return ""
+
+
 def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=None,
               ended: list[dict] | None = None) -> list[dict]:
     """Run one file of hidden tests and say how each case came out.
@@ -1656,14 +1679,7 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             # what the runner spent walking and removing is the step's time for that, not the file's
             used = tree_before - TREE_CLOCK.left if tree_before is not None and TREE_CLOCK.left is not None else 0.0
             spent += time.monotonic() - began - used
-            how = ""
-            if code is None:
-                how = TIMED_OUT
-            elif code < 0:
-                how = (KERNEL_ENDED.replace("a process", "the case runner") if killed_for_memory() > kills
-                       else f"the case runner was ended by signal {-code}")
-            elif code not in (0, 1, 2, 5):
-                how = f"the case runner ended with exit code {code}"
+            how = runner_end(code, code is not None and code < 0 and killed_for_memory() > kills)
             records = read_progress(progress)
             faults = [r["fault"] for r in records if "fault" in r]
             if faults:

@@ -1228,8 +1228,10 @@ what = "What the test decided stands: a case whose test failed stays failed"
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]", "tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            if not case.pop("ran", True) or case["outcome"] not in ("passed", "skipped"):'''
-put = '''            if not case.pop("ran", True):'''
+find = '''            if case["outcome"] not in ("passed", "skipped"):
+                # failed by its test: it keeps its outcome and reason
+                continue'''
+put = '''            pass'''
 
 [[protection]]
 what = "A note of the judge's that cannot be read leaves no case of its file passed or unjudged"
@@ -1731,8 +1733,10 @@ what = "A case the judge decided without running it is not read against the note
 file = "dodambench/judge.py"
 tests = ["tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            if not case.pop("ran", True) or case["outcome"]'''
-put = '''            if case["outcome"]'''
+find = '''            if not case.pop("ran", True):
+                # decided by the judge without a run'''
+put = '''            if False:
+                # decided by the judge without a run'''
 
 [[protection]]
 what = "The memory of the judge's own processes is taken out of every figure"

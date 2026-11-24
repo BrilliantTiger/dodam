@@ -499,7 +499,7 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
                     # a judging with a case not judged for measuring tells its room as well
                     bounds = getattr(exc, "bounds", ())
-                except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                except COULD_NOT_JUDGE as exc:
                     result.update(ok=False, problems=[f"could not judge in {image}: {exc}"])
                 else:
                     found = judgement_problems(variant.expect, variant.weakness, judged)
@@ -511,6 +511,11 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                 result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     return results
+
+
+# What the tool takes as a judging it could not run at all: the container could not be made, started or
+# read. Such a judging gives no result and tells no room.
+COULD_NOT_JUDGE = (subprocess.SubprocessError, OSError, ValueError)
 
 
 def room_of(bounds: tuple[int, ...], limit_mb: int) -> float | None:
