@@ -1363,7 +1363,8 @@ def test_measured():
             with real_open(SEEN, "w") as f:
                 json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
                            "tries": reads["try"], "late": c.measured.get("late"),
-                           "undecided": c.measured.get("undecided")}, f)
+                           "undecided": c.measured.get("undecided"),
+                           **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after")}}, f)
             CHECK
     finally:
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
@@ -1741,10 +1742,17 @@ QUICK = {
     "300 MB stood": (way(), 300, 1, judge_module.UNMEASURED),
     # nothing stood and nothing is left: the case passes
     "nothing stood": (way(), 10, 1, "passed"),
+    # 200 MB stood: the most the case can have held is 184 MB, within its limit, at every reading
+    "200 MB stood": (way(), 200, 1, "passed"),
     # one run leaves 300 MB of records that stand when it has ended
     "one run leaves 300 MB": (way(LEAVES_RECORDS.replace("100 *", "300 *")) + "\n\nLEFT = [0]\n", 10, 1, judge_module.UNMEASURED),
     # three short runs each leave 100 MB: only what stands after the third lies beyond the line
     "three runs leave 100 MB each": (way(LEAVES_RECORDS) + "\n\nLEFT = [0]\n", 10, 3, judge_module.UNMEASURED),
+    # a run leaves 280 MB of records while 50 MB of what stood goes: counted from the lowest figure the
+    # reading at its end saw, the case can have held 274 MB
+    "one run leaves 280 MB while 50 MB go": (way(LEAVES_RECORDS.replace("100 *", "280 *").replace(
+        "        LEFT[0] = runs_ended()", "        move(held, current=-50)\n        LEFT[0] = runs_ended()")) + "\n\nLEFT = [0]\n",
+        10, 1, judge_module.UNMEASURED),
 }
 
 
@@ -1759,6 +1767,9 @@ def test_no_run_is_judged_by_the_count_alone(tmp_path, state):
     result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=runs)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == expected, (state, the_case(result))
+    if state == "one run leaves 300 MB":
+        # the records it left are counted too, as the reading when the run has ended saw them
+        assert the_case(result)["records_counted_bytes"] == (300 - 16) * 2**20, the_case(result)
 
 
 def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
@@ -1799,6 +1810,29 @@ def test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure(tmp_p
     assert seen["limit"] is None, (dip, seen)
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
+# Between two runs, after the reading taken when the first has ended and before the one the second
+# begins with, 60 MB of what stood goes: of the figure, or of the kernel's records. The second run then
+# takes its memory, or makes 100 MB of records and takes 190 MB.
+BETWEEN_RUNS = {
+    "the figure": (way("    if n == 4 and part == 'total':\n        move(held, current=-60)\n", takes(290, 5)), 10, 60),
+    "the records": (way("    if n == 3 and part == 'files after':\n        move(held, records=-60)\n",
+                        "    if n == 4 and part == 'files after':\n        move(held, records=100)\n", takes(190, 5)), 100, 0),
+}
+
+
+@pytest.mark.parametrize("fall", list(BETWEEN_RUNS))
+def test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted_from(tmp_path, fall):
+    """The reading a later run begins with lowers the lowest figure the case is counted from, and that
+    of the kernel's records, as every reading does; it does not begin the case again. A second run whose
+    memory, counted from what stood after 60 MB went, lies above its limit of 256 MB fails for memory;
+    the case says how far its figure fell below where it began before its first run."""
+    code, records_mb, fell = BETWEEN_RUNS[fall]
+    result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=2)
+    case = the_case(result)
+    assert case["outcome"] == "failed", (fall, case, seen)
+    assert case["fell_below_start_bytes"] == fell * 2**20, (fall, case)
+
+
 def test_a_case_says_the_most_it_can_have_held_only_where_a_reading_worked_it_out(tmp_path):
     """Where every reading of a case was cut by time, no reading worked out the most it can have held:
     the case says nothing of it, rather than 0, and is unmeasured."""
@@ -1828,7 +1862,8 @@ def test_a_note_that_cannot_be_written_keeps_its_case_from_passing(tmp_path):
 def test_the_judges_work_around_a_case_holds_the_wait_for_the_kernels_own_part():
     """The 2 seconds the format checker counts for the judge's work around each case hold the wait
     for the kernel's own part before it, at most SETTLE_SECONDS and one more look, and the rest of that
-    work, which took about 0.03 seconds for a whole plain case on the measuring computer."""
+    work: a whole plain case took 30.9 thousandths of a second with this judge on the measuring computer,
+    the program alone 7.7."""
     from dodambench import dodam_cli as runner
     assert judge_module.CASE_SECONDS >= runner.SETTLE_SECONDS + runner.SETTLE_PAUSE + 0.5
 
@@ -1872,7 +1907,7 @@ def test_the_kernels_own_part_is_read_from_every_part_it_names(tmp_path):
 SETTLING = way("    if n == 5 and part == 'total' and LEFT[0]:\n        move(held, current=-LEFT[0])\n        LEFT[0] = 0\n",
                takes(270)) + ("\n\nLEFT = [30]\n\n\ndef kernel_part(held):\n    if LEFT[0]:\n        LEFT[0] -= 10\n"
                               "        move(held, current=-10)\n        stand_in(Path(GROUP), held)\n    return (10 + LEFT[0]) * MB\n")
-NEVER_STILL = way(takes(40)) + "\n\nFALLING = [10_000]\n\n\ndef kernel_part(held):\n    FALLING[0] -= 2\n    return FALLING[0] * MB\n"
+NEVER_STILL = way(takes(40)) + "\n\nFALLING = [10_000]\n\n\ndef kernel_part(held):\n    FALLING[0] -= 1.5\n    return int(FALLING[0] * MB)\n"
 
 
 def test_a_case_begins_once_the_kernel_has_given_back_what_it_kept_of_the_previous_one(tmp_path):
@@ -1885,9 +1920,38 @@ def test_a_case_begins_once_the_kernel_has_given_back_what_it_kept_of_the_previo
     assert the_case(result)["outcome"] == "failed", the_case(result)
 
 
+# The kernel's own part, read before the case begins and when each run has ended: still at first, then
+# 3 MB lower once a run has ended; or 1.5 MB lower at the second look and still after it.
+FALLS_AFTER = way(takes(40)) + "\n\n\ndef kernel_part(held):\n    return (10 if runs_ended() else 13) * MB\n"
+FALLS_ONCE = (way(takes(40)) + "\n\nLOOKS = [0]\n\n\ndef kernel_part(held):\n    LOOKS[0] += 1\n"
+              "    return int((11.5 if LOOKS[0] == 1 else 10) * MB)\n")
+WAITS = {
+    # still at the first look: the case begins at once, and says how much the part fell after it began
+    "still, then falls once a run has ended": (FALLS_AFTER, 1, 0, 3 * 2**20),
+    # 1.5 MB lower at the second look, more than the 1 MB taken as still: the wait looks once more
+    "falls 1.5 MB, then still": (FALLS_ONCE, 2, int(1.5 * 2**20), 0),
+    # 30 MB higher at first, falling 10 MB a look until it is still
+    "falls 10 MB a look": (SETTLING, 3, 20 * 2**20, 0),
+}
+
+
+@pytest.mark.parametrize("wait", list(WAITS))
+def test_each_case_says_how_long_it_waited_and_how_much_the_kernels_part_fell(tmp_path, wait):
+    """The judge reads the kernel's own part of the container until it is still: one look at least,
+    and as many as it keeps falling by more than 1 MB from one to the next. The case says how many
+    looks that took, how much the part fell meanwhile, and how much more it fell once the case had
+    begun. A wait that ends with the part still lets the case be judged as any other."""
+    code, looks, fell, after = WAITS[wait]
+    result, seen = judge_measured(tmp_path, code, memory_mb="256")
+    assert (seen["settle_looks"], seen["settle_fell"], seen["kernel_fell_after"]) == (looks, fell, after), seen
+    if code is not SETTLING:
+        assert the_case(result)["outcome"] == "passed", the_case(result)
+
+
 def test_a_case_whose_kernel_part_never_stops_falling_cannot_pass(tmp_path):
     """Where the kernel's own part of the container does not stop falling before the case begins, its
-    starting figure cannot be trusted, and the case cannot pass: it is unmeasured."""
+    starting figure cannot be trusted, and the case cannot pass: it is unmeasured. Here it falls by
+    1.5 MB at every look, more than the 1 MB the wait takes as still."""
     result, seen = judge_measured(tmp_path, NEVER_STILL)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
@@ -1925,6 +1989,8 @@ UNREADABLE = {
     "a line that is not a record": b"[1, 2]",
     "a note without its fields": b'{"case": "test_notes.py::test_b"}',
     "a line that is not text": b"\xff\xfe",
+    "a note with a yes or a no where a number belongs": (b'{"case": "test_notes.py::test_b", "unsettled": false, "undecided": true, '
+                                                         b'"grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}'),
     "a note whose fields are of other types": (b'{"case": "test_notes.py::test_b", "unsettled": "no", "undecided": "0", '
                                                b'"grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}'),
     "the notes cannot be read at all": None,
@@ -1947,9 +2013,9 @@ class Unreadable:
         return not self.gone
 
 
-def note(name: str, unsettled: bool = False, file: str = "test_notes.py") -> bytes:
+def note(name: str, unsettled: bool = False, file: str = "test_notes.py", bound: int | None = 0) -> bytes:
     return json.dumps({"case": f"{file}::{name}", "unsettled": unsettled, "undecided": int(unsettled),
-                       "grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}).encode()
+                       "grown": 0, "left_out": 0, "counted": 0, "bound": bound, "fell": 0}).encode()
 
 
 def noted(tmp_path: Path, lines: list[bytes] | None, run_as: str = "", cases: list[dict] | None = None) -> tuple[object, dict]:
@@ -2030,6 +2096,30 @@ def test_notes_the_judge_cannot_remove_are_a_fault_of_the_judge(tmp_path):
     cli.records_file, cli.records_highest, cli.undecided, cli.run_as = Stays(), 0, 0, ""
     with pytest.raises(judge_module.JudgeFault):
         cli.note_records(tmp_path / "test_notes.py", [dict(c) for c in NOTE_CASES])
+
+def test_the_judge_is_told_how_many_cases_of_the_program_each_test_opened(tmp_path, monkeypatch):
+    """The case runner counts the cases of the program each test opens, and the judge's plug-in hands
+    the count on with the test's outcome: where the program is separated, the judge holds the notes of
+    a test's cases against it."""
+    told = {}
+    kept = judge_module.CliRun.note_records
+
+    def note_records(self, path, cases):
+        told.update({c["name"].rsplit("::", 1)[-1]: c.get("opened") for c in cases})
+        return kept(self, path, cases)
+
+    monkeypatch.setattr(judge_module.CliRun, "note_records", note_records)
+    result = judge_program(tmp_path, "print('fine')\n", {"functional/test_opened.py": (
+        "from dodam_cli import Case\n\n\ndef test_two():\n    Case()\n    Case()\n\n\ndef test_none():\n    pass\n")})
+    assert told == {"test_two": 2, "test_none": 0}, (told, result["details"]["tests"])
+
+
+def test_a_note_without_a_bound_is_read(tmp_path):
+    """A note of a case whose readings worked out no bound says so, and is read like any other: the
+    other cases of the file keep what their tests decided."""
+    cli, outcomes_of = noted(tmp_path, [note("test_a", bound=None), note("test_b", True)])
+    assert outcomes_of == {"test_a": "passed", "test_b": judge_module.UNMEASURED, "test_c": "failed"}, outcomes_of
+
 
 def test_a_note_belongs_to_a_case_by_its_file_and_its_name(tmp_path):
     """A note marks the case of its own file and name, never a case of the same name in another file."""

@@ -1671,10 +1671,11 @@ def test_after():
 """
 
 
-def test_a_case_begins_once_the_kernel_has_let_go_of_what_the_case_before_it_left(tmp_path):
-    """An earlier case ends holding much in the kernel's own part of the container. The next case
-    waits before its starting reading until that part has stopped falling, and says how many looks
-    that took, how much it fell meanwhile and how much more it fell during the case; both cases pass."""
+def test_the_case_after_one_that_made_many_mappings_passes_and_says_what_its_wait_saw(tmp_path):
+    """A case makes 480,000 small mappings in eight processes. The kernel's own part of the container
+    rises while they run and goes with them, before the run returns: nothing of it stands when the case
+    ends. The case after it passes and says how many looks its wait took, how much the kernel's part
+    fell meanwhile and how much more during the case; the figures are noted, not judged."""
     result = judge_attack(tmp_path, PLAIN + LEAVES_KERNEL, {"functional/test_kernel.py": LEAVES_KERNEL_TESTS},
                           CASE_MEMORY_MB="512", CASE_PROCESSES="16")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")

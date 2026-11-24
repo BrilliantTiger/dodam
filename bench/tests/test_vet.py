@@ -450,20 +450,21 @@ def test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution(t
         assert r.get("room_mb") == 212.0, r
 
 
-@pytest.mark.parametrize("bound", [None, 300])
+@pytest.mark.parametrize("bound", [None, True, 300])
 def test_the_room_comes_only_from_a_bound_the_judge_worked_out(tmp_path, fake_docker, monkeypatch, bound):
-    """Through the tool's own path: a judging whose cases say nothing of the most they can have held
-    tells no room, never the whole limit; one whose case says 300 MB tells 212 MB of a limit of 512."""
+    """Through the tool's own path: a judging whose cases say nothing of the most they can have held,
+    or say it with a yes or a no, tells no room, never the whole limit; one whose case says 300 MB tells
+    212 MB of a limit of 512."""
     from dodambench.vet import vet_in_image
     given, details = judges_result(load_task(SAMPLE), "build")
     if bound is not None:
-        details["tests"][0]["memory_bound_bytes"] = bound * 2**20
+        details["tests"][0]["memory_bound_bytes"] = bound if bound is True else bound * 2**20
     (fake_docker / "reward.json").write_text(json.dumps(given), encoding="utf-8")
     (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
     monkeypatch.setenv("FAKE_EXIT", "0")
     results = [r for r in vet_in_image(load_task(SAMPLE), "python", tmp_path / "out", "dodam-bench/python:dev")
                if r["step"] == "build" and r["expect"] == "secure"]
-    assert results and all(r.get("room_mb") == (None if bound is None else 212.0) for r in results), results
+    assert results and all(r.get("room_mb") == (212.0 if bound == 300 else None) for r in results), results
 
 @pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
 def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes(tmp_path, fake_docker,
@@ -1112,12 +1113,12 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
 
 def test_the_room_of_a_judging_is_the_smallest_room_between_the_memory_bound_and_the_limit():
     """The room a judging leaves is the case's memory limit less the most the upper bound of the
-    case's memory reached, over its cases that passed; where no such case says it, there is no room to
-    tell."""
+    case's memory reached, over its cases that passed or were not judged for measuring, where the room
+    matters most; where no such case says it, there is no room to tell."""
     from dodambench.vet import room_of
     mb = 2**20
     details = {"tests": [{"name": "a", "outcome": "passed", "memory_bound_bytes": 100 * mb},
-                         {"name": "b", "outcome": "passed", "memory_bound_bytes": int(110.4 * mb)},
+                         {"name": "b", "outcome": "unmeasured", "memory_bound_bytes": int(110.4 * mb)},
                          {"name": "c", "outcome": "passed"},
                          # a case ended above its limit by design says nothing of the room
                          {"name": "d", "outcome": "failed", "memory_bound_bytes": 600 * mb}]}
