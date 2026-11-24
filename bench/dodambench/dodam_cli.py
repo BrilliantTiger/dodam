@@ -678,10 +678,10 @@ class Case:
             time.sleep(SETTLE_PAUSE)
             now = _judge.kernel_part()
             looks += 1
-            if now > last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:
+            if now >= last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:
                 self._kernel_start = now
                 self.measured.update(settle_looks=looks, settle_fell=max(first - now, 0), kernel_fell_after=0)
-                return now > last - _judge.TOGETHER_BYTES
+                return now >= last - _judge.TOGETHER_BYTES
             last = now
 
     def _bound(self, now: dict, figure: int, max_memory: int) -> None:

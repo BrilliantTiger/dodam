@@ -1655,8 +1655,8 @@ what = "The wait for the kernel's own part goes on while the part falls by more 
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_each_case_says_how_long_it_waited_and_how_much_the_kernels_part_fell[falls 1.5 MB, then still]"]
 [[protection.change]]
-find = '''            if now > last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
-put = '''            if now > last - 2 * _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
+find = '''            if now >= last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
+put = '''            if now >= last - 2 * _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
 
 [[protection]]
 what = "A case the judge decides without running it keeps the judge's outcome and reason"

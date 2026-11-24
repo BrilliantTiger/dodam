@@ -1679,7 +1679,7 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             # what the runner spent walking and removing is the step's time for that, not the file's
             used = tree_before - TREE_CLOCK.left if tree_before is not None and TREE_CLOCK.left is not None else 0.0
             spent += time.monotonic() - began - used
-            how = runner_end(code, code is not None and code < 0 and killed_for_memory() > kills)
+            how = runner_end(code, killed_for_memory() > kills)
             records = read_progress(progress)
             faults = [r["fault"] for r in records if "fault" in r]
             if faults:
