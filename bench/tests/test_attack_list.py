@@ -110,3 +110,15 @@ def test_the_check_refuses_a_variant_whose_text_does_not_occur_exactly_once(tmp_
     entry["change"] = [{"find": "work()\n", "put": ""}]
     copy = check.broken_copy(entry, tmp_path / "once")
     assert (copy / "twice.py").read_text(encoding="utf-8") == "stop()\nstop()\n"
+
+
+def test_a_second_line_whose_variant_leaves_the_tests_unlisted_does_not_hold(tmp_path):
+    """A variant after which the tests of the judge and of the vetting tool cannot even be listed shows
+    nothing: the second line does not hold, rather than holding against no test at all."""
+    spec = importlib.util.spec_from_file_location("check_protections", BENCH / "experiments/check_protections.py")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    entry = {"what": "made up", "file": "dodambench/judge.py", "tests": [], "second_line": "made up",
+             "change": [{"find": "FILE_SECONDS, CASE_SECONDS = 30, 2\n", "put": "FILE_SECONDS, CASE_SECONDS = (30, 2\n"}]}
+    result = check.against_judge_tests(entry)
+    assert result["verdict"] != "second line", result

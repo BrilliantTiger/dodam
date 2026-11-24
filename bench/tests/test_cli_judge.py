@@ -1499,7 +1499,10 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         # a test whose name, as pytest gives it, holds spaces
         source = source.replace("def test_measured():", "@pytest.mark.parametrize('label', ['with spaces in it'])\n"
                                                         "def test_measured(label):")
-    result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb)
+    # each run of the solution sleeps 0.6 seconds: a case of several runs gets 2 seconds for each, so that
+    # starting its runs on a busy machine does not end it for time
+    result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
+                           CASE_TIMEOUT_SEC=str(2 * runs))
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
 
@@ -2112,6 +2115,31 @@ def test_the_judge_is_told_how_many_cases_of_the_program_each_test_opened(tmp_pa
     result = judge_program(tmp_path, "print('fine')\n", {"functional/test_opened.py": (
         "from dodam_cli import Case\n\n\ndef test_two():\n    Case()\n    Case()\n\n\ndef test_none():\n    pass\n")})
     assert told == {"test_two": 2, "test_none": 0}, (told, result["details"]["tests"])
+
+
+def test_cases_the_judge_leaves_unrun_keep_their_outcome_and_reason_where_the_program_is_separated(tmp_path, monkeypatch):
+    """A case runner is ended after the first case of a file of security tests, and the cases' folder
+    cannot be emptied after it: the cases that are left are not run, and the judge gives them the
+    outcome of the file's kind, left unjudged, with that reason. They ran no program and have no note;
+    where the program is separated they keep that outcome and that reason, and are not read as cases
+    whose note is missing."""
+    def runner(test_path, env, timeout, said):
+        with open(env[judge_module.PROGRESS_ENV], "a", encoding="utf-8") as f:
+            for record in ({"listed": [f"test_notes.py::test_{n}" for n in "abc"]}, {"started": "test_notes.py::test_a"},
+                           {"case": "test_notes.py::test_a", "outcome": "passed", "message": "", "opened": 1, "lost": False}):
+                f.write(json.dumps(record) + "\n")
+        return -9
+
+    monkeypatch.setattr(judge_module, "run_pytest", runner)
+    (tmp_path / "test_notes.py").write_text("")
+    left = "the folder the cases live in cannot be emptied: the step's time for walking and removing is spent"
+    cases = judge_module.run_cases(tmp_path / "test_notes.py", {}, 10.0, give_back=lambda: ("skipped", left))
+    cli = object.__new__(judge_module.CliRun)
+    cli.records_file, cli.records_highest, cli.undecided, cli.run_as = tmp_path / "records.jsonl", 0, 0, "someone"
+    cli.records_file.write_bytes(note("test_a") + b"\n")
+    cli.note_records(tmp_path / "test_notes.py", cases)
+    assert [(c["name"], c["outcome"], c["message"]) for c in cases] == [
+        ("test_a", "passed", ""), ("test_b", "skipped", left), ("test_c", "skipped", left)], cases
 
 
 def test_a_note_without_a_bound_is_read(tmp_path):
