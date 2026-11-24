@@ -2917,7 +2917,8 @@ def test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_
             raise OSError(errno.EIO, "Input/output error")
         return remove(top, *args, **kwargs)
     monkeypatch.setattr(judge_module, "remove_tree", failing)
-    with pytest.raises(judge_module.JudgeFault):
+    # the fault is that one, and no other the judge would meet later on the way to the first case
+    with pytest.raises(judge_module.JudgeFault, match="cannot empty the folder the cases live in before the first case"):
         judge_module.CliRun(app, lang_env(), "someone", {"PATH": "/usr/bin"})
 
 
