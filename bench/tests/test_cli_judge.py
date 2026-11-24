@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1804,6 +1805,65 @@ def test_the_room_below_the_cap_is_held_to_the_megabyte(tmp_path, records_mb, ou
     assert the_case(result)["outcome"] == outcome, the_case(result)
 
 
+# one byte, in MB
+BYTE = 2**-20
+
+
+def makes(mb: float, at: int = 5) -> str:
+    """The program makes `mb` MB of the kernel's records at the total of the `at`-th try."""
+    return f"    if n == {at} and part == 'total':\n        move(held, records={mb})\n"
+
+
+# A container of 1,024 MB under a case's limit of 2,048 MB: the room it keeps below its cap is 896 MB. The
+# case makes 20 MB of records, 4 MB beyond the amount left out, which count.
+ROOM = {"cap_mb": 1024, "memory_mb": "2048", "records_mb": 0}
+# The lines at which the judge ends a program, each where the program lies on it and one byte beyond: the
+# case's count at its limit of 256 MB; what the container holds and the counted records at its room; and,
+# for readings whose two halves moved apart, the most they may move and still be taken as they are, and
+# the count or the container less what moved at either line. What the program held, how its readings
+# moved, how it ends and what the case comes to.
+LINES = {
+    "the count at the limit": (way(takes(256)), {}, None, "passed"),
+    "the count a byte above the limit": (way(takes(256 + BYTE)), {}, "memory", "failed"),
+    "the container at the room": (way(makes(20), takes(692)), ROOM, None, "passed"),
+    "the container a byte above the room": (way(makes(20), takes(692 + BYTE)), ROOM, "memory", "failed"),
+    "halves 1 MB apart, the count 1 MB above the limit": (way(takes(256, 20), every_try({"file": 1})), {}, "memory", "failed"),
+    "halves a byte more apart": (way(takes(256, 20), every_try({"file": 1 + BYTE})), {}, None, judge_module.UNMEASURED),
+    "halves 20 MB apart, the count less that at the limit": (way(takes(256, 20), every_try({"file": 20})), {}, None,
+                                                             judge_module.UNMEASURED),
+    "halves 20 MB apart, the count less that a byte above": (way(takes(256 + BYTE, 20), every_try({"file": 20})), {},
+                                                             "memory", "failed"),
+    "halves 20 MB apart, the container less that at the room": (way(makes(20), takes(692, 20), every_try({"file": 20})),
+                                                                ROOM, None, judge_module.UNMEASURED),
+    "halves 20 MB apart, the container less that a byte above": (way(makes(20), takes(692 + BYTE, 20),
+                                                                     every_try({"file": 20})), ROOM, "memory", "failed"),
+}
+
+
+@pytest.mark.parametrize("line", LINES)
+def test_the_lines_at_which_a_program_is_ended_are_held_to_the_byte(tmp_path, line):
+    """A program that lies on a line the judge ends programs at is not ended; one byte beyond it, it is.
+    So for the case's count against its limit, and for what the container holds with the records counted
+    against the room below its cap. A reading whose halves moved apart by no more than 1 MB is taken as
+    it is; by one byte more, only the count less what moved can end the program, at either line, and
+    where it does not, the case cannot pass."""
+    code, settings, limit, outcome = LINES[line]
+    result, seen = judge_measured(tmp_path, code, patient=True, **settings)
+    assert seen["limit"] == limit and the_case(result)["outcome"] == outcome, (line, seen, the_case(result))
+
+
+def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_decide_as_nought_where_none(tmp_path):
+    """A case whose figure never fell below where it began, and whose readings all decided, says 0 of
+    both; so does a case whose reading at its start was cut by time, from which no figure fell."""
+    (tmp_path / "settled").mkdir()
+    (tmp_path / "cut").mkdir()
+    settled, _ = judge_measured(tmp_path / "settled", WAYS["settled"])
+    case = the_case(settled)
+    assert case["fell_below_start_bytes"] == 0 and case["undecided_readings"] == 0, case
+    cut, _ = judge_measured(tmp_path / "cut", WAYS["cut by time at the case's start"])
+    assert the_case(cut)["fell_below_start_bytes"] == 0, the_case(cut)
+
+
 def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
     """A program that writes a line every fifth of a thousandth of a second for 0.6 seconds wakes the
     judge at almost every line; the judge still measures at most once in 0.002 seconds, about 300 times
@@ -2105,6 +2165,97 @@ def test_the_judges_own_processes_are_taken_out_of_every_figure(tmp_path):
         assert runner._own_memory(statuses[0]) == 1320 * 1024
     finally:
         runner._config = kept
+
+
+def test_a_figure_is_the_count_less_the_cases_files_and_the_judges_own_memory(monkeypatch):
+    """Of the container's count, the cases' files and the judge's own memory are taken out."""
+    from dodambench import dodam_cli as runner
+    monkeypatch.setattr(runner, "_own_memory", lambda: 30 * 2**20)
+    assert runner.Case._figure(SimpleNamespace(), {"taken": 500 * 2**20, "files": 40 * 2**20}) == 430 * 2**20
+
+
+def test_the_records_a_case_made_are_the_most_they_stood_above_their_lowest(monkeypatch):
+    """The kernel's records of a case grow from the lowest they reached; what they grew by at the most
+    stays the case's, when they fall again too. What counts is their growth beyond the amount left out."""
+    from dodambench import dodam_cli as runner
+    mb = 2**20
+    me = SimpleNamespace(_records_lowest=None, _records_grown=0, _left_out_at_most=16 * mb)
+    counted = [runner.Case._records(me, {"records": r * mb}) for r in (10, 50, 20)]
+    assert counted == [0, 24 * mb, 0] and me._records_grown == 40 * mb, (counted, me)
+
+
+# What a reading gave, and the case's lowest figure until then: the most the case can have held, and
+# whether that keeps it from passing. Under a limit of 256 MB, with 16 MB of records left out, in a
+# container of 1,024 MB whose room below the cap is 896 MB.
+BOUNDS = {
+    # nothing held above the lowest figure, and the records within the amount left out: nothing at all
+    "nothing held": ({"taken": 200, "cap": 0, "records": 10}, 100, 100, 0, False),
+    "the room exactly": ({"taken": 892, "cap": 1024, "records": 20}, 140, 100, 44, False),
+    "a byte above the room": ({"taken": 892 + 2**-20, "cap": 1024, "records": 20}, 140, 100, 44, True),
+}
+
+
+@pytest.mark.parametrize("state", BOUNDS)
+def test_the_most_a_case_can_have_held_is_worked_out_to_the_byte(state):
+    """The most a case can have held is its figure above its lowest and the records beyond the amount
+    left out, never less than nothing; it keeps the case from passing where what the container holds and
+    those records lie beyond the room below the cap by as little as a byte."""
+    from dodambench import dodam_cli as runner
+    mb = 2**20
+    now, figure, lowest, bound, unsettled = BOUNDS[state]
+    me = SimpleNamespace(_left_out_at_most=16 * mb, _lowest=lowest * mb, measured={}, _unsettled=False)
+    runner.Case._bound(me, {k: int(v * mb) for k, v in now.items()}, figure * mb, 256 * mb)
+    assert (me.measured["bound_highest"], me._unsettled) == (bound * mb, unsettled), (state, me)
+
+
+class Looks:
+    """The wait's clock and the kernel's own part as the wait reads them: the clock moves only while the
+    wait pauses, and the part takes the values given, the last one from then on."""
+
+    def __init__(self, parts):
+        self.parts, self.read, self.now, self.paused = list(parts), 0, 0.0, 0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.paused += 1
+        self.now += seconds
+
+    def kernel_part(self, *args, **kwargs):
+        self.read += 1
+        assert self.read < 100, "the wait read the kernel's own part 100 times"
+        return self.parts[min(self.read - 1, len(self.parts) - 1)]
+
+
+# How the kernel's own part goes during the wait, in MB, a value a look: whether the wait says it stopped
+# falling, after how many looks, and how far it fell. The wait lasts at most a second, a look a quarter.
+WAITS = {
+    "falls by 1 MB": ([100, 99], True, 1, 1),
+    "falls by a byte more than 1 MB, then stays": ([100, 99 - 2**-20], True, 2, 1 + 2**-20),
+    "falls by 2 MB a look until the second is over": ([100 - 2 * n for n in range(10)], False, 4, 8),
+    "rises": ([10, 12], True, 1, 0),
+}
+
+
+@pytest.mark.parametrize("way", WAITS)
+def test_the_wait_for_the_kernels_own_part_ends_when_it_fell_by_no_more_than_1_mb_in_a_look(monkeypatch, way):
+    """The wait looks at the kernel's own part once each pause; it has stopped falling where it fell by
+    no more than 1 MB in a look, and the wait ends at the latest when its second is over, then saying
+    it has not stopped. The case says how many looks it took and how far the part fell, nothing where it
+    rose, and that it fell by nothing yet after the wait."""
+    from dodambench import dodam_cli as runner
+    parts, stopped, looks, fell = WAITS[way]
+    clock = Looks(int(p * 2**20) for p in parts)
+    monkeypatch.setattr(runner, "time", clock)
+    monkeypatch.setattr(runner._judge, "kernel_part", clock.kernel_part)
+    monkeypatch.setattr(runner, "SETTLE_PAUSE", 0.25)
+    monkeypatch.setattr(runner, "SETTLE_SECONDS", 1.0)
+    me = SimpleNamespace(measured={})
+    told = runner.Case._kernel_settled(me)
+    assert (told, me.measured, clock.paused) == (stopped, {"settle_looks": looks, "settle_fell": int(fell * 2**20),
+                                                           "kernel_fell_after": 0}, looks), way
+    assert me._kernel_start == clock.parts[min(looks, len(clock.parts) - 1)], way
 
 # The notes the case runners hand the judge, one line for each case, and what the judge makes of them.
 NOTE_CASES = [{"name": "test_a", "outcome": "passed", "message": ""},
@@ -2525,7 +2676,7 @@ def test_a_test_that_never_loads_the_case_runner_opened_no_case(tmp_path, monkey
     kept = judge_module.CliRun.note_records
 
     def note_records(self, path, cases):
-        told.update({c["name"].rsplit("::", 1)[-1]: c.get("opened") for c in cases})
+        told.update({c["name"].rsplit("::", 1)[-1]: (c.get("opened"), c.get("lost")) for c in cases})
         return kept(self, path, cases)
 
     monkeypatch.setattr(judge_module.CliRun, "note_records", note_records)
@@ -2533,7 +2684,41 @@ def test_a_test_that_never_loads_the_case_runner_opened_no_case(tmp_path, monkey
     result = judge_program(tmp_path, "print('fine')\n", {"functional/test_plain.py": (
         "def unused():\n    from dodam_cli import case\n    with case() as c:\n        c.run([])\n\n\n"
         "def test_plain():\n    assert 1 == 1\n")})
-    assert told == {"test_plain": 0}, (told, result["details"]["tests"])
+    # nor did it lose the note of a case
+    assert told == {"test_plain": (0, False)}, (told, result["details"]["tests"])
+    assert the_plain_case(result)["outcome"] == "passed", result["details"]["tests"]
+
+
+def the_plain_case(result: dict) -> dict:
+    return next(c for c in result["report"]["tests"] if c["name"].endswith("test_plain"))
+
+
+def test_a_case_opened_at_the_top_of_a_file_of_tests_leaves_its_tests_to_be_judged(tmp_path):
+    """A file of tests may open a case of the program at its top, outside any test, as the format
+    checker allows: pytest names no test then, and the file's tests are judged as ever."""
+    result = judge_program(tmp_path, "print('fine')\n", {"functional/test_plain.py": (
+        HEAD + "with case() as c:\n    c.run([])\n\n\ndef test_plain():\n    assert 1 == 1\n")})
+    assert the_plain_case(result)["outcome"] == "passed", result["details"]["tests"]
+
+
+# How a case runner ended, from its exit code (None where its time was up, a signal's number below 0)
+# and whether the kernel ended a process for memory while it ran: what the judge says of it, nothing
+# where the runner ended as pytest does when its tests are over.
+RUNNER_CODES = {(code, kernel): told for code, told in (
+    (0, ""), (1, ""), (2, ""), (5, ""), (3, "the case runner ended with exit code 3"),
+    (4, "the case runner ended with exit code 4"), (None, judge_module.TIMED_OUT)) for kernel in (False, True)}
+RUNNER_CODES.update({
+    (-9, False): "the case runner was ended by signal 9", (-1, False): "the case runner was ended by signal 1",
+    (-9, True): "the kernel ended the case runner because the container ran out of memory",
+    (-1, True): "the kernel ended the case runner because the container ran out of memory"})
+
+
+def test_how_a_case_runner_ended_is_told_from_its_exit_code_and_the_kernel(monkeypatch):
+    """A runner that ended by itself as pytest does is no ending to tell; any other exit code is told
+    with its number, a signal with its number, a signal while the kernel ended a process for memory as
+    the kernel's doing, and a runner whose time was up as such, whatever the kernel did meanwhile."""
+    told = {key: judge_module.runner_end(*key) for key in RUNNER_CODES}
+    assert told == RUNNER_CODES, {k: v for k, v in told.items() if v != RUNNER_CODES[k]}
 
 
 def test_a_note_without_a_bound_is_read(tmp_path):

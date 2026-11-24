@@ -1226,6 +1226,12 @@ def test_the_table_of_the_room_has_every_way_a_judging_ends_and_every_reason():
     assert {r for _, r, *_ in rows if r} == set(UNMEASURED_REASONS)
 
 
+def test_the_room_is_told_to_a_tenth_of_a_megabyte():
+    """The room is told in MB to one decimal place: a bound of 37.66 MB under a limit of 50 MB leaves 12.3."""
+    from dodambench.vet import room_of
+    assert room_of((int(37.66 * 2**20),), 50) == 12.3
+
+
 def test_the_tool_prints_for_each_language_the_smallest_room_its_prepared_solutions_left(tmp_path, monkeypatch, capsys):
     """Whoever writes a task sees, for each language, the smallest room between the memory bound and the
     limit that a prepared solution's judging left. It refuses nothing for it."""
