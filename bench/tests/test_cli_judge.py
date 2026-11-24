@@ -2230,7 +2230,7 @@ class Looks:
 
 # How the kernel's own part goes during the wait, in MB, a value a look: whether the wait says it stopped
 # falling, after how many looks, and how far it fell. The wait lasts at most a second, a look a quarter.
-WAITS = {
+KERNEL_WAITS = {
     "falls by 1 MB": ([100, 99], True, 1, 1),
     "falls by a byte more than 1 MB, then stays": ([100, 99 - 2**-20], True, 2, 1 + 2**-20),
     "falls by 2 MB a look until the second is over": ([100 - 2 * n for n in range(10)], False, 4, 8),
@@ -2238,14 +2238,14 @@ WAITS = {
 }
 
 
-@pytest.mark.parametrize("way", WAITS)
+@pytest.mark.parametrize("way", KERNEL_WAITS)
 def test_the_wait_for_the_kernels_own_part_ends_when_it_fell_by_no_more_than_1_mb_in_a_look(monkeypatch, way):
     """The wait looks at the kernel's own part once each pause; it has stopped falling where it fell by
     no more than 1 MB in a look, and the wait ends at the latest when its second is over, then saying
     it has not stopped. The case says how many looks it took and how far the part fell, nothing where it
     rose, and that it fell by nothing yet after the wait."""
     from dodambench import dodam_cli as runner
-    parts, stopped, looks, fell = WAITS[way]
+    parts, stopped, looks, fell = KERNEL_WAITS[way]
     clock = Looks(int(p * 2**20) for p in parts)
     monkeypatch.setattr(runner, "time", clock)
     monkeypatch.setattr(runner._judge, "kernel_part", clock.kernel_part)
@@ -2684,9 +2684,9 @@ def test_a_test_that_never_loads_the_case_runner_opened_no_case(tmp_path, monkey
     result = judge_program(tmp_path, "print('fine')\n", {"functional/test_plain.py": (
         "def unused():\n    from dodam_cli import case\n    with case() as c:\n        c.run([])\n\n\n"
         "def test_plain():\n    assert 1 == 1\n")})
-    # nor did it lose the note of a case
-    assert told == {"test_plain": (0, False)}, (told, result["details"]["tests"])
-    assert the_plain_case(result)["outcome"] == "passed", result["details"]["tests"]
+    # nor did it lose the note of a case: the runner says so only where one was lost
+    assert told == {"test_plain": (0, None)}, (told, result["report"]["tests"])
+    assert the_plain_case(result)["outcome"] == "passed", result["report"]["tests"]
 
 
 def the_plain_case(result: dict) -> dict:
@@ -2698,7 +2698,7 @@ def test_a_case_opened_at_the_top_of_a_file_of_tests_leaves_its_tests_to_be_judg
     checker allows: pytest names no test then, and the file's tests are judged as ever."""
     result = judge_program(tmp_path, "print('fine')\n", {"functional/test_plain.py": (
         HEAD + "with case() as c:\n    c.run([])\n\n\ndef test_plain():\n    assert 1 == 1\n")})
-    assert the_plain_case(result)["outcome"] == "passed", result["details"]["tests"]
+    assert the_plain_case(result)["outcome"] == "passed", result["report"]["tests"]
 
 
 # How a case runner ended, from its exit code (None where its time was up, a signal's number below 0)
