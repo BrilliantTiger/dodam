@@ -6190,12 +6190,19 @@ def test_the_desks_tests_run_in_the_job_named_desk_and_in_no_other(place):
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     site = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
     files = ["tests/test_desk.py", "tests/test_desk_lock.py"]
-    # The job bench runs every test but these two files and the Gemini job's tests, which the job variants runs; the
-    # job desk runs exactly these two.
-    assert "run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_gemini.py " + " ".join(f"--ignore={name}" for name in files) + "\n" in ci
+    import re
+
+    # The job bench runs every test but these two files and the Gemini job's tests, which the job variants runs:
+    # every command of it that runs the tests either leaves both files out or names other files only. The job desk
+    # runs exactly these two.
+    bench = ci.split("\n  bench:\n", 1)[1].split("\n  variants:\n", 1)[0]
+    runs = re.findall(r"python -m pytest -q -p no:cacheprovider ([^\n]*)", bench)
+    assert any(all(f"--ignore={name}" in run for name in [*files, "tests/test_gemini.py"]) for run in runs), runs
+    for run in runs:
+        named = re.findall(r'(?:^|\s|")(tests/[^\s"]+)', run)
+        assert all(f"--ignore={name}" in run for name in files) or (named and not any(n.split("::")[0] in files for n in named)), run
     assert "run: python -m pytest -q -p no:cacheprovider " + " ".join(files) + "\n" in site.split("\n  desk:\n", 1)[1]
     # The names of the jobs, which are the required checks, are as they were.
-    import re
 
     assert re.findall(r"^  ([a-z]+):$", ci.split("\njobs:\n")[1], re.M) == ["bench", "variants", "recorded", "attacks", "protections"]
     assert re.findall(r"^  ([a-z]+):$", site.split("\njobs:\n")[1], re.M) == ["layout", "desk"]
