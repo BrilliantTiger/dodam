@@ -1613,6 +1613,7 @@ def test_the_readings_that_could_not_decide_are_counted_exactly(tmp_path):
     case = the_case(result)
     assert case.get("undecided_readings") == 3, case
     assert case["outcome"] == judge_module.UNMEASURED, case
+    assert result["report"].get("memory", {}).get("undecided_readings") == 3, result["report"].get("memory")
 
 
 # The state that one net figure of the kernel's records cannot show, generated from its parameters: how
@@ -1678,6 +1679,67 @@ def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
 
+def test_the_most_a_case_can_have_held_leaves_out_no_more_of_the_records_than_the_amount_left_out(tmp_path):
+    """Of the records that stand, the most a case can have held leaves out the amount left out and no
+    more, and no less. With 100 MB of records held under a limit of 256 MB, a program of 184 MB lies
+    8 MB beyond its limit, the amount left out and the tolerance: it is unmeasured. One of 170 MB
+    lies within its limit with every record that stands counted beyond that amount: it passes."""
+    over_tmp, within_tmp = tmp_path / "over", tmp_path / "within"
+    over_tmp.mkdir()
+    within_tmp.mkdir()
+    over, over_seen = judge_measured(over_tmp, way(takes(184), HOW_HELD["held"](100)), records_mb=100)
+    within, within_seen = judge_measured(within_tmp, way(takes(170), HOW_HELD["held"](100)), records_mb=100)
+    assert over_seen["limit"] is None and the_case(over)["outcome"] == judge_module.UNMEASURED, the_case(over)
+    assert within_seen["limit"] is None and the_case(within)["outcome"] == "passed", the_case(within)
+
+
+# Every record that stood when the case began goes before its first measurement while the program runs.
+GONE_AT_ONCE = way("    if n == 2 and part == 'stat before':\n        move(held, records=-RECORDS_MB)\n", takes(40, 3))
+
+
+def test_the_records_that_stand_when_a_case_begins_count_before_its_first_measurement(tmp_path):
+    """The reading a case begins with is held to the most the case can have held as every later one is:
+    a program that ends before the judge has measured it once, while 300 MB of records stand, cannot
+    show that it held no more than its limit of 256 MB. Here the records go before the first
+    measurement, so only the reading at the start can see them: the case is unmeasured."""
+    result, seen = judge_measured(tmp_path, GONE_AT_ONCE, records_mb=300)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
+# What stood in the figure goes before the program takes its memory: 30 MB at the third reading.
+FELL = way("    if n == 3 and part == 'total':\n        move(held, current=-30)\n", takes(184))
+
+
+def test_the_most_a_case_can_have_held_is_counted_from_the_lowest_figure_the_case_reached(tmp_path):
+    """The most a case can have held is counted from the lowest figure the case reached, as the count
+    is: counted from where the case began, what stood and went would make room. With 100 MB of records
+    held and 30 MB gone before the program takes 184 MB, it can have held 184 MB and those records,
+    beyond its limit of 256 MB, the amount left out and the tolerance: it is unmeasured, where counted
+    from the start it would pass. Each case says the most it can have held and how far its figure fell
+    below where it began."""
+    mb = 2**20
+    result, seen = judge_measured(tmp_path, FELL, records_mb=100)
+    assert seen["limit"] is None, seen
+    case = the_case(result)
+    assert case["outcome"] == judge_module.UNMEASURED, case
+    assert case["memory_bound_bytes"] == (184 + 100 - 16) * mb, case
+    assert case["fell_below_start_bytes"] == 30 * mb, case
+
+
+def test_the_kernels_own_part_is_read_from_every_part_it_names(tmp_path):
+    """The kernel's own part of the container is the sum of what memory.stat names for it: the stacks
+    and page tables of the processes, memory for each processor, sockets, memory it maps itself and the
+    records it cannot give back; nothing else of the container's figures. Where the kernel says
+    nothing, it is 0."""
+    parts = {"kernel_stack": 1, "pagetables": 2, "sec_pagetables": 4, "percpu": 8, "sock": 16, "vmalloc": 32,
+             "slab_unreclaimable": 64}
+    others = {"anon": 1 << 10, "file": 1 << 11, "slab_reclaimable": 1 << 12, "shmem": 1 << 13}
+    mb = 2**20
+    (tmp_path / "memory.stat").write_text("".join(f"{name} {value * mb}\n" for name, value in {**others, **parts}.items()))
+    assert judge_module.kernel_part(tmp_path) == sum(parts.values()) * mb
+    (tmp_path / "gone").mkdir()
+    assert judge_module.kernel_part(tmp_path / "gone") == 0
+
 # What the kernel kept of the previous case's processes goes after it: the kernel's own part of the
 # container stands 30 MB higher at first and falls 10 MB each time it is read, until it is still; where
 # nobody reads it before the case begins, it goes at once while the program takes its memory.
@@ -1737,6 +1799,8 @@ UNREADABLE = {
     "a line that is not a record": b"[1, 2]",
     "a note without its fields": b'{"case": "test_notes.py::test_b"}',
     "a line that is not text": b"\xff\xfe",
+    "a note whose fields are of other types": (b'{"case": "test_notes.py::test_b", "unsettled": "no", "undecided": "0", '
+                                               b'"grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}'),
     "the notes cannot be read at all": None,
 }
 
@@ -1762,16 +1826,17 @@ def note(name: str, unsettled: bool = False, file: str = "test_notes.py") -> byt
                        "grown": 0, "left_out": 0, "counted": 0, "bound": 0, "fell": 0}).encode()
 
 
-def noted(tmp_path: Path, lines: list[bytes] | None) -> tuple[object, dict]:
+def noted(tmp_path: Path, lines: list[bytes] | None, run_as: str = "", cases: list[dict] | None = None) -> tuple[object, dict]:
     """What the judge makes of the notes of the file test_notes.py, whose cases came out as NOTE_CASES;
-    None for notes that cannot be read at all."""
+    None for notes that cannot be read at all. `run_as` names the user the program runs as, where it
+    is separated from the judge."""
     cli = object.__new__(judge_module.CliRun)
-    cli.records_file, cli.records_highest, cli.undecided = tmp_path / "records.jsonl", 0, 0
+    cli.records_file, cli.records_highest, cli.undecided, cli.run_as = tmp_path / "records.jsonl", 0, 0, run_as
     if lines is None:
         cli.records_file = Unreadable()
     else:
         cli.records_file.write_bytes(b"\n".join(lines) + b"\n")
-    cases = [dict(c) for c in NOTE_CASES]
+    cases = [dict(c) for c in (cases or NOTE_CASES)]
     cli.note_records(tmp_path / "test_notes.py", cases)
     return cli, {c["name"]: c["outcome"] for c in cases}
 
@@ -1786,6 +1851,36 @@ def test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjud
     assert outcomes_of == {"test_a": judge_module.UNMEASURED, "test_b": judge_module.UNMEASURED, "test_c": "failed"}
     assert not cli.records_file.exists()
 
+
+def test_a_case_with_no_note_cannot_pass_where_the_program_is_separated(tmp_path):
+    """Where the program is separated from the judge, every case that ran it has a note of its
+    readings. A case whose test passed or left it unjudged with no note, because its note could not be
+    written or because it never started the program, cannot show that its readings allowed a pass: it
+    is unmeasured. A case whose test failed stays failed. Where nothing separates them, the case runner
+    writes no notes and nothing changes."""
+    cases = NOTE_CASES + [{"name": "test_d", "outcome": "passed", "message": ""}]
+    (tmp_path / "separated").mkdir()
+    (tmp_path / "unseparated").mkdir()
+    _, separated = noted(tmp_path / "separated", [note("test_a")], run_as="dodam-case", cases=cases)
+    assert separated == {"test_a": "passed", "test_b": judge_module.UNMEASURED, "test_c": "failed",
+                         "test_d": judge_module.UNMEASURED}, separated
+    _, unseparated = noted(tmp_path / "unseparated", [note("test_a")], cases=cases)
+    assert unseparated == {"test_a": "passed", "test_b": "skipped", "test_c": "failed", "test_d": "passed"}, unseparated
+
+def test_notes_the_judge_cannot_remove_are_a_fault_of_the_judge(tmp_path):
+    """Notes that stayed would be read as the next file's: notes the judge cannot remove are its own
+    fault, and the step gives no result."""
+    class Stays(Unreadable):
+        def read_bytes(self) -> bytes:
+            return note("test_a") + b"\n"
+
+        def unlink(self, missing_ok: bool = False) -> None:
+            raise OSError(errno.EACCES, "the notes cannot be removed")
+
+    cli = object.__new__(judge_module.CliRun)
+    cli.records_file, cli.records_highest, cli.undecided, cli.run_as = Stays(), 0, 0, ""
+    with pytest.raises(judge_module.JudgeFault):
+        cli.note_records(tmp_path / "test_notes.py", [dict(c) for c in NOTE_CASES])
 
 def test_a_note_belongs_to_a_case_by_its_file_and_its_name(tmp_path):
     """A note marks the case of its own file and name, never a case of the same name in another file."""
