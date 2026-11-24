@@ -29,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from .convert import to_harbor, verifier_env
-from .judge import (LEFT_BEHIND, NOT_JUDGED_FOR_MEASURING, OUTCOMES, UNMEASURED, JudgeFault, judge, names_of_tests,
+from .judge import (LEFT_BEHIND, OUTCOMES, UNMEASURED, UNMEASURED_REASONS, JudgeFault, judge, names_of_tests,
                     reward_of)
 from .languages import LANGUAGES, Language
 from .task import (PROCESS_CAP, Task, TaskError, TestFile, cases_mount, container_memory_mb, load_task,
@@ -85,7 +85,8 @@ class Judged:
     left_behind: str          # what the program's side left that the judge could not take back; empty when nothing
     cases: tuple[Case, ...]
     reward: dict              # the judge's reward, the one the cases give
-    bounds: tuple[int, ...] = ()  # the most each case that passed can have held, where the judge worked it out
+    bounds: tuple[int, ...] = ()  # the most each case that passed or was not judged for measuring can have held,
+    #                               where the judge worked it out
 
 
 def _not_of_the_shape(file: str, key: str, what: str) -> JudgeFault:
@@ -151,7 +152,7 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.name", "a text that is not empty")
         if case["outcome"] not in OUTCOMES:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.outcome", f"one of {', '.join(OUTCOMES)}")
-        if case["outcome"] == UNMEASURED and case["message"] != NOT_JUDGED_FOR_MEASURING:
+        if case["outcome"] == UNMEASURED and case["message"] not in UNMEASURED_REASONS:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.message", "the judge's own words for a case not judged "
                                                                     "for measuring")
         own = files.get(case["file"])
@@ -201,7 +202,8 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
         # the judging is no judgement of the solution, whatever kind it was written as: a fault of measuring;
         # the room it left is told all the same, from the bounds read here
         fault = JudgeFault(json.dumps({"severity": "error", "file": DETAILS_FILE, "key": UNMEASURED,
-                                       "message": f"{NOT_JUDGED_FOR_MEASURING}: {', '.join(unmeasured)}"}))
+                                       "message": "cases not judged for measuring: " + "; ".join(
+                                           f"{c.file}::{c.name}, {c.message}" for c in cases if c.outcome == UNMEASURED)}))
         fault.bounds = bounds
         raise fault
     return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward), bounds=bounds)
@@ -505,22 +507,18 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                     bounds = judged.bounds
                 if task.cli.get("case_memory_mb"):
                     # from what the one place read, never from a bound the judge did not work out
-                    result["room_mb"] = room_of({"tests": [{"outcome": "passed", "memory_bound_bytes": b} for b in bounds]},
-                                                task.cli["case_memory_mb"])
+                    result["room_mb"] = room_of(bounds, task.cli["case_memory_mb"])
                 result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     return results
 
 
-def room_of(details: dict, limit_mb: int) -> float | None:
-    """The room a judging left: the case's memory limit less the most the bound of a case's memory
-    reached, the smallest over its cases that passed or were not judged for measuring, in MB; None
-    where no such case says it. A case that failed is left out: it may have been ended above its limit
-    by design. The bound counts every record of the kernel's that stands, so a language whose build
-    leaves more of them leaves less room."""
-    bounds = [t["memory_bound_bytes"] for t in details.get("tests", [])
-              if isinstance(t, dict) and isinstance(t.get("memory_bound_bytes"), int)
-              and not isinstance(t.get("memory_bound_bytes"), bool) and t.get("outcome") in ("passed", UNMEASURED)]
+def room_of(bounds: tuple[int, ...], limit_mb: int) -> float | None:
+    """The room a judging left: the case's memory limit less the largest of `bounds`, in MB; None where
+    there is none. The bounds are those the one place read: of the cases that passed or were not judged
+    for measuring, where the judge worked them out. A case that failed is left out there: it may have
+    been ended above its limit by design. The bound counts every record of the kernel's that stands, so
+    a language whose build leaves more of them leaves less room."""
     return round(limit_mb - max(bounds) / 2**20, 1) if bounds else None
 
 

@@ -1210,26 +1210,26 @@ put = '''            self._broken.append(f"{what} ({why})")
 [[protection]]
 what = "A case that would pass after a reading that could not be taken is unmeasured"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-security]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-ordinary]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-security]", "tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
-put = '''            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("skipped",):'''
+find = '''case["outcome"] not in ("passed", "skipped"):'''
+put = '''case["outcome"] not in ("skipped",):'''
 
 [[protection]]
 what = "A case its test would leave unjudged after a reading that could not be taken is unmeasured"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-unjudged]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-unjudged]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[right-unjudged]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-unjudged]", "tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
-put = '''            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed",):'''
+find = '''case["outcome"] not in ("passed", "skipped"):'''
+put = '''case["outcome"] not in ("passed",):'''
 
 [[protection]]
 what = "What the test decided stands: a case whose test failed stays failed"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]"]
+tests = ["tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[vulnerable-security]", "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured[broken-ordinary]", "tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):'''
-put = '''            if unreadable or missing or any(n["unsettled"] for n in mine):'''
+find = '''            if not case.pop("ran", True) or case["outcome"] not in ("passed", "skipped"):'''
+put = '''            if not case.pop("ran", True):'''
 
 [[protection]]
 what = "A note of the judge's that cannot be read leaves no case of its file passed or unjudged"
@@ -1483,10 +1483,10 @@ put = '''        pass'''
 [[protection]]
 what = "A case whose note could not be written cannot pass"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_a_note_that_cannot_be_written_keeps_its_case_from_passing", "tests/test_cli_judge.py::test_a_case_with_no_note_cannot_pass_where_the_program_is_separated"]
+tests = ["tests/test_cli_judge.py::test_a_note_that_cannot_be_written_keeps_its_case_from_passing", "tests/test_cli_judge.py::test_a_case_with_no_note_cannot_pass_where_the_program_is_separated", "tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''            missing = missing or case.pop("lost", False)'''
-put = '''            missing = missing or (case.pop("lost", False) and False)'''
+find = '''NOTE_LOST if lost else '''
+put = ''''''
 
 [[protection]]
 what = "What stands when a run has ended is held to the most the case can have held"
@@ -1657,11 +1657,11 @@ find = '''            if now > last - _judge.TOGETHER_BYTES or time.monotonic() 
 put = '''            if now > last - 2 * _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
 
 [[protection]]
-what = "A case the judge decides without running it opened no case of the program"
+what = "A case the judge decides without running it keeps the judge's outcome and reason"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_cases_the_judge_leaves_unrun_keep_their_outcome_and_reason_where_the_program_is_separated"]
+tests = ["tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
-find = '''                         **(_case_notes(decided[case]) if case in decided else {"opened": 0})}'''
+find = '''                         **(_case_notes(decided[case]) if case in decided else {"ran": False})}'''
 put = '''                         **_case_notes(decided.get(case, {}))}'''
 
 [[protection]]
@@ -1703,7 +1703,7 @@ put = '''                next_watch = now'''
 [[protection]]
 what = "A test that opened several cases says the most any of them can have held"
 file = "dodambench/judge.py"
-tests = ["tests/test_cli_judge.py::test_a_test_that_opened_several_cases_says_the_most_of_them"]
+tests = ["tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
 [[protection.change]]
 find = '''                    case["memory_bound_bytes"] = max(bounds)'''
 put = '''                    case["memory_bound_bytes"] = min(bounds)'''
@@ -1715,6 +1715,24 @@ tests = ["tests/test_vet.py::test_the_record_holds_only_bounds_that_are_numbers"
 [[protection.change]]
 find = '''                   and isinstance(case.get("memory_bound_bytes"), int) and not isinstance(case["memory_bound_bytes"], bool))'''
 put = '''                   and isinstance(case.get("memory_bound_bytes"), int))'''
+
+[[protection]]
+what = "Each way a case comes out unmeasured is told with its own reason"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
+[[protection.change]]
+find = '''            reason = (NOTES_UNREADABLE if unreadable else NOTE_LOST if lost else NOTE_MISSING if missing
+                      else NOT_JUDGED_FOR_MEASURING if any(n["unsettled"] for n in mine) else None)'''
+put = '''            reason = (NOT_JUDGED_FOR_MEASURING if unreadable or lost or missing or any(n["unsettled"] for n in mine)
+                      else None)'''
+
+[[protection]]
+what = "A case the judge decided without running it is not read against the notes"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say"]
+[[protection.change]]
+find = '''            if not case.pop("ran", True) or case["outcome"]'''
+put = '''            if case["outcome"]'''
 
 [[protection]]
 what = "The memory of the judge's own processes is taken out of every figure"
@@ -1779,7 +1797,7 @@ what = "The tool takes a case not judged for measuring only with the judge's own
 file = "dodambench/vet.py"
 tests = ["tests/test_vet.py::test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes[other words]"]
 [[protection.change]]
-find = '''        if case["outcome"] == UNMEASURED and case["message"] != NOT_JUDGED_FOR_MEASURING:'''
+find = '''        if case["outcome"] == UNMEASURED and case["message"] not in UNMEASURED_REASONS:'''
 put = '''        if False:'''
 
 [[protection]]

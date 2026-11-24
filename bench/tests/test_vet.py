@@ -752,7 +752,7 @@ def test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success(tmp_path,
 
 def test_every_part_the_judging_code_reads_is_tried():
     """The record holds exactly the parts the judging code reads, and each is tried above; beside them
-    only the most each case that passed can have held, from which the tool tells the room, which the
+    only the most each case that passed or was not judged for measuring can have held, from which the tool tells the room, which the
     judging code does not read."""
     from dataclasses import fields
     import inspect

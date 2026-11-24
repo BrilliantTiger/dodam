@@ -229,6 +229,12 @@ UNMEASURED = "unmeasured"
 OUTCOMES = ("passed", "failed", "skipped", UNMEASURED)
 NOT_JUDGED_FOR_MEASURING = ("not judged: the judge could not take a reading of the container's memory that says "
                             "on which side of a line it lies")
+# the other reasons for it, each of its own: the notes of the file could not be read, the case's note could
+# not be written, or the test has fewer notes than cases of the program it opened, or did not say how many
+NOTES_UNREADABLE = "not judged: the notes of the memory of this file's cases could not be read"
+NOTE_LOST = "not judged: the note of this case's memory could not be written"
+NOTE_MISSING = "not judged: the test has fewer notes of its cases' memory than cases of the program it opened"
+UNMEASURED_REASONS = (NOT_JUDGED_FOR_MEASURING, NOTES_UNREADABLE, NOTE_LOST, NOTE_MISSING)
 MACHINE_INFO = Path("/proc/meminfo")   # what the machine has, its swap included
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
@@ -1253,14 +1259,14 @@ class CliRun:
         """Write into each case of the file of tests at `path` how much of the kernel's records was
         left out of its memory and how much was counted, and how many of its readings could not
         decide, as the case runner noted it, so that a case that failed for memory shows why. A note
-        belongs to the case of its own file and name. A case with a reading that could not say on
-        which side of a line the figure lay is UNMEASURED when its test passed or left it unjudged:
-        then the outcome depended on the reading. A case whose test failed stays failed. A note that
-        cannot be read whole could be the one that marks a case, and which case it belonged to cannot
-        be told: then every case of the file whose test passed or left it unjudged is UNMEASURED. Where
-        the program is separated, a case with no note at all is UNMEASURED too: its note could not be
-        written, or its test never started the program. The notes are removed on every path, so that
-        the next file of tests starts with none."""
+        belongs to the case of its own file and name. A case the judge decided itself, which no runner
+        ran, keeps the judge's outcome and reason. A case whose test failed stays failed. A case its
+        runner reported passed or unjudged is UNMEASURED, with the first of these that holds as its
+        reason: the notes of the file cannot be read whole (then which case a note belonged to cannot be
+        told); its note could not be written; the program is separated and the test has fewer notes
+        than cases of the program it opened, or did not say how many; a reading could not say on which
+        side of a line the figure lay. The notes are removed on every path, so that the next file of
+        tests starts with none."""
         unreadable = False
         try:
             lines = self.records_file.read_bytes().splitlines()
@@ -1295,13 +1301,17 @@ class CliRun:
                 case["fell_below_start_bytes"] = max(n["fell"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
                 self.undecided += case["undecided_readings"]
+            opened, lost = case.pop("opened", None), case.pop("lost", False)
+            if not case.pop("ran", True) or case["outcome"] not in ("passed", "skipped"):
+                # decided by the judge without a run, or failed by its test: it keeps its outcome and reason
+                continue
             # where the program is separated every case of the program has a note: a test that opened
-            # one, or of which that is not known, with none cannot pass; nor can one whose note was lost
-            opened = case.pop("opened", None)
+            # one, or of which that is not known, with fewer cannot pass
             missing = bool(self.run_as) and (opened is None or len(mine) < opened)
-            missing = missing or case.pop("lost", False)
-            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):
-                case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING
+            reason = (NOTES_UNREADABLE if unreadable else NOTE_LOST if lost else NOTE_MISSING if missing
+                      else NOT_JUDGED_FOR_MEASURING if any(n["unsettled"] for n in mine) else None)
+            if reason is not None:
+                case["outcome"], case["message"] = UNMEASURED, reason
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,
@@ -1705,10 +1715,10 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             verdict = give_back() if give_back is not None else None
             if verdict is not None and listed:
                 outcome, message = verdict
-                # a case decided here was not run: it opened no case of the program and has no note
+                # a case decided here was not run: it is the judge's, with no count, note or lost note
                 return [{"name": case.split("::")[-1], "outcome": decided.get(case, {}).get("outcome", outcome),
                          "message": decided.get(case, {}).get("message", message),
-                         **(_case_notes(decided[case]) if case in decided else {"opened": 0})}
+                         **(_case_notes(decided[case]) if case in decided else {"ran": False})}
                         for case in listed]
     finally:
         shutil.rmtree(private, ignore_errors=True)
