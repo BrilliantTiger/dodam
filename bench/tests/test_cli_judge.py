@@ -1778,6 +1778,27 @@ def test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing(
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
 
+# A case of two runs, each measured at its first look only; the reading when the first run has ended is
+# cut by time in every try and shows, in its total or in the kernel's records, 60 MB less than stood.
+AFTER_RUN_DIPS = {
+    "the total": ("    if 3 <= n < 11 and part == 'total':\n        move(held, current=-60)\n"
+                  "    if 3 <= n < 11 and part == 'swap after':\n        move(held, current=60)\n", 10),
+    "the records": ("    if 3 <= n < 11 and part == 'stat before':\n        move(held, records=-60)\n"
+                    "    if 3 <= n < 11 and part == 'files after':\n        move(held, records=60)\n", 100),
+}
+
+
+@pytest.mark.parametrize("dip", list(AFTER_RUN_DIPS))
+def test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure(tmp_path, dip):
+    """A reading cut by time when a run has ended moves neither the lowest figure the case is counted
+    from nor that of the kernel's records: the second run, which takes 230 MB under a limit of 256 MB,
+    is not ended for memory as it would be counted from 60 MB lower. The case is unmeasured."""
+    code, records_mb = AFTER_RUN_DIPS[dip]
+    result, seen = judge_measured(tmp_path, way(code, takes(230, 12), late=tuple(3 + i for i in EIGHT)),
+                                  records_mb=records_mb, watch=1000.0, runs=2)
+    assert seen["limit"] is None, (dip, seen)
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
 def test_a_case_says_the_most_it_can_have_held_only_where_a_reading_worked_it_out(tmp_path):
     """Where every reading of a case was cut by time, no reading worked out the most it can have held:
     the case says nothing of it, rather than 0, and is unmeasured."""

@@ -445,9 +445,25 @@ def test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution(t
     for r in results:
         assert r["ok"] is False and r.get("judge_fault") is True, r
         assert NOT_JUDGED_FOR_MEASURING in r["problems"][0] and name in r["problems"][0], r
-        # the room is told for such a judging too: 512 MB less the 300 MB its case can have held
+        # the room is told for such a judging too, from what the one place read: 512 MB less the 300 MB
+        # its case can have held
         assert r.get("room_mb") == 212.0, r
 
+
+@pytest.mark.parametrize("bound", [None, 300])
+def test_the_room_comes_only_from_a_bound_the_judge_worked_out(tmp_path, fake_docker, monkeypatch, bound):
+    """Through the tool's own path: a judging whose cases say nothing of the most they can have held
+    tells no room, never the whole limit; one whose case says 300 MB tells 212 MB of a limit of 512."""
+    from dodambench.vet import vet_in_image
+    given, details = judges_result(load_task(SAMPLE), "build")
+    if bound is not None:
+        details["tests"][0]["memory_bound_bytes"] = bound * 2**20
+    (fake_docker / "reward.json").write_text(json.dumps(given), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    results = [r for r in vet_in_image(load_task(SAMPLE), "python", tmp_path / "out", "dodam-bench/python:dev")
+               if r["step"] == "build" and r["expect"] == "secure"]
+    assert results and all(r.get("room_mb") == (None if bound is None else 212.0) for r in results), results
 
 @pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
 def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes(tmp_path, fake_docker,
@@ -723,11 +739,15 @@ def test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success(tmp_path,
 
 
 def test_every_part_the_judging_code_reads_is_tried():
-    """The record holds exactly the parts the judging code reads, and each is tried above."""
+    """The record holds exactly the parts the judging code reads, and each is tried above; beside them
+    only the most each case that passed can have held, from which the tool tells the room, which the
+    judging code does not read."""
     from dataclasses import fields
+    import inspect
     import dodambench.vet as vetting
     tried = {(w, p) for w, p, _ in NOT_OF_IT}
-    assert {f.name for f in fields(vetting.Judged)} == {"step", "build_ok", "left_behind", "cases", "reward"}
+    assert {f.name for f in fields(vetting.Judged)} == {"step", "build_ok", "left_behind", "cases", "reward", "bounds"}
+    assert "bounds" not in inspect.getsource(vetting.judgement_problems)
     assert {("details", p) for p in ("step", "build_ok", "left_behind", "tests")} <= tried
     assert {("case", f.name) for f in fields(vetting.Case)} <= tried
     assert set(vetting.REWARD_KEYS) == set(judges_result(load_task(SAMPLE), "build")[0])
@@ -1092,12 +1112,12 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
 
 def test_the_room_of_a_judging_is_the_smallest_room_between_the_memory_bound_and_the_limit():
     """The room a judging leaves is the case's memory limit less the most the upper bound of the
-    case's memory reached, over its cases that passed or were not judged for measuring; where no such
-    case says it, there is no room to tell."""
+    case's memory reached, over its cases that passed; where no such case says it, there is no room to
+    tell."""
     from dodambench.vet import room_of
     mb = 2**20
     details = {"tests": [{"name": "a", "outcome": "passed", "memory_bound_bytes": 100 * mb},
-                         {"name": "b", "outcome": "unmeasured", "memory_bound_bytes": int(110.4 * mb)},
+                         {"name": "b", "outcome": "passed", "memory_bound_bytes": int(110.4 * mb)},
                          {"name": "c", "outcome": "passed"},
                          # a case ended above its limit by design says nothing of the room
                          {"name": "d", "outcome": "failed", "memory_bound_bytes": 600 * mb}]}
