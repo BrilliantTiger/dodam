@@ -1224,6 +1224,7 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
 # and 40 MB of the cases' files; the case's limit is 256 MB.
 UNDECIDED = r'''
 import builtins, functools, io
+import pytest
 from pathlib import Path
 import dodam_cli
 
@@ -1484,7 +1485,7 @@ LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
                    records_mb: int = 10, watch: float = 0.002, runs: int = 1,
-                   lose_note: bool = False) -> tuple[dict, dict]:
+                   lose_note: bool = False, spaced: bool = False) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw."""
     seen = tmp_path / "seen.json"
@@ -1493,6 +1494,10 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
               .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
               .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)).replace("WATCH_S", repr(watch))
               .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)))
+    if spaced:
+        # a test whose name, as pytest gives it, holds spaces
+        source = source.replace("def test_measured():", "@pytest.mark.parametrize('label', ['with spaces in it'])\n"
+                                                        "def test_measured(label):")
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb)
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
@@ -1510,7 +1515,7 @@ def read_as_the_tool_does(tmp_path: Path, result: dict, test: str):
 
 
 def the_case(result: dict) -> dict:
-    return next(c for c in result["report"]["tests"] if c["name"] == "test_measured")
+    return next(c for c in result["report"]["tests"] if c["name"].split("[")[0] == "test_measured")
 
 
 @pytest.mark.parametrize("way", [w for w in WAYS if w != "settled"])
@@ -1756,6 +1761,41 @@ def test_no_run_is_judged_by_the_count_alone(tmp_path, state):
     assert the_case(result)["outcome"] == expected, (state, the_case(result))
 
 
+def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
+    """The judge measures a run at the first look after it starts, not one look later: a program that
+    holds 300 MB under a limit of 256 MB from its first moments is ended for memory even where the
+    judge would look again only after a thousand seconds."""
+    result, seen = judge_measured(tmp_path, way(takes(300, 2)), watch=1000.0)
+    assert seen["limit"] == "memory", seen
+    assert the_case(result)["outcome"] == "failed", the_case(result)
+
+
+def test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing(tmp_path):
+    """The reading taken when a run has ended is held to what a reading cut by time can say, as every
+    other one: where every try of it was cut by time, the case cannot pass."""
+    result, seen = judge_measured(tmp_path, way(late=tuple(3 + i for i in EIGHT)), watch=1000.0)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
+
+def test_a_case_says_the_most_it_can_have_held_only_where_a_reading_worked_it_out(tmp_path):
+    """Where every reading of a case was cut by time, no reading worked out the most it can have held:
+    the case says nothing of it, rather than 0, and is unmeasured."""
+    result, seen = judge_measured(tmp_path, way(late=tuple(range(1, 6000))))
+    assert seen["limit"] is None, seen
+    case = the_case(result)
+    assert case["outcome"] == judge_module.UNMEASURED and "memory_bound_bytes" not in case, case
+
+
+def test_a_case_whose_test_name_holds_spaces_keeps_its_notes(tmp_path):
+    """The case runner names a case as pytest names its test, spaces and all, so that its note belongs
+    to it: a case of a test whose name holds spaces, with a reading whose every try moved across its
+    limit, is unmeasured."""
+    result, seen = judge_measured(tmp_path, WAYS["every try moved"], spaced=True)
+    assert seen["limit"] is None, seen
+    case = the_case(result)
+    assert case["name"] == "test_measured[with spaces in it]" and case["outcome"] == judge_module.UNMEASURED, case
+
 def test_a_note_that_cannot_be_written_keeps_its_case_from_passing(tmp_path):
     """A case runner that cannot write its note of a case does not keep it to itself: the case, whose
     test passed and whose readings were all taken, is unmeasured."""
@@ -1930,17 +1970,21 @@ def test_a_case_with_no_note_cannot_pass_where_the_program_is_separated(tmp_path
         # how many cases a test opened is not known: the judge decided its outcome itself
         {"name": "test_f", "outcome": "passed", "message": ""},
         # the case runner could not write the note of a case of this test
-        {"name": "test_g", "outcome": "passed", "message": "", "opened": 1, "lost": True}]
+        {"name": "test_g", "outcome": "passed", "message": "", "opened": 1, "lost": True},
+        # a test that opened two cases and has a note of one
+        {"name": "test_h", "outcome": "passed", "message": "", "opened": 2}]
     (tmp_path / "separated").mkdir()
     (tmp_path / "unseparated").mkdir()
     (tmp_path / "gone").mkdir()
-    _, separated = noted(tmp_path / "separated", [note("test_a"), note("test_g")], run_as="dodam-case", cases=cases)
+    _, separated = noted(tmp_path / "separated", [note("test_a"), note("test_g"), note("test_h")], run_as="dodam-case",
+                         cases=cases)
     assert separated == {"test_a": "passed", "test_b": judge_module.UNMEASURED, "test_c": "failed",
                          "test_d": judge_module.UNMEASURED, "test_e": "passed", "test_f": judge_module.UNMEASURED,
-                         "test_g": judge_module.UNMEASURED}, separated
-    _, unseparated = noted(tmp_path / "unseparated", [note("test_a"), note("test_g")], cases=cases)
+                         "test_g": judge_module.UNMEASURED, "test_h": judge_module.UNMEASURED}, separated
+    _, unseparated = noted(tmp_path / "unseparated", [note("test_a"), note("test_g"), note("test_h")], cases=cases)
     assert unseparated == {"test_a": "passed", "test_b": "skipped", "test_c": "failed", "test_d": "passed",
-                           "test_e": "passed", "test_f": "passed", "test_g": judge_module.UNMEASURED}, unseparated
+                           "test_e": "passed", "test_f": "passed", "test_g": judge_module.UNMEASURED,
+                           "test_h": "passed"}, unseparated
     # the notes file is gone altogether: every case that ran the program is unmeasured
     cli = object.__new__(judge_module.CliRun)
     cli.records_file, cli.records_highest, cli.undecided, cli.run_as = tmp_path / "gone" / "records.jsonl", 0, 0, "dodam-case"
@@ -1949,7 +1993,7 @@ def test_a_case_with_no_note_cannot_pass_where_the_program_is_separated(tmp_path
     assert {c["name"]: c["outcome"] for c in gone} == {
         "test_a": judge_module.UNMEASURED, "test_b": judge_module.UNMEASURED, "test_c": "failed",
         "test_d": judge_module.UNMEASURED, "test_e": "passed", "test_f": judge_module.UNMEASURED,
-        "test_g": judge_module.UNMEASURED}, gone
+        "test_g": judge_module.UNMEASURED, "test_h": judge_module.UNMEASURED}, gone
 
 def test_notes_the_judge_cannot_remove_are_a_fault_of_the_judge(tmp_path):
     """Notes that stayed would be read as the next file's: notes the judge cannot remove are its own

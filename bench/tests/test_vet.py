@@ -421,7 +421,8 @@ def leave_unmeasured(leaves: Path, message: str | None = None, named: bool = Tru
     from dodambench.judge import NOT_JUDGED_FOR_MEASURING
     given, details = judges_result(load_task(SAMPLE), "build")
     first = details["tests"][0]
-    first.update(outcome="unmeasured", message=NOT_JUDGED_FOR_MEASURING if message is None else message)
+    first.update(outcome="unmeasured", message=NOT_JUDGED_FOR_MEASURING if message is None else message,
+                 memory_bound_bytes=300 * 2**20)
     name = f"{first['file']}::{first['name']}"
     details["unmeasured"] = [name] if named else []
     (leaves / "reward.json").write_text(json.dumps(reward_of_cases(details["tests"], True, "build", True)),
@@ -444,6 +445,8 @@ def test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution(t
     for r in results:
         assert r["ok"] is False and r.get("judge_fault") is True, r
         assert NOT_JUDGED_FOR_MEASURING in r["problems"][0] and name in r["problems"][0], r
+        # the room is told for such a judging too: 512 MB less the 300 MB its case can have held
+        assert r.get("room_mb") == 212.0, r
 
 
 @pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
