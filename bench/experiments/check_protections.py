@@ -90,6 +90,9 @@ def check(protection: dict) -> dict:
 JUDGE_TESTS = ["tests/test_judge.py", "tests/test_cli_judge.py", "tests/test_cli_test_code.py", "tests/test_vet.py"]
 NO_IMAGE = "not test_vet_in_the_language_image"
 PARTS = 8
+# tests that need the judge to read many times within a fraction of a second: beside seven other processes on a
+# machine of four processors they fail whatever is taken out, so they run on their own after the others
+ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
 
 
 def judge_tests(cwd: Path) -> list[str]:
@@ -101,20 +104,25 @@ def judge_tests(cwd: Path) -> list[str]:
 
 def against_judge_tests(protection: dict) -> dict:
     """One second line taken out, and every test of the judge and of the vetting tool that needs no image run
-    against it, in PARTS processes at once; the tests that fail."""
+    against it, in PARTS processes at once and then the tests named in ALONE in one; the tests that fail."""
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
         copy = broken_copy(protection, Path(where))
         nodes = judge_tests(copy)
-        parts = [nodes[i::PARTS] for i in range(PARTS)]
-        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part], cwd=copy,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for part in parts if part]
-        try:
-            said = [run.communicate(timeout=HANGS)[0] for run in runs]
-        except subprocess.TimeoutExpired:
-            for run in runs:
-                run.kill()
-            return {"what": protection["what"], "verdict": "the tests did not end", "seconds": HANGS, "failed": []}
+        alone = [node for node in nodes if any(name in node for name in ALONE)]
+        rest = [node for node in nodes if node not in alone]
+        said, runs = [], []
+        for group in ([rest[i::PARTS] for i in range(PARTS)], [alone]):
+            started_group = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part],
+                                              cwd=copy, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                             for part in group if part]
+            runs += started_group
+            try:
+                said += [run.communicate(timeout=HANGS)[0] for run in started_group]
+            except subprocess.TimeoutExpired:
+                for run in started_group:
+                    run.kill()
+                return {"what": protection["what"], "verdict": "the tests did not end", "seconds": HANGS, "failed": []}
     failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
               if line.startswith(("FAILED ", "ERROR "))]
     verdict = "second line" if not failed and all(run.returncode == 0 for run in runs) else "NO SECOND LINE"

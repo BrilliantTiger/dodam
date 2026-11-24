@@ -173,8 +173,9 @@ jobs:
         run: python experiments/check_protections.py
 
   # Every second line of the protections is taken out in turn, and every test of the judge and of the
-  # vetting tool that needs no image is run against it: a second line one of them catches is no second
-  # line. An ordinary run ends in less than half of the time limit.
+  # vetting tool that needs no image is run against it, the ones that need many readings within a fraction
+  # of a second on their own: a second line one of them catches is no second line. An ordinary run ends in
+  # less than half of the time limit.
   second-lines:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
