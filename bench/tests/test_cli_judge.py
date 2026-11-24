@@ -1642,8 +1642,9 @@ def test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unju
         with pytest.raises(judge_module.JudgeFault) as fault:
             read_as_the_tool_does(tmp_path, result, test)
         said = json.loads(str(fault.value))
-        assert said["key"] == "unmeasured" and said["message"].startswith(judge_module.NOT_JUDGED_FOR_MEASURING), said
-        assert name in said["message"], said
+        # the fault names each such case with the judge's reason for it
+        assert said["key"] == "unmeasured" and said["message"].startswith("cases not judged for measuring: "), said
+        assert f"{name}, {judge_module.NOT_JUDGED_FOR_MEASURING}" in said["message"], said
 
 
 # two readings whose every try was cut by time (tries 10 to 17 and 40 to 47), and one whose every try
