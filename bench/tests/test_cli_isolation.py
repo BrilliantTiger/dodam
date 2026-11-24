@@ -2714,8 +2714,8 @@ def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_act
     from outside, lies above its limit, that amount and the tolerance. A program that holds clearly
     more fails for memory, as before. While records stand beyond the amount left out no case can show
     that it held no more than its limit, so the case within it and a later case that only prints are
-    unmeasured, never failed: what an earlier case leaves can turn a later case from passed to
-    unmeasured and never into a better outcome."""
+    unmeasured, never failed: what an earlier case leaves can turn a later case from passed, or from
+    failed for memory, into unmeasured, and never into passed."""
     limit_mb = 256
     tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
         .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))

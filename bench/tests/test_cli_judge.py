@@ -1668,9 +1668,11 @@ def test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_what
     """However many of the kernel's records stood when a case began, and however the case came to hold
     100 MB of records, whether the figure fell where it did or not, a case that held more than its limit
     and the amount left out does not pass: it fails where the count sees its growth, and is unmeasured
-    where the count cannot. Its honest twin, which holds none of those records and little memory, is
-    never failed: it passes where the records that stand leave room under its limit, and is unmeasured
-    where they do not."""
+    where the count cannot. So the same program fails for memory where it makes its records itself and
+    is unmeasured where they stood already, as when an earlier case left them: what an earlier case
+    leaves can turn a failure into unmeasured, never into a pass. Its honest twin, which holds none of
+    those records and little memory, is never failed: it passes where the records that stand leave
+    room under its limit, and is unmeasured where they do not."""
     code = HOW_HELD[how](stood)
     over_tmp, honest_tmp = tmp_path / "over", tmp_path / "honest"
     over_tmp.mkdir()

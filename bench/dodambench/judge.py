@@ -1133,7 +1133,7 @@ def keep_private(folder: Path) -> None:
 
 # what a case runner's note of a case holds, each of its own type
 NOTE_FIELDS = {"case": str, "unsettled": bool, "undecided": int, "grown": int, "left_out": int, "counted": int,
-               "bound": int, "fell": int}
+               "bound": (int, type(None)), "fell": int}
 
 
 def _note_of(line: bytes) -> dict | None:
@@ -1146,7 +1146,7 @@ def _note_of(line: bytes) -> dict | None:
         return None
     for name, kind in NOTE_FIELDS.items():
         value = note.get(name)
-        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        if not isinstance(value, kind) or isinstance(value, bool) and kind is not bool:
             return None
     return note
 
@@ -1257,8 +1257,10 @@ class CliRun:
         which side of a line the figure lay is UNMEASURED when its test passed or left it unjudged:
         then the outcome depended on the reading. A case whose test failed stays failed. A note that
         cannot be read whole could be the one that marks a case, and which case it belonged to cannot
-        be told: then every case of the file whose test passed or left it unjudged is UNMEASURED. The
-        notes are removed on every path, so that the next file of tests starts with none."""
+        be told: then every case of the file whose test passed or left it unjudged is UNMEASURED. Where
+        the program is separated, a case with no note at all is UNMEASURED too: its note could not be
+        written, or its test never started the program. The notes are removed on every path, so that
+        the next file of tests starts with none."""
         unreadable = False
         try:
             lines = self.records_file.read_bytes().splitlines()
@@ -1286,12 +1288,19 @@ class CliRun:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
                 case["records_counted_bytes"] = max(n["counted"] for n in mine)
                 case["undecided_readings"] = sum(n["undecided"] for n in mine)
-                # the most the case can have held, and how far its figure fell below where it began
-                case["memory_bound_bytes"] = max(n["bound"] for n in mine)
+                # the most the case can have held, where a reading worked it out, and how far its figure fell
+                bounds = [n["bound"] for n in mine if n["bound"] is not None]
+                if bounds:
+                    case["memory_bound_bytes"] = max(bounds)
                 case["fell_below_start_bytes"] = max(n["fell"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
                 self.undecided += case["undecided_readings"]
-            if (unreadable or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):
+            # where the program is separated every case of the program has a note: a test that opened
+            # one, or of which that is not known, with none cannot pass; nor can one whose note was lost
+            opened = case.pop("opened", None)
+            missing = bool(self.run_as) and not mine and opened != 0
+            missing = missing or case.pop("lost", False)
+            if (unreadable or missing or any(n["unsettled"] for n in mine)) and case["outcome"] in ("passed", "skipped"):
                 case["outcome"], case["message"] = UNMEASURED, NOT_JUDGED_FOR_MEASURING
 
     def highs(self) -> dict:
@@ -1540,7 +1549,11 @@ def pytest_runtest_logfinish(nodeid, location) -> None:
         # Whatever the kernel ended while this case ran, the case fails. The runner stops here; the
         # judge gives back what the case took and runs the cases that are left with a new runner.
         outcome, message = "failed", KERNEL_ENDED
-    _note_progress({"case": nodeid, "outcome": outcome, "message": message})
+    # how many cases of the program the test opened, and whether the note of one could not be written
+    runner = sys.modules.get("dodam_cli")
+    opened = getattr(runner, "_opened", {}).get(nodeid, 0) if runner is not None else 0
+    lost = nodeid in getattr(runner, "_lost", ()) if runner is not None else False
+    _note_progress({"case": nodeid, "outcome": outcome, "message": message, "opened": opened, "lost": lost})
     if stop and _runner["session"] is not None:
         _runner["session"].shouldstop = KERNEL_ENDED
 
@@ -1688,14 +1701,26 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
                     left, fruitless = left[1:], 0
                 if not left:
                     return [{"name": case.split("::")[-1], "outcome": decided[case]["outcome"],
-                             "message": decided[case]["message"]} for case in listed]
+                             "message": decided[case]["message"], **_case_notes(decided[case])} for case in listed]
             verdict = give_back() if give_back is not None else None
             if verdict is not None and listed:
                 outcome, message = verdict
                 return [{"name": case.split("::")[-1], "outcome": decided.get(case, {}).get("outcome", outcome),
-                         "message": decided.get(case, {}).get("message", message)} for case in listed]
+                         "message": decided.get(case, {}).get("message", message), **_case_notes(decided.get(case, {}))}
+                        for case in listed]
     finally:
         shutil.rmtree(private, ignore_errors=True)
+
+
+def _case_notes(record: dict) -> dict:
+    """What the case runner said of a test besides its outcome: how many cases of the program it opened
+    and whether the note of one was lost. Where the runner said nothing, these are left out."""
+    said = {}
+    if isinstance(record.get("opened"), int) and not isinstance(record.get("opened"), bool):
+        said["opened"] = record["opened"]
+    if record.get("lost") is True:
+        said["lost"] = True
+    return said
 
 
 def _note_progress_to(path: str, record: dict) -> None:
@@ -1854,15 +1879,16 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
         # and how many processes the kernel ended there
         report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
                             "ended_by_the_kernel": killed_for_memory()}
-        if cli is not None:
-            # how many readings of the step's cases could not say on which side of a line the figure lay
-            report["memory"]["undecided_readings"] = cli.undecided
+
         records["at_end"] = container_memory()["records"]
         report["memory"]["records_mb"] = {name: round(value / 2**20, 1) for name, value in records.items()}
         if highs is not None:
             # the runs that made a new high of the container's memory above the case's limit
             report["memory"]["highs_above_the_limit"] = highs
 
+    if cli is not None:
+        # how many readings of the step's cases could not say on which side of a line the figure lay
+        report.setdefault("memory", {})["undecided_readings"] = cli.undecided
     # the cases not judged for measuring, by name: their count is in the reward
     report[UNMEASURED] = [f"{c['file']}::{c['name']}" for c in report["tests"] if c["outcome"] == UNMEASURED]
     reward = reward_of(report["tests"], report["build_ok"], step, bool(run_as))

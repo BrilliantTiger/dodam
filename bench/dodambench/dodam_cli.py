@@ -227,6 +227,10 @@ def need(condition: bool, what: str) -> None:
 
 _config: dict | None = None
 _spent: dict[str, float] = {}
+# for each test, how many cases it opened, and whether the note of one of them could not be written:
+# the judge's plug-in hands both on with the test's outcome, so that a lost note never reads as none
+_opened: dict[str, int] = {}
+_lost: set[str] = set()
 
 
 def config() -> dict:
@@ -311,6 +315,7 @@ class Case:
         self._uid, self._gid = cfg.get("uid"), cfg.get("gid")
         self._limits = cfg["limits"]
         self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
+        _opened[self._key] = _opened.get(self._key, 0) + 1
         self._broken: list[str] = []
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
@@ -321,9 +326,10 @@ class Case:
         # the kernel's records: the lowest figure since the case began, and the most they stood above it
         self._records_lowest: int | None = None
         self._records_grown = 0
-        # whether the case's starting reading was taken, and the figure it gave
+        # whether the case's starting reading was taken, the figure it gave, and the kernel's own part then
         self._began = False
         self._figure_start: int | None = None
+        self._kernel_start: int | None = None
         self._left_out_at_most = _records_left_out_at_most(self._limits["memory_mb"])
         # what the container held besides the cases' files and the runner's own memory: the lowest
         # figure since the case's first run began, from which the case's memory is counted
@@ -562,6 +568,9 @@ class Case:
                 if self._figure_start is None:
                     self._figure_start = figure
                 self._records(held_before)
+                # held to the most the case can have held like every later reading: a program that ends
+                # before it is measured once is judged by this reading alone
+                self._bound(held_before, figure, limits["memory_mb"] * 2**20)
             else:
                 self._undecided()
         started = time.monotonic()
@@ -584,6 +593,21 @@ class Case:
                 result.limit = "left processes"
         finally:
             self._end(proc)
+        if separated:
+            # what stands when the run has ended is held to the most the case can have held as well:
+            # a run that ended before it was measured once is judged by its first and its last reading
+            held_after = self._container()
+            if _in_time(held_after):
+                figure = self._figure(held_after)
+                self._lowest = _lowest(self._lowest, figure)
+                self._records(held_after)
+                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                self._undecided()
+            if self._kernel_start is not None:
+                # how much the kernel's own part still fell after the wait
+                self.measured["kernel_fell_after"] = max(self.measured.get("kernel_fell_after", 0),
+                                                         self._kernel_start - _judge.kernel_part())
         if separated and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
         if signalled and result.limit != "memory":
@@ -645,16 +669,18 @@ class Case:
     def _kernel_settled(self) -> bool:
         """Wait until the kernel's own part of the container stops falling: what it kept of the
         processes of the previous case goes a while after them. False when it has not stopped
-        within SETTLE_SECONDS."""
+        within SETTLE_SECONDS. The case says how many looks that took and how much it fell meanwhile."""
         deadline = time.monotonic() + SETTLE_SECONDS
-        last = _judge.kernel_part()
+        first = last = _judge.kernel_part()
+        looks = 0
         while True:
             time.sleep(SETTLE_PAUSE)
             now = _judge.kernel_part()
-            if now > last - _judge.TOGETHER_BYTES:
-                return True
-            if time.monotonic() >= deadline:
-                return False
+            looks += 1
+            if now > last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:
+                self._kernel_start = now
+                self.measured.update(settle_looks=looks, settle_fell=max(first - now, 0), kernel_fell_after=0)
+                return now > last - _judge.TOGETHER_BYTES
             last = now
 
     def _bound(self, now: dict, figure: int, max_memory: int) -> None:
@@ -740,7 +766,8 @@ class Case:
         else:
             proc.stdin.close()
         deadline = started + timeout
-        next_watch = last_watch = 0.0
+        # the first measurement comes one look after the reading the run began with
+        next_watch, last_watch = started + WATCH, 0.0
         open_streams = 2
 
         def take(stream) -> bool:
@@ -858,11 +885,12 @@ class Case:
                 fell = max(self._figure_start - self._lowest, 0) if self._figure_start is not None else 0
                 f.write(json.dumps({"case": self._key, "unsettled": self._unsettled,
                                     "undecided": self.measured.get("undecided", 0), "grown": self._records_grown,
-                                    "bound": self.measured.get("bound_highest", 0), "fell": fell,
+                                    "bound": self.measured.get("bound_highest"), "fell": fell,
                                     "left_out": min(self._records_grown, self._left_out_at_most),
                                     "counted": _records_counted(self._records_grown, self._left_out_at_most)}) + "\n")
         except OSError:
-            pass
+            # not kept to itself: the judge's plug-in says so with the test's outcome, and the case cannot pass
+            _lost.add(self._key)
 
     def failing(self) -> bool:
         """Whether the case fails whatever its test says."""
