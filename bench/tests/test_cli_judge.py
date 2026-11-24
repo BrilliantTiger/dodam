@@ -1271,6 +1271,15 @@ def kernel_part(held):
     return 10 * MB
 
 
+# the case's own folder, where the program leaves a mark each time a run of it ends
+CASE_DIR = [None]
+
+
+def runs_ended():
+    mark = CASE_DIR[0] / "ended" if CASE_DIR[0] is not None else None
+    return len(mark.read_text()) if mark is not None and mark.exists() else 0
+
+
 WAY
 
 
@@ -1339,9 +1348,16 @@ def test_measured():
     tool.kernel_part = lambda *args, **kwargs: kernel_part(held)
     dodam_cli._files_held = files_held
     dodam_cli._own_memory = lambda: 0
+    dodam_cli.WATCH = WATCH_S
     try:
         with case() as c:
             c._side = Side()
+            CASE_DIR[0] = Path(c.work)
+            if LOSE_NOTE:
+                # the note of this case cannot be written: where it should go stands a folder
+                c._cfg = {**c._cfg, "records_file": str(group)}
+            for _ in range(RUNS - 1):
+                c.run([SOLUTION])
             r = c.run([SOLUTION])
             with real_open(SEEN, "w") as f:
                 json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
@@ -1356,7 +1372,8 @@ def test_measured():
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
 SOLUTIONS = ("import sys, time\ntime.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
-             "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n")
+             "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
+             "with open('ended', 'a') as mark:\n    mark.write('x')\n")
 CHECKS = {"ordinary": "assert r.out == 'fine\\n', r.out", "security": "assert 'leak' not in r.err, r.err",
           # a security test that leaves its case unjudged: the feature it attacks does not work
           "unjudged": "need(r.out == 'nothing\\n', 'the feature it attacks')"}
@@ -1466,14 +1483,16 @@ LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 
 def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
-                   records_mb: int = 10) -> tuple[dict, dict]:
+                   records_mb: int = 10, watch: float = 0.002, runs: int = 1,
+                   lose_note: bool = False) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw."""
     seen = tmp_path / "seen.json"
     # the way first, so that it may name the stand-in's own folder and figures as the rest does
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
               .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
-              .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)))
+              .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)).replace("WATCH_S", repr(watch))
+              .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)))
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb)
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
@@ -1706,6 +1725,50 @@ def test_the_records_that_stand_when_a_case_begins_count_before_its_first_measur
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
+# Runs that end before the judge measures them once: it looks only every thousand seconds. What a run
+# leaves of the kernel's records comes when it has ended, 100 MB for each run, and stands.
+LEAVES_RECORDS = ("    if part == 'stat before' and runs_ended() > LEFT[0]:\n"
+                  "        move(held, records=100 * (runs_ended() - LEFT[0]))\n        LEFT[0] = runs_ended()\n")
+QUICK = {
+    # 300 MB stood when the case began: the reading it begins with is held to the most it can have held
+    "300 MB stood": (way(), 300, 1, judge_module.UNMEASURED),
+    # nothing stood and nothing is left: the case passes
+    "nothing stood": (way(), 10, 1, "passed"),
+    # one run leaves 300 MB of records that stand when it has ended
+    "one run leaves 300 MB": (way(LEAVES_RECORDS.replace("100 *", "300 *")) + "\n\nLEFT = [0]\n", 10, 1, judge_module.UNMEASURED),
+    # three short runs each leave 100 MB: only what stands after the third lies beyond the line
+    "three runs leave 100 MB each": (way(LEAVES_RECORDS) + "\n\nLEFT = [0]\n", 10, 3, judge_module.UNMEASURED),
+}
+
+
+@pytest.mark.parametrize("state", list(QUICK))
+def test_no_run_is_judged_by_the_count_alone(tmp_path, state):
+    """A run that ends before the judge measures it once is held to the most the case can have held
+    all the same: at the reading every run begins with, and at the one taken when it has ended. So
+    records that stood when the case began, and records a short run leaves standing, keep the case
+    from passing where they lie beyond its limit and the amount left out; with nothing of that, it
+    passes."""
+    code, records_mb, runs, expected = QUICK[state]
+    result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=runs)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == expected, (state, the_case(result))
+
+
+def test_a_note_that_cannot_be_written_keeps_its_case_from_passing(tmp_path):
+    """A case runner that cannot write its note of a case does not keep it to itself: the case, whose
+    test passed and whose readings were all taken, is unmeasured."""
+    result, seen = judge_measured(tmp_path, WAYS["settled"], lose_note=True)
+    assert seen["limit"] is None, seen
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
+
+def test_the_judges_work_around_a_case_holds_the_wait_for_the_kernels_own_part():
+    """The 2 seconds the format checker counts for the judge's work around each case hold the wait
+    for the kernel's own part before it, at most SETTLE_SECONDS and one more look, and the rest of that
+    work, which took about 0.03 seconds for a whole plain case on the measuring computer."""
+    from dodambench import dodam_cli as runner
+    assert judge_module.CASE_SECONDS >= runner.SETTLE_SECONDS + runner.SETTLE_PAUSE + 0.5
+
 # What stood in the figure goes before the program takes its memory: 30 MB at the third reading.
 FELL = way("    if n == 3 and part == 'total':\n        move(held, current=-30)\n", takes(184))
 
@@ -1858,14 +1921,33 @@ def test_a_case_with_no_note_cannot_pass_where_the_program_is_separated(tmp_path
     written or because it never started the program, cannot show that its readings allowed a pass: it
     is unmeasured. A case whose test failed stays failed. Where nothing separates them, the case runner
     writes no notes and nothing changes."""
-    cases = NOTE_CASES + [{"name": "test_d", "outcome": "passed", "message": ""}]
+    cases = [{**c, "opened": 1} for c in NOTE_CASES] + [
+        {"name": "test_d", "outcome": "passed", "message": "", "opened": 2},
+        # a test that opened no case ran no program: there is nothing to measure
+        {"name": "test_e", "outcome": "passed", "message": "", "opened": 0},
+        # how many cases a test opened is not known: the judge decided its outcome itself
+        {"name": "test_f", "outcome": "passed", "message": ""},
+        # the case runner could not write the note of a case of this test
+        {"name": "test_g", "outcome": "passed", "message": "", "opened": 1, "lost": True}]
     (tmp_path / "separated").mkdir()
     (tmp_path / "unseparated").mkdir()
-    _, separated = noted(tmp_path / "separated", [note("test_a")], run_as="dodam-case", cases=cases)
+    (tmp_path / "gone").mkdir()
+    _, separated = noted(tmp_path / "separated", [note("test_a"), note("test_g")], run_as="dodam-case", cases=cases)
     assert separated == {"test_a": "passed", "test_b": judge_module.UNMEASURED, "test_c": "failed",
-                         "test_d": judge_module.UNMEASURED}, separated
-    _, unseparated = noted(tmp_path / "unseparated", [note("test_a")], cases=cases)
-    assert unseparated == {"test_a": "passed", "test_b": "skipped", "test_c": "failed", "test_d": "passed"}, unseparated
+                         "test_d": judge_module.UNMEASURED, "test_e": "passed", "test_f": judge_module.UNMEASURED,
+                         "test_g": judge_module.UNMEASURED}, separated
+    _, unseparated = noted(tmp_path / "unseparated", [note("test_a"), note("test_g")], cases=cases)
+    assert unseparated == {"test_a": "passed", "test_b": "skipped", "test_c": "failed", "test_d": "passed",
+                           "test_e": "passed", "test_f": "passed", "test_g": judge_module.UNMEASURED}, unseparated
+    # the notes file is gone altogether: every case that ran the program is unmeasured
+    cli = object.__new__(judge_module.CliRun)
+    cli.records_file, cli.records_highest, cli.undecided, cli.run_as = tmp_path / "gone" / "records.jsonl", 0, 0, "dodam-case"
+    gone = [dict(c) for c in cases]
+    cli.note_records(tmp_path / "test_notes.py", gone)
+    assert {c["name"]: c["outcome"] for c in gone} == {
+        "test_a": judge_module.UNMEASURED, "test_b": judge_module.UNMEASURED, "test_c": "failed",
+        "test_d": judge_module.UNMEASURED, "test_e": "passed", "test_f": judge_module.UNMEASURED,
+        "test_g": judge_module.UNMEASURED}, gone
 
 def test_notes_the_judge_cannot_remove_are_a_fault_of_the_judge(tmp_path):
     """Notes that stayed would be read as the next file's: notes the judge cannot remove are its own

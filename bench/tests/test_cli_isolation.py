@@ -1634,6 +1634,59 @@ def test_two():
     assert result["report"]["memory"]["undecided_readings"] == sum(c["undecided_readings"] for c in cases), (
         result["report"]["memory"])
 
+# A program that leaves much in the kernel's own part of the container when it ends: eight processes
+# each make 60,000 small mappings that cannot be merged, and end. What the kernel kept of them goes a
+# while after.
+LEAVES_KERNEL = r"""
+if sys.argv[1:] == ["maps"]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    children = []
+    for _ in range(8):
+        pid = os.fork()
+        if pid == 0:
+            for n in range(60000):
+                libc.mmap(None, 4096, n % 2, 0x22, -1, 0)
+            os._exit(0)
+        children.append(pid)
+    for pid in children:
+        os.waitpid(pid, 0)
+    print("mapped")
+    sys.exit(0)
+"""
+
+LEAVES_KERNEL_TESTS = """
+def test_leaves():
+    with case() as c:
+        r = c.run(["maps"])
+        assert r.out == "mapped\\n", r
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"measured": c.measured}, f)
+"""
+
+
+def test_a_case_begins_once_the_kernel_has_let_go_of_what_the_case_before_it_left(tmp_path):
+    """An earlier case ends holding much in the kernel's own part of the container. The next case
+    waits before its starting reading until that part has stopped falling, and says how many looks
+    that took, how much it fell meanwhile and how much more it fell during the case; both cases pass."""
+    result = judge_attack(tmp_path, PLAIN + LEAVES_KERNEL, {"functional/test_kernel.py": LEAVES_KERNEL_TESTS},
+                          CASE_MEMORY_MB="512", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_leaves": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    measured = found_by(tmp_path / "out", "attack.json")["measured"]
+    for name in ("settle_looks", "settle_fell", "kernel_fell_after"):
+        assert isinstance(measured.get(name), (int, float)), measured
+    assert measured["settle_looks"] >= 1, measured
+    note_figures("the case after one that left 480,000 mappings: the wait for the kernel's own part",
+                 looks=measured["settle_looks"], fell_while_waiting=measured["settle_fell"] / 2**20,
+                 fell_after=measured["kernel_fell_after"] / 2**20)
+
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
     seen = []
     for attempt in range(3):
