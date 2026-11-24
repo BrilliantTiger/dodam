@@ -133,10 +133,12 @@ def load_check():
 
 def test_a_second_line_holds_only_where_every_run_of_its_tests_passed():
     """A second line holds only where its tests were listed, ran, and every run of them ended passed:
-    not where no run was started, nor where a run ended otherwise than passed or failed."""
+    not where no run was started, nor where a run ended otherwise than passed or failed, nor where the
+    runs did not end."""
     check = load_check()
     assert check.verdict_of({"listed": True, "codes": [0, 0], "failed": []}) == "second line"
     for run in ({"listed": True, "codes": [], "failed": []}, {"listed": True, "codes": [0, 5], "failed": []},
+                {"listed": True, "codes": [None], "failed": []},
                 {"listed": True, "codes": [0, 2], "failed": []}, {"listed": True, "codes": [1, 0], "failed": ["t"]},
                 {"listed": False, "codes": [0], "failed": []}):
         assert check.verdict_of(run) != "second line", run
@@ -163,3 +165,14 @@ def test_the_second_lines_are_checked_against_the_tests_of_the_formats_and_the_c
     check = load_check()
     for name in ("tests/test_cli_format.py", "tests/test_task_format.py", "tests/test_convert.py", "tests/test_cli_convert.py"):
         assert name in check.JUDGE_TESTS, name
+
+
+def test_a_second_line_whose_variant_leaves_some_tests_unlisted_does_not_hold():
+    """A variant after which some files of the tests cannot be listed while the others can shows nothing
+    of those files: the second line does not hold, though the tests that were listed would all pass."""
+    check = load_check()
+    entry = {"what": "made up", "file": "dodambench/vet.py", "tests": [], "second_line": "made up",
+             "change": [{"find": "COULD_NOT_JUDGE = (subprocess.SubprocessError, OSError, ValueError)\n",
+                         "put": "COULD_NOT_JUDGE = (\n"}]}
+    result = check.against_judge_tests(entry)
+    assert result["verdict"] == "the tests could not be listed", result

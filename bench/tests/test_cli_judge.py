@@ -2214,42 +2214,81 @@ LEFT = "the folder the cases live in cannot be emptied: the step's time for walk
 OWN_MESSAGE = {"passed": "", "failed": "the test's own failure", "skipped": "the feature it attacks does not work"}
 
 
+# How a case runner's run ends, every way the judge tells (its exit code, None where its time was up, and
+# whether the kernel ended a process meanwhile), and the words it gives the case that was running then.
+ENDINGS = {"by itself": (0, False, "the case runner ended while this case ran"),
+           "its time was up": (None, False, "timed out"),
+           "the kernel ended it": (-9, True, "the kernel ended the case runner because the container ran out of memory"),
+           "a signal ended it": (-9, False, "the case runner was ended by signal 9"),
+           "with an exit code of its own": (3, False, "the case runner ended with exit code 3")}
+# The paths a file can take: its runner runs it through; its runner reports the first case, starts the
+# second and ends in one of those ways, and another goes on, or the cases' folder cannot be emptied (where
+# its time was up, nothing goes on); its runner is ended after the first case and two more are ended before
+# the next case starts; and the paths where no case of the file is decided: a runner ended twice before it
+# listed the tests, a file with no tests, tests that could not be listed, a fault of the judge.
+PATHS = ([("ran through", None)] + [(go, end) for end in ENDINGS if end != "its time was up" for go in ("replaced", "not emptied")]
+         + [("out of time", "its time was up"), ("replaced after two more ended", "a signal ended it")])
+WHOLE = ("ended before listing", "no tests collected", "could not be listed", "a fault of the judge")
+# The state of the file of notes: read whole (a blank line among the notes; no file where there is none);
+# one of the ways a note cannot be read; the file cannot be read at all; it cannot be removed.
+NOTES_STATES = ("read whole", "a torn line", "a line that is not a record", "a note without its fields",
+                "the file cannot be read", "the file cannot be removed")
+BAD_LINES = {"a torn line": b'{"case": ', "a line that is not a record": b"[1, 2]",
+             "a note without its fields": b'{"case": "test_notes.py::test_x"}'}
+
+
 def decided_rows() -> list[dict]:
     rows = []
-    for path in ("ran through", "replaced", "not emptied"):
-        for who in ("runner", "judge"):
-            if who == "judge" and path != "not emptied":
-                continue   # only there does the judge decide cases that no runner ran
-            for outcome in (("failed", "skipped") if who == "judge" else ("passed", "failed", "skipped")):
-                for separated in (False, True):
-                    for unreadable in (False, True):
-                        if who == "judge":
-                            rows.append(dict(path=path, who=who, outcome=outcome, separated=separated, unreadable=unreadable,
-                                             opened=None, notes=0, lost=False, undecided=False))
-                            continue
-                        for opened in (None, 0, 1, 2):
-                            # notes found: as many as the cases opened, or fewer; not told, none or one
-                            for notes in ((0, 1) if opened is None else sorted({opened, max(opened - 1, 0)})):
-                                for lost in (False, True):
-                                    # a lost note is one fewer: only where a case was opened and a note is missing
-                                    if lost and (opened == 0 or (opened is not None and notes == opened)):
+    for separated in (False, True):
+        for unreadable in NOTES_STATES:
+            base = dict(separated=separated, unreadable=unreadable, opened=None, notes=0, lost=False, undecided=False)
+            for path in WHOLE:
+                rows.append(dict(base, path=(path, None), who="judge", which="the file", outcome="failed"))
+            for path in PATHS:
+                go, end = path
+                if go in ("replaced", "not emptied", "out of time"):
+                    rows.append(dict(base, path=path, who="judge", which="running", outcome="failed"))
+                if go == "not emptied":
+                    rows += [dict(base, path=path, who="judge", which="never started", outcome=o) for o in ("failed", "skipped")]
+                if go in ("out of time", "replaced after two more ended"):
+                    rows.append(dict(base, path=path, who="judge", which="never started", outcome="failed"))
+                for outcome in ("passed", "failed", "skipped"):
+                    for opened in (None, 0, 1, 2):
+                        # notes found: as many as the cases opened, or fewer, down to none; not told: none or one
+                        for notes in ((0, 1) if opened is None else range(opened, -1, -1)):
+                            for lost in (False, True):
+                                # a lost note is one fewer: only where a case was opened and a note is missing
+                                if lost and (opened == 0 or (opened is not None and notes == opened)):
+                                    continue
+                                for undecided in (False, True):
+                                    if undecided and not notes:
                                         continue
-                                    for undecided in (False, True):
-                                        if undecided and not notes:
-                                            continue
-                                        rows.append(dict(path=path, who=who, outcome=outcome, separated=separated,
-                                                         unreadable=unreadable, opened=opened, notes=notes, lost=lost,
-                                                         undecided=undecided))
+                                    rows.append(dict(path=path, who="runner", which="reported", outcome=outcome,
+                                                     separated=separated, unreadable=unreadable, opened=opened,
+                                                     notes=notes, lost=lost, undecided=undecided))
     return rows
 
 
 def expected_of(row: dict) -> tuple[str, str]:
-    """The outcome and the reason the judge gives a case of this row."""
-    if row["who"] == "judge":
-        return row["outcome"], LEFT
+    """The outcome and the reason the judge gives a case of this row; a fault of the judge where it gives none."""
+    (go, end), which = row["path"], row["which"]
+    if go == "a fault of the judge":
+        return "fault", "the runner met a fault"
+    if row["unreadable"] == "the file cannot be removed":
+        return "fault", "cannot remove the case runners' notes: [Errno 5] the notes cannot be removed"
+    if which == "the file":
+        return {"ended before listing": ("failed", ENDINGS["a signal ended it"][2]), "no tests collected": ("failed", "no tests collected"),
+                "could not be listed": ("failed", "the tests could not be listed: a file it imports is missing"),
+                "a fault of the judge": ("fault", "the runner met a fault")}[go]
+    if which == "running":
+        return "failed", ENDINGS[end][2]
+    if which == "never started":
+        return {"not emptied": (row["outcome"], LEFT), "out of time": ("failed", judge_module.TIMED_OUT),
+                "replaced after two more ended": ("failed", "the case runner ended twice before this case could be judged: "
+                                                  + ENDINGS[end][2])}[go]
     if row["outcome"] == "failed":
         return "failed", OWN_MESSAGE["failed"]
-    if row["unreadable"]:
+    if row["unreadable"] != "read whole":
         return judge_module.UNMEASURED, judge_module.NOTES_UNREADABLE
     if row["lost"]:
         return judge_module.UNMEASURED, judge_module.NOTE_LOST
@@ -2261,31 +2300,51 @@ def expected_of(row: dict) -> tuple[str, str]:
 
 
 def decided_case(tmp_path: Path, monkeypatch, row: dict) -> dict:
-    """The case the row is about, as run_cases and the reading of the notes leave it."""
+    """The case the row is about, as run_cases and the reading of the notes leave it; for a fault of the
+    judge, a record of it."""
     mb = 2**20
-    said = {"case": "test_notes.py::test_x", "outcome": row["outcome"], "message": OWN_MESSAGE[row["outcome"]], "lost": row["lost"]}
+    said = {"case": "test_notes.py::test_x", "outcome": row["outcome"] if row["who"] == "runner" else "passed",
+            "message": OWN_MESSAGE[row["outcome"]] if row["who"] == "runner" else "", "lost": row["lost"]}
     if row["opened"] is not None:
         said["opened"] = row["opened"]
-    first = [{"listed": [f"test_notes.py::test_{n}" for n in "xzw"]}, {"started": "test_notes.py::test_x"}, said]
-    calls = []
+    go, end = row["path"]
+    code, kernel = ENDINGS[end][:2] if end else (0, False)
+    listed = [{"listed": ["test_notes.py::test_x"] if go == "ran through" else [f"test_notes.py::test_{n}" for n in "xzw"]}]
+    goes_on = ([{"started": "test_notes.py::test_w"},
+                {"case": "test_notes.py::test_w", "outcome": "passed", "message": "", "opened": 0, "lost": False}], 0)
+    # what each runner writes, and how it ends
+    runners = {"ran through": [(listed + [{"started": "test_notes.py::test_x"}, said], 0)],
+               "replaced": [(listed + [{"started": "test_notes.py::test_x"}, said, {"started": "test_notes.py::test_z"}], code), goes_on],
+               "not emptied": [(listed + [{"started": "test_notes.py::test_x"}, said, {"started": "test_notes.py::test_z"}], code)],
+               "out of time": [(listed + [{"started": "test_notes.py::test_x"}, said, {"started": "test_notes.py::test_z"}], None)],
+               "replaced after two more ended": [(listed + [{"started": "test_notes.py::test_x"}, said], -9), ([], -9), ([], -9), goes_on],
+               "ended before listing": [([], -9), ([], -9)],
+               "no tests collected": [([{"listed": []}], 5)],
+               "could not be listed": [([{"unlisted": "a file it imports is missing"}], 2)],
+               "a fault of the judge": [([{"fault": "the runner met a fault"}], 3)]}[go]
+    calls, kills = [], [0]
 
     def runner(test_path, env, timeout, out):
-        calls.append(1)
+        records, ends_with = runners[len(calls)]
+        with open(out, "a", encoding="utf-8") as f:
+            f.write("what the runner said\n")
         with open(env[judge_module.PROGRESS_ENV], "a", encoding="utf-8") as f:
-            if len(calls) == 1:
-                records = first if row["path"] != "ran through" else [{"listed": ["test_notes.py::test_x"]}, *first[1:]]
-                records = records + ([{"started": "test_notes.py::test_z"}] if row["path"] != "ran through" else [])
-            else:
-                records = [{"started": "test_notes.py::test_w"},
-                           {"case": "test_notes.py::test_w", "outcome": "passed", "message": "", "opened": 0, "lost": False}]
             for record in records:
                 f.write(json.dumps(record) + "\n")
-        return 0 if row["path"] == "ran through" or len(calls) > 1 else -9
+        calls.append(1)
+        if kernel and ends_with is not None and ends_with < 0:
+            kills[0] += 1   # the kernel ended a process while this runner ran
+        return ends_with
 
     monkeypatch.setattr(judge_module, "run_pytest", runner)
-    give_back = {"ran through": None, "replaced": lambda: None,
-                 "not emptied": lambda: (row["outcome"] if row["who"] == "judge" else "failed", LEFT)}[row["path"]]
-    cases = judge_module.run_cases(tmp_path / "test_notes.py", {}, 10.0, give_back=give_back)
+    monkeypatch.setattr(judge_module, "killed_for_memory", lambda *args, **kwargs: kills[0])
+    give_back = None if go == "ran through" else (
+        (lambda: (row["outcome"] if row["which"] == "never started" else "failed", LEFT)) if go == "not emptied" else (lambda: None))
+    ended = []
+    try:
+        cases = judge_module.run_cases(tmp_path / "test_notes.py", {}, 10.0, give_back=give_back, ended=ended)
+    except judge_module.JudgeFault as fault:
+        return {"outcome": "fault", "message": str(fault).split(": ", 1)[1], "ended": ended}
     cli = object.__new__(judge_module.CliRun)
     cli.records_file, cli.records_highest, cli.undecided = tmp_path / "records.jsonl", 0, 0
     cli.run_as = "someone" if row["separated"] else ""
@@ -2294,14 +2353,61 @@ def decided_case(tmp_path: Path, monkeypatch, row: dict) -> dict:
                          "left_out": (16 if n == 0 else 4) * mb, "counted": (2 if n == 0 else 7) * mb,
                          "bound": (300 if n == 0 else 100) * mb, "fell": (1 if n == 0 else 5) * mb}).encode()
              for n in range(row["notes"])]
-    cli.records_file.write_bytes(b"".join(line + b"\n" for line in lines) + (b'{"case": \n' if row["unreadable"] else b""))
-    cli.note_records(tmp_path / "test_notes.py", cases)
-    return next(c for c in cases if c["name"] == ("test_w" if row["who"] == "judge" else "test_x"))
+    written = b"\n".join(lines) + b"\n\n" + BAD_LINES.get(row["unreadable"], b"") + b"\n"
+    if row["unreadable"] in BAD_LINES or lines:
+        cli.records_file.write_bytes(written)   # where there is no note at all the runner leaves no file
+    if row["unreadable"] in ("the file cannot be read", "the file cannot be removed"):
+        cli.records_file = NotesFile(written, readable=row["unreadable"] == "the file cannot be removed")
+    try:
+        cli.note_records(tmp_path / "test_notes.py", cases)
+    except judge_module.JudgeFault as fault:
+        return {"outcome": "fault", "message": str(fault), "ended": ended}
+    name = {"reported": "test_x", "running": "test_z", "the file": "test_notes.py",
+            "never started": "test_z" if go == "replaced after two more ended" else "test_w"}[row["which"]]
+    return dict(next(c for c in cases if c["name"] == name), ended=ended)
+
+
+class NotesFile:
+    """A file of notes that cannot be read at all, or that can be read and cannot be removed."""
+
+    def __init__(self, content: bytes, readable: bool):
+        self.content, self.readable = content, readable
+
+    def read_bytes(self) -> bytes:
+        if not self.readable:
+            raise OSError(errno.EIO, "the notes cannot be read")
+        return self.content
+
+    def unlink(self, missing_ok: bool = False) -> None:
+        if self.readable:
+            raise OSError(errno.EIO, "the notes cannot be removed")
+
+
+def ended_runners_of(row: dict) -> list[str]:
+    """How each runner of the row's path ended, as the record of ended runners says, in order."""
+    go, end = row["path"]
+    if go in ("replaced", "not emptied"):
+        return [] if end == "by itself" else [ENDINGS[end][2]]
+    return {"out of time": [judge_module.TIMED_OUT], "replaced after two more ended": [ENDINGS["a signal ended it"][2]] * 3,
+            "ended before listing": [ENDINGS["a signal ended it"][2]] * 2}.get(go, [])
+
+
+def test_the_table_of_who_decided_a_case_has_every_way_a_runner_ends_and_every_reason():
+    """The table has a row for every way the judge tells that a case runner's run ended and for every
+    reason it gives a case not judged for measuring: a way or a reason the judge gains and the table
+    lacks fails this test."""
+    assert set(ENDINGS) == set(judge_module.RUNNER_ENDS), (set(ENDINGS) ^ set(judge_module.RUNNER_ENDS))
+    reasons = {expected_of(row)[1] for row in decided_rows()}
+    assert set(judge_module.UNMEASURED_REASONS) <= reasons, set(judge_module.UNMEASURED_REASONS) - reasons
+    assert {end for _, end in PATHS if end} == set(judge_module.RUNNER_ENDS)
 
 
 def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say(tmp_path, monkeypatch):
-    """Every row of the table, through the judge's own functions: a case the judge decided without running
-    it keeps the judge's outcome and reason; a case its test failed stays failed with its message; a case
+    """Every row of the table, through the judge's own functions: a case the judge decided itself keeps the
+    judge's outcome and reason, which is failed for the case running when its runner was ended or ran out
+    of time, for one its runners were ended twice before it could start, and for one left when the time
+    ran out, and the file's outcome where the cases' folder could not be emptied; a case its test failed
+    stays failed with its message; a case
     its runner reported passed or unjudged is unmeasured where the notes of its file cannot be read, where
     its note was lost, where the program is separated and the test has fewer notes than cases it opened or
     did not say how many, or where a reading could not decide, each with that reason and in that order;
@@ -2309,7 +2415,7 @@ def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say
     have held, the furthest any figure fell, the most of the records any left out and counted, and the
     readings of all of them that could not decide."""
     rows = decided_rows()
-    assert len(rows) == 620, len(rows)
+    assert len(rows) == 7800, len(rows)
     wrong = []
     for n, row in enumerate(rows):
         where = tmp_path / str(n)
@@ -2318,7 +2424,9 @@ def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say
         case = decided_case(where, monkeypatch, row)
         if (case["outcome"], case["message"]) != expected_of(row):
             wrong.append((row, (case["outcome"], case["message"]), expected_of(row)))
-        elif row["who"] == "runner" and row["notes"] and not row["unreadable"]:
+        elif row["path"][0] != "a fault of the judge" and [e["how"] for e in case["ended"]] != ended_runners_of(row):
+            wrong.append((row, case["ended"], "the record of ended runners"))
+        elif row["who"] == "runner" and row["notes"] and row["unreadable"] == "read whole" and case.get("outcome") != "fault":
             two = row["notes"] == 2
             said = tuple(case.get(k) for k in ("memory_bound_bytes", "fell_below_start_bytes", "records_left_out_bytes",
                                                "records_counted_bytes", "undecided_readings"))
