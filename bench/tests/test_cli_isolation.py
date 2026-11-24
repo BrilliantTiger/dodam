@@ -1687,6 +1687,24 @@ def test_a_case_begins_once_the_kernel_has_let_go_of_what_the_case_before_it_lef
                  looks=measured["settle_looks"], fell_while_waiting=measured["settle_fell"] / 2**20,
                  fell_after=measured["kernel_fell_after"] / 2**20)
 
+def test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can(tmp_path):
+    """Where the program is separated, the note of a case that ran it is gone by the time the judge
+    reads the notes: the case, whose test passed, is unmeasured. A test of the same file that opened
+    no case ran no program, has no note and nothing to measure, and passes."""
+    tests = {"functional/test_gone.py": """
+def test_note_gone():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+    os.remove(c._cfg["records_file"])
+
+
+def test_no_case():
+    assert os.environ.get("DODAM_CLI_CONFIG")
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_note_gone": UNMEASURED, "test_no_case": "passed"}, lost(result, tmp_path / "out")
+
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
     seen = []
     for attempt in range(3):
