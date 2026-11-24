@@ -95,11 +95,13 @@ PARTS = 8
 ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
 
 
-def judge_tests(cwd: Path) -> list[str]:
-    """The node of every test of the judge and of the vetting tool that needs no image, in the folder `cwd`."""
+def judge_tests(cwd: Path) -> list[str] | None:
+    """The node of every test of the judge and of the vetting tool that needs no image, in the folder `cwd`;
+    None when they cannot all be listed."""
     listed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--collect-only", "-p", "no:cacheprovider", "-k",
                              NO_IMAGE, *JUDGE_TESTS], cwd=cwd, capture_output=True, text=True)
-    return [line for line in listed.stdout.splitlines() if "::" in line]
+    nodes = [line for line in listed.stdout.splitlines() if "::" in line]
+    return nodes if listed.returncode == 0 and nodes else None
 
 
 def against_judge_tests(protection: dict) -> dict:
@@ -109,6 +111,10 @@ def against_judge_tests(protection: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
         copy = broken_copy(protection, Path(where))
         nodes = judge_tests(copy)
+        if nodes is None:
+            # a variant after which the tests cannot be listed shows nothing, so it holds nothing
+            return {"what": protection["what"], "verdict": "the tests could not be listed",
+                    "seconds": round(time.monotonic() - started, 1), "tests": 0, "failed": []}
         alone = [node for node in nodes if any(name in node for name in ALONE)]
         rest = [node for node in nodes if node not in alone]
         said, runs = [], []
@@ -125,7 +131,7 @@ def against_judge_tests(protection: dict) -> dict:
                 return {"what": protection["what"], "verdict": "the tests did not end", "seconds": HANGS, "failed": []}
     failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
               if line.startswith(("FAILED ", "ERROR "))]
-    verdict = "second line" if not failed and all(run.returncode == 0 for run in runs) else "NO SECOND LINE"
+    verdict = "second line" if runs and not failed and all(run.returncode == 0 for run in runs) else "NO SECOND LINE"
     if verdict != "second line":
         print("\n".join(out[-4000:] for out in said), file=sys.stderr, flush=True)
     return {"what": protection["what"], "verdict": verdict, "seconds": round(time.monotonic() - started, 1),

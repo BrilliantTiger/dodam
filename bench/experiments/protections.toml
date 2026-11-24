@@ -1657,6 +1657,14 @@ find = '''            if now > last - _judge.TOGETHER_BYTES or time.monotonic() 
 put = '''            if now > last - 2 * _judge.TOGETHER_BYTES or time.monotonic() >= deadline:'''
 
 [[protection]]
+what = "A case the judge decides without running it opened no case of the program"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_cases_the_judge_leaves_unrun_keep_their_outcome_and_reason_where_the_program_is_separated"]
+[[protection.change]]
+find = '''                         **(_case_notes(decided[case]) if case in decided else {"opened": 0})}'''
+put = '''                         **_case_notes(decided.get(case, {}))}'''
+
+[[protection]]
 what = "The memory of the judge's own processes is taken out of every figure"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_judges_own_processes_are_taken_out_of_every_figure"]

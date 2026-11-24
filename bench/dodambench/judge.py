@@ -1705,8 +1705,10 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             verdict = give_back() if give_back is not None else None
             if verdict is not None and listed:
                 outcome, message = verdict
+                # a case decided here was not run: it opened no case of the program and has no note
                 return [{"name": case.split("::")[-1], "outcome": decided.get(case, {}).get("outcome", outcome),
-                         "message": decided.get(case, {}).get("message", message), **_case_notes(decided.get(case, {}))}
+                         "message": decided.get(case, {}).get("message", message),
+                         **(_case_notes(decided[case]) if case in decided else {"opened": 0})}
                         for case in listed]
     finally:
         shutil.rmtree(private, ignore_errors=True)
