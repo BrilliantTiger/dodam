@@ -1294,6 +1294,8 @@ def kernel_part(held):
 
 # the case's own folder, where the program leaves a mark each time a run of it ends
 CASE_DIR = [None]
+# how many tries of a reading a patient program waits for
+ENOUGH = 70
 
 
 def runs_ended():
@@ -1319,6 +1321,9 @@ def test_measured():
         n = reads["try"] if reads["after"] else reads["try"] + 1
         if part == "total":
             reads["try"], reads["after"] = n, True
+            if n == ENOUGH and CASE_DIR[0] is not None:
+                # what a patient program waits for
+                (CASE_DIR[0] / "enough").write_text("")
         was = dict(held)
         happen(n, part if part == "total" else f"{part} {'after' if reads['after'] else 'before'}", held)
         if held != was:
@@ -1393,8 +1398,12 @@ def test_measured():
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
-SOLUTIONS = ("import sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 0.6\n"
+SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 0.6\n"
              "    while time.monotonic() < end:\n        print('x', flush=True)\n        time.sleep(0.0002)\n"
+             # a patient program runs until the judge has read the container ENOUGH times, however busy the
+             # machine is, and no longer than 8 seconds
+             "elif sys.argv[1] == 'patient':\n    end = time.monotonic() + 8\n"
+             "    while not os.path.exists('enough') and time.monotonic() < end:\n        time.sleep(0.01)\n"
              "else:\n    time.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
              "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
@@ -1509,9 +1518,13 @@ LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
                    records_mb: int = 10, watch: float = 0.002, runs: int = 1,
-                   lose_note: bool = False, spaced: bool = False) -> tuple[dict, dict]:
+                   lose_note: bool = False, spaced: bool = False, patient: bool = False) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
-    says: the judging, and what the case's run saw."""
+    says: the judging, and what the case's run saw. A patient program runs until the judge has read the
+    container 70 times, so that a test that needs that many readings does not depend on how busy the
+    machine is."""
+    if patient:
+        solution = "patient"
     seen = tmp_path / "seen.json"
     # the way first, so that it may name the stand-in's own folder and figures as the rest does
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
@@ -1525,7 +1538,7 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     # each run of the solution sleeps 0.6 seconds: a case of several runs gets 2 seconds for each, so that
     # starting its runs on a busy machine does not end it for time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
-                           CASE_TIMEOUT_SEC=str(2 * runs))
+                           CASE_TIMEOUT_SEC=str((12 if patient else 2) * runs))
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
 
@@ -1552,7 +1565,8 @@ def test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_en
     lowest figure, and from it on the case cannot pass. However few such readings there were and
     however fast the machine, a case whose test passes after one is not judged, as a fault of
     measuring: the outcome is "unmeasured"."""
-    result, seen = judge_measured(tmp_path, WAYS[way], slow=SLOWER.get(way, 0.0), records_mb=RECORDS_OF.get(way, 10))
+    result, seen = judge_measured(tmp_path, WAYS[way], slow=SLOWER.get(way, 0.0), records_mb=RECORDS_OF.get(way, 10),
+                                  patient=True)
     assert seen["limit"] is None and seen["out"] == "fine\n", f"the program was ended on such a reading: {seen}"
     assert seen["tries"] >= 20, f"the program ended before the readings this needs: {seen}"
     case = the_case(result)
@@ -1589,7 +1603,8 @@ def test_each_part_of_a_reading_is_taken_as_it_can_be_trusted(tmp_path, change):
     one taken; and the cases' files are taken from the reading itself, not read once more."""
     code, expected = EVERY_TRY[change]
     cap_mb, memory_mb = LIMITS_OF.get(change, (4096, "256"))
-    result, seen = judge_measured(tmp_path, code, cap_mb=cap_mb, memory_mb=memory_mb, records_mb=RECORDS_OF.get(change, 10))
+    result, seen = judge_measured(tmp_path, code, cap_mb=cap_mb, memory_mb=memory_mb, records_mb=RECORDS_OF.get(change, 10),
+                                  patient=True)
     assert seen["tries"] >= 20, f"the program ended before the readings this needs: {seen}"
     case = the_case(result)
     if expected == "memory":
@@ -1659,7 +1674,7 @@ def test_the_readings_that_could_not_decide_are_counted_exactly(tmp_path):
     """A case says how many of its readings were cut by time, and how many could not say on which side
     of a line the figure lay, those cut by time among them; its outcome in the result says the latter
     too. The step's count in the result is the sum of these over its cases."""
-    result, seen = judge_measured(tmp_path, COUNTED)
+    result, seen = judge_measured(tmp_path, COUNTED, patient=True)
     assert seen["tries"] >= 60, f"the program ended before the readings this needs: {seen}"
     assert (seen["late"], seen["undecided"]) == (2, 3), seen
     case = the_case(result)
@@ -1732,8 +1747,8 @@ def test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_what
         expected = "passed" if stood <= 100 else "failed"
         assert the_case(honest)["outcome"] == expected, (how, stood, the_case(honest), honest_seen)
         return
-    over, over_seen = judge_measured(over_tmp, way(takes(200), code), records_mb=stood)
-    honest, honest_seen = judge_measured(honest_tmp, way(takes(40), code), records_mb=stood)
+    over, over_seen = judge_measured(over_tmp, way(takes(200), code), records_mb=stood, patient=True)
+    honest, honest_seen = judge_measured(honest_tmp, way(takes(40), code), records_mb=stood, patient=True)
     for seen in (over_seen, honest_seen):
         assert seen["limit"] == "memory" or seen["tries"] >= 60, f"the program ended before the readings this needs: {seen}"
     outcome = the_case(over)["outcome"]
@@ -1768,7 +1783,7 @@ def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
     """A case whose count stays far below its limit, while 750 MB of the kernel's records stand in a
     container of 1,024 MB, cannot show that the container keeps 128 MB of room below its cap: it is
     unmeasured, not passed, and nothing is ended for it."""
-    result, seen = judge_measured(tmp_path, way(takes(40)), cap_mb=1024, memory_mb="2048", records_mb=750)
+    result, seen = judge_measured(tmp_path, way(takes(40)), cap_mb=1024, memory_mb="2048", records_mb=750, patient=True)
     assert seen["limit"] is None and seen["tries"] >= 20, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
