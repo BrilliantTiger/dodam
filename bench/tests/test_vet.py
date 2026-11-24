@@ -1130,18 +1130,20 @@ ROOM_MESSAGES = {"passed": "", "failed": "the test's own failure", "skipped": "t
 
 
 def room_rows() -> list[tuple]:
-    """(how the judging went, the reason of its unmeasured cases, one case's outcome, its bound)."""
+    """(how the judging went, the reason of its unmeasured cases, one case's outcome, its bound, and whether
+    another case that passed says 100 MB beside it)."""
     from dodambench.judge import UNMEASURED_REASONS
     from dodambench.vet import COULD_NOT_JUDGE
     rows = [("could not run: " + kind.__name__, None, None, None) for kind in COULD_NOT_JUDGE]
     rows += [(ended, None, None, None) for ended in ("ended without a result", "the judge wrote a fault", "a result of another shape",
                                                       "the program's side left something")]
-    for outcome in ("passed", "failed", "not run"):
-        rows += [("ran", None, outcome, bound) for bound in ROOM_BOUNDS]
-    for reason in UNMEASURED_REASONS:
-        for outcome in ("passed", "failed", "unmeasured", "not run"):
-            rows += [("has an unmeasured case", reason, outcome, bound) for bound in ROOM_BOUNDS]
-    return rows
+    for beside in ("a case of 100 MB beside", "nothing beside"):
+        for outcome in ("passed", "failed", "not run"):
+            rows += [("ran", None, outcome, bound, beside) for bound in ROOM_BOUNDS]
+        for reason in UNMEASURED_REASONS:
+            for outcome in ("passed", "failed", "unmeasured", "not run"):
+                rows += [("has an unmeasured case", reason, outcome, bound, beside) for bound in ROOM_BOUNDS]
+    return [row + (None,) * (5 - len(row)) for row in rows]
 
 
 def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(tmp_path, fake_docker, monkeypatch):
@@ -1151,15 +1153,15 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
     the judge could not take back; and one that has a case not judged for measuring, for
     every reason the judge gives that. One case of it passed, failed, was not judged for measuring or was
     not run, saying the most it can have held with nothing, a number, nought, or a yes or a no, beside a
-    case that passed saying 100 MB. The room is the limit of 512 MB less the largest bound that is a
-    number among the cases that passed or were not judged for measuring; where the judging gave no result
-    and no such bound, no room is told, never the whole limit."""
+    case that passed saying 100 MB, or beside nothing. The room is the limit of 512 MB less the largest
+    bound that is a number among the cases that passed or were not judged for measuring; where the judging
+    gave no result or no such bound, no room is told, never the whole limit."""
     from dodambench import vet as tool
     from dodambench.judge import UNMEASURED_REASONS
     rows = room_rows()
-    assert len(rows) == 7 + 12 + 16 * len(UNMEASURED_REASONS), len(rows)
+    assert len(rows) == 7 + 2 * (12 + 16 * len(UNMEASURED_REASONS)), len(rows)
     wrong = []
-    for n, (judging, reason, outcome, bound) in enumerate(rows):
+    for n, (judging, reason, outcome, bound, beside) in enumerate(rows):
         leaves = tmp_path / f"leaves-{n}"
         leaves.mkdir()
         with monkeypatch.context() as m:
@@ -1195,12 +1197,15 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
                         case["memory_bound_bytes"] = ROOM_BOUNDS[bound]
                     if judging == "has an unmeasured case":
                         details["tests"][1].update(outcome="unmeasured", message=reason)
-                    details["tests"][2]["memory_bound_bytes"] = 100 * 2**20
+                    others = [100 * 2**20] if beside == "a case of 100 MB beside" else []
+                    if others:
+                        details["tests"][2]["memory_bound_bytes"] = others[0]
                     details["unmeasured"] = [f"{c['file']}::{c['name']}" for c in details["tests"] if c["outcome"] == "unmeasured"]
                     given = reward_of_cases(details["tests"], True, "build", True)
                     worked_out = (word in ("passed", "unmeasured") and isinstance(ROOM_BOUNDS[bound], int)
                                   and not isinstance(ROOM_BOUNDS[bound], bool))
-                    expected = round(512 - max([100 * 2**20] + ([ROOM_BOUNDS[bound]] if worked_out else [])) / 2**20, 1)
+                    bounds = others + ([ROOM_BOUNDS[bound]] if worked_out else [])
+                    expected = round(512 - max(bounds) / 2**20, 1) if bounds else None
                 (leaves / "reward.json").write_text(json.dumps(given), encoding="utf-8")
                 (leaves / "details.json").write_text(json.dumps(details), encoding="utf-8")
             results = [r for r in tool.vet_in_image(load_task(SAMPLE), "python", tmp_path / str(n), "dodam-bench/python:dev")
@@ -1217,7 +1222,7 @@ def test_the_table_of_the_room_has_every_way_a_judging_ends_and_every_reason():
     from dodambench.judge import UNMEASURED_REASONS
     from dodambench.vet import COULD_NOT_JUDGE
     rows = room_rows()
-    assert {j for j, *_ in rows if j.startswith("could not run")} == {"could not run: " + k.__name__ for k in COULD_NOT_JUDGE}
+    assert {j for j, *_ in rows if j and j.startswith("could not run")} == {"could not run: " + k.__name__ for k in COULD_NOT_JUDGE}
     assert {r for _, r, *_ in rows if r} == set(UNMEASURED_REASONS)
 
 
@@ -1225,13 +1230,16 @@ def test_the_tool_prints_for_each_language_the_smallest_room_its_prepared_soluti
     """Whoever writes a task sees, for each language, the smallest room between the memory bound and the
     limit that a prepared solution's judging left. It refuses nothing for it."""
     import dodambench.vet as tool
-    rooms = {"python": [496.8, 500.1], "go": [None, 401.6]}
+    rooms = {"python": [496.8, 500.1], "go": [None, 401.6], "rust": [12.0, 0.0], "java": [None, None]}
     monkeypatch.setattr(tool, "vet", lambda task, lang, out, **kwargs: [
         {"step": "build", "solution": f"s{n}", "ok": True, "problems": [], "seconds": 1.0, "room_mb": room}
         for n, room in enumerate(rooms[lang])])
-    code = tool.main([str(SAMPLE), "--lang", "python",
-                      "--lang", "go", "--out", str(tmp_path)])
+    code = tool.main([str(SAMPLE), "--lang", "python", "--lang", "go", "--lang", "rust", "--lang", "java",
+                      "--out", str(tmp_path)])
     out = capsys.readouterr().out
     assert code == 0, out
     assert "room  python      the smallest room between the memory bound and the limit: 496.8 MB" in out, out
     assert "room  go          the smallest room between the memory bound and the limit: 401.6 MB" in out, out
+    # a room of nought is a room told; a language none of whose judgings told one prints none
+    assert "room  rust        the smallest room between the memory bound and the limit: 0.0 MB" in out, out
+    assert "room  java" not in out, out
