@@ -47,6 +47,9 @@ def broken_copy(protection: dict, where: Path) -> Path:
     """A copy of the bench folder with this protection's variant in it."""
     copy = where / "bench"
     shutil.copytree(BENCH, copy, ignore=SKIP)
+    if (BENCH.parent / "docs").is_dir():
+        # the tests of the converter read the document of command-line tasks beside the bench folder
+        shutil.copytree(BENCH.parent / "docs", where / "docs", ignore=SKIP)
     path = copy / protection["file"]
     text = path.read_text(encoding="utf-8")
     for change in protection["change"]:
@@ -86,68 +89,82 @@ def check(protection: dict) -> dict:
             "tests": protection["tests"], "pytest": last}
 
 
-# The tests of the judge and of the vetting tool that need no image, and how many processes run them at once.
-JUDGE_TESTS = ["tests/test_judge.py", "tests/test_cli_judge.py", "tests/test_cli_test_code.py", "tests/test_vet.py"]
+# The tests of the judge and of the vetting tool that need no image, those of the formats and of the converters,
+# which reach the judge's sum of time and what a task may say, and how many processes run them at once.
+JUDGE_TESTS = ["tests/test_judge.py", "tests/test_cli_judge.py", "tests/test_cli_test_code.py", "tests/test_vet.py",
+               "tests/test_cli_format.py", "tests/test_task_format.py", "tests/test_convert.py", "tests/test_cli_convert.py"]
 NO_IMAGE = "not test_vet_in_the_language_image"
 PARTS = 8
-# tests that need the judge to read many times within a fraction of a second: beside seven other processes on a
-# machine of four processors they fail whatever is taken out, so they run on their own after the others
+# tests that need the judge to read many times within a fraction of a second: they have room in themselves,
+# and run on their own after the others all the same, so that no verdict rests on how busy the machine is
 ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
 
 
-def judge_tests(cwd: Path) -> list[str] | None:
-    """The node of every test of the judge and of the vetting tool that needs no image, in the folder `cwd`;
-    None when they cannot all be listed."""
+def run_judge_tests(cwd: Path) -> dict:
+    """Every test of JUDGE_TESTS that needs no image, run in the folder `cwd`: in PARTS processes at once,
+    then the tests named in ALONE in one. Whether they could be listed, how each run ended, and the
+    tests that failed."""
     listed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--collect-only", "-p", "no:cacheprovider", "-k",
                              NO_IMAGE, *JUDGE_TESTS], cwd=cwd, capture_output=True, text=True)
     nodes = [line for line in listed.stdout.splitlines() if "::" in line]
-    return nodes if listed.returncode == 0 and nodes else None
+    if listed.returncode != 0 or not nodes:
+        return {"listed": False, "codes": [], "failed": [], "said": [listed.stdout[-4000:] + listed.stderr[-2000:]], "tests": 0}
+    alone = [node for node in nodes if any(name in node for name in ALONE)]
+    rest = [node for node in nodes if node not in alone]
+    said, codes = [], []
+    for group in ([rest[i::PARTS] for i in range(PARTS)], [alone]):
+        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part], cwd=cwd,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for part in group if part]
+        try:
+            said += [run.communicate(timeout=HANGS)[0] for run in runs]
+        except subprocess.TimeoutExpired:
+            for run in runs:
+                run.kill()
+            return {"listed": True, "codes": [None], "failed": [], "said": ["the tests did not end"], "tests": len(nodes)}
+        codes += [run.returncode for run in runs]
+    failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
+              if line.startswith(("FAILED ", "ERROR "))]
+    return {"listed": True, "codes": codes, "failed": failed, "said": said, "tests": len(nodes)}
+
+
+def verdict_of(run: dict) -> str:
+    """A second line holds only where its tests were listed, every run of them started and ended passed. A
+    run that ended otherwise than passed or failed, or no run at all, shows nothing, and holds nothing."""
+    if not run["listed"]:
+        return "the tests could not be listed"
+    if not run["codes"] or any(code not in (0, 1) for code in run["codes"]):
+        return "the tests did not run through"
+    if run["failed"] or any(code != 0 for code in run["codes"]):
+        return "NO SECOND LINE"
+    return "second line"
 
 
 def against_judge_tests(protection: dict) -> dict:
-    """One second line taken out, and every test of the judge and of the vetting tool that needs no image run
-    against it, in PARTS processes at once and then the tests named in ALONE in one; the tests that fail."""
+    """One second line taken out, and the tests of JUDGE_TESTS that need no image run against it."""
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
-        copy = broken_copy(protection, Path(where))
-        nodes = judge_tests(copy)
-        if nodes is None:
-            # a variant after which the tests cannot be listed shows nothing, so it holds nothing
-            return {"what": protection["what"], "verdict": "the tests could not be listed",
-                    "seconds": round(time.monotonic() - started, 1), "tests": 0, "failed": []}
-        alone = [node for node in nodes if any(name in node for name in ALONE)]
-        rest = [node for node in nodes if node not in alone]
-        said, runs = [], []
-        for group in ([rest[i::PARTS] for i in range(PARTS)], [alone]):
-            started_group = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part],
-                                              cwd=copy, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                             for part in group if part]
-            runs += started_group
-            try:
-                said += [run.communicate(timeout=HANGS)[0] for run in started_group]
-            except subprocess.TimeoutExpired:
-                for run in started_group:
-                    run.kill()
-                return {"what": protection["what"], "verdict": "the tests did not end", "seconds": HANGS, "failed": []}
-    failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
-              if line.startswith(("FAILED ", "ERROR "))]
-    verdict = "second line" if runs and not failed and all(run.returncode == 0 for run in runs) else "NO SECOND LINE"
+        run = run_judge_tests(broken_copy(protection, Path(where)))
+    verdict = verdict_of(run)
     if verdict != "second line":
-        print("\n".join(out[-4000:] for out in said), file=sys.stderr, flush=True)
+        print("\n".join(out[-4000:] for out in run["said"]), file=sys.stderr, flush=True)
     return {"what": protection["what"], "verdict": verdict, "seconds": round(time.monotonic() - started, 1),
-            "tests": len(nodes), "failed": failed}
+            "tests": run["tests"], "failed": run["failed"]}
 
 
 def second_lines() -> int:
-    """Every second line against every test of the judge and of the vetting tool that needs no image."""
+    """Every second line against the tests of JUDGE_TESTS that need no image. They are first run the same
+    way with nothing taken out: where one fails there, no second line is judged by them."""
     chosen = [p for p in protections() if p.get("second_line")]
-    whole = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-k", NO_IMAGE,
-                            *JUDGE_TESTS], cwd=BENCH, capture_output=True, text=True)
-    if whole.returncode != 0:
-        print(whole.stdout[-20000:], file=sys.stderr, flush=True)
+    with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
+        whole = run_judge_tests(broken_copy({"what": "nothing taken out", "file": "experiments/protections.toml",
+                                             "change": []}, Path(where)))
+    if verdict_of(whole) != "second line":
+        print("\n".join(out[-4000:] for out in whole["said"]), file=sys.stderr, flush=True)
         print(json.dumps({"second_lines": len(chosen), "held": 0,
-                          "not_held": [{"what": "the tests do not pass with every protection in place"}]}, indent=1))
+                          "not_held": [{"what": "the tests do not pass with nothing taken out",
+                                        "verdict": verdict_of(whole), "failed": whole["failed"]}]}, indent=1))
         return 1
+    print(f"{'nothing taken out':22}  {whole['tests']} tests pass", file=sys.stderr, flush=True)
     results = []
     for protection in chosen:
         result = against_judge_tests(protection)

@@ -1665,6 +1665,58 @@ find = '''                         **(_case_notes(decided[case]) if case in deci
 put = '''                         **_case_notes(decided.get(case, {}))}'''
 
 [[protection]]
+what = "The reading a later run begins with is held to the most the case can have held"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_what_stands_when_a_later_run_begins_is_held_to_the_most_the_case_can_have_held"]
+[[protection.change]]
+find = '''                if self._figure_start is None:
+                    self._figure_start = figure
+                self._records(held_before)
+                # held to the most the case can have held like every later reading: a program that ends
+                # before it is measured once is judged by this reading alone
+                self._bound(held_before, figure, limits["memory_mb"] * 2**20)'''
+put = '''                first_run = self._figure_start is None
+                if self._figure_start is None:
+                    self._figure_start = figure
+                self._records(held_before)
+                if first_run:
+                    self._bound(held_before, figure, limits["memory_mb"] * 2**20)'''
+
+[[protection]]
+what = "The most a case can have held keeps the container 128 MB of room below its cap"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_room_below_the_cap_is_held_to_the_megabyte"]
+[[protection.change]]
+find = '''        room = now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+        if bound > max_memory'''
+put = '''        room = now["cap"] - (_judge.MEMORY_RESERVE_MB - 1) * 1024 * 1024
+        if bound > max_memory'''
+
+[[protection]]
+what = "The judge measures a run no more often than its interval"
+file = "dodambench/dodam_cli.py"
+tests = ["tests/test_cli_judge.py::test_the_judge_measures_a_run_no_more_often_than_its_interval"]
+[[protection.change]]
+find = '''                next_watch = now + WATCH'''
+put = '''                next_watch = now'''
+
+[[protection]]
+what = "A test that opened several cases says the most any of them can have held"
+file = "dodambench/judge.py"
+tests = ["tests/test_cli_judge.py::test_a_test_that_opened_several_cases_says_the_most_of_them"]
+[[protection.change]]
+find = '''                    case["memory_bound_bytes"] = max(bounds)'''
+put = '''                    case["memory_bound_bytes"] = min(bounds)'''
+
+[[protection]]
+what = "The record of a judging holds only bounds that are numbers"
+file = "dodambench/vet.py"
+tests = ["tests/test_vet.py::test_the_record_holds_only_bounds_that_are_numbers"]
+[[protection.change]]
+find = '''                   and isinstance(case.get("memory_bound_bytes"), int) and not isinstance(case["memory_bound_bytes"], bool))'''
+put = '''                   and isinstance(case.get("memory_bound_bytes"), int))'''
+
+[[protection]]
 what = "The memory of the judge's own processes is taken out of every figure"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_judges_own_processes_are_taken_out_of_every_figure"]
