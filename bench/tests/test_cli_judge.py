@@ -947,9 +947,10 @@ def test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memo
     (group / "memory.current").write_text(f"{400 * mb}\n")
     (group / "memory.max").write_text(f"{1024 * mb}\n")
 
-    def taken(**stat: int) -> int:
+    def taken(**stat: int) -> float:
+        # in MB to the byte: a byte more or less is not rounded away
         (group / "memory.stat").write_text("".join(f"{name} {value * mb}\n" for name, value in stat.items()))
-        return judge_module.container_memory(group=group)["taken"] // mb
+        return judge_module.container_memory(group=group)["taken"] / mb
 
     # 200 MB of pages of files, all on the lists: none of them counts
     assert taken(anon=200, file=200, shmem=0, inactive_file=150, active_file=50, unevictable=0) == 200
@@ -960,6 +961,92 @@ def test_a_page_of_a_file_on_neither_of_the_kernels_two_lists_is_counted_as_memo
     assert taken(anon=200, file=200, shmem=40, inactive_file=120, active_file=40, unevictable=90) == 240
     # a kernel that does not say which pages stand on its lists: every page of a file is counted
     assert taken(anon=200, file=200, shmem=0) == 400
+
+
+def a_group(folder: Path, files: dict[str, int | str]) -> Path:
+    """A stand-in for the container's own folder of the kernel's files, holding the files named."""
+    folder.mkdir()
+    for name, value in files.items():
+        (folder / name).write_text(f"{value}\n")
+    return folder
+
+
+def test_a_try_that_moved_and_took_no_more_than_the_lines_is_taken_at_once_and_in_time(tmp_path, monkeypatch):
+    """A try whose two halves differ by no more than TOGETHER_BYTES and that took no longer than
+    TOGETHER_SECONDS is taken at once, and in time, also where it lies on both lines: here what can be
+    given back is TOGETHER_BYTES more in the second half than in the first, and the try takes
+    TOGETHER_SECONDS. Nothing else moves: the swap stands at nothing, and there are no cases' files to
+    read, as where the judge reads the container itself between the steps of a judging."""
+    mb = 2**20
+    group = a_group(tmp_path / "group", {"memory.current": 300 * mb, "memory.max": 1024 * mb, "memory.swap.current": 0})
+    halves = []
+
+    def given_back(folder):
+        halves.append(len(halves) % 2)
+        return 100 * mb + halves[-1] * judge_module.TOGETHER_BYTES, 0
+
+    # the first try takes TOGETHER_SECONDS; any later one none at all
+    clock = iter([0.0, judge_module.TOGETHER_SECONDS] + [float(n // 2 + 1) for n in range(2 * judge_module.TOGETHER_TRIES)])
+    monkeypatch.setattr(judge_module, "_given_back", given_back)
+    monkeypatch.setattr(judge_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    reading = judge_module.container_memory(group=group)
+    assert len(halves) == 2, f"the reading took {len(halves) // 2} tries"
+    assert (reading["moved"], reading["late"], reading["taken"]) == (judge_module.TOGETHER_BYTES, 0, 200 * mb), reading
+
+
+def test_of_tries_that_moved_alike_the_one_that_took_least_is_taken(tmp_path, monkeypatch):
+    """Where every try of a reading moved more than TOGETHER_BYTES, the try that moved least is taken,
+    and of tries that moved alike, the one that took least: the shorter a try, the less can come and go
+    in it that no half shows. Here every try moves 2 mb; the first takes four times as long as every
+    later one; and each try's total is 1 mb more than the one before, so the figure says which try
+    was taken: the second."""
+    mb = 2**20
+    group = a_group(tmp_path / "group", {"memory.max": 1024 * mb, "memory.swap.current": 0})
+    halves = []
+
+    def given_back(folder):
+        halves.append(len(halves) % 2)
+        if not halves[-1]:
+            # the total of the try, which is read after its first half
+            (folder / "memory.current").write_text(f"{(300 + len(halves) // 2 + 1) * mb}\n")
+        return 100 * mb + halves[-1] * 2 * mb, 0
+
+    times = []
+    for n in range(1, judge_module.TOGETHER_TRIES + 1):
+        times += [float(n), n + (2**-10 if n == 1 else 2**-12)]
+    clock = iter(times)
+    monkeypatch.setattr(judge_module, "_given_back", given_back)
+    monkeypatch.setattr(judge_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    reading = judge_module.container_memory(group=group)
+    assert len(halves) == 2 * judge_module.TOGETHER_TRIES, f"the reading took {len(halves) // 2} tries"
+    assert reading["taken"] == 202 * mb, f"the try taken was the {reading['taken'] // mb - 200}th"
+
+
+def test_the_room_a_reading_gives_is_the_memory_cap_and_the_swap_the_container_may_use_to_the_byte(tmp_path, monkeypatch):
+    """The room a reading of the container gives is its memory cap and the swap it may use, to the
+    byte: its own allowance, and no more than the machine has. It may use no swap where its allowance
+    is taken away, where the kernel does not count swap per container, or where the machine's own
+    figures cannot be read. A container without a memory cap gives no room."""
+    mb = 2**20
+    info = tmp_path / "meminfo"
+    info.write_text("MemTotal:        2000000 kB\nSwapTotal:       1048576 kB\n")
+    monkeypatch.setattr(judge_module, "MACHINE_INFO", info)
+
+    def cap(allowed: str | None, memory_max: int | str = 1024 * mb) -> int:
+        files = {"memory.current": 300 * mb, "memory.max": memory_max}
+        if allowed is not None:
+            files["memory.swap.max"] = allowed
+        group = a_group(tmp_path / f"group-{len(list(tmp_path.iterdir()))}", files)
+        (group / "memory.stat").write_text("inactive_file 0\nactive_file 0\n")
+        return judge_module.container_memory(group=group)["cap"]
+
+    assert cap("0") == 1024 * mb                       # the allowance taken away
+    assert cap(None) == 1024 * mb                      # a kernel that does not count swap per container
+    assert cap(str(5 * mb)) == 1029 * mb               # an allowance of its own
+    assert cap("max") == 1024 * mb + 2**30             # no allowance of its own: all the machine has
+    assert cap("max", memory_max="max") == 0           # no memory cap: no room
+    monkeypatch.setattr(judge_module, "MACHINE_INFO", tmp_path / "unreadable")
+    assert cap("max") == 1024 * mb                     # the machine's own figures cannot be read
 
 
 def test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached(tmp_path):
@@ -1519,11 +1606,12 @@ LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
                    records_mb: int = 10, watch: float = 0.002, runs: int = 1,
-                   lose_note: bool = False, spaced: bool = False, patient: bool = False) -> tuple[dict, dict]:
+                   lose_note: bool = False, spaced: bool = False, patient: bool = False,
+                   separated: bool = True) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw. A patient program runs until the judge has read the
     container 70 times, so that a test that needs that many readings does not depend on how busy the
-    machine is."""
+    machine is. A case that is not separated runs as it does outside a container: with no confined side."""
     if patient:
         solution = "patient"
     seen = tmp_path / "seen.json"
@@ -1536,6 +1624,9 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         # a test whose name, as pytest gives it, holds spaces
         source = source.replace("def test_measured():", "@pytest.mark.parametrize('label', ['with spaces in it'])\n"
                                                         "def test_measured(label):")
+    if not separated:
+        source = source.replace("            c._side = Side()\n", "")
+        assert "c._side" not in source
     # each run of the solution sleeps 0.6 seconds: a case of several runs gets 2 seconds for each, so that
     # starting its runs on a busy machine does not end it for time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
@@ -2077,14 +2168,18 @@ def test_the_most_a_case_can_have_held_is_counted_from_the_lowest_figure_the_cas
 def test_the_kernels_own_part_is_read_from_every_part_it_names(tmp_path):
     """The kernel's own part of the container is the sum of what memory.stat names for it: the stacks
     and page tables of the processes, memory for each processor, sockets, memory it maps itself and the
-    records it cannot give back; nothing else of the container's figures. Where the kernel says
-    nothing, it is 0."""
+    records it cannot give back; nothing else of the container's figures. A part the kernel does not
+    name is 0, and where the kernel says nothing, the whole is 0."""
     parts = {"kernel_stack": 1, "pagetables": 2, "sec_pagetables": 4, "percpu": 8, "sock": 16, "vmalloc": 32,
              "slab_unreclaimable": 64}
     others = {"anon": 1 << 10, "file": 1 << 11, "slab_reclaimable": 1 << 12, "shmem": 1 << 13}
     mb = 2**20
     (tmp_path / "memory.stat").write_text("".join(f"{name} {value * mb}\n" for name, value in {**others, **parts}.items()))
     assert judge_module.kernel_part(tmp_path) == sum(parts.values()) * mb
+    # a kernel that names only some of the parts
+    named = {"kernel_stack": 1, "pagetables": 2, "slab_unreclaimable": 64}
+    (tmp_path / "memory.stat").write_text("".join(f"{name} {value * mb}\n" for name, value in {**others, **named}.items()))
+    assert judge_module.kernel_part(tmp_path) == 67 * mb
     (tmp_path / "gone").mkdir()
     assert judge_module.kernel_part(tmp_path / "gone") == 0
 
@@ -2142,6 +2237,29 @@ def test_a_case_whose_kernel_part_never_stops_falling_cannot_pass(tmp_path):
     result, seen = judge_measured(tmp_path, NEVER_STILL)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
+
+
+# the kernel's own part: still until the first run of the case has ended, then falling by 1.5 MB at every look
+FALLS_ONCE_A_RUN_HAS_ENDED = way(takes(40)) + ("\n\nFALLING = [10_000]\n\n\ndef kernel_part(held):\n    if runs_ended():\n"
+                                               "        FALLING[0] -= 1.5\n    return int(FALLING[0] * MB)\n")
+
+
+def test_a_case_waits_for_the_kernels_own_part_only_before_its_first_run(tmp_path):
+    """What the wait is for, what the kernel kept of the previous case's processes, stands only before a
+    case's first run: a later run of the case begins at once, whatever the kernel's part does then. Here
+    it never stops falling once the first run has ended, and the case passes."""
+    result, seen = judge_measured(tmp_path, FALLS_ONCE_A_RUN_HAS_ENDED, runs=2)
+    assert seen["settle_looks"] == 1, seen
+    assert the_case(result)["outcome"] == "passed", the_case(result)
+
+
+def test_a_case_outside_a_container_does_not_wait_for_the_kernels_own_part(tmp_path):
+    """Outside a container the judge measures nothing of a case, and the kernel's part it would read is not
+    the case's: the case does not wait for it, and its test alone judges it. Here the part never stops
+    falling."""
+    result, seen = judge_measured(tmp_path, NEVER_STILL, separated=False)
+    assert seen["settle_looks"] is None, seen
+    assert the_case(result)["outcome"] == "passed", the_case(result)
 
 
 def test_the_judges_own_processes_are_taken_out_of_every_figure(tmp_path):
@@ -2820,8 +2938,8 @@ def test_the_stop_before_the_cap_counts_the_swap_the_container_may_use(tmp_path)
 
 def test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first(tmp_path):
     """A run whose new high lies less than 1 MB above what the case may take is written down with
-    its size, not as nothing, and the ten runs that lay furthest above are ordered by their exact
-    size."""
+    its size, not as nothing: in bytes, and in MB rounded up to a hundredth. The ten runs that lay
+    furthest above are ordered by their exact size."""
     from types import SimpleNamespace
     from dodambench import dodam_cli as runner
     highs = tmp_path / "highs.jsonl"
@@ -2842,6 +2960,9 @@ def test_a_new_high_is_written_down_to_the_byte_and_the_largest_come_first(tmp_p
     half = said["largest"][-1]
     assert any(isinstance(value, (int, float)) and value > 0 for key, value in half.items() if key.startswith("above_the_limit")), (
         f"a run half a MB above the limit was written down as nothing: {half}")
+    written = {run["case"].split("::")[-1]: (run.get("above_the_limit_bytes"), run.get("above_the_limit_mb"))
+               for run in said["largest"]}
+    assert written == {name: (above, mbs) for (name, above), mbs in zip(runs.items(), (0.5, 1.2, 1.9, 1.5, 1.51, 1.51))}, written
 
 
 def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(tmp_path):
@@ -3527,6 +3648,26 @@ def test_a_cases_folder_the_judge_cannot_empty_before_the_first_case_is_a_fault_
     # the fault is that one, and no other the judge would meet later on the way to the first case
     with pytest.raises(judge_module.JudgeFault, match="cannot empty the folder the cases live in before the first case"):
         judge_module.CliRun(app, lang_env(), "someone", {"PATH": "/usr/bin"})
+
+
+def test_the_case_runner_is_told_the_judges_own_processes_where_the_cases_run_as_a_working_user(tmp_path, monkeypatch):
+    """Where the cases run as a working user, in a container, the case runner's settings name the judge's
+    own processes, the container's first and the judge itself, whose memory comes out of every figure of
+    a case; elsewhere they name none."""
+    app, cases = tmp_path / "app", tmp_path / "cases"
+    app.mkdir()
+    cases.mkdir()
+    monkeypatch.setattr(judge_module, "close_writable_places", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(judge_module, "settle_access_times", lambda *args, **kwargs: 0, raising=False)
+    monkeypatch.setattr(judge_module, "MEMORY_FOLDER", tmp_path / "no-memory-folder")
+    monkeypatch.setattr(judge_module, "CASES_DIR", cases)
+    for run_as, named in (("someone", ["/proc/1/status", f"/proc/{os.getpid()}/status"]), ("", None)):
+        run = judge_module.CliRun(app, lang_env(), run_as, {"PATH": "/usr/bin"})
+        try:
+            settings = json.loads(run.settings_file.read_text(encoding="utf-8"))
+        finally:
+            run.close()
+        assert settings.get("judge_statuses") == named, (run_as, settings)
 
 
 def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_result(tmp_path, monkeypatch):
