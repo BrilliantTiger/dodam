@@ -1382,7 +1382,7 @@ def kernel_part(held):
 
 # the case's own folder, where the program leaves a mark each time a run of it ends
 CASE_DIR = [None]
-# how many tries of a reading a patient program waits for
+# how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
 
@@ -1400,7 +1400,8 @@ def test_measured():
     held = {"current": (300 + RECORDS_MB) * MB, "file": 100 * MB, "records": RECORDS_MB * MB, "files": 40 * MB,
             "swap": 0, "kernel": 0}
     stand_in(group, held)
-    reads = {"try": 0, "after": False, "inside": False}
+    # the tries counted since the last run of the case ended, and how many each count of ended runs saw
+    reads = {"try": 0, "after": False, "inside": False, "ended": 0, "from": 0, "tries_of": {}}
     real_open = builtins.open
     parts = {str(group / "memory.current"): "total", str(group / "memory.stat"): "stat",
              str(group / "memory.swap.current"): "swap"}
@@ -1409,9 +1410,14 @@ def test_measured():
         n = reads["try"] if reads["after"] else reads["try"] + 1
         if part == "total":
             reads["try"], reads["after"] = n, True
-            if n == ENOUGH and CASE_DIR[0] is not None:
-                # what a patient program waits for
-                (CASE_DIR[0] / "enough").write_text("")
+            ended = runs_ended()
+            if ended != reads["ended"]:
+                # a run of the case has ended: the tries of the next run are counted from here
+                reads["ended"], reads["from"] = ended, n - 1
+            reads["tries_of"][ended] = n - reads["from"]
+            if n - reads["from"] == ENOUGH and CASE_DIR[0] is not None:
+                # what a patient program waits for, in the run that follows `ended` runs of its case
+                (CASE_DIR[0] / f"enough-{ended}").write_text("")
         was = dict(held)
         happen(n, part if part == "total" else f"{part} {'after' if reads['after'] else 'before'}", held)
         if held != was:
@@ -1475,7 +1481,8 @@ def test_measured():
             r = c.run([SOLUTION])
             with real_open(SEEN, "w") as f:
                 json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
-                           "tries": reads["try"], "late": c.measured.get("late"),
+                           "tries": reads["try"], "run_tries": reads["tries_of"].get(RUNS - 1, 0),
+                           "late": c.measured.get("late"),
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
             CHECK
@@ -1488,10 +1495,11 @@ def test_measured():
 # output and a leak on its error stream; or the wrong output.
 SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 0.6\n"
              "    while time.monotonic() < end:\n        print('x', flush=True)\n        time.sleep(0.0002)\n"
-             # a patient program runs until the judge has read the container ENOUGH times, however busy the
-             # machine is, and no longer than 8 seconds
+             # a patient program runs until the judge has read the container ENOUGH times since the case's
+             # run before it ended, however busy the machine is, and no longer than 8 seconds
              "elif sys.argv[1] == 'patient':\n    end = time.monotonic() + 8\n"
-             "    while not os.path.exists('enough') and time.monotonic() < end:\n        time.sleep(0.01)\n"
+             "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
+             "    while not os.path.exists(f'enough-{run}') and time.monotonic() < end:\n        time.sleep(0.01)\n"
              "else:\n    time.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
              "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
@@ -1610,8 +1618,9 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
                    separated: bool = True) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw. A patient program runs until the judge has read the
-    container 70 times, so that a test that needs that many readings does not depend on how busy the
-    machine is. A case that is not separated runs as it does outside a container: with no confined side."""
+    container 70 times in its run, counted from the end of the case's run before it, so that a test that
+    needs that many readings in a run does not depend on how busy the machine is. A case that is not
+    separated runs as it does outside a container: with no confined side."""
     if patient:
         solution = "patient"
     seen = tmp_path / "seen.json"
@@ -1843,8 +1852,8 @@ def test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_what
     honest_tmp.mkdir()
     # held: 200 MB of memory and 100 MB of records, 28 MB above the limit and the amount left out
     if run == "later, put in between":
-        over, over_seen = judge_measured(over_tmp, in_a_later_run(takes(200) + code, stood), runs=2)
-        honest, honest_seen = judge_measured(honest_tmp, in_a_later_run(takes(40) + code, stood), runs=2)
+        over, over_seen = judge_measured(over_tmp, in_a_later_run(takes(200) + code, stood), runs=2, patient=True)
+        honest, honest_seen = judge_measured(honest_tmp, in_a_later_run(takes(40) + code, stood), runs=2, patient=True)
         assert the_case(over)["outcome"] == "failed" and over_seen["limit"] == "memory", (how, stood, the_case(over))
         expected = "passed" if stood <= 100 else "failed"
         assert the_case(honest)["outcome"] == expected, (how, stood, the_case(honest), honest_seen)
@@ -1852,16 +1861,17 @@ def test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_what
     letting_go = run.endswith("letting go")
     if run.startswith("later"):
         over, over_seen = judge_measured(over_tmp, in_a_later_run(takes(200) + code + (lets_go(200) if letting_go else "")),
-                                         records_mb=stood, runs=2)
+                                         records_mb=stood, runs=2, patient=True)
         honest, honest_seen = judge_measured(honest_tmp, in_a_later_run(takes(40) + code + (lets_go(40) if letting_go else "")),
-                                             records_mb=stood, runs=2)
+                                             records_mb=stood, runs=2, patient=True)
     else:
         over, over_seen = judge_measured(over_tmp, way(takes(200), code, lets_go(200) if letting_go else ""),
                                          records_mb=stood, patient=True)
         honest, honest_seen = judge_measured(honest_tmp, way(takes(40), code, lets_go(40) if letting_go else ""),
                                              records_mb=stood, patient=True)
     for seen in (over_seen, honest_seen):
-        assert seen["limit"] == "memory" or seen["tries"] >= 60, f"the program ended before the readings this needs: {seen}"
+        # the readings this needs are those of the run the way happens in
+        assert seen["limit"] == "memory" or seen["run_tries"] >= 60, f"the program ended before the readings this needs: {seen}"
     # the most the honest twin can have held is the largest of its readings, while it held its 40 MB with
     # every record that stood, less the amount left out; never the last of them
     peak = stood + (100 if how == "made" else 0)
