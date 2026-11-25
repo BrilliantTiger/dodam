@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# one run at a time, so that no more jobs run at once than the matrix allows
+concurrency:
+  group: breaks
+  cancel-in-progress: false
+
 jobs:
   keys:
     runs-on: ubuntu-24.04

@@ -87,7 +87,8 @@ def failures(said: str, code: int) -> list[str]:
 
 
 def run_tests(repo: Path) -> dict:
-    nodes = listed_file(repo).read_text(encoding="utf-8").split()
+    # one test a line: a test's name may hold spaces
+    nodes = [line for line in listed_file(repo).read_text(encoding="utf-8").splitlines() if line]
     alone = [node for node in nodes if any(name in node for name in ALONE)]
     rest = [node for node in nodes if node not in alone]
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
