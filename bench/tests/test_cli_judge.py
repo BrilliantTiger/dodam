@@ -2987,38 +2987,57 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     pages that wait to be written, has the kernel give back what it can, and then waits until the
     figure stands still, because the kernel frees what it lets go of a moment later. That last
     wait has a time of its own: when writing the waiting pages took more than three seconds, the
-    figure is still read only once it stands still."""
+    figure is still read only once it stands still. The stand-in kernel frees what it let go of at the
+    third reading of the container's memory after the drop, so the test holds however busy the machine
+    is; its files are replaced whole, as the kernel's never read half written."""
     from test_cli_isolation import READER
     asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
     reclaim, freeze = HELPERS_NAMES[:2]
     asked.mkdir()
     held.mkdir()
     mb = 2**20
+
+    def put(path, text):
+        (tmp_path / "next").write_text(text)
+        os.replace(tmp_path / "next", path)
+
     for name, text in {"memory.current": f"{2 * mb}\n", "memory.swap.current": "0\n", "cgroup.events": "populated 1\nfrozen 1\n",
                        freeze: "0\n", reclaim: "",
                        "memory.stat": f"anon 4096\nfile 0\nfile_dirty {64 * mb}\n"}.items():
-        (held / name).write_text(text)
-    drop.write_text("")
-    machine.write_text("".join(f"{name}: 1000 kB\n" for name in ("MemTotal", "MemFree", "Buffers", "Cached", "Shmem", "SReclaimable")))
+        put(held / name, text)
+    put(drop, "")
+    put(machine, "".join(f"{name}: 1000 kB\n" for name in ("MemTotal", "MemFree", "Buffers", "Cached", "Shmem", "SReclaimable")))
     program = READER
     for path, here in (('asked, held = "/reading", "/group"', f'asked, held = "{asked}", "{held}"'),
                        ('open("/drop", "wb"', f'open("{drop}", "wb"'),
                        ('open("/proc/meminfo")', f'open("{machine}")')):
         assert program.count(path) == 1, f"the helper no longer names {path} once"
         program = program.replace(path, here)
+    kernel = f"""
+
+_number, _after_drop = number, 0
+
+
+def number(name):
+    # the stand-in kernel: what it let go of at the drop it frees at the third reading after it
+    global _after_drop
+    if name != "memory.current":
+        return _number(name)
+    with open("{drop}", "rb") as f:
+        dropped = f.read() == b"2"
+    _after_drop += dropped
+    return {mb} if dropped and _after_drop > 2 else {2 * mb}
+"""
+    assert program.count("\n\ndef charged():") == 1, "the helper no longer reads the container's memory in charged()"
+    program = program.replace("\n\ndef charged():", kernel + "\n\ndef charged():")
     (tmp_path / "helper.py").write_text(program)
     helper = subprocess.Popen([sys.executable, str(tmp_path / "helper.py")], cwd=tmp_path, stderr=subprocess.PIPE)
     try:
-        (asked / "ask-one").write_text("one")
-        # the waiting pages take 3.5 seconds to be written; then the kernel is asked to let go, and
-        # what it let go of is freed a hundredth of a second later
+        put(asked / "ask-one", "one")
+        # the waiting pages take 3.5 seconds to be written
         time.sleep(3.5)
-        (held / "memory.stat").write_text("anon 4096\nfile 0\nfile_dirty 0\n")
-        deadline = time.monotonic() + 10
-        while drop.read_bytes() != b"2" and time.monotonic() < deadline:
-            time.sleep(0.005)
-        time.sleep(0.01)
-        (held / "memory.current").write_text(f"{mb}\n")
+        put(held / "memory.stat", "anon 4096\nfile 0\nfile_dirty 0\n")
+        deadline = time.monotonic() + 60
         while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
             time.sleep(0.01)
         assert (asked / "answer-one").exists(), f"the helper gave no answer: {helper.stderr.read()[-2000:] if helper.poll() is not None else 'it is still running'}"
@@ -3026,6 +3045,7 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     finally:
         helper.kill()
         helper.wait()
+    assert answer["seconds"] > 3, f"writing the waiting pages took {answer['seconds']:.2f} s, not more than 3"
     assert answer["charged"] == mb, f"the figure was read before it stood still: {answer['charged'] / mb:.2f} MB, after {answer['seconds']:.2f} s"
 
 
