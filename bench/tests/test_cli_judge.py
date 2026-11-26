@@ -2320,6 +2320,13 @@ BOUNDS = {
     "nothing held": ({"taken": 200, "cap": 0, "records": 10}, 100, 100, 0, False),
     "the room exactly": ({"taken": 892, "cap": 1024, "records": 20}, 140, 100, 44, False),
     "a byte above the room": ({"taken": 892 + 2**-20, "cap": 1024, "records": 20}, 140, 100, 44, True),
+    # the records within the amount left out add nothing, and take nothing away, at either edge
+    "the room exactly, the records within the amount": ({"taken": 896, "cap": 1024, "records": 10}, 140, 100, 40, False),
+    "a byte above the room, the records within the amount": (
+        {"taken": 896 + 2**-20, "cap": 1024, "records": 10}, 140, 100, 40, True),
+    "the limit exactly, the records within the amount": ({"taken": 400, "cap": 0, "records": 10}, 356, 100, 256, False),
+    "a byte above the limit, the records within the amount": (
+        {"taken": 400, "cap": 0, "records": 10}, 356 + 2**-20, 100, 256 + 2**-20, True),
 }
 
 
