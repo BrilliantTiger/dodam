@@ -1508,6 +1508,11 @@ find = '''                self.measured.update(settle_looks=looks, settle_fell=m
 '''
 put = ''''''
 
+[[protection.change]]
+find = '''                self.measured["kernel_fell_after"] = max(self.measured.get("kernel_fell_after", 0),
+                                                         self._kernel_start - _judge.kernel_part())'''
+put = '''                self.measured["kernel_fell_after"] = self._kernel_start - _judge.kernel_part()'''
+
 [[protection]]
 what = "The judge's work around a case holds the wait for the kernel's own part"
 file = "dodambench/judge.py"
@@ -1643,9 +1648,9 @@ put = '''                figure = self._figure(held_before)
 [[protection]]
 what = "A case has one starting figure, read before its first run"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_judge.py::test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted_from[the figure]"]
+tests = ["tests/test_cli_judge.py::test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted_from[the figure]", "tests/test_cli_judge.py::test_a_case_whose_first_reading_was_cut_by_time_has_no_starting_figure_in_a_later_run"]
 [[protection.change]]
-find = '''                if self._figure_start is None:
+find = '''                if first_run:
                     self._figure_start = figure'''
 put = '''                if True:
                     self._figure_start = figure'''

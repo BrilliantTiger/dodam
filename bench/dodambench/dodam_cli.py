@@ -552,6 +552,7 @@ class Case:
         separated = self._side is not None
         killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
+        first_run = not self._began
         if separated and not self._began:
             # what the kernel kept of the previous case's processes goes after them; while it goes it
             # would hide as much of the program's memory, so the case begins once it has stopped
@@ -562,11 +563,12 @@ class Case:
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
             # own files are written; a later run of the case is measured against it as well. A
-            # reading cut by time is no starting figure, and its case cannot pass
+            # reading cut by time is no starting figure, and its case cannot pass; where the first run's is
+            # cut, the case has none, and a later run's reading does not become it
             if _in_time(held_before):
                 figure = self._figure(held_before)
                 self._lowest = _lowest(self._lowest, figure)
-                if self._figure_start is None:
+                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 # held to the most the case can have held like every later reading: a program that ends
