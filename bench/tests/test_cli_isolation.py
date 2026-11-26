@@ -251,8 +251,9 @@ ASKED = []
 
 
 def held_until_read():
-    os.unlink("holding-not-yet")
+    # said before the file goes: from then on the reading from outside may come at any moment
     ASKED.append(True)
+    os.unlink("holding-not-yet")
     for _ in range(12000):
         if not os.path.exists("not-read-yet"):
             return
