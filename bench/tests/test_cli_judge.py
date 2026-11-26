@@ -5,6 +5,7 @@ import errno
 import inspect
 import json
 import os
+import re
 import shutil
 import stat
 import struct
@@ -972,10 +973,10 @@ def a_group(folder: Path, files: dict[str, int | str]) -> Path:
 
 
 def test_a_try_that_moved_and_took_no_more_than_the_lines_is_taken_at_once_and_in_time(tmp_path, monkeypatch):
-    """A try whose two halves differ by no more than TOGETHER_BYTES and that took no longer than
-    TOGETHER_SECONDS is taken at once, and in time, also where it lies on both lines: here what can be
-    given back is TOGETHER_BYTES more in the second half than in the first, and the try takes
-    TOGETHER_SECONDS. Nothing else moves: the swap stands at nothing, and there are no cases' files to
+    """A try whose two halves differ by no more than 1 MB and that took no longer than a thousandth of a
+    second is taken at once, and in time, also where it lies on both lines: here what can be given back is
+    1 MB more in the second half than in the first, and the try takes a thousandth of a second, the numbers
+    the documents give, written here and not read from the judge. Nothing else moves: the swap stands at nothing, and there are no cases' files to
     read, as where the judge reads the container itself between the steps of a judging."""
     mb = 2**20
     group = a_group(tmp_path / "group", {"memory.current": 300 * mb, "memory.max": 1024 * mb, "memory.swap.current": 0})
@@ -983,19 +984,39 @@ def test_a_try_that_moved_and_took_no_more_than_the_lines_is_taken_at_once_and_i
 
     def given_back(folder):
         halves.append(len(halves) % 2)
-        return 100 * mb + halves[-1] * judge_module.TOGETHER_BYTES, 0
+        return 100 * mb + halves[-1] * mb, 0
 
-    # the first try takes TOGETHER_SECONDS; any later one none at all
-    clock = iter([0.0, judge_module.TOGETHER_SECONDS] + [float(n // 2 + 1) for n in range(2 * judge_module.TOGETHER_TRIES)])
+    # the first try takes a thousandth of a second; any later one, of the eight a reading may take, a whole second
+    clock = iter([0.0, 0.001] + [float(n // 2 + 1) for n in range(2 * 8)])
     monkeypatch.setattr(judge_module, "_given_back", given_back)
     monkeypatch.setattr(judge_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     reading = judge_module.container_memory(group=group)
     assert len(halves) == 2, f"the reading took {len(halves) // 2} tries"
-    assert (reading["moved"], reading["late"], reading["taken"]) == (judge_module.TOGETHER_BYTES, 0, 200 * mb), reading
+    assert (reading["moved"], reading["late"], reading["taken"]) == (mb, 0, 200 * mb), reading
+
+
+def test_a_try_that_took_a_little_more_than_a_thousandth_of_a_second_is_cut_by_time(tmp_path, monkeypatch):
+    """A try that took longer than a thousandth of a second is read again, however little longer and however
+    still its halves: here every try takes 1.1 thousandths and nothing moves, so the reading takes its eight
+    tries and is cut by time."""
+    mb = 2**20
+    group = a_group(tmp_path / "group", {"memory.current": 300 * mb, "memory.max": 1024 * mb, "memory.swap.current": 0})
+    halves = []
+
+    def given_back(folder):
+        halves.append(len(halves) % 2)
+        return 100 * mb, 0
+
+    clock = iter([value for n in range(1, 8 + 1) for value in (float(n), n + 0.0011)])
+    monkeypatch.setattr(judge_module, "_given_back", given_back)
+    monkeypatch.setattr(judge_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    reading = judge_module.container_memory(group=group)
+    assert len(halves) == 2 * 8, f"the reading took {len(halves) // 2} tries"
+    assert (reading["late"], reading["moved"]) == (1, 0), reading
 
 
 def test_of_tries_that_moved_alike_the_one_that_took_least_is_taken(tmp_path, monkeypatch):
-    """Where every try of a reading moved more than TOGETHER_BYTES, the try that moved least is taken,
+    """Where every try of a reading moved more than 1 MB, the try that moved least is taken,
     and of tries that moved alike, the one that took least: the shorter a try, the less can come and go
     in it that no half shows. Here every try moves 2 mb; the first takes four times as long as every
     later one; and each try's total is 1 mb more than the one before, so the figure says which try
@@ -1012,13 +1033,13 @@ def test_of_tries_that_moved_alike_the_one_that_took_least_is_taken(tmp_path, mo
         return 100 * mb + halves[-1] * 2 * mb, 0
 
     times = []
-    for n in range(1, judge_module.TOGETHER_TRIES + 1):
+    for n in range(1, 8 + 1):
         times += [float(n), n + (2**-10 if n == 1 else 2**-12)]
     clock = iter(times)
     monkeypatch.setattr(judge_module, "_given_back", given_back)
     monkeypatch.setattr(judge_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     reading = judge_module.container_memory(group=group)
-    assert len(halves) == 2 * judge_module.TOGETHER_TRIES, f"the reading took {len(halves) // 2} tries"
+    assert len(halves) == 2 * 8, f"the reading took {len(halves) // 2} tries, not the eight the documents give"
     assert reading["taken"] == 202 * mb, f"the try taken was the {reading['taken'] // mb - 200}th"
 
 
@@ -2914,6 +2935,17 @@ def test_the_table_of_who_decided_a_case_has_every_way_a_runner_ends_and_every_r
     assert set(WRITTEN_REASONS.values()) == set(judge_module.UNMEASURED_REASONS), (
         set(WRITTEN_REASONS.values()) ^ set(judge_module.UNMEASURED_REASONS))
     assert {end for _, end in PATHS if end} == set(judge_module.RUNNER_ENDS)
+
+
+def test_every_way_the_judge_tells_a_runner_ended_is_a_way_of_the_table():
+    """How the judge tells a case runner's run ended, over every exit code a process can end with, ended by
+    the kernel or not, and where its time was up: each thing it says has the form of one of the table's ways,
+    written out there, and every way of the table is said. A way the judge gains, or one it loses, fails this
+    test, whatever its list of ways says."""
+    shape = lambda said: re.sub(r"\d+", "N", said)
+    said = {shape(judge_module.runner_end(code, kernel)) for code in [None, *range(-64, 256)] for kernel in (False, True)}
+    written = {shape(message) for end, (_, _, message) in ENDINGS.items() if end != "by itself"} | {""}
+    assert said == written, said ^ written
 
 
 def test_the_outcome_of_a_case_is_given_by_who_decided_it_and_what_its_notes_say(tmp_path, monkeypatch):
