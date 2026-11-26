@@ -36,6 +36,7 @@ NO_IMAGE = "not test_vet_in_the_language_image"
 PARTS = 8
 ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
 LIMIT = 420
+PER_TEST = 150
 OUTCOMES = (" PASSED", " FAILED", " ERROR", " SKIPPED", " XFAIL", " XPASS")
 
 
@@ -83,10 +84,13 @@ def unfinished(part: list[str], said: str) -> str | None:
     return None
 
 
-def failures(said: str, code: int) -> list[str]:
-    """The tests a finished process names as failed or in error, as the job of the second lines reads them."""
+def failures(said: str, code: int | None) -> list[str]:
+    """The tests a process names as failed or in error: in its summary, as the job of the second lines reads
+    them, or, for a process that was ended, on the line of each test as it finished."""
     named = [line.split(" ", 1)[1].split(" - ")[0] for line in said.splitlines() if line.startswith(("FAILED ", "ERROR "))]
-    return named or ([f"a run that ended with exit code {code}"] if code != 0 else [])
+    named += [line.split(f" {o}", 1)[0] for line in said.splitlines() if line.startswith("tests/")
+              for o in ("FAILED", "ERROR") if f" {o}" in line and line.split(f" {o}", 1)[0] not in named]
+    return list(dict.fromkeys(named)) or ([f"a run that ended with exit code {code}"] if code not in (0, None) else [])
 
 
 def run_tests(repo: Path) -> dict:
@@ -105,18 +109,31 @@ def run_tests(repo: Path) -> dict:
         files = [outs / f"{g}-{i}.txt" for i in range(len(group))]
         runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-v", "-p", "no:cacheprovider", *part], cwd=repo / "bench",
                                  env=env, stdout=open(file, "w"), stderr=subprocess.STDOUT) for part, file in zip(group, files)]
+        # a process whose output has not grown for PER_TEST seconds is in a test that does not end
+        sizes, moved = [0] * len(runs), [time.monotonic()] * len(runs)
         while any(run.poll() is None for run in runs) and time.monotonic() < deadline:
             time.sleep(0.5)
+            for k, (file, run) in enumerate(zip(files, runs)):
+                size = file.stat().st_size if file.exists() else 0
+                if size != sizes[k]:
+                    sizes[k], moved[k] = size, time.monotonic()
+                elif run.poll() is None and time.monotonic() - moved[k] > PER_TEST:
+                    run.kill()
+                    run.wait()
         hung = []
         for part, file, run in zip(group, files, runs):
             if run.poll() is None:
                 run.kill()
                 run.wait()
-                hung.append(unfinished(part, file.read_text(errors="replace")) or "a test of the part, all of them reported")
-                continue
             said = file.read_text(errors="replace")
-            collected += sum(int(m) for m in re.findall(r"^collected (\d+) items?", said, re.M))
+            collected += sum(int(m) for m in re.findall(r"collected (\d+) items?", said))
             collection_errors += len(re.findall(r"^_+ ERROR collecting ", said, re.M))
+            if run.returncode < 0:
+                # ended here: the test it had not finished is named, and the tests it had failed count
+                hung.append(unfinished(part, said) or "a test of the part, all of them reported")
+                failed += failures(said, None)
+                print(said[-3000:])
+                continue
             codes.append(run.returncode)
             failed += failures(said, run.returncode)
             if run.returncode != 0:
