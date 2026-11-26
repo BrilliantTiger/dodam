@@ -1,7 +1,6 @@
-# Breaks one statement of the judge's code in each job and runs the tests the job of the second lines runs.
-# It lives on a branch of its own that is never merged, and the branch is removed once its results are
-# written down. A job fails where a test fails: the break is caught. See breaks/run.py.
-name: breaks
+# The two honest cases of the attacks job, ten times over in each job, at the mended head and at the head
+# before it, in turn. It lives on a branch of its own that is never merged. See repeats/repeat.py.
+name: repeats
 
 on:
   push:
@@ -10,7 +9,6 @@ on:
 permissions:
   contents: read
 
-# one run at a time, so that no more jobs run at once than the matrix allows
 concurrency:
   group: breaks
   cancel-in-progress: false
@@ -26,13 +24,13 @@ jobs:
         with:
           persist-credentials: false
       - id: keys
-        run: python3 breaks/run.py keys >> "$GITHUB_OUTPUT"
+        run: python3 repeats/repeat.py keys >> "$GITHUB_OUTPUT"
 
-  break:
+  repeat:
     needs: keys
     name: ${{ matrix.key }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -46,7 +44,7 @@ jobs:
           persist-credentials: false
           path: side
       - id: tree
-        run: python3 side/breaks/run.py ref "$KEY" >> "$GITHUB_OUTPUT"
+        run: python3 side/repeats/repeat.py ref "$KEY" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -59,9 +57,8 @@ jobs:
         working-directory: repo/bench
         run: |
           python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
-      - name: List the tests with nothing broken
-        run: python side/breaks/run.py list "$KEY" repo
-      - name: Break the statement
-        run: python side/breaks/run.py break "$KEY" repo
-      - name: Run the tests
-        run: python side/breaks/run.py test "$KEY" repo
+      - name: Build the Python language image
+        working-directory: repo/bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: Run the two tests ten times
+        run: python side/repeats/repeat.py run repo
