@@ -1971,6 +1971,24 @@ def test_a_case_whose_first_reading_was_cut_by_time_has_no_starting_figure_in_a_
     assert case["outcome"] == judge_module.UNMEASURED and case["fell_below_start_bytes"] == 0, case
 
 
+# With one look in the run: the reading the run begins with is the first try, the run's look the next, and
+# the reading taken when it has ended the one after. Each of the two around the run, cut by time.
+LATE_AROUND_A_RUN = {
+    "the reading the run begins with": way(takes(40, 9), late=tuple(1 + i for i in EIGHT)),
+    "the reading taken when the run has ended": way(takes(40, 2), late=tuple(3 + i for i in EIGHT)),
+}
+
+
+@pytest.mark.parametrize("which", LATE_AROUND_A_RUN)
+def test_a_reading_cut_by_time_around_a_run_is_counted_as_late(tmp_path, which):
+    """A case counts every reading cut by time as late, the one a run begins with and the one taken when
+    it has ended as well as those during the run, so that its record says why it could not pass: here one,
+    which is its one reading that could not decide, and the case is unmeasured."""
+    result, seen = judge_measured(tmp_path, LATE_AROUND_A_RUN[which], watch=1000.0)
+    assert (seen["late"], seen["undecided"]) == (1, 1), (which, seen)
+    assert the_case(result)["outcome"] == judge_module.UNMEASURED, (which, the_case(result))
+
+
 def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_decide_as_nought_where_none(tmp_path):
     """A case whose figure never fell below where it began, and whose readings all decided, says 0 of
     both; so does a case whose reading at its start was cut by time, from which no figure fell."""

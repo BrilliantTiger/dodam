@@ -1660,6 +1660,8 @@ LEAVES_KERNEL_TESTS = """
 def test_leaves():
     with case() as c:
         r = c.run(["maps"])
+        with open("/logs/verifier/leaves.json", "w") as f:
+            json.dump({"measured": c.measured}, f)
         assert r.out == "mapped\\n", r
 
 
