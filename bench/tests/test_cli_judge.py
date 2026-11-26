@@ -1953,6 +1953,24 @@ def test_the_lines_at_which_a_program_is_ended_are_held_to_the_byte(tmp_path, li
     assert seen["limit"] == limit and the_case(result)["outcome"] == outcome, (line, seen, the_case(result))
 
 
+# The reading the first run begins with is cut by time; during that run 40 MB of what stood go, and they
+# come back when it has ended, before the second run begins.
+CUT_START_AND_BACK = way("    if n == 9 and part == 'total' and not runs_ended():\n        move(held, current=-40)\n"
+                         "    if part == 'total' and runs_ended() == 1 and not BACK[0]:\n"
+                         "        move(held, current=40)\n        BACK[0] = 1\n",
+                         late=tuple(1 + i for i in EIGHT)) + "\n\nBACK = [0]\n"
+
+
+def test_a_case_whose_first_reading_was_cut_by_time_has_no_starting_figure_in_a_later_run(tmp_path):
+    """A case has one starting figure, read before its first run. Where that reading was cut by time,
+    the case has none, and a later run's first reading does not become it: a case that never fell below
+    where it began says it fell by nothing, not by what went during its first run. It cannot pass."""
+    result, seen = judge_measured(tmp_path, CUT_START_AND_BACK, runs=2)
+    case = the_case(result)
+    assert seen["lowest"] is not None and seen["undecided"], seen
+    assert case["outcome"] == judge_module.UNMEASURED and case["fell_below_start_bytes"] == 0, case
+
+
 def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_decide_as_nought_where_none(tmp_path):
     """A case whose figure never fell below where it began, and whose readings all decided, says 0 of
     both; so does a case whose reading at its start was cut by time, from which no figure fell."""
@@ -2217,13 +2235,20 @@ def test_a_case_begins_once_the_kernel_has_given_back_what_it_kept_of_the_previo
 FALLS_AFTER = way(takes(40)) + "\n\n\ndef kernel_part(held):\n    return (10 if runs_ended() else 13) * MB\n"
 FALLS_ONCE = (way(takes(40)) + "\n\nLOOKS = [0]\n\n\ndef kernel_part(held):\n    LOOKS[0] += 1\n"
               "    return int((11.5 if LOOKS[0] == 1 else 10) * MB)\n")
+# 10 MB until a run has ended, then 14: the part rose after the case began
+RISES_AFTER = way(takes(40)) + "\n\n\ndef kernel_part(held):\n    return (14 if runs_ended() else 10) * MB\n"
+# 15 MB until the first run has ended, 10 after it, 14 after the second: it fell 5 MB at the most
+FALLS_THEN_RISES = way(takes(40)) + "\n\n\ndef kernel_part(held):\n    return {0: 15, 1: 10}.get(runs_ended(), 14) * MB\n"
 WAITS = {
     # still at the first look: the case begins at once, and says how much the part fell after it began
-    "still, then falls once a run has ended": (FALLS_AFTER, 1, 0, 3 * 2**20),
+    "still, then falls once a run has ended": (FALLS_AFTER, 1, 0, 3 * 2**20, 1),
     # 1.5 MB lower at the second look, more than the 1 MB taken as still: the wait looks once more
-    "falls 1.5 MB, then still": (FALLS_ONCE, 2, int(1.5 * 2**20), 0),
+    "falls 1.5 MB, then still": (FALLS_ONCE, 2, int(1.5 * 2**20), 0, 1),
     # 30 MB higher at first, falling 10 MB a look until it is still
-    "falls 10 MB a look": (SETTLING, 3, 20 * 2**20, 0),
+    "falls 10 MB a look": (SETTLING, 3, 20 * 2**20, 0, 1),
+    # what the part fell after the case began is never below nothing, and the most it fell over the runs
+    "still, then rises once a run has ended": (RISES_AFTER, 1, 0, 0, 1),
+    "falls after the first run, rises after the second": (FALLS_THEN_RISES, 1, 0, 5 * 2**20, 2),
 }
 
 
@@ -2232,9 +2257,10 @@ def test_each_case_says_how_long_it_waited_and_how_much_the_kernels_part_fell(tm
     """The judge reads the kernel's own part of the container until it is still: one look at least,
     and as many as it keeps falling by more than 1 MB from one to the next. The case says how many
     looks that took, how much the part fell meanwhile, and how much more it fell once the case had
-    begun. A wait that ends with the part still lets the case be judged as any other."""
-    code, looks, fell, after = WAITS[wait]
-    result, seen = judge_measured(tmp_path, code, memory_mb="256")
+    begun: the most it fell below where the wait left it when any run of the case had ended, and
+    nothing where it rose. A wait that ends with the part still lets the case be judged as any other."""
+    code, looks, fell, after, runs = WAITS[wait]
+    result, seen = judge_measured(tmp_path, code, memory_mb="256", runs=runs)
     assert (seen["settle_looks"], seen["settle_fell"], seen["kernel_fell_after"]) == (looks, fell, after), seen
     if code is not SETTLING:
         assert the_case(result)["outcome"] == "passed", the_case(result)
