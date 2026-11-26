@@ -4132,6 +4132,9 @@ def test_the_tests_helper_changes_nothing_outside_the_three_folders_it_is_given(
             time.sleep(0.01)
         assert (asked / "answer-one").exists(), f"the helper gave no answer: {helper.stderr.read()[-2000:] if helper.poll() is not None else 'it is still running'}"
         answer = json.loads((asked / "answer-one").read_text())
+        # the answer is written before the container goes on: the helper is stopped only once it has let it go
+        while (held / freeze).read_text() != "0" and time.monotonic() < deadline and helper.poll() is None:
+            time.sleep(0.01)
     finally:
         helper.kill()
         helper.wait()
