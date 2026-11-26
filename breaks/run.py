@@ -12,7 +12,9 @@ How a break is caught: a test fails (or a run of the tests ends with an error of
 with it; or a test does not end: a run of the tests still going LIMIT seconds after the tests began is ended,
 and in each process still going the test it had not finished is named. With nothing broken all the tests end
 in well under two minutes on the machine of the automatic check. Where no test fails and every run ends, the
-break is not caught and the job passes. The last line the job prints, RECORD and a line of JSON, says which.
+break is not caught and the job passes. The last line the job prints, RECORD and a line of JSON, says which,
+with how many tests were listed before the break and how many the runs collected after it, and how many files of
+tests could not be collected.
 
     python run.py keys                 every key of the list, for the jobs
     python run.py ref KEY              the commit of the key's tree
@@ -21,6 +23,7 @@ break is not caught and the job passes. The last line the job prints, RECORD and
     python run.py test KEY REPO        the tests, run in REPO"""
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -96,6 +99,7 @@ def run_tests(repo: Path) -> dict:
     outs.mkdir(exist_ok=True)
     deadline = time.monotonic() + LIMIT
     failed, codes = [], []
+    collected = collection_errors = 0
     for g, group in enumerate(([rest[i::PARTS] for i in range(PARTS)], [alone])):
         group = [part for part in group if part]
         files = [outs / f"{g}-{i}.txt" for i in range(len(group))]
@@ -111,6 +115,8 @@ def run_tests(repo: Path) -> dict:
                 hung.append(unfinished(part, file.read_text(errors="replace")) or "a test of the part, all of them reported")
                 continue
             said = file.read_text(errors="replace")
+            collected += sum(int(m) for m in re.findall(r"^collected (\d+) items?", said, re.M))
+            collection_errors += len(re.findall(r"^_+ ERROR collecting ", said, re.M))
             codes.append(run.returncode)
             failed += failures(said, run.returncode)
             if run.returncode != 0:
@@ -118,8 +124,10 @@ def run_tests(repo: Path) -> dict:
         if hung:
             # a test that failed in a process that ended comes first; the tests that did not end are named too
             return {"how": "a failing test" if failed else "a test that does not end", "tests": failed or hung,
-                    "did_not_end": hung, "codes": codes}
-    return {"how": "a failing test" if failed else None, "tests": failed, "codes": codes}
+                    "did_not_end": hung, "codes": codes, "listed": len(nodes), "collected": collected,
+                    "collection_errors": collection_errors}
+    return {"how": "a failing test" if failed else None, "tests": failed, "codes": codes, "listed": len(nodes),
+            "collected": collected, "collection_errors": collection_errors}
 
 
 def main(argv: list[str]) -> int:
