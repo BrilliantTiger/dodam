@@ -575,6 +575,8 @@ class Case:
                 # before it is measured once is judged by this reading alone
                 self._bound(held_before, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()
         started = time.monotonic()
         try:
@@ -606,6 +608,8 @@ class Case:
                 self._records(held_after)
                 self._bound(held_after, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()
             if self._kernel_start is not None:
                 # how much the kernel's own part still fell after the wait
