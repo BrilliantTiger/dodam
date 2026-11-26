@@ -196,12 +196,12 @@ def reading(label):
     with open("/logs/reading/ask.tmp", "w") as f:
         f.write(label)
     os.rename("/logs/reading/ask.tmp", "/logs/reading/ask-" + label)
-    for _ in range(6000):
+    for _ in range(30000):
         try:
             with open("/logs/reading/answer-" + label) as f:
                 return json.load(f)
         except (OSError, ValueError):
-            time.sleep(0.005)
+            time.sleep(0.001)
     raise AssertionError("no reading came from outside the container")
 
 
@@ -254,10 +254,10 @@ def held_until_read():
     # said before the file goes: from then on the reading from outside may come at any moment
     ASKED.append(True)
     os.unlink("holding-not-yet")
-    for _ in range(12000):
+    for _ in range(60000):
         if not os.path.exists("not-read-yet"):
             return
-        time.sleep(0.005)
+        time.sleep(0.001)
 """
 
 
@@ -2373,16 +2373,21 @@ elif sys.argv[1] == "reads again and again":
     import json, mmap, threading
     large = os.open("/app/large.bin", os.O_RDONLY)
     view = memoryview(mmap.mmap(large, 0, mmap.MAP_SHARED, mmap.PROT_READ))
-    stood = []
+    stood = {}
+    # the two threads have taken their first time before the program goes on
+    begun = threading.Barrier(3)
 
     def again(first):
         # Each thread rests a little after every 4 MB, so that the two never take all of the container's
-        # two processors and nothing but the container standing still holds them back for long, while
-        # each still reads the whole file in well under a tenth of a second. Once the program holds what it
-        # holds, a thread that stood still for more than 25 ms (the container is read standing still for at
-        # least 30) stops: it brings back nothing of what the kernel gave back, and says when it stood.
+        # two processors, while each still reads the whole file in well under a tenth of a second. Once the
+        # program holds what it holds, each thread notes every time it stood still for more than 25 ms (the
+        # container is read standing still for at least 30), and it stops once the test has had the reading
+        # and taken away the file that keeps the program going: a machine that holds the program back
+        # before the reading does not stop it, and after the reading it brings back almost nothing.
         pieces = range(0, len(view), 65536)              # small pieces: the copy is no memory to speak of
+        mine = stood.setdefault(str(first), [])
         last, n = time.monotonic(), 0
+        begun.wait()
         while True:
             for at in [*pieces[first:], *pieces[:first]]:
                 bytes(view[at:at + 65536])
@@ -2390,15 +2395,22 @@ elif sys.argv[1] == "reads again and again":
                 if n % 64 == 0:
                     time.sleep(0.0005)
                 now = time.monotonic()
-                if ASKED and now - last > 0.025:
-                    stood.append((last, now))
-                    return
+                if ASKED:
+                    if now - last > 0.025:
+                        mine.append((last, now))
+                    if not os.path.exists("not-read-yet"):
+                        # the time of the look itself is noted as well: the container may have stood still in it
+                        end = time.monotonic()
+                        if end - now > 0.025:
+                            mine.append((now, end))
+                        return
                 last = now
 
     # the two begin 100 MB apart
     threads = [threading.Thread(target=again, args=(first,), daemon=True) for first in (0, 100 * MB // 65536)]
     for thread in threads:
         thread.start()
+    begun.wait()
     time.sleep(0.5)
     held_until_read()
     for thread in threads:
@@ -2427,10 +2439,11 @@ def test_reads_again_and_again():
     r = attempt("reads again", ["reads again and again"])
     assert r.out == "done\\n"
     # both threads read until the container stood still to be read: each stood still for more than 25 ms
-    # over the moment the reading from outside found it standing still
+    # over the moment the reading from outside found it standing still, whatever else held them back
     stood = json.loads(r.err.split("stood still ", 1)[1].splitlines()[0])
     froze_at = json.load(open("/logs/verifier/attack.json"))["reads again"]["held"]["froze_at"]
-    assert len(stood) == 2 and all(t1 - t0 > 0.025 and t0 <= froze_at < t1 for t0, t1 in stood), (stood, froze_at, r.err)
+    assert len(stood) == 2 and all(any(t1 - t0 > 0.025 and t0 <= froze_at < t1 for t0, t1 in spans)
+                                   for spans in stood.values()), (stood, froze_at, r.err)
 
 
 def test_the_judged_container_cannot_ask_the_kernel_itself():
