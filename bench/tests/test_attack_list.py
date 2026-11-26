@@ -176,3 +176,17 @@ def test_a_second_line_whose_variant_leaves_some_tests_unlisted_does_not_hold():
                          "put": "COULD_NOT_JUDGE = (\n"}]}
     result = check.against_judge_tests(entry)
     assert result["verdict"] == "the tests could not be listed", result
+
+
+def test_the_documents_say_the_kernel_ending_the_judge_is_not_mended_while_the_test_keeps_the_judge_out_of_the_way():
+    """The test in which the kernel ends the case runner holds the judge still while the hidden test takes the
+    container's memory, because the kernel can end the judge at that moment, which this change does not mend.
+    Both documents say so for as long as the test holds the judge still, and only then: whoever mends the
+    fault takes the holding out of the test, and whoever calls it mended without that fails here."""
+    isolation = (BENCH / "tests" / "test_cli_isolation.py").read_text(encoding="utf-8")
+    holds = "JUDGE_HELD_STILL.replace(" in isolation and "os.kill(judge, signal.SIGSTOP)" in isolation
+    english = (DOCS / "command-line-tasks.en.md").read_text(encoding="utf-8")
+    korean = (DOCS / "command-line-tasks.ko.md").read_text(encoding="utf-8")
+    said = ("**The kernel can end the judge.**" in english and "This change does not mend it." in english,
+            "**커널이 판정기를 끝낼 수 있다.**" in korean and "이 변경은 그것을 고치지 않는다." in korean)
+    assert said == (holds, holds), (said, holds)

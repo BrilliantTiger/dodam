@@ -1872,6 +1872,41 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
         assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
 
 
+# The judge out of the way while the hidden test takes the container's memory: the kernel can end the judge
+# itself at that moment, a fault this change does not mend (the documents name it), and this test is about
+# what the judge does once the case runner is gone. A child of the case runner holds the judge still, waits
+# for the runner to be gone without asking for memory, and lets the judge go on once the container's memory
+# has come back, or after five seconds, whatever happens.
+JUDGE_HELD_STILL = '''
+    import ctypes, signal
+    libc = ctypes.CDLL(None, use_errno=True)
+    judge = os.getppid()
+    cap = int(open("/sys/fs/cgroup/memory.max").read())
+    current = os.open("/sys/fs/cgroup/memory.current", os.O_RDONLY)
+    held_r, held_w = os.pipe()
+    gone_r, gone_w = os.pipe()
+    if os.fork() == 0:
+        os.close(held_r)
+        os.close(gone_w)
+        buf = ctypes.create_string_buffer(32)
+        try:
+            os.kill(judge, signal.SIGSTOP)
+            os.write(held_w, b"x")
+            libc.read(gone_r, buf, 1)
+            for _ in range(1000):
+                n = libc.pread(current, buf, 31, 0)
+                if n > 0 and int(buf.raw[:n]) < cap - 64 * 2**20:
+                    break
+                time.sleep(0.005)
+        finally:
+            os.kill(judge, signal.SIGCONT)
+            os._exit(0)
+    os.close(held_w)
+    os.close(gone_r)
+    assert os.read(held_r, 1) == b"x"
+'''
+
+
 def test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running(tmp_path):
     """Really out of memory, five times over: a hidden test takes the memory itself, so the kernel
     ends the case runner and not a program."""
@@ -1882,6 +1917,7 @@ def test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running(tmp_
 def test_the_one_that_is_ended():
     with case() as c:
         assert c.run(["plain"]).out == "plain\\n"
+''' + JUDGE_HELD_STILL.replace("\n    ", "\n        ") + '''
         blocks = []
         while True:
             blocks.append(bytearray(b"x") * (16 * 2**20))
