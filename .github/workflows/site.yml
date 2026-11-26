@@ -33,15 +33,15 @@ jobs:
           # In isolated mode, so that nothing placed in the root of the repository runs in place of pip.
           python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt
       - name: The committed pages are what the template builds
-        run: python tools/site/build.py --check
+        run: python -I tools/site/build.py --check
       - name: Build what would be published, with a made-up status that carries markup in a title
-        run: python tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json
+        run: python -I tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json
       - name: Lay the page out at every size with the question about measurement open, and check that it asks first
-        run: python tools/site/sweep.py --site "$RUNNER_TEMP/site" --consent
+        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/site" --consent
       - name: Build it again as it would be without a measurement ID
-        run: python tools/site/build.py --live "$RUNNER_TEMP/unmeasured" --status tools/site/sample_status.json --analytics ""
+        run: python -I tools/site/build.py --live "$RUNNER_TEMP/unmeasured" --status tools/site/sample_status.json --analytics ""
       - name: Lay that out as well, and check that it asks no other host for anything
-        run: python tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"
+        run: python -I tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"
 
   # Everything about the desk: its own tests (the tools, the relay, the lock), and the same check of the layout
   # with a way to the desk open. The facts of the desk are the real ones; only the opening dates and the measured
@@ -70,10 +70,10 @@ jobs:
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider tests/test_desk.py tests/test_desk_lock.py
       - name: Build what would be published with the way on GitHub open
-        run: python tools/site/build.py --live "$RUNNER_TEMP/github" --status tools/site/sample_status.json --open github
+        run: python -I tools/site/build.py --live "$RUNNER_TEMP/github" --status tools/site/sample_status.json --open github
       - name: Lay that out at every size
-        run: python tools/site/sweep.py --site "$RUNNER_TEMP/github" --desk github
+        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/github" --desk github
       - name: Build it again with both ways open
-        run: python tools/site/build.py --live "$RUNNER_TEMP/both" --status tools/site/sample_status.json --open github,live
+        run: python -I tools/site/build.py --live "$RUNNER_TEMP/both" --status tools/site/sample_status.json --open github,live
       - name: Lay that out at every size
-        run: python tools/site/sweep.py --site "$RUNNER_TEMP/both" --desk github,live
+        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/both" --desk github,live

@@ -20,6 +20,7 @@ comes from the session except the arguments named in each tool's description.
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import math
 import os
@@ -46,6 +47,13 @@ MAX_NUMBER = 10_000_000
 TOKEN_FILE = "github-token"
 COUNTS_FILE = "desk-counts.json"
 SHOWN_FILE = "shown.json"
+# The relay gives every session a list of its own for whose text it was shown, named here, so that a call of a session
+# that ended can change nothing the relay reads about another.
+# What stands in place of a variable text of a message to the coordinator that the check refuses: fixed words only.
+LEFT_OUT = "(this text is left out: it holds what the desk does not send)"
+SHOWN_NAME = re.compile(r"^shown-[0-9a-f]{16}\.json$")
+# The tools that send something. When its session ends, the tool server waits for these, and for no call that only reads.
+SENDING = ("answer", "add_label", "tell_coordinator")
 # Arrivals that were not kept or did not stay kept, counted one by one for the account that wrote them.
 DROPPED = "arrivals dropped"
 # The lines the relay writes about one session into the kept reports: that it ended the session, and that the session
@@ -91,14 +99,66 @@ PASSING_ON = re.compile(
     r"|avis\w+|inform(?:a|an|ar\w*|ad[oa]s?|é|ó|amos)|notific\w+|comunic\w+|pasar\w*|pasad\w+|pas[éó]|transmit\w+|traslad\w+)\b"
     r"|전달|알리|알렸|알려|보고|통보|넘기|넘겼|伝え|知らせ|報告|通知|連絡|引き継"
 )
+# The usual words for whom, in each language of the project: the agents, the maintainers, the team, the coordinator, the
+# owner, those in charge. One table, which the check and its tests read. A word of Latin letters is a stem: it stands at
+# the beginning of a word (no Latin letter or digit before it), and any letters may follow it, so that every form of the
+# word is found, with a Korean or Japanese ending attached too. Words of Korean and Japanese are found wherever they stand.
+WHOM_WORDS = {
+    "en": ["agent", "maintainer", "coordinat", "team", "owner", "staff"],
+    "es": ["agente", "mantenedor", "responsable", "equipo", "coordinador", "propietari", "dueñ", "duen"],
+    "ko": ["에이전트", "관리자", "담당", "메인테이너", "코디네이터", "소유자", "팀", "오너"],
+    "ja": ["エージェント", "メンテナ", "担当", "チーム", "管理者", "コーディネーター", "所有者", "オーナー"],
+}  # fmt: skip
 WHOM = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:" + "|".join(map(re.escape, WHOM_WORDS["en"] + WHOM_WORDS["es"])) + r")\w*"
+    r"|" + "|".join(map(re.escape, WHOM_WORDS["ko"] + WHOM_WORDS["ja"]))
+)
+# Short forms whose point ends no sentence, whatever follows it, in the languages of the project that write them with a
+# point. Beside the table, the rule: the point of one or two letters (also in pairs, as in a time of day or the name of a
+# country) ends no sentence, and neither does a point that a space and a small letter or a digit follow, nor an ellipsis.
+SHORT_FORMS = ["e.g.", "i.e.", "cf.", "etc.", "vs.", "approx.", "incl.", "esp.", "viz.", "p. ej.", "aprox.", "Sr.", "Sra.", "Srta.", "Dr.", "Dra.",
+               "Mr.", "Mrs.", "Ms.", "No.", "núm.", "pág.", "Prof.", "Ud.", "Uds.", "Vd.", "Vds.", "St.", "Jr.", "Sr.", "dpto.", "Mt.", "Inc.", "Ltd.",
+               "Co.", "Corp.", "Dept.", "Fig.", "Vol.", "Ed.", "Ave.", "Blvd.", "Lic.", "Ing.", "Avda.", "Sta.", "Sto."]  # fmt: skip
+SHORT_FORM = re.compile(r"(?i)(?<![^\W\d_])(?:" + "|".join(re.escape(form).replace(r"\ ", r"\s*") for form in sorted(set(SHORT_FORMS), key=len, reverse=True)) + r")")
+# One or two letters with a point: the point goes.
+LETTERS_WITH_A_POINT = re.compile(r"(?<![^\W\d_])([^\W\d_]{1,2})\.")
+ELLIPSIS = re.compile(r"\.(?:\s*\.){1,}|…")
+# Where a sentence ends: a line break, a full stop of Japanese, or a point, an exclamation or a question mark that the
+# end of the text follows, or a space and then something that is not a small letter or a digit.
+SENTENCE_END = re.compile(r"[.!?]+(?=\s*$|\s+(?![a-záéíñóúü0-9]))|[。！？\n]+")
+
+
+# The told check as main had it before this round, word for word. It stays beside the new one, and a claim either
+# of them catches is refused: whatever main caught, the desk still catches.
+MAIN_PASSING_ON = re.compile(
+    r"(?i)\b(?:tell|tells|told|telling|notif(?:y|ies|ied|ying)|inform(?:s|ed|ing)?|alert(?:s|ed|ing)?|escalat(?:e|es|ed|ing)|forward(?:s|ed|ing)?"
+    r"|pass(?:es|ed|ing)?\s+(?:\S+\s+){0,3}(?:on|along)|hand(?:s|ed|ing)?\s+(?:\S+\s+){0,3}over|let(?:ting)?\s+(?:\S+\s+){0,5}know|report(?:s|ed|ing)?\s+(?:this|it|that)"
+    r"|avis\w+|inform(?:a|an|ar\w*|ad[oa]s?|é|ó|amos)|notific\w+|comunic\w+|pasar\w*|pasad\w+|pas[éó]|transmit\w+|traslad\w+)\b"
+    r"|전달|알리|알렸|알려|보고|통보|넘기|넘겼|伝え|知らせ|報告|通知|連絡|引き継"
+)
+MAIN_WHOM = re.compile(
     r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*)\b"
     r"|에이전트|관리자|담당|메인테이너|코디네이터|エージェント|メンテナ|担当|チーム|管理者|コーディネーター"
 )
 
 
+def main_says_told(text: str) -> bool:
+    return any(MAIN_PASSING_ON.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+
+
 def says_agents_were_told(text: str) -> bool:
-    return any(PASSING_ON.search(sentence) and WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+    """Whether a sentence of the text makes the claim in the usual words, by the new check or by main's. The sentences
+    are found in the text as written (a capital after a point is part of the rule); each is then read in one width and
+    one case."""
+    return main_says_told(text) or _says_agents_were_told(text)
+
+
+def _says_agents_were_told(text: str) -> bool:
+    text = unicodedata.normalize("NFKC", text).replace("…", "...")
+    text = ELLIPSIS.sub(" ", text)
+    text = SHORT_FORM.sub(lambda found: found.group(0).replace(".", ""), text)
+    text = LETTERS_WITH_A_POINT.sub(r"\1", text)
+    return any(PASSING_ON.search(sentence) and WHOM.search(sentence) for sentence in SENTENCE_END.split(text))
 
 
 def accounts_of(value) -> list[int]:
@@ -121,20 +181,28 @@ def charge_of(session: dict) -> float:
     return session["reserved"] if session["charged"] is None else session["charged"]
 
 
-# A number as it is written: digits, and points or commas between digits (a version, a sum of money, thousands).
-NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+# What is a number to a cut: a word that holds a digit, with everything joined to it (its sign, its points and commas,
+# the hyphens of a date or a range, the letters of a hexadecimal value, a unit or an ending attached to it).
+NUMBER = re.compile(r"\S*\d\S*")
+# The letters of the Latin alphabet that the desk writes with, those with accents among them, and the digits.
+LATIN_LETTER = re.compile(r"[A-Za-z0-9ÁÉÍÑÓÚÜáéíñóúüªº]")
 
 
 def cut(text: str, limit: int) -> str:
-    """The text within its bound. A number is never cut: one that does not fit whole is left out, with its points and commas."""
+    """The text within its bound, cut only at a word's edge. A word that holds a digit is never cut, nor a run of Latin
+    letters and digits: one that does not fit whole is left out. (Between letters of Korean or Japanese a cut may fall.)"""
     if len(text) <= limit:
         return text
-    for found in NUMBER.finditer(text):
-        if found.start() >= limit:
-            break
-        if found.end() > limit:
-            return text[: found.start()]
-    return text[:limit]
+    end = limit
+    while True:
+        before = end
+        for found in NUMBER.finditer(text):
+            if found.start() < end < found.end():
+                end = found.start()
+        while 0 < end and LATIN_LETTER.match(text[end - 1]) and LATIN_LETTER.match(text[end]):
+            end -= 1
+        if end == before:
+            return text[:end]
 
 
 def named(numbers: list[int], room: int, most: int | None = None) -> str:
@@ -161,16 +229,19 @@ def most_used(sessions: list[dict], by_units: bool = False) -> list[int]:
 
 def empty_record() -> dict:
     return {"answers": [], "labels": [], "reports": [], "sent": [], "sessions": [], "uncounted": {}, "last_digest": 0.0, "clock": 0.0,
-            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}, "not_delivered": [], "digest_ticks": None, "placings": []}  # fmt: skip
+            "ended_in_a_row": {}, "closed": {}, "closed_items": {}, "went": {}, "not_delivered": [], "digest_ticks": None, "digest_boot": None,
+            "placings": []}  # fmt: skip
 
 
 def checked_record(data) -> dict:
     """The record as it was written, or an error when it is not what the tools write."""
     # The desk's time was added later; a record written before it starts at nothing. So were the others named here.
-    later = ("clock", "ended_in_a_row", "closed", "closed_items", "went", "not_delivered", "digest_ticks", "placings")
+    later = ("clock", "ended_in_a_row", "closed", "closed_items", "went", "not_delivered", "digest_ticks", "digest_boot", "placings")
     record = {key: data.get(key, default) if key in later else data[key] for key, default in empty_record().items()}
     if record["digest_ticks"] is not None and (isinstance(record["digest_ticks"], bool) or not isinstance(record["digest_ticks"], (int, float))):
         raise ValueError("digest_ticks")
+    if record["digest_boot"] is not None and not isinstance(record["digest_boot"], str):
+        raise ValueError("digest_boot")
     if not isinstance(record["placings"], list) or not all(isinstance(name, str) for name in record["placings"]):
         raise ValueError("placings")
     if not isinstance(record["ended_in_a_row"], dict) or not isinstance(record["closed"], dict) or not isinstance(record["closed_items"], dict):
@@ -203,6 +274,22 @@ now = time.time
 # The computer's count of the time since it was started, which no setting of its clock changes. It keeps the hour
 # between two digests. It may stand still while the computer sleeps, and it begins anew when the computer is started again.
 ticks = time.monotonic
+
+
+@functools.lru_cache(maxsize=1)
+def boot() -> str | None:
+    """Which start of the computer this is, as the computer itself names it; None where it does not say.
+
+    The count of ticks begins anew at every start, so a count is compared only with a count of the same start.
+    """
+    try:
+        if os.path.exists("/proc/sys/kernel/random/boot_id"):
+            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+                return handle.read().strip() or None
+        done = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, timeout=5)
+        return done.stdout.strip() or None if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 class Refused(Exception):
@@ -453,6 +540,9 @@ class Desk:
         self.shown: set[int] = set()
         # Calls of one session run at once, each in its own thread: whose text was shown is written by one at a time.
         self.showing = threading.Lock()
+        # The session's own list of whose text it was shown, named by the relay for this session alone.
+        named = env.get("DESK_SHOWN")
+        self.shown_name = named if isinstance(named, str) and SHOWN_NAME.fullmatch(named) else SHOWN_FILE
 
     # -- shared checks ------------------------------------------------------
 
@@ -488,9 +578,17 @@ class Desk:
             raise Refused(f"{what.capitalize()} is {len(value)} characters long; the most allowed is {limit}. Nothing was sent.")
         return value
 
+    def holds_in(self, parts: list[tuple[str, bool]], keys: bool = True) -> list[str]:
+        """What the check finds in a text made of fixed and variable parts, exactly as it is sent."""
+        return guard.leaks_in(parts, self.machine + guard.state_paths(self.state), self.copy, self.public, keys=keys)
+
+    def holds(self, text: str, keys: bool = True) -> list[str]:
+        """What the check on text that leaves finds in a text, exactly as it is sent. The state folder's own path is among it."""
+        return guard.outgoing(text, self.machine + guard.state_paths(self.state), self.copy, self.public, keys=keys)
+
     def outgoing(self, text: str, what: str) -> None:
-        """The one place every text passes before it goes to an outsider. The state folder's own path is among what it refuses."""
-        found = guard.outgoing(text, self.machine + guard.state_paths(self.state), self.copy, self.public)
+        """The one place every text passes before it goes to an outsider, as it is sent."""
+        found = self.holds(text)
         if found:
             raise Refused(f"Nothing was sent. {what.capitalize()} holds " + ", ".join(found) + ". Write it without that.")
 
@@ -549,8 +647,22 @@ class Desk:
 
     # -- what the desk has to tell: kept first, then sent ---------------------
 
-    def _send(self, record: dict, what: str, subject: str, lines: list[str]) -> bool:
+    def safe_lines(self, lines: list) -> list[str]:
+        """The lines of a message to the coordinator as they are sent. A line is the desk's own fixed words and numbers, or a
+        pair (fixed words, variable text). The whole is checked once, by fields: when a hit touches variable text, every
+        variable text of the message is replaced by fixed words, so that the message always goes and holds only the desk's
+        own words and numbers, which are never searched."""
+        parts: list[tuple[str, bool]] = [(self.lock["coordinator"]["first_line"] + "\n", False)]
+        for line in lines:
+            parts += [(line[0], False), (line[1], True)] if isinstance(line, tuple) else [(line, False)]
+            parts.append(("\n", False))
+        if not self.holds_in(parts, keys=False):
+            return [line[0] + line[1] if isinstance(line, tuple) else line for line in lines]
+        return [line[0] + LEFT_OUT if isinstance(line, tuple) else line for line in lines]
+
+    def _send(self, record: dict, what: str, subject: str, lines: list) -> bool:
         """Send one message now and write down that it was sent. False when it could not be sent."""
+        lines = self.safe_lines(lines)
         try:
             # What is about to be sent is in the kept list, in the state folder, before it goes anywhere.
             state_files.write(self.state / COUNTS_FILE, "The desk's record", json.dumps(record))
@@ -592,7 +704,7 @@ class Desk:
                 entry = {"t": record["clock"], "kind": "desk_down", "number": None, "accounts": [], "line": line, "sent": False, "digested": False}
                 record["reports"].append(entry)
                 if len([sent for sent in record["sent"] if sent["what"] == "desk_down"]) < settings["desk_down_per_day"]:
-                    entry["sent"] = self._send(record, "desk_down", "Desk: the desk itself is not working", ["Kind: desk_down", "Written by the desk's relay, not by a session: " + line])
+                    entry["sent"] = self._send(record, "desk_down", "Desk: the desk itself is not working", ["Kind: desk_down", ("Written by the desk's relay, not by a session: ", line)])
                 return entry["sent"]
         except Refused:
             # The record itself is what is damaged. Said once by each running desk, without a record.
@@ -600,7 +712,8 @@ class Desk:
                 return False
             self.said_down_without_record = True
             try:
-                self.deliver("Desk: the desk itself is not working", "\n".join([self.lock["coordinator"]["first_line"], "Kind: desk_down", "Written by the desk's relay, not by a session: " + cut(guard.shown(" ".join(line.split())), 300)]))
+                lines = self.safe_lines(["Kind: desk_down", ("Written by the desk's relay, not by a session: ", cut(guard.shown(" ".join(line.split())), 300))])
+                self.deliver("Desk: the desk itself is not working", "\n".join([self.lock["coordinator"]["first_line"], *lines]))
             except Refused:
                 return False
             return True
@@ -697,11 +810,13 @@ class Desk:
     def report(self, kind: str, number: int | None, summary: str) -> str:
         """Keep one report of a session, and send it at once when its kind is one that cannot wait for the digest."""
         settings = self.lock["coordinator"]
-        # The coordinator is not an outsider, so a summary may quote what an outsider wrote, a key included.
-        # A character that is not on the list of what the desk writes with goes to nobody.
-        if guard.not_allowed(summary):
-            raise Refused(f"Nothing was kept. The summary holds {guard.NOT_ALLOWED}. Write it without that.")
+        # The coordinator is not an outsider, so a summary may quote what an outsider wrote, a key included. Everything else
+        # of the check on text that leaves holds for it: the characters, the known values, the paths and private places.
+        # The summary as it was given (every character of it), and the line as it is kept: its line breaks and tabs made spaces.
         line = " ".join(summary.split())
+        found = list(dict.fromkeys(self.holds(summary, keys=False) + self.holds(line, keys=False)))
+        if found:
+            raise Refused("Nothing was kept. The summary holds " + ", ".join(found) + ". Write it without that.")
         with self.counts() as record:
             moment = record["clock"]
             if number is not None and any(e["kind"] == kind and e["number"] == number and moment - e["t"] < DAY for e in record["reports"]):
@@ -727,7 +842,7 @@ class Desk:
                 lines = ["Kind: vulnerability"]
                 if number is not None:
                     lines.append(f"Item: https://github.com/{self.repository}/issues/{number}")
-                lines.append("Summary by the desk, which may quote outside text: " + line)
+                lines.append(("Summary by the desk, which may quote outside text: ", line))
                 # A report that was sent at once counts only against the accounts that still had room for one.
                 if self._send(record, "vulnerability", "Desk: vulnerability" + (f" on item {number}" if number is not None else ""), lines):
                     entry["sent"] = True
@@ -752,8 +867,12 @@ class Desk:
                 uncounted = {key: value for key, value in record["uncounted"].items() if value}
                 closed = record["closed"]
                 not_delivered = record["not_delivered"]
-                last = record["digest_ticks"]
-                since = math.inf if last is None else (counted - last if counted >= last else counted)
+                last, started = record["digest_ticks"], boot()
+                # Within one start of the computer, the count since the last digest. After a new start, which the computer's
+                # name for its start shows (or, where it gives none, a count smaller than the last), the count since that
+                # start, which is less than what passed.
+                same = record["digest_boot"] == started if started is not None and record["digest_boot"] is not None else counted >= (last or 0)
+                since = math.inf if last is None else (counted - last if same and counted >= last else counted)
                 if not (waiting or uncounted or closed or not_delivered) or (since < settings["digest_seconds"] and not force):
                     return False
                 # A vulnerability never waits for more than one digest: every one that waits is carried, before anything else.
@@ -763,7 +882,7 @@ class Desk:
                 lines = ["Kind: digest", f"Reports since the last digest: {len(waiting)}. Each line is a kind, an item and one line by the desk, which may quote outside text."]
                 for entry in carried:
                     where = f"item {entry['number']}" if entry["number"] is not None else "no item"
-                    lines.append(f"- {entry['kind']}, {where}: {cut(entry['line'], settings['digest_line_chars'])}")
+                    lines.append((f"- {entry['kind']}, {where}: ", cut(entry["line"], settings["digest_line_chars"])))
                 # After the vulnerabilities: a bound of the day that closed the desk for everyone, and the accounts that used the most of it.
                 for name, accounts in sorted(closed.items()):
                     lines.insert(2 + len(first), f"- a day closed for everyone ({name}); the accounts that used the most of it, by number: "
@@ -788,7 +907,12 @@ class Desk:
                 # A notice that a limit was reached is tried once; one that could not be delivered is named here.
                 for name in not_delivered:
                     lines.append(f"- the notice that a limit was reached could not be delivered: {name}")
+                # Written down before it goes, so that a digest that is stopped while it is sent is not sent again within the
+                # hour: the record holds its time from the moment before it leaves. When it could not be sent, the time before.
+                earlier = (record["digest_ticks"], record["digest_boot"])
+                record["digest_ticks"], record["digest_boot"] = counted, started
                 if not self._send(record, "digest", "Desk: digest", lines):
+                    record["digest_ticks"], record["digest_boot"] = earlier
                     return False
                 for entry in carried:
                     entry["digested"] = True
@@ -819,7 +943,7 @@ class Desk:
                         shown = self.shown | set(shows)
                         try:
                             folder = state_files.folder(self.state / "session", "The folder session in the state folder", make=True)
-                            state_files.write(folder / SHOWN_FILE, "The list of whose text a session was shown", json.dumps(sorted(shown)))
+                            state_files.write(folder / self.shown_name, "The list of whose text a session was shown", json.dumps(sorted(shown)))
                         except state_files.StateProblem as problem:
                             raise Refused(f"{problem} Stop and tell the coordinator.") from None
                         self.shown = shown
@@ -903,7 +1027,7 @@ class Desk:
             if verdict.get("refused") or pull.get("head_before") != pull.get("head_after"):
                 return refused
             return {
-                "protected_folders": [folder for folder in pr_files.PROTECTED_FOLDERS if folder in verdict["protected_folders"]],
+                "protected_folders": [folder for folder in (*pr_files.PROTECTED_FOLDERS, *pr_files.PROTECTED_KINDS) if folder in verdict["protected_folders"]],
                 "adds_new_test": verdict["adds_new_test"] is True,
                 "ready_for_review": verdict["ready_for_review"] is True,
             }
@@ -938,8 +1062,16 @@ class Desk:
                 "Nothing was sent. The text itself says that the project's agents were or will be told. Leave that out of the text: "
                 "the tool adds the fixed sentence when agents_told is told."
             )
-        self.outgoing(text, "the answer")
         fixed = {"told": settings["told"], "could_not_tell": settings["could_not_tell"]}.get(told, {}).get(language)
+        # Checked as it is posted: with the first line before it and the fixed sentence after it. A hit counts when one of
+        # its letters is the session's.
+        parts = [(settings["first_line"] + "\n\n", False), (text, True)] + ([("\n\n" + fixed, False)] if fixed else [])
+        posted = "".join(part for part, _ in parts)
+        self.outgoing(text, "the answer")
+        found = self.holds_in(parts)
+        if found:
+            raise Refused("Nothing was sent. The answer, with the desk's first line and the fixed sentence round it, holds " + ", ".join(found)
+                          + ". Write it without that.")  # fmt: skip
         with self.counts() as record:
             moment = record["clock"]
             on_item = sum(1 for entry in record["answers"] if entry["number"] == number and moment - entry["t"] < HOUR)
@@ -959,7 +1091,7 @@ class Desk:
                 self.limit_reached(record, "answers to one account in a day")
                 raise Refused("Nothing was sent. Every account this answer is for already has its answers for today, which is the limit for one account.")
             # The tool writes the first line, so no answer goes out without it.
-            self.backend.comment(number, settings["first_line"] + "\n\n" + text + ("\n\n" + fixed if fixed else ""))
+            self.backend.comment(number, posted)
             record["answers"].append({"t": moment, "number": number, "accounts": under})
         return f"The answer was posted on item {number}."
 
@@ -1138,16 +1270,18 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, env: dict[str, str] | None = None)
             elif method == "tools/call":
                 # Each call has its own thread, so a slow answer from GitHub does not hold up the next call.
                 thread = threading.Thread(target=run, args=(identifier, params), daemon=True)
-                running.append(thread)
+                if params.get("name") in SENDING:
+                    running.append(thread)
                 thread.start()
             elif method == "ping":
                 send({"jsonrpc": "2.0", "id": identifier, "result": {}})
             elif identifier is not None:
                 send({"jsonrpc": "2.0", "id": identifier, "error": {"code": -32601, "message": "not supported"}})
     finally:
-        # The session is gone: let the calls under way finish.
+        # The session is gone: a call that sends is let finish, within the bound each sending has; a call that only reads is
+        # not waited for, and ends with the server.
         for thread in running:
-            thread.join(timeout=30)
+            thread.join(timeout=65)
     return 0
 
 

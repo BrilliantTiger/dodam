@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -165,7 +166,7 @@ POINTS_AT_END = ("end: before the first step", "end: the handled places are out 
 POINTS_AT_PLACING = ("place: the list is written", "place: what went is counted")
 
 
-def marked(env: dict[str, str], number: int | None = None, accounts=(), held_back=()) -> dict[str, str]:
+def marked(env: dict[str, str], number: int | None = None, accounts=(), held_back=(), shown: str | None = None) -> dict[str, str]:
     """The environment of one session, with the mark that says what kind it is: without the mark its tools do nothing.
 
     A session for an item is given the item, the accounts whose arrivals it handles, the newest first, and the accounts
@@ -176,6 +177,9 @@ def marked(env: dict[str, str], number: int | None = None, accounts=(), held_bac
         env["DESK_SESSION"] = "typed"
     else:
         env |= {"DESK_SESSION": "item", "DESK_ITEM": str(number), "DESK_ACCOUNTS": json.dumps(list(accounts)), "DESK_HELD_BACK": json.dumps(list(held_back))}
+        # The session's own list of whose text it was shown: a call of an ended session changes nothing of another's.
+        if shown is not None:
+            env["DESK_SHOWN"] = shown
     return env
 
 
@@ -225,6 +229,9 @@ class Kept:
             if events and whole_number(entry.get("account"), least=0) and len({e["number"] for e in events}) == 1 and all(
                     e["actor_id"] == entry["account"] for e in events):  # fmt: skip
                 good.append({"number": events[0]["number"], "account": entry["account"], "events": events[-EVENTS_PER_ARRIVAL:]})
+        # The one order of arrivals says the age of a place: the number of its oldest arrival that is still kept. A place
+        # whose arrivals a session handled holds what its account wrote meanwhile, and is as old as that.
+        good.sort(key=lambda place: min((event.get("seq", 0) for event in place["events"]), default=0))
         return (good, pending)
 
     def _write(self, entries: list[dict], pending: list[dict]) -> None:
@@ -262,8 +269,9 @@ class Kept:
         if len(entries) >= self.most:
             if account in held_back:
                 return went(account, number, len(events), "held back")
-            # A place in hand does not go, and is not counted among the places its account can give.
-            can_go = [e for e in entries if (e["number"], e["account"]) not in in_hand]
+            # A place in hand does not go, and is not counted among the places its account can give. Oldest first by the order
+            # of arrivals: a place cut to its newest arrivals earlier in this batch is as old as what it keeps.
+            can_go = sorted((e for e in entries if (e["number"], e["account"]) not in in_hand), key=lambda e: min(event.get("seq", 0) for event in e["events"]))
             gives: dict[int, int] = {}
             for entry in can_go:
                 gives[entry["account"]] = gives.get(entry["account"], 0) + 1
@@ -349,8 +357,12 @@ def went_at(entry: dict) -> dict | None:
 
 class Relay:
     def __init__(self, plan: dict, watcher_env: dict[str, str], *, typed=None, shown=None, say: str | None = None,
-                 exit_when_idle: bool = False, retry_seconds: float = 60.0, quiet_seconds: float = 3.0):  # fmt: skip
+                 exit_when_idle: bool = False, retry_seconds: float = 60.0, quiet_seconds: float = 3.0, held=None):  # fmt: skip
         self.plan = plan
+        # The lock of the state folder, when the start command took it before it touched anything there.
+        self.held = held
+        # The name of the running session's own list of whose text it was shown.
+        self.shown_name = SHOWN_FILE
         self.copy = Path(plan["cwd"])
         self.state = Path(plan["state"])
         self.facts_path = self.copy / "tools" / "desk" / "desk.toml"
@@ -574,7 +586,7 @@ class Relay:
                         session["ended"] = bool(ended)
                         session["waits"] = list(waits) if ended else []
                         session["let_in"] = bool(entry.get("let_in", True))
-                        if entry["number"] is not None and session["let_in"]:
+                        if entry["number"] is not None and session["let_in"] and not entry.get("stopped"):
                             # Sessions that had to be ended on one item and were shown its text, one after the other. A session that
                             # was not ended begins the count anew; one that was ended before it was shown anything says nothing about the item.
                             row, name = record["ended_in_a_row"], str(entry["number"])
@@ -770,6 +782,11 @@ class Relay:
         """Run one session to its end within its bounds. Returns what was seen of it."""
         spending = self.spending
         seen = {"counts": None, "ended_by": None, "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": False, "over_the_base": False}
+        source = self.plan.get("program_source")
+        if source and not state_files.program_holds(Path(self.plan["argv"][0]), source):
+            # What is started is what was checked, at the moment it is started.
+            self.show("relay: the desk's copy of the program changed after it was checked; the session was not started")
+            return seen | {"ended_by": NOT_STARTED, "not_started": True}
         try:
             with self.guard:
                 if self.stopping.is_set():
@@ -871,8 +888,10 @@ class Relay:
         if result is not None:
             usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
             total = [int(usage.get(key) or 0) for key in USAGE]
-            if sum(total) > sum(seen["counts"] or [0]):
-                seen["counts"] = total
+            # Its responses and its result each report a count of every class. The larger count of each class is taken,
+            # so that the cost is weighed on what either says and neither can hide what the other says.
+            if any(total):
+                seen["counts"] = [max(own, given) for own, given in zip(seen["counts"] or [0] * len(USAGE), total, strict=True)]
             # Claude Code's own report of an error, not anything the model wrote.
             seen["error"] = result.get("is_error") is True
             if seen["error"] and not sum(seen["counts"] or [0]) and SIGN_IN_REFUSED.search(str(result.get("result", "")) + " ".join(said)):
@@ -885,9 +904,10 @@ class Relay:
     def handle(self, about: str, text: str, number: int | None, accounts: list[int], entry: dict, places: list[dict]) -> bool:
         """One fresh session for one message. Returns False when the arrival has to be kept for another try."""
         # The tools of a session for an item refuse every other item; a session for what was typed says so.
-        env = marked(self.plan["env"], number, accounts, entry.get("held_back", []))
         if number is not None:
             self.forget_shown()
+            self.shown_name = f"shown-{secrets.token_hex(8)}.json"
+        env = marked(self.plan["env"], number, accounts, entry.get("held_back", []), self.shown_name if number is not None else None)
         self.handled += 1
         if self.log is not None:
             self.log.write(json.dumps({"type": "relay", "session": self.handled, "about": about}) + "\n")
@@ -917,7 +937,22 @@ class Relay:
             return self.failed("the service refused the desk's sign-in", "The service refused the desk's sign-in to Claude.")
         counts = seen["counts"]
         cost = units(counts, spending["weights"]) if counts else 0
+        responded = bool(counts) and sum(counts) > 0
+        if not responded:
+            # It ended before the service counted any response, however it ended: without a result, with Claude Code's own
+            # report of an error (the service overloaded, a limit of use reached), at the relay's bound on time, or because
+            # the desk was stopped. No outside text reached the model before its first response, so this is a failure of
+            # the desk itself, as when the service refuses its sign-in. What it may have spent is not known, so the day is
+            # charged everything that was set aside, and no account and no item: it counts against nobody's share. The
+            # arrival stays kept.
+            entry["let_in"] = False
+            self.end(entry, places, False, None, entry["reserved"])
+            if self.stopping.is_set() and not seen.get("at_a_bound"):
+                return False
+            return self.failed("a session ended without any response", "A session of the desk ended without any response.")
         if seen.get("over_the_base"):
+            # A fault of the desk, not of an outsider: the day is charged, no account and no item.
+            entry["let_in"] = False
             self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             self.starts_nothing = "a session took in more than the bounds count on"
             self.show("relay: no more sessions are started until the desk is started again (" + self.starts_nothing + ")")
@@ -926,18 +961,11 @@ class Relay:
             self.stop_watching()
             return False
         if self.stopping.is_set() and not seen.get("at_a_bound"):
-            # The desk is being stopped in the middle of a session: the arrival stays kept, and nobody waits for it.
+            # The desk is being stopped in the middle of a session: the arrival stays kept, nobody waits for it, and the
+            # item's count toward closing stays as it was.
+            entry["stopped"] = True
             self.end(entry, places, False, counts, max(cost, entry["reserved"]))
             return False
-        responded = bool(counts) and sum(counts) > 0
-        if not responded and (seen["ended_by"] == WITHOUT_A_RESULT or seen.get("error")):
-            # Claude Code ended before the service counted any response, without a result or with its own report of an
-            # error (the service overloaded, a limit of use reached): the desk itself is not working, as when the service
-            # refuses its sign-in. What it may have spent is not known, so the day is charged everything that was set
-            # aside, and no account and no item: it counts against nobody's share. The arrival stays kept.
-            entry["let_in"] = False
-            self.end(entry, places, False, None, entry["reserved"])
-            return self.failed("a session ended without any response", "A session of the desk ended without any response.")
         self.failures = 0
         if seen["ended_by"] == WITHOUT_A_RESULT:
             # It responded and ended without a result: charged everything that was set aside, as a session without a count
@@ -978,16 +1006,19 @@ class Relay:
         return False
 
     def forget_shown(self) -> None:
+        """Remove the lists of sessions that ended: nothing reads them any more."""
         try:
-            if state_files.file(self.state / "session" / SHOWN_FILE, "The list of whose text a session was shown"):
-                (self.state / "session" / SHOWN_FILE).unlink()
+            folder = self.state / "session"
+            for old in [folder / SHOWN_FILE, *folder.glob("shown-*.json")]:
+                if state_files.file(old, "The list of whose text a session was shown"):
+                    old.unlink()
         except (OSError, state_files.StateProblem):
             pass
 
     def shown_accounts(self) -> list[int]:
-        """The accounts whose text the reading tool handed to the session that just ran. Written before the tool answered."""
+        """The accounts whose text the reading tool handed to the session that just ran, from that session's own list."""
         try:
-            text = state_files.read(self.state / "session" / SHOWN_FILE, "The list of whose text a session was shown")
+            text = state_files.read(self.state / "session" / self.shown_name, "The list of whose text a session was shown")
             return tools.accounts_of(text)
         except state_files.StateProblem:
             return []
@@ -1080,12 +1111,15 @@ class Relay:
         state_files.real_folder(self.state, "The state folder")
         session = state_files.folder(self.state / "session", "The folder session in the state folder", make=True)
         state_files.file(self.state / WATCH_STATE_FILE, "The watcher's state file")
-        with state_files.opened(self.state / "desk.lock", "The file desk.lock in the state folder") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                self.show("The desk was not started. Another desk is already running on this state folder.")
-                return 1
+        with ExitStack() as stack:
+            # One desk for one state folder: the lock the start command took before it touched the folder, or one taken here.
+            if self.held is None:
+                lock = stack.enter_context(state_files.opened(self.state / "desk.lock", "The file desk.lock in the state folder"))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    self.show("The desk was not started. Another desk is already running on this state folder.")
+                    return 1
             # The counts of reading calls of earlier sessions are of no use any more.
             for old in session.glob("reads-*.json*"):
                 if state_files.file(old, "A count of reading calls in the state folder"):
@@ -1103,14 +1137,12 @@ class Relay:
                 for target in (self.read_typed, self.watch):
                     threading.Thread(target=target, daemon=True).start()
                 waited = self.retry_seconds
-                looked = time.monotonic()
                 try:
                     while not self.stopping.is_set():
-                        if time.monotonic() - looked >= self.retry_seconds:
-                            # The digest's time is looked at before every start, so that a queue of sessions does not hold it up.
-                            looked = time.monotonic()
-                            if self.desk.digest():
-                                self.waiting_written = None
+                        # The digest's time is looked at before every start, the first one too, so that neither a start of
+                        # the desk nor a queue of sessions holds it up.
+                        if self.desk.digest():
+                            self.waiting_written = None
                         seen = self.seen
                         if self.start_one():
                             continue
@@ -1120,6 +1152,9 @@ class Relay:
                         if self.exit_when_idle and self.typing_ended.is_set() and self.typed_lines.empty() and (
                             self.handled > 0 or seen > 0 or self.watching_ended.is_set() or self.starts_nothing
                         ):
+                            # And once more before the desk ends.
+                            if self.desk.digest():
+                                self.waiting_written = None
                             break
                         tick = min(1.0, self.quiet_seconds)
                         self.stopping.wait(timeout=tick)

@@ -519,7 +519,7 @@ def test_the_page_stays_light_in_every_state(lang, state):
 
 def test_the_layout_check_runs_with_no_way_open_with_one_open_and_with_both_open():
     text = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
-    runs = re.findall(r"run: (python tools/site/\S+\.py .*)", text)
+    runs = re.findall(r"run: (python -I tools/site/\S+\.py .*)", text)
     built = {re.search(r'--live "\$RUNNER_TEMP/(\w+)"', run).group(1): run for run in runs if "build.py --live" in run}
     swept = {re.search(r'--site "\$RUNNER_TEMP/(\w+)"', run).group(1): run for run in runs if "sweep.py" in run}
     states = {name: (re.search(r"--open (\S+)", run).group(1) if "--open" in run else "") for name, run in built.items()}
@@ -544,8 +544,8 @@ def test_the_layout_check_runs_with_no_way_open_with_one_open_and_with_both_open
 def test_what_is_published_is_never_built_as_if_a_way_were_open():
     pages = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
     assert "--open" not in pages
-    run = re.search(r"run: (python3 tools/site/build\.py .*)", pages).group(1)
-    assert run == 'python3 tools/site/build.py --live "$RUNNER_TEMP/site" --compare >> "$GITHUB_OUTPUT"'
+    run = re.search(r"run: (python3 -I tools/site/build\.py .*)", pages).group(1)
+    assert run == 'python3 -I tools/site/build.py --live "$RUNNER_TEMP/site" --compare >> "$GITHUB_OUTPUT"'
 
 
 def test_the_checks_main_requires_keep_their_names():

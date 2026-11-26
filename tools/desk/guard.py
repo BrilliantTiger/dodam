@@ -10,10 +10,10 @@ Every text that leaves passes outgoing(), in this order:
 
 1. Every character must be on the list of what the desk writes with (ALLOWED): what English, Korean,
    Japanese and Spanish are written with. Anything else is refused, whatever it is.
-2. The known values (what names this computer, this account and the owner) are compared on a
-   reduced form of both sides, see reduced(), Spelled and holds().
+2. The known values (what names this computer, this account and the owner) are compared in one
+   form of both sides, made by form(): see Form and holds().
 3. Shapes: the beginning of a key, a long run of letters and digits, a private address, a path
-   outside the repository.
+   outside the repository, compared in the same form's spelling of paths (path_spelling()).
 
 Claude Code also runs this file before every tool call of a desk session (guard.py hook ...,
 wrapped by the start command so that any ending other than a clean "allowed" refuses the call).
@@ -100,14 +100,12 @@ LOOK_ALIKE = str.maketrans({
 # 0 and o; 1, l and i; 2 and z; 3 and e; 4 and a; 5 and s; 6, 9 and g; 7 and t; 8 and b.
 DIGIT_FOR_LETTER = str.maketrans({"0": "o", "1": "l", "i": "l", "2": "z", "3": "e", "4": "a", "5": "s", "6": "g", "7": "t", "8": "b", "9": "g"})
 
-# A known value of six or more letters and digits in its reduced form is refused wherever it stands, whatever is
-# attached to it, also with its characters or groups of them set apart by up to three characters that are not
-# letters or digits; and across words, however far apart, when it begins where a word begins and ends where a
-# word ends. A shorter value is refused as a whole word, also set apart like that, unless it is written in another
-# alphabet than the Latin one: then it is refused wherever it stands, at any length, because Korean attaches its
-# endings to a name and Japanese puts no space between words, so that a name there is seldom a whole word.
+# A known value is searched as a run of letters in the form: its letters one after another, with any number of
+# characters that are not letters or digits between them. A value of six or more letters and digits, or one written in
+# another alphabet than the Latin one, is refused wherever that run stands, whatever is attached to it: Korean attaches
+# its endings to a name and Japanese puts no space between words, so that a name there is seldom a whole word. A shorter
+# value in Latin letters is refused when the run begins where a word begins and ends where a word ends.
 SHORTEST_REDUCED = 6
-MOST_BETWEEN = 3
 # The long-vowel mark of Japanese looks like a dash and is counted as one: it sets letters apart and is no letter itself.
 # Its half-width form becomes the same character when the text is folded.
 LONG_VOWEL = "\u30fc"
@@ -120,8 +118,13 @@ JOINED_KOREAN = {
     "ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅏㅣ", "ㅚ": "ㅗㅣ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅓㅣ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ",
 }  # fmt: skip
 KOREAN_FORMS = ("HANGUL CHOSEONG ", "HANGUL JUNGSEONG ", "HANGUL JONGSEONG ", "HANGUL LETTER ", "HALFWIDTH HANGUL LETTER ")
-# Katakana and hiragana write the same sounds: a name in one is the same name in the other.
+# Katakana and hiragana write the same sounds: a name in one is the same name in the other. The voicing marks are taken
+# off before (they are marks), so a voiced katakana that has no hiragana of its own is its plain letter first.
 KATAKANA_AS_HIRAGANA = {code: code - 0x60 for code in range(0x30A1, 0x30F7)} | {0x30FD: 0x309D, 0x30FE: 0x309E}
+# A small kana is its full-size letter.
+SMALL_KANA = str.maketrans(dict(zip("ぁぃぅぇぉっゃゅょゎゕゖ", "あいうえおつやゆよわかけ")))
+# A mark that repeats a letter (the kanji mark, and the kana marks, voiced or not) is the letter before it, again.
+REPEATS = ("々", "ゝ")
 
 
 def looks_like_a_secret(value: str) -> bool:
@@ -158,12 +161,16 @@ WORD_WITH_PATH = re.compile(r"[^\s`'\"()<>\[\],;]+")
 PRIVATE_PLACES = (
     # Every folder for temporary files of the system is one: /tmp, /var/tmp, /private/tmp, /var/folders, /dev/shm, /run/user.
     # Spaces may stand round the slashes; other ways of writing the same folder are made plain first (see as_a_path).
-    ("a path outside the repository", re.compile(r"(?i)(?<![\w.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
+    # A path begins at a slash that no Latin letter, digit, point or underscore stands before: a letter of another alphabet may.
+    ("a path outside the repository", re.compile(r"(?i)(?<![A-Za-z0-9_.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
                                                 r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")),
     # A drive of Windows, with either slash.
-    ("a path outside the repository", re.compile(r"(?i)\b[a-z]:[\\/]")),
-    ("a path outside the repository", re.compile(r"(?<![\w.])~/+[^\s/]")),
-    ("a hidden folder of this computer", re.compile(r"(?<![\w-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)/+[^\s/]")),
+    # Also when a letter of another alphabet stands right before it.
+    ("a path outside the repository", re.compile(r"(?i)(?<![A-Za-z0-9_])[a-z]:[\\/]")),
+    # A home folder: ~ alone, or followed by the name of an account; spaces may stand round its slash.
+    ("a path outside the repository", re.compile(r"(?<![A-Za-z0-9_.])~[A-Za-z0-9._-]*[ \t]*/+[ \t]*[^\s/]")),
+    # A hidden folder whose name begins with one of these names, in any case, with either slash and spaces round it.
+    ("a hidden folder of this computer", re.compile(r"(?i)(?<![A-Za-z0-9_-])\.(?:dodam|ssh|coworker|aws|gnupg|claude)[\w.-]*[ \t]*/+[ \t]*[^\s/]")),
     (
         "an address inside a private network",
         re.compile(
@@ -263,71 +270,92 @@ def _korean_letters(character: str) -> str:
 
 
 def _folded(text: str) -> str:
-    """One case, one alphabet, no accents, every form of a Korean letter one; the separators are still there."""
-    folded = unicodedata.normalize("NFKC", text).casefold().translate(LOOK_ALIKE).translate(KATAKANA_AS_HIRAGANA)
-    return "".join(_korean_letters(character) for character in unicodedata.normalize("NFKD", folded) if unicodedata.category(character) != "Mn")
-
-
-def reduced(text: str) -> str:
-    """Letters and digits only, in one case and one alphabet, a digit and the letters it stands for made one."""
-    return "".join(character for character in _folded(text) if character.isalnum() and character != LONG_VOWEL).translate(DIGIT_FOR_LETTER)
+    """One width, one case, one alphabet, no marks, one size of kana, every form of a Korean letter one. The separators are
+    still there, and a mark that repeats a letter is still the mark."""
+    folded = unicodedata.normalize("NFKC", text).casefold().translate(LOOK_ALIKE)
+    marks_off = "".join(c for c in unicodedata.normalize("NFKD", folded) if unicodedata.category(c) != "Mn")
+    return "".join(_korean_letters(character) for character in marks_off.translate(KATAKANA_AS_HIRAGANA).translate(SMALL_KANA))
 
 
 @functools.lru_cache(maxsize=65536)
 def _letters_of(character: str) -> str:
-    """The letters and digits one written character stands for, in reduced form. None when it only marks a letter."""
+    """The letters and digits one written character is in the form. None when it only marks a letter; empty when it is
+    no letter or digit, which is what may stand between the parts of a name."""
     folded = _folded(character)
     return "".join(c for c in folded if c.isalnum() and c != LONG_VOWEL).translate(DIGIT_FOR_LETTER) if folded else None
 
 
-class Spelled:
-    """The letters and digits of a text in reduced form, and how many other characters stand before each of them.
+class Form:
+    """A text in the one form in which the desk compares what leaves it: its letters and digits, and how many other
+    characters stand before each of them. Made by form(), and nowhere else.
 
-    The other characters are counted as they are written: a mark that stands for three dots is one character.
+    The letters are folded by the tables above: widths (NFKC), case, letters of other alphabets that look like Latin ones,
+    marks (accents and the voicing marks of kana), katakana as hiragana, small kana as their full size, every form of a
+    Korean letter as the single letters it is made of, and a digit as the letter it is written for. A mark that repeats a
+    letter of Korean or Japanese is that letter again; after a Latin letter or a digit it repeats nothing and stays a
+    letter of its own, so it keeps the edge of the Latin word before it. Every other character is a separator: it may
+    stand between the parts of a name, any number of them. The other characters are counted as they are written. For each
+    letter the form keeps the place of the character it was written with (source), so that a hit can be told apart by
+    where its letters came from.
     """
 
     def __init__(self, text: str):
         letters: list[str] = []
         self.gaps: list[int] = []
+        self.source: list[int] = []
         gap = 1  # The text begins where a word begins.
-        for character in composed(text):
+        before = ""
+        for at, character in enumerate(composed(text)):
             found = _letters_of(character)
             if found is None:
                 continue  # An accent written by itself belongs to its letter.
+            if found in REPEATS and before and not before.isascii():
+                found = before
             if not found:
                 gap += 1
                 continue
             letters.append(found)
             self.gaps += [gap] + [0] * (len(found) - 1)
-            gap = 0
+            self.source += [at] * len(found)
+            gap, before = 0, found
         self.letters = "".join(letters)
-        # How many of the gaps up to each place are wider than what may stand between the characters of a value.
-        self.wide = [0]
-        for gap in self.gaps:
-            self.wide.append(self.wide[-1] + (gap > MOST_BETWEEN))
+        self.text = text
+        self.path = path_spelling(text)
 
 
-def holds(spelled: Spelled, value: str) -> bool:
-    """Whether the text holds a known value, given in reduced form."""
+def form(text: str) -> Form:
+    """The one function that makes the form in which text that leaves is compared."""
+    return Form(text)
+
+
+def reduced(text: str) -> str:
+    """The letters and digits of a text in the form: what a known value is searched as."""
+    return form(text).letters
+
+
+def hits(spelled: Form, value: str) -> list[tuple[int, int]]:
+    """Where the text holds a known value, given as its letters in the form: the runs of the text's letters, with any
+    characters that are not letters or digits between them, as (first letter, after the last)."""
+    found: list[tuple[int, int]] = []
     if not value:
-        return False
-    letters, gaps, wide = spelled.letters, spelled.gaps, spelled.wide
-    long = len(value) >= SHORTEST_REDUCED
-    # A value in another alphabet than the Latin one is refused wherever it stands, at any length.
-    anywhere = long or not value.isascii()
-    latin = value.isascii()
+        return found
+    letters, gaps = spelled.letters, spelled.gaps
+    # A long value, and a value in another alphabet than the Latin one, is refused wherever the run stands.
+    anywhere = len(value) >= SHORTEST_REDUCED or not value.isascii()
     start = letters.find(value)
     while start != -1:
         end = start + len(value)
-        # A word in Latin letters also begins and ends where a letter of another alphabet stands next to it: a Korean
-        # ending or a Japanese word attached to it.
-        whole = (gaps[start] > 0 or latin and not letters[start - 1].isascii()) and (
-            end == len(letters) or gaps[end] > 0 or latin and not letters[end].isascii())
-        close = wide[end] == wide[start + 1]
-        if (whole and close) or (anywhere and close) or (long and whole):
-            return True
+        # A short value in Latin letters: where a word begins and ends. A word in Latin letters also begins and ends where
+        # a letter of another alphabet stands next to it: a Korean ending or a Japanese word attached to it.
+        if anywhere or (gaps[start] > 0 or not letters[start - 1].isascii()) and (end == len(letters) or gaps[end] > 0 or not letters[end].isascii()):
+            found.append((start, end))
         start = letters.find(value, start + 1)
-    return False
+    return found
+
+
+def holds(spelled: Form, value: str) -> bool:
+    """Whether the text holds a known value, given as its letters in the form."""
+    return bool(hits(spelled, value))
 
 
 def state_paths(state: str | os.PathLike) -> list[tuple[str, str]]:
@@ -340,35 +368,59 @@ def state_paths(state: str | os.PathLike) -> list[tuple[str, str]]:
     return [("the state folder's path", path) for path in dict.fromkeys((given, os.path.realpath(given)))]
 
 
-def names(text: str, machine: list[tuple[str, str]], public: tuple[str, ...] = ()) -> list[str]:
+def values_of(word: str) -> list[str]:
+    """What one known value is searched as: its letters in the form, and for an address also the part before its at sign,
+    which names a person by itself."""
+    found = [reduced(word)]
+    if "@" in word:
+        local = word.split("@", 1)[0]
+        # The part before the at sign, and every part of it split at a plus sign: a tag, or a number before the name in
+        # GitHub's private addresses.
+        found += [reduced(local)] + [reduced(part) for part in local.split("+")]
+    return [value for value in dict.fromkeys(found) if value]
+
+
+def names(text: str | Form, machine: list[tuple[str, str]], public: tuple[str, ...] = ()) -> list[str]:
     """Which of the known values are in the text. Values that are public anyway (public) are not looked for."""
-    spelled = Spelled(text)
+    spelled = text if isinstance(text, Form) else form(text)
     open_values = {reduced(value) for value in public}
     found: list[str] = []
     for kind, word in machine:
-        value = reduced(word)
-        if value and value not in open_values and kind not in found and holds(spelled, value):
+        if kind not in found and any(value not in open_values and holds(spelled, value) for value in values_of(word)):
             found.append(kind)
     return found
 
 
 def _is_path_of_the_copy(word: str, copy: Path | None) -> bool:
-    """Whether a word, the whole of it, is the path of a file or folder that exists in the desk's copy."""
+    """Whether a word, the whole of it, is the path of a file or folder of the desk's copy: spelled exactly as the folder
+    lists it, capital letters too, and through no link, the last part included."""
     if copy is None:
         return False
     word = word.rstrip(".:")
-    if not word or word.startswith("/") or ".." in word.split("/") or "#" in word or "?" in word:
+    if word.endswith("/"):
+        word = word[:-1]
+    if not word or word.startswith("/") or "#" in word or "?" in word:
         return False
-    try:
-        return (copy / word).exists() and (copy / word).resolve().is_relative_to(copy.resolve())
-    except OSError:
-        return False
+    folder = copy
+    for part in word.split("/"):
+        if part == ".":
+            continue
+        if part in ("", ".."):
+            return False
+        try:
+            if part not in os.listdir(folder):
+                return False
+        except OSError:
+            return False
+        folder = folder / part
+        if folder.is_symlink():
+            return False
+    return True
 
 
-def as_a_path(text: str) -> str:
-    """The text with other ways of writing a path that the computer accepts made plain: backslashes as slashes, the data
-    volume of macOS left out, a part that is a dot left out, a part followed by two dots left out with them, whatever its
-    name begins with, and two dots at the root left out, since there they lead to the root itself."""
+def main_path_spelling(text: str) -> str:
+    """How the desk made other spellings of a path plain before this round, kept word for word and searched too, so that
+    whatever it found, the desk still finds."""
     text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
     before = None
     while before != text:
@@ -379,12 +431,86 @@ def as_a_path(text: str) -> str:
     return text
 
 
-def shapes(text: str, copy: Path | None = None) -> list[str]:
-    plain = unicodedata.normalize("NFKC", text)
+def _plain_path(token: str) -> str:
+    """One path, split at its slashes and walked part by part: a dot leaves the place as it is, two dots go up one part,
+    above the root they stay at the root, and a relative path that climbs above where it starts leaves the copy and is
+    read as one that begins at the root. The data volume of macOS is left out. A relative path that does not climb out
+    stays relative."""
+    parts = token.split("/")
+    absolute = parts[0] == ""
+    head = parts[0] if not absolute and (parts[0].startswith("~") or re.fullmatch(r"[a-z]:", parts[0])) else None
+    stack: list[str] = []
+    for part in parts[1:] if absolute or head is not None else parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if stack and stack[-1] != "..":
+                stack.pop()
+            elif not absolute and head is None:
+                stack.append("..")
+            continue
+        stack.append(part)
+    climbed = not absolute and head is None and bool(stack) and stack[0] == ".."
+    stack = [part for part in stack if part != ".."] if climbed else stack
+    while (absolute or climbed) and stack[:3] == ["system", "volumes", "data"]:
+        stack = stack[3:]
+    if absolute or climbed:
+        return "/" + "/".join(stack)
+    return (head + "/" if head is not None else "") + "/".join(stack)
+
+
+CLIMBING_STEP = re.compile(r"\.\./")
+
+
+def stack_path_spelling(text: str) -> str:
+    """Every path of the text walked by _plain_path: in one width and one case, backslashes as slashes, spaces round a
+    slash taken out, and each path between the spaces and the marks that stand round a word; and what follows every
+    climbing step, read from the root."""
+    text = re.sub(r"[ \t]*/[ \t]*", "/", unicodedata.normalize("NFKC", text).casefold().replace("\\", "/"))
+    walked = [_plain_path(word.strip("'\"`()[]<>,;")) if "/" in word else word for word in text.split()]
+    # Free of position: wherever a climbing step stands, whatever stands straight before it, what follows it has left the
+    # copy and is read from the root.
+    climbed = [_plain_path("/" + text[step.end() :].split(None, 1)[0].strip("'\"`()[]<>,;")) for step in CLIMBING_STEP.finditer(text)
+               if text[step.end() : step.end() + 1].strip()]  # fmt: skip
+    return " ".join(walked + climbed)
+
+
+def path_spelling(text: str) -> str:
+    """The form's spelling of paths: every way of writing a path that the computer accepts made plain. One width, one case;
+    backslashes as slashes; slashes written twice or more, also with spaces between them, as one; a part that is a dot left
+    out; a part followed by two dots left out with them, whatever its name begins with; two dots at the root left out,
+    since there they lead to the root itself; the data volume of macOS left out. Each again until nothing changes, so
+    that one way hidden in another is found too. Spaces round a slash stay, and the search allows them."""
+    text = unicodedata.normalize("NFKC", text).casefold().replace("\\", "/")
+    # Two dots that climb, at the beginning of a path: from the copy they lead out of it and, enough of them, to the root.
+    text = re.sub(r"(?<![a-z0-9_./-])(?:\.\.[ \t]*/[ \t]*)+", "/", text)
+    before = None
+    while before != text:
+        before = text
+        text = re.sub(r"/(?:[ \t]*/)+", "/", text)
+        text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![a-z0-9_./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*system[ \t]*/[ \t]*volumes[ \t]*/[ \t]*data(?=[ \t]*/)", "", text)
+    return text
+
+
+as_a_path = path_spelling
+
+
+def shapes(text: str | Form, copy: Path | None = None, keys: bool = True) -> list[str]:
+    """The shapes in a text: of a key (when keys is true), of a private address, of a path outside the repository or of a
+    hidden folder of this computer. A path is looked for in the text and in the form's spelling of paths."""
+    spelled = text if isinstance(text, Form) else form(text)
+    plain = unicodedata.normalize("NFKC", text if isinstance(text, str) else spelled.text)
     found: list[str] = []
-    for kind, shape in (*SECRET_SHAPES, *PRIVATE_PLACES):
-        if (shape.search(plain) or kind.startswith("a path") and shape.search(as_a_path(plain))) and kind not in found:
+    # The text as written, the earlier rendering of its paths, and every path walked part by part.
+    renderings = (plain, spelled.path, main_path_spelling(plain), stack_path_spelling(plain))
+    for kind, shape in (*(SECRET_SHAPES if keys else ()), *PRIVATE_PLACES):
+        if any(shape.search(rendering) for rendering in renderings) and kind not in found:
             found.append(kind)
+    if not keys:
+        return found
     if any(looks_like_a_secret(value) for value in LABELLED.findall(plain)):
         found.append("a password or key after its label")
     for word in WORD_WITH_PATH.findall(plain):
@@ -403,21 +529,60 @@ NOT_ALLOWED = "a character outside what the desk writes with (English, Korean, J
 
 
 def leaks(text: str, machine: list[tuple[str, str]] | None = None, copy: Path | None = None, public: tuple[str, ...] = (),
-          as_given: bool = False) -> list[str]:  # fmt: skip
-    """The kinds of thing in the text that must not leave. Empty when the text may go."""
+          as_given: bool = False, keys: bool = True) -> list[str]:  # fmt: skip
+    """The kinds of thing in the text that must not leave. Empty when the text may go.
+
+    The one place every text that leaves passes: the characters, then the form (made once), searched for every known
+    value and every private path. keys is false for a report to the coordinator, which may quote a key an outsider wrote.
+    """
     if not_allowed(text, as_given):
         return [NOT_ALLOWED]
     text = plain(text)
-    found = names(text, machine_words() if machine is None else machine, public)
-    return found + [kind for kind in shapes(text, copy) if kind not in found]
+    spelled = form(text)
+    found = names(spelled, machine_words() if machine is None else machine, public)
+    return found + [kind for kind in shapes(spelled, copy, keys) if kind not in found]
 
 
 outgoing = leaks
 
 
+def leaks_in(parts: list[tuple[str, bool]], machine: list[tuple[str, str]] | None = None, copy: Path | None = None, public: tuple[str, ...] = (),
+             keys: bool = True) -> list[str]:  # fmt: skip
+    """What must not leave in a text made of parts, each fixed (the desk's own numbers, kinds and fixed words) or variable
+    (what a session wrote, or a line of the relay's). The whole is put into the form once. A hit counts when one of its
+    letters comes from a variable part; a hit made only of fixed parts is none. Characters and shapes are searched in each
+    variable part."""
+    texts = [plain(text) for text, _ in parts]
+    variable = [(text, flag) for text, (_, flag) in zip(texts, parts, strict=True)]
+    if any(not_allowed(text) for text, flag in variable if flag):
+        return [NOT_ALLOWED]
+    spans, at = [], 0
+    for text, flag in variable:
+        if flag:
+            spans.append((at, at + len(text)))
+        at += len(text)
+    spelled = form("".join(texts))
+
+    def touches(start: int, end: int) -> bool:
+        return any(a <= spelled.source[n] < b for n in range(start, end) for a, b in spans)
+
+    open_values = {reduced(value) for value in public}
+    found: list[str] = []
+    for kind, word in machine_words() if machine is None else machine:
+        if kind not in found and any(touches(*hit) for value in values_of(word) if value not in open_values for hit in hits(spelled, value)):
+            found.append(kind)
+    for text, flag in variable:
+        if flag:
+            found += [kind for kind in shapes(text, copy, keys) if kind not in found]
+    return found
+
+
 def _strings(value) -> list[str]:
     if isinstance(value, str):
         return [value]
+    # A number is text too: its digits can spell a value.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return [str(value)]
     if isinstance(value, dict):
         return [s for k, v in value.items() for s in (*_strings(k), *_strings(v))]
     if isinstance(value, (list, tuple)):
@@ -450,6 +615,9 @@ def judge_call(call: dict, lock: dict, facts, machine: list[tuple[str, str]] | N
             return "The bridge must carry the desk's public name and no other."
         if "port" in given:
             return "The desk does not choose a port."
+        # The bridge is opened with its name, and at most the choice of a code that links two sessions only; nothing else.
+        if set(given) - {"name", "private"} or not isinstance(given.get("private", False), bool):
+            return "The bridge is opened with the desk's public name and nothing else."
     # The desk cannot change what a tool of another program sends, so here the text is judged as it was given.
     found = leaks("\n".join(_strings(given)), machine, as_given=True)
     if found:
@@ -513,9 +681,13 @@ def bytes_of(call: dict, lock: dict, copy: Path) -> int | str:
         if not real.is_relative_to(copy.resolve()) or not real.is_file():
             return "Read only a text file that is in the desk's copy."
         with open(real, "rb") as handle:
-            lines = handle.read().split(b"\n")
+            content = handle.read()
     except OSError:
         return "Read only a text file that is in the desk's copy."
+    # The lines the file has: a line break at its end begins no further line, and an empty file has none.
+    lines = content.split(b"\n")
+    if content.endswith(b"\n") or not content:
+        lines.pop()
     wanted = lines[max(offset - 1, 0) : max(offset - 1, 0) + limit]
     if not wanted:
         return "The file ends before that line; give Read an offset inside it."

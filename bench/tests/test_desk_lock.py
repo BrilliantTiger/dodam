@@ -19,6 +19,7 @@ import sys
 import textwrap
 import threading
 import time
+import itertools
 import unicodedata
 from pathlib import Path
 
@@ -529,8 +530,9 @@ def test_an_honest_answer_is_not_refused(place, text):
     ("and rew", True), ("an-drew", True), ("a.n.d.r.e.w", True), ("and\nrew", True), ("4ndr3w", True),
     # Whatever is attached, and with a space between its groups like any other separator.
     ("and rewrite", True), ("stand rew", True), ("band rewrite", True), ("an and rewind", True), ("HMAC minimum", True),
-    # With more than three characters between its groups it counts only from the beginning of a word to the end of one.
-    ("and    rew", True), ("and -- - rew", True), ("and    rewrite", False), ("band    rew", False), ("and -- - rewrite", False),
+    # However many characters stand between its groups, and with anything attached: a value split by wide gaps whose ends
+    # touch other letters is the same value (in the round before, more than three between counted only for whole words).
+    ("and    rew", True), ("and -- - rew", True), ("and    rewrite", True), ("band    rew", True), ("and -- - rewrite", True),
     ("pass all prepared", False), ("eventually pass", False),
 ])  # fmt: skip
 def test_a_value_is_found_wherever_it_stands_and_across_far_words_only_as_whole_words(text, found):
@@ -1198,7 +1200,8 @@ for line in sys.stdin:
             time.sleep(600)
         if how.get("no_result"):
             break
-        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {k: v * how.get("turns", 1) for k, v in usage.items()}}), flush=True)
+        final = how.get("result_usage", {k: v * how.get("turns", 1) for k, v in usage.items()})
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": final}), flush=True)
 """
 
 
@@ -1882,10 +1885,26 @@ class Day:
         self.place, self.lock = place, lock_file()
         self.tools, self.relay_module = module("tools"), module("relay")
         self.clock, self.real = 20_000_000.0, 0.0
+        # Which start of the computer this is, and when it began, by the time that passed.
+        self.boot, self.booted_at, self.last_digest_boot = 0, 0.0, 0
+        # The test's own order of every arrival, and the item the next start must choose by it.
+        self.order_of: dict = {}
+        self.expected_item = "not worked out"
+        # The payers of sessions during which the desk was stopped: a stop costs them what was set aside.
+        self.stopped_payers: set = set()
+        # Whether the session that runs is one during which the desk is stopped, and whether the next digest is stopped.
+        self.stopped_now, self.stop_the_digest = False, False
+        # A stream of its own for the rarer ways a session ends, and how many digests were due.
+        self.rare, self.digests_due = random.Random(seed + 1), 0
+        # The environment and item of the last session for an item: its tools may still be reading when the next one runs.
+        self.previous_session: tuple | None = None
+        self.earlier_session: tuple | None = None
         for loaded in (self.tools, self.relay_module.tools):
             monkeypatch.setattr(loaded, "now", lambda: self.clock)
-            # The computer's count of the time since it was started moves with the time that passes, and with no setting of the clock.
-            monkeypatch.setattr(loaded, "ticks", lambda: self.real, raising=False)
+            # The computer's count of the time since it was started moves with the time that passes, and with no setting of
+            # the clock; it begins anew when the computer is started again.
+            monkeypatch.setattr(loaded, "ticks", lambda: self.real - self.booted_at, raising=False)
+            monkeypatch.setattr(loaded, "boot", lambda: f"start {self.boot} of the computer", raising=False)
             # The values of this computer are not looked up for every made-up session.
             monkeypatch.setattr(loaded.guard, "machine_words", lambda known=None: MACHINE)
         self.started, self.charged, self.answered, self.messages, self.vulnerabilities = [], [], [], [], []
@@ -1926,9 +1945,16 @@ class Day:
         outer = self
         label_as_it_is = self.tools.StandIn.label
 
+        def as_sent(body: str, keys: bool = True) -> list:
+            """What the check on text that leaves finds in a text exactly as it is sent."""
+            guard = outer.tools.guard
+            return guard.leaks(body, MACHINE + guard.state_paths(place.state), place.copy, tuple(outer.lock["repository"].split("/")), keys=keys)
+
         def comment(backend, number, body):
             # Whatever is sent is sent while the record's own file lock is held, and never inside a step of the relay.
             assert the_record_is_held(place) and getattr(outer.relay.turn, "owner", None) != threading.get_ident()
+            # And it passes the check on text that leaves exactly as it is posted, the first line and the fixed sentence with it.
+            assert as_sent(body) == [], body
             outer.last_comment = body
 
         def label(backend, number, name):
@@ -1938,6 +1964,8 @@ class Day:
         def message(backend, subject, body, receiver):
             kind = body.split("\n")[1].removeprefix("Kind: ")
             assert the_record_is_held(place), body
+            # A message passes the check exactly as it is sent; it may quote a key an outsider wrote.
+            assert as_sent(body, keys=False) == [], body
             if getattr(outer.relay.turn, "owner", None) == threading.get_ident():
                 # Inside one of the relay's own steps it sends one thing only: at a start, the notice of a limit it finds used up.
                 limit = body.split("\n")[2].removeprefix("Limit: ")
@@ -1962,7 +1990,14 @@ class Day:
             outer.messages.append((outer.desk_time, kind))
             outer.messages_passed.append((outer.real, kind))
             if kind == "digest":
-                outer.last_digest_passed = outer.real
+                outer.last_digest_passed, outer.last_digest_boot = outer.real, outer.boot
+                if outer.stop_the_digest:
+                    # The desk is stopped while this digest is being sent: it was delivered, and nothing after it was
+                    # written down. What it carried waits for the next digest, an hour later at the soonest.
+                    outer.stop_the_digest = False
+                    outer.reach["a digest stopped after its time was written"] += 1
+                    outer.said.append(body)
+                    raise Stopped()
                 for account, count in record["uncounted"].get("arrivals dropped", {}).items():
                     outer.dropped_carried[account] = outer.dropped_carried.get(account, 0) + count
             outer.said.append(body)
@@ -2004,7 +2039,11 @@ class Day:
             settle(entry, counts, charged, ended, waits, read)
             self.in_session = False
             number = entry["number"]
-            if number is not None and entry.get("let_in", True):
+            stopped, self.stopped_now = self.stopped_now, False
+            if number is not None and entry.get("let_in", True) and stopped:
+                # The desk was stopped while the session ran: the item's count toward closing stays as it was.
+                pass
+            elif number is not None and entry.get("let_in", True):
                 # A session that had to be ended counts toward closing its item only when it was shown text of that item.
                 assert read is bool(self.shown) or not ended
                 if ended and self.shown:
@@ -2029,6 +2068,9 @@ class Day:
                     self.opened_again.discard(number)
                 else:
                     self.reach["a session that had to be ended and read nothing"] += 1
+            if number is not None:
+                # The item's count toward closing is what the test works out by itself, after every session.
+                assert self.record()["ended_in_a_row"].get(str(number)) == self.in_a_row.get(number), (number, stopped)
             (written,) = [s for s in self.record()["sessions"] if s["id"] == entry["id"] and s["t"] == entry["t"]]
             # A session has one payer, the newest writer it handles, and counts against nobody else.
             assert written["account"] == self.payer and written["accounts"] == self.handles and written["ended"] is ended
@@ -2212,6 +2254,12 @@ class Day:
         self.handled_places = [p for p in self.relay.kept.entries() if p["number"] == number and p["account"] in self.handles] if number is not None else []
         self.shown = set()
         self.handled_now |= set(self.handles)
+        if number is not None:
+            # This session's tools may still be reading when the next session runs.
+            self.earlier_session, self.previous_session = self.previous_session, (dict(env), number)
+        if number is not None and self.expected_item != "not worked out":
+            # Which item starts follows the order of arrivals alone.
+            assert number == self.expected_item, (number, self.expected_item)
         # No session starts for an item while it is closed.
         assert number not in self.closed_now(), number
         if number is not None:
@@ -2244,27 +2292,53 @@ class Day:
                 self.take(how["during"])
                 self.reach["an arrival during a session"] += 1
                 self.the_relay_agrees()
+            if how.get("late read"):
+                self.a_late_read()
+            if how.get("again") and number is not None:
+                # A writer the session handles writes again on its item while it runs: on a place in hand.
+                self.take([event(number, self.handles[0], f"again-{self.arrived}")])
+                self.reach["an arrival on a place in hand"] += 1
+                self.the_relay_agrees()
             if how.get("no response"):
                 # Claude Code ended without one response.
                 self.refusals_in_a_row = failures + 1
                 self.reach["a session that gave no response"] += 1
                 return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
+            ending = self.an_ending_before_any_response(how, failures)
+            if ending is not None:
+                return ending
             if number is not None:
                 self.act(number, env, how)
+            ending = self.an_ending_after_a_response(how)
+            if ending is not None:
+                return ending
             if how.get("ended"):
+                self.reach["a session that the relay ended at a bound after it responded"] += 1
                 return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
             if how.get("no result"):
                 self.reach["a session that ended without a result after it responded"] += 1
+                self.stopped_payers.add(self.payer)
                 return {"counts": [10, 0, 0, 10], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
+            self.reach["a session that ended by itself"] += 1
             return {"counts": [how.get("units", 20), 0, 0, 0], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
         if rng.random() < 0.04 or self.refusals_in_a_row and rng.random() < 0.6:
             # Sessions in a row that the service refused or that gave no response.
             self.refusals_in_a_row += 1
+            self.reach["a session that the service refused"] += 1
             return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
         failures, self.refusals_in_a_row = self.refusals_in_a_row, 0
         self.pass_time(rng.uniform(1, spending["seconds_per_session"] + spending["grace_seconds"]))
         if number is not None:
-            if rng.random() < 0.08:
+            during = rng.random()
+            if 0.12 <= during < 0.16:
+                self.a_late_read()
+            again = [account for account in self.handles if account in self.loud]
+            if 0.08 <= during < 0.12 and again:
+                # A loud writer the session handles writes again on its item while it runs: on a place in hand.
+                self.take([event(number, rng.choice(again), f"h{rng.randrange(10**9)}")])
+                self.reach["an arrival on a place in hand"] += 1
+                self.the_relay_agrees()
+            elif during < 0.08:
                 # Something arrives on the item while its session runs, written by an account the session does not handle.
                 self.take([event(number, rng.choice([a for a in (N + 11, N + 12, N + 13, N + 14) if a not in self.handles]), f"d{rng.randrange(10**9)}")])
                 self.reach["an arrival during a session"] += 1
@@ -2289,19 +2363,91 @@ class Day:
             return {"counts": None, "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 0, "reads": 0}
         if how < 0.08:
             self.reach["a session that ended without a result after it responded"] += 1
+            self.stopped_payers.add(self.payer)
             return {"counts": [1 + rng.randrange(50), 0, 0, rng.randrange(600)], "ended_by": "it ended without a result", "refused_sign_in": False, "turns": 2, "reads": 1}
         counts = [rng.randrange(50), rng.randrange(30_000), rng.randrange(200_000), rng.randrange(6_000)]
         if self.cheap:
             counts = [rng.randrange(50), rng.randrange(300), rng.randrange(3_000), rng.randrange(60)]
+        # Days of the first kind only: the rarer ways a session ends, drawn from a stream of their own, so that the steps of
+        # the main stream stay what the seeds were chosen for.
+        rare = self.rare.random() if not self.cheap else 1.0
+        if rare < 0.012:
+            return self.an_ending_before_any_response({"time ran out": True}, failures)
+        if rare < 0.016:
+            return self.an_ending_before_any_response({"over the base": True}, failures)
+        if rare < 0.03:
+            return self.an_ending_after_a_response({"desk stopped": True})
+        if rare < 0.05:
+            return self.an_ending_after_a_response({"killed": True})
+        if rare < 0.06:
+            return self.an_ending_after_a_response({"dear at the end": True})
+        if rare < 0.075:
+            return self.an_ending_after_a_response({"error after a response": True})
         if how < 0.16:
             counts[1] = rng.randrange(150_000)
+            self.reach["a session that the relay ended at a bound after it responded"] += 1
             return {"counts": counts, "ended_by": rng.choice(["its time was up", "too many turns", "it cost more than one session may"]), "refused_sign_in": False, "turns": 3, "reads": 3, "at_a_bound": True}
         if how < 0.2:
             counts = [0, 0, 0, 0]
         while self.relay_module.units(counts, spending["weights"]) > spending["units_per_session"]:
             # A session that the relay did not end stayed under the bound of one session.
             counts = [count // 2 for count in counts]
+        self.reach["a session that ended by itself"] += 1
         return {"counts": counts, "ended_by": None, "refused_sign_in": False, "turns": 3, "reads": 2}
+
+    def a_late_read(self) -> None:
+        """A reading call of the session before this one finishes now, in that session's tools: it changes nothing the relay
+        reads about this session."""
+        if self.earlier_session is None:
+            return
+        env, number = self.earlier_session
+        late = self.tools.Desk(self.place.env(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")}))
+        try:
+            late.read_item({"number": number})
+        except self.tools.Refused:
+            return
+        self.reach["a reading call of an ended session finishing while the next session runs"] += 1
+
+    def an_ending_before_any_response(self, how: dict, failures: int) -> dict | None:
+        """The ways a session ends before any response, where the desk itself failed: no outside text reached the model."""
+        if how.get("refused"):
+            self.refusals_in_a_row = failures + 1
+            self.reach["a session that the service refused"] += 1
+            return {"counts": None, "ended_by": None, "refused_sign_in": True, "turns": 0, "reads": 0}
+        if how.get("time ran out"):
+            self.refusals_in_a_row = failures + 1
+            self.reach["a session whose time ran out before any response"] += 1
+            return {"counts": None, "ended_by": "its time was up", "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": True}
+        if how.get("over the base"):
+            self.reach["a session whose first response took in more than the bounds count on"] += 1
+            return {"counts": [30_000, 0, 0, 10], "ended_by": "its first response took in more than the bounds count on", "refused_sign_in": False,
+                    "turns": 1, "reads": 0, "at_a_bound": False, "over_the_base": True}  # fmt: skip
+        return None
+
+    def an_ending_after_a_response(self, how: dict) -> dict | None:
+        """The ways a session ends after it responded that the made-up days play besides ending by itself and at a bound."""
+        if how.get("desk stopped") or how.get("killed") or how.get("dear at the end"):
+            # A stop of the desk, and a count past the bound at the end, cost the session's payer everything set aside.
+            self.stopped_payers.add(self.payer)
+        if how.get("desk stopped"):
+            # The desk is stopped while the session runs, after a response; it is started again before the next start.
+            self.relay.stopping.set()
+            self.stopped_now = True
+            self.reach["a session during which the desk was stopped"] += 1
+            return {"counts": [10, 0, 0, 10], "ended_by": "the desk is stopping", "refused_sign_in": False, "turns": 1, "reads": 1}
+        if how.get("killed"):
+            # The desk is killed while the session runs: its end never comes, and the next start charges what was set aside.
+            self.reach["the desk killed while a session ran"] += 1
+            self.in_session = False
+            raise Stopped()
+        if how.get("dear at the end"):
+            # Its responses stayed under the bound of one session; the count at its end did not.
+            self.reach["a session past the bound of one session only by the count at its end"] += 1
+            return {"counts": [0, 0, 0, 13_000], "ended_by": None, "refused_sign_in": False, "turns": 2, "reads": 1}
+        if how.get("error after a response"):
+            self.reach["a session that ended with Claude Code's report of an error after it responded"] += 1
+            return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 2, "reads": 1, "error": True}
+        return None
 
     def act(self, number: int, env: dict, how: dict | None = None) -> None:
         rng, tools = self.random, self.tools
@@ -2312,7 +2458,8 @@ class Day:
         if how is not None:
             writers, author = waiting[:2] + ids[:1], ids[0]
         self.place.put(number, written(author, *[by(writer, f"text-of-{writer}.") for writer in writers], body=f"text-of-{author}."))
-        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"], DESK_HELD_BACK=env["DESK_HELD_BACK"]))
+        desk = tools.Desk(self.place.env(DESK_ITEM=env["DESK_ITEM"], DESK_ACCOUNTS=env["DESK_ACCOUNTS"], DESK_HELD_BACK=env["DESK_HELD_BACK"],
+                                         DESK_SHOWN=env.get("DESK_SHOWN")))
         desk.machine = MACHINE
         if how.get("read", True) if how is not None else rng.random() < 0.85:
             read = desk.read_item({"number": number})
@@ -2402,6 +2549,7 @@ class Day:
             if isinstance(e, dict) and isinstance(e.get("actor_id"), int) and isinstance(e.get("number"), int) and e["number"] not in closed:
                 self.arrived += 1
                 self.latest[(e["number"], e["actor_id"])] = self.arrived
+                self.order_of[(e["number"], e["actor_id"], e.get("id"))] = self.arrived
                 on_item.setdefault(e["number"], []).append(e["actor_id"])
         for writers in on_item.values():
             again = [n for n in range(len(writers)) if writers[n] in writers[:n] and writers[n - 1] != writers[n]]
@@ -2441,12 +2589,20 @@ class Day:
             # closed it was written: this start takes them out.
             assert self.left_on_closed is not None and self.left_on_closed[0] in closed
             self.reach["an item found closed at a start with arrivals still kept on it, after a stop"] += 1
+        self.expected_item = self.oldest_waiting_item()
         try:
             self.relay.start_one()
         except Stopped:
-            # The desk was stopped in a session's end. When that session closed its item, the next start finds the rest.
+            # The desk was stopped in a session's end, or while a session ran. When that session closed its item, the next
+            # start finds the rest.
+            self.in_session = False
             self.left_on_closed = (self.started[-1][1], before, dict(self.went_with_the_item)) if self.closings > closings else None
             return len(self.started) > started
+        finally:
+            self.expected_item = "not worked out"
+        if self.relay.stopping.is_set():
+            # The desk was stopped while a session ran, and is started again.
+            self.restart()
         if self.left_on_closed is not None:
             # What was kept on the item that closed before the stop went at this start, counted and named once.
             self.went_whole(*self.left_on_closed)
@@ -2461,6 +2617,28 @@ class Day:
         if self.closings > closings:
             self.went_whole(self.started[-1][1], before, self.went_with_the_item)
         return len(self.started) > started
+
+    def oldest_waiting_item(self):
+        """The item the next start must choose, by the test's own order alone: the item of the place whose oldest arrival still
+        waiting came first, among places whose account is not held back and whose item has no bound of its own."""
+        record = self.record()
+        # The record as the relay looks at it: sessions of the last day and the one whose cost is not written; items closed
+        # for their days.
+        record["sessions"] = [x for x in record["sessions"] if self.desk_time - x["t"] < self.DAY or x["charged"] is None]
+        closed_for = self.lock["spending"]["item_closed_days"] * self.DAY
+        record["closed_items"] = {n: at for n, at in record["closed_items"].items() if self.desk_time - at < closed_for}
+        if self.relay.day_bound(record["sessions"]):
+            return None
+        held, closed = self.held_back_by_the_record(), self.closed_now()
+
+        def oldest(place):
+            return min(self.order_of.get((place["number"], place["account"], e.get("id")), 10**12) for e in place["events"])
+
+        for place in sorted(self.relay.kept.entries(), key=oldest):
+            if place["account"] in held or place["number"] in closed or self.relay.item_bound(record, place["number"]):
+                continue
+            return place["number"]
+        return None
 
     def went_whole(self, number: int, before: dict, went: dict) -> None:
         """What was kept on an item that closed went: each arrival counted once for its account, and one line names the item."""
@@ -2507,8 +2685,10 @@ class Day:
             assert not [body for body in self.said[said:] if limit in body], self.said[said:]
             assert limit not in after["closed"] or after["closed"][limit] == before["closed"].get(limit)
         # Whatever was counted in this step names only accounts whose arrivals a session of this step handled.
+        # A session's entry that a later step charges (the desk was killed while it ran) is no new session of that step.
+        known = {entry.get("id") for entry in before["sessions"]}
         for entry in after["sessions"]:
-            if entry not in before["sessions"]:
+            if entry.get("id") not in known:
                 assert entry.get("account") is None or entry["account"] in self.handled_now
                 assert set(entry.get("waits", [])) <= {entry.get("account")}
         for key in ("answers", "labels", "reports"):
@@ -2573,6 +2753,9 @@ class Day:
                 # The computer's clock alone is set a day or more ahead. A later step puts it right again.
                 self.set_the_clock_ahead(rng.uniform(1.2, 2.5) * self.DAY)
         elif what < 0.95:
+            if what >= 0.94:
+                # The computer itself is started again: its count of time begins anew.
+                self.boot, self.booted_at = self.boot + 1, self.real
             self.restart()
             self.refusals_in_a_row = 0
             self.reach["a restart between two steps"] += 1
@@ -2581,7 +2764,13 @@ class Day:
             # The desk's own report is always available, up to its own count, whatever outsiders did.
             assert self.relay.desk.desk_down("The watcher stopped.") is (sent < self.lock["coordinator"]["at_once"]["desk_down_per_day"])
         else:
-            self.relay.desk.digest()
+            # Now and then the desk is stopped while the digest is being sent.
+            self.stop_the_digest = what >= 0.99
+            try:
+                self.relay.desk.digest()
+            except Stopped:
+                pass
+            self.stop_the_digest = False
 
     def next_start(self):
         """Which places the next session would handle, and that it is the same without the places of accounts that are held back."""
@@ -2636,8 +2825,9 @@ class Day:
         self.reach["an account at its kept reports of a day"] += any(n >= settings["kept_per_account_per_day"] for (key, _), n in counts.items() if key == "reports")
         started = self.within(self.started)
         assert len(started) <= spending["sessions_per_day"]
+        # A session that failed for the desk's own reasons counts against no item: only those that count are counted here.
         per_item: dict = {}
-        for _, number in started:
+        for _, number, _, _, _ in self.within(self.sessions):
             per_item[number] = per_item.get(number, 0) + 1
         assert all(count <= spending["sessions_per_item_per_day"] for number, count in per_item.items() if number is not None)
         assert sum(charged for _, charged, _ in self.within(self.charged)) <= spending["units_per_day"]
@@ -2696,9 +2886,22 @@ class Day:
         waits = (any(not r["digested"] and not r["sent"] for r in record["reports"]) or any(record["uncounted"].values()) or record["closed"]
                  or record["not_delivered"])  # fmt: skip
         hour = self.lock["coordinator"]["digest_seconds"]
-        due = bool(waits) and (self.last_digest_passed is None or self.real - self.last_digest_passed >= hour)
+        # Within one start of the computer, the time that passed since the last digest; after a new start, the time since it,
+        # which is less than what passed.
+        since = None if self.last_digest_passed is None else (self.real - self.last_digest_passed if self.last_digest_boot == self.boot else self.real - self.booted_at)
+        due = bool(waits) and (since is None or since >= hour)
         clock_moved = self.clock != self.desk_time or self.ahead
-        assert self.relay.desk.digest() is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time)
+        after_a_new_start = since is not None and self.last_digest_boot != self.boot
+        # Every seventh digest that is due is stopped while it is being sent, after it was delivered.
+        self.digests_due += due
+        self.stop_the_digest = due and self.digests_due % 7 == 3
+        try:
+            sent = self.relay.desk.digest()
+        except Stopped:
+            sent = True
+        self.stop_the_digest = False
+        assert sent is due, (due, self.real, self.last_digest_passed, self.clock, self.desk_time, self.boot, self.last_digest_boot)
+        self.reach["the computer started again between two digests"] += due and after_a_new_start
         self.reach["a digest due while the computer's clock is not the desk's time"] += due and bool(clock_moved)
 
 
@@ -2727,6 +2930,13 @@ REACHED = [
     "a session that gave no response", "a session that ended without a result after it responded",
     "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
     "a digest due while the computer's clock is not the desk's time",
+    "a session that the service refused", "a session whose time ran out before any response",
+    "a session whose first response took in more than the bounds count on", "a session during which the desk was stopped",
+    "the desk killed while a session ran", "a session that the relay ended at a bound after it responded",
+    "a session past the bound of one session only by the count at its end",
+    "a session that ended with Claude Code's report of an error after it responded", "a session that ended by itself",
+    "an arrival on a place in hand", "the computer started again between two digests",
+    "a reading call of an ended session finishing while the next session runs", "a digest stopped after its time was written",
 ]  # fmt: skip
 
 
@@ -2964,6 +3174,80 @@ def the_opening(day) -> None:
             day.reach["a restart between two steps"] += 1
     assert one(44, 901_000) and (901_000, 44) not in kept_places()
     go(lambda: day.pass_time(DAY + 1))
+    # The other ways a session ends without handling what it was started for. Before any response (the service refused
+    # it, its time ran out, its first response took in more than the bounds count on): the arrival stays kept and nobody
+    # is charged or waits. After a response (the desk stopped while it ran, or killed): the arrival stays kept and its payer
+    # is charged everything that was set aside. Each on a day of its own, so that no bound of a day is met on the way.
+    # The desk is stopped while a session runs on an item that a session before had to end after it was shown its text:
+    # the item's count toward closing stays where it was (the test checks the count after every session).
+    go(lambda: day.pass_time(DAY + 1))
+    assert one(51, 908_000, ended=True)
+    go(lambda: day.pass_time(DAY + 1))
+    assert one(52, 908_000, **{"desk stopped": True})
+    go(day.restart)
+    go(lambda: day.pass_time(DAY + 1))
+    # What that session was handling stays kept, and the next session handles it.
+    assert (908_000, 52) in kept_places()
+    day.forced.append({})
+    go(day.start)
+    assert (908_000, 52) not in kept_places()
+    go(lambda: day.pass_time(DAY + 1))
+    go(lambda: day.take([ev(902_000, 45, "asks")]))
+    for how in ({"refused": True}, {"time ran out": True}, {"over the base": True}, {"desk stopped": True}, {"killed": True}):
+        day.forced.append(how)
+        go(day.start)
+        assert (902_000, 45) in kept_places(), how
+        if not (how.get("desk stopped") or how.get("killed")):
+            assert 45 not in held(), how
+        if day.relay.starts_nothing:
+            go(day.restart)
+            day.refusals_in_a_row = 0
+        go(lambda: day.pass_time(DAY + 1))
+    day.refusals_in_a_row = 0
+    day.forced.append({})
+    go(day.start)
+    assert (902_000, 45) not in kept_places()
+    # A writer the session handles writes again while it runs; the session then ends with Claude Code's report of an error
+    # after it responded, which ends it as one that ended by itself. What was written meanwhile waits behind older places.
+    go(lambda: day.take([ev(903_000, 46, "first"), ev(904_000, 47, "second")]))
+    day.forced.append({"again": True, "error after a response": True})
+    go(day.start)
+    assert (903_000, 46) in kept_places() and (904_000, 47) in kept_places()
+    day.forced.append({})
+    go(day.start)
+    assert day.started[-1][1] == 904_000
+    # A session whose responses stayed under the bound of one session and whose count at its end did not.
+    go(lambda: day.pass_time(DAY + 1))
+    assert one(48, 905_000, **{"dear at the end": True})
+    go(lambda: day.pass_time(DAY + 1))
+    # The computer is started again, twice, with a digest between: after the second start its new count passes the count
+    # at that digest before the next digest is due, and the hour is counted from the start all the same.
+    def a_new_start_of_the_computer():
+        day.boot, day.booted_at = day.boot + 1, day.real
+        day.restart()
+
+    for _ in range(2):
+        go(a_new_start_of_the_computer)
+        go(lambda: day.relay.desk.note("session_ended", "A line that waits for a digest.", 905_000))
+        go(lambda: day.pass_time(2 * 3600))
+    assert day.reach["the computer started again between two digests"] >= 2
+    # A digest is stopped while it is being sent, after it was delivered: it is not sent again within the hour.
+    def a_stopped_digest():
+        # In one step, so that the checks after each step do not send the digest first.
+        day.relay.desk.note("session_ended", "A line that waits for a digest.", 905_000)
+        day.pass_time(3700)
+        day.stop_the_digest = True
+        with pytest.raises(Stopped):
+            day.relay.desk.digest()
+        day.stop_the_digest = False
+
+    go(a_stopped_digest)
+    go(lambda: day.pass_time(1800))
+    go(lambda: day.pass_time(1900))
+    # A session for one item, then a session for another during which a reading call of the first finishes.
+    go(lambda: day.pass_time(DAY + 1))
+    assert one(49, 906_000) and one(50, 907_000, **{"late read": True})
+    assert day.reach["a reading call of an ended session finishing while the next session runs"]
     # Every place is taken, and a newcomer's arrival makes the oldest place of the account that holds the most go. The
     # desk is stopped inside that placing: before what went is counted, and once after. Started again, the next start
     # counts it, once.
@@ -2996,6 +3280,12 @@ RANDOM_STEPS_REACH = {
         "a digest line cut where a number stands",
         "a batch that holds an account's arrivals on one item before and after another account's", "a session that gave no response",
         "a session that ended without a result after it responded", "a digest due while the computer's clock is not the desk's time",
+        "a session that the service refused", "a session whose time ran out before any response", "a session during which the desk was stopped",
+        "the desk killed while a session ran", "a session that the relay ended at a bound after it responded",
+        "a session past the bound of one session only by the count at its end",
+        "a session that ended with Claude Code's report of an error after it responded", "a session that ended by itself",
+        "the computer started again between two digests", "a reading call of an ended session finishing while the next session runs",
+        "a digest stopped after its time was written",
     ],
     True: [
         "an account held back: " + Day.BY_SESSIONS, "an account held back: " + Day.BY_WAIT, "a day closed: sessions in a day",
@@ -3005,6 +3295,9 @@ RANDOM_STEPS_REACH = {
         "an arrival during a session", "a restart between two steps", "the clock set back", "the clock set a day or more ahead and put right again",
         "a digest line cut where a number stands", "a session that gave no response", "a session that ended without a result after it responded",
         "a digest due while the computer's clock is not the desk's time",
+        "a session that the service refused", "a session that ended by itself", "an arrival on a place in hand",
+        "the computer started again between two digests", "a reading call of an ended session finishing while the next session runs",
+        "a digest stopped after its time was written",
     ],
 }  # fmt: skip
 # What the random steps of neither kind reach in every seed: for these the made-up days are the opening's one sequence.
@@ -3020,15 +3313,16 @@ def test_lock_md_says_which_states_only_the_opening_of_the_made_up_days_reaches(
         "a closed item's line names fewer accounts than went, each number whole",
         "an item found closed at a start with arrivals still kept on it, after a stop", "a session that could not be started",
         "a stop inside a placing: place: the list is written", "a stop inside a placing: place: what went is counted",
+        "a session whose first response took in more than the bounds count on",
     ]  # fmt: skip
     said = " ".join((DESK / "LOCK.md").read_text(encoding="utf-8").split())
-    assert ("Eleven of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a "
+    assert ("Twelve of these states are reached by the opening alone in every run: an account held back by its share of the day's units, a "
             "report refused for want of room, an account at its twenty kept reports, an item that closes with other accounts' arrivals kept on "
             "it, an arrival for a full list while the place that would go by the rule is in hand, an arrival between two of the relay's steps "
             "at the end of a session, a closed item's line that names fewer accounts than went, an item found closed at a start with arrivals "
-            "still kept on it after the desk was stopped, a session that could not be started, and a stop inside a placing at each of its two "
-            "points.") in said
-    assert "For those eleven the made-up days are one fixed sequence" in said
+            "still kept on it after the desk was stopped, a session that could not be started, a stop inside a placing at each of its two "
+            "points, and a session whose first response took in more than the bounds count on.") in said
+    assert "For those twelve the made-up days are one fixed sequence" in said
     # The opening stops the desk once and writes a line that a digest cuts where a number stands; every message is looked at.
     for phrase in ("the desk stopped right after the cost of the session that closed an item was written",
                    "a report longer than a digest's line, which the digest cuts where an account's number stands",
@@ -3063,7 +3357,9 @@ def test_the_invariants_hold_after_every_step_of_many_made_up_days(place, monkey
     day.check()
     assert day.openings == day.closings and day.relay.closed_items() == set()
     # What the share of a day's units costs: no account with a few items of its own ever waited for it.
-    assert [waited for waited in day.waited_for_units if waited[0] not in day.loud] == [], sorted(day.waited_for_units)
+    # (A stop of the desk while a session runs, a session that ended without a result after it responded, and a count past the
+    # bound at a session's end cost its payer everything set aside; such a payer is left out.)
+    assert [waited for waited in day.waited_for_units if waited[0] not in day.loud and waited[0] not in day.stopped_payers] == [], sorted(day.waited_for_units)
     # What the random steps of this kind of day reached by themselves.
     by_themselves = {name: day.reach[name] - opening[name] for name in REACHED}
     assert not [name for name in RANDOM_STEPS_REACH[cheap] if not by_themselves[name]], by_themselves
@@ -4036,8 +4332,9 @@ def test_a_sign_in_of_the_desks_own_that_still_shows_an_address_is_refused(start
     start.committed()
     (start.bin / "own-status").write_text('{"loggedIn": true, "email": "desk@example.invalid"}')
     assert "email address" in start.refuses(stand_in=None)
+    # An empty address shows none, but neither is it exactly what the lock names for the desk's own sign-in: refused.
     (start.bin / "own-status").write_text('{"loggedIn": true, "email": ""}')
-    start.plan(stand_in=None)
+    assert "cannot tell" in start.refuses(stand_in=None)
 
 
 @pytest.mark.parametrize("status", ['{"loggedIn": false}', "not json", "[]", '{"loggedIn": "yes"}', ""])
@@ -4920,7 +5217,7 @@ def reading(place, then: dict | None = None):
     seen = []
 
     def session(text, env):
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         seen.append(json.loads(desk.read_item({"number": int(env["DESK_ITEM"])})))
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | (then or {})
 
@@ -5058,7 +5355,7 @@ def test_the_reading_tool_hands_over_the_verdict_of_the_classifying_function(pla
     assert verdict(place, [new_test, {"filename": "README.md", "status": "modified"}]) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
     assert verdict(place, [new_test], draft=True) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": False}
     touched = [{"filename": ".github/workflows/MENTION-@someone.yml", "status": "modified"}, {"filename": "bench/tests/test_site.py", "status": "modified"}]
-    assert verdict(place, touched) == {"protected_folders": [".github/", "bench/tests/"], "adds_new_test": False, "ready_for_review": False}
+    assert verdict(place, touched) == {"protected_folders": [".github/", "bench/tests/", "a file or folder whose name begins with a dot"], "adds_new_test": False, "ready_for_review": False}
     # A task folder that exists at the tip of main, at the base commit or in the desk's own copy is protected.
     assert verdict(place, [{"filename": "bench/tasks/web-signup/x.py", "status": "added"}])["protected_folders"] == ["bench/tasks/"]
     assert verdict(place, [{"filename": "bench/tasks/only-on-main/x.py", "status": "added"}], main_task_folders=["only-on-main"])["protected_folders"] == ["bench/tasks/"]
@@ -5388,7 +5685,8 @@ REAL_PULLS = {
     # test files are modified; the files under bench/tests/runtimes/ are not tests directly in the folder), a file
     # of the existing task web-signup and the security experiments (bench/experiments/). The files of the new task
     # cli-csv-json are a new task and protect nothing. It adds new tests directly in bench/tests/ (test_attack_list.py and others).
-    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/"], "adds_new_test": True,
+    # Its workflow is under a folder whose name begins with a dot, a case of that class as well.
+    13: {"protected_folders": ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/", "a file or folder whose name begins with a dot"], "adds_new_test": True,
          "ready_for_review": False},
     # 4 files, all added, the desk's watcher among them. It is merged, so the test it added (test_desk.py) is at the tip
     # of main today: by today's answers it is a change to an existing test and not a new one.
@@ -5479,7 +5777,8 @@ def test_on_a_sign_in_of_the_desks_own_that_run_takes_nothing_out_and_can_fail()
     row = check.shown_row("what the session knows", got, own_sign_in=True)
     assert row["held"] is False and "taken out" not in row["shown_by"] and "owner's sign-in" not in row["thing"]
     # The account name alone, spelled the session's own way, fails it too.
-    assert check.search_of_the_stream("It is s o m e b o d y.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)["found"] == ["the account name"]
+    # (The part of the address before its at sign is a known value of its own, so what the sign-in shows is found as well.)
+    assert set(check.search_of_the_stream("It is s o m e b o d y.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)["found"]) == {"the account name", SHOWN_BY_A_SIGN_IN}
     # And a session that was shown none of it passes.
     got = check.search_of_the_stream("Account email: not in my context.", SEARCHED, asks_what_it_knows=True, own_sign_in=True)
     assert got["found"] == [] and check.shown_row("what the session knows", got, own_sign_in=True)["held"] is True
@@ -6425,7 +6724,7 @@ def test_the_reports_of_24_hours_come_from_at_most_one_session_more_than_a_day_h
         # Every session writes a vulnerability report at its end, the most a session can write. The first runs longer than the others.
         ran.append((clock[0], env["DESK_ITEM"]))
         clock[0] += running_for if len(ran) == 1 else running_for / 2
-        place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")}).tell_coordinator(
+        place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")}).tell_coordinator(
             {"kind": "vulnerability", "number": int(env["DESK_ITEM"]), "summary": "Made up."})  # fmt: skip
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
 
@@ -6783,9 +7082,13 @@ def test_an_arrival_between_writing_the_cost_and_the_places_leaving_hand_meets_t
         assert went == {} and (7100, 1) not in places and len(places) == lock_file()["spending"]["arrivals_kept"]
     else:
         # The account was held back and its place was not in hand when the newcomer was placed: its oldest place went,
-        # and no place of an account that is not held back.
+        # and no place of an account that is not held back. The oldest by the order of arrivals: what the place of its
+        # session keeps was written during that session, after the arrival on its other place.
         assert running.held_back() == [account] and went == {str(account): 1}
-        assert (7100, 1) not in places and ((7101, 1) in places) == sequence.startswith("an older")
+        if sequence.startswith("an older"):
+            assert (7101, 1) not in places and (7100, 1) in places
+        else:
+            assert (7100, 1) not in places
 
 
 def test_what_goes_from_the_kept_list_is_never_what_the_next_session_was_chosen_to_handle(place, monkeypatch):
@@ -6986,7 +7289,7 @@ def test_a_placing_waits_under_the_relays_lock_while_a_tool_of_the_session_sends
 
     def session(text, env):
         ran.append(env["DESK_ITEM"])
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         tool = threading.Thread(target=lambda: answered.append(desk.answer({"number": 7, "text": "Thank you for writing."} | ANSWER)))
         tool.start()
         assert inside.wait(30)
@@ -7528,7 +7831,7 @@ def test_the_payer_and_the_wait_are_the_same_whether_arrivals_come_one_by_one_or
 
     def session(text, env):
         told.append([json.loads(line)["id"] for line in text.splitlines()[1:]])
-        desk = place.desk(**{key: env[key] for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK")})
+        desk = place.desk(**{key: env.get(key) for key in ("DESK_ITEM", "DESK_ACCOUNTS", "DESK_HELD_BACK", "DESK_SHOWN")})
         desk.read_item({"number": 7})
         answered.append(desk.answer(ANSWER | {"number": 7, "text": "Thank you for writing."}))
         return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1} | ENDED
@@ -7573,8 +7876,8 @@ def test_a_known_value_of_any_length_is_found_in_every_form_of_its_letters(value
 def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_only():
     guard = module("guard")
     assert guard.leaks("Alice and Albert walk.", [("the made-up value", "Al")]) == []
-    phrase = ("A shorter value is refused as a whole word, also under the reductions and set apart in that way, unless it is written in "
-              "another alphabet than the Latin one: then it is refused wherever it stands, at any length.")  # fmt: skip
+    phrase = ("A shorter value in Latin letters is refused when the run begins where a word begins and ends where a word ends; a word in "
+              "Latin letters also begins and ends where a letter of Korean or Japanese stands next to it")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
 
 
@@ -7594,7 +7897,9 @@ def test_a_short_value_in_the_latin_alphabet_is_still_refused_as_a_whole_word_on
 def test_an_outside_pull_request_does_not_change_the_desk_the_gemini_job_the_harness_the_security_tests_or_the_workflows(place, path, folder, how):
     new_test = {"filename": "bench/tests/test_brand_new.py", "status": "added"}
     changed = {"filename": path, "status": how} if how != "moved out of it" else {"filename": "docs/moved.md", "status": "renamed", "previous_filename": path}
-    assert verdict(place, [new_test, changed]) == {"protected_folders": [folder], "adds_new_test": True, "ready_for_review": False}
+    # The workflows' folder is also a case of every folder whose name begins with a dot.
+    kinds = ["a file or folder whose name begins with a dot"] if path.startswith(".") else []
+    assert verdict(place, [new_test, changed]) == {"protected_folders": [folder, *kinds], "adds_new_test": True, "ready_for_review": False}
 
 
 class MovingPull(FakeGitHub):
@@ -7963,9 +8268,14 @@ def test_a_link_to_a_file_that_is_not_text_and_a_read_of_nothing_are_refused_bef
     "A session for what was typed in the desk's terminal handles no account:",
     "What the watcher has printed and the relay has not yet placed is lost when the desk is stopped in between:",
     "A stop while a message to the coordinator is being sent can leave it delivered without its sending being written down, or neither:",
-    "a digest sent again so can come within the hour of the first",
+    "so the coordinator can get them twice, an hour apart at the soonest: a digest is written down with its time before it goes.",
     "Unlike the room for vulnerability reports, it has no number:",
-    "A session that ends with Claude Code's own report of an error after the service counted a response ends as one that ended by itself:",
+    "| It ended by itself, also with Claude Code's own report of an error after it responded | Handled |",
+    "a place keeps its account's newest ten, and what goes from it that way is not counted as dropped",
+    "a comment written while the item is being read can be missed when the item had a multiple of a hundred comments just before",
+    "Within one look of the watcher, arrivals without a time of their own and arrivals of different kinds within one second are put in order by a fixed rule",
+    "and a claim whose two parts stand in two sentences.",
+    "it does not read one script as another, by sound or by reading (a Korean name written in hanja among them), and it does not fold one kanji into another",
 ])  # fmt: skip
 def test_what_remains_after_the_attack_look_is_said_in_place(phrase):
     assert phrase in said_in_lock_md(), phrase
@@ -8155,6 +8465,2542 @@ def test_every_job_starts_python_with_a_module_only_from_a_protected_folder_or_i
         if not protected and not re.search(r"python3?\s+(?:-\w+\s+)*-I\b", command):
             open_to_outside.append((workflow, folder or "the root of the repository", command))
     assert open_to_outside == []
-    phrase = ("Every job that starts Python with a module from the root of the repository, which is not protected, starts it in isolated "
-              "mode, so that nothing placed there runs in place of what the job means to run.")  # fmt: skip
+    phrase = ("What the workflows start is a closed list too, and the list is the workflows themselves: a test holds every line of "
+              "every workflow, in its order and with its indentation")  # fmt: skip
     assert phrase in said_in_lock_md(), phrase
+
+
+# =================================================================================================
+# Classes, not cases: what the second attack look found, each as the class it belongs to
+# =================================================================================================
+
+import posixpath  # noqa: E402
+import random  # noqa: E402
+import shlex  # noqa: E402
+
+
+# --- One order of arrivals: which item starts next follows it alone -----------------------------
+
+
+@pytest.mark.parametrize("seed", [20261123, 515, 9091])
+def test_which_item_starts_next_follows_the_order_of_arrivals_alone(place, monkeypatch, seed):
+    """Over generated days: arrivals in batches, some on the places a running session holds in hand, restarts between
+    steps. The next item is always the one whose oldest arrival that is still waiting came first."""
+    rng = random.Random(seed)
+    running, clock, _ = in_process(place, monkeypatch)
+    relay_of = [running]
+    # Five items, so that no writer holds more places than an account may and nothing is dropped.
+    writers = [1_300_000_000 + n for n in range(5)]
+    waiting: dict[tuple[int, int], list[int]] = {}
+    order = [0]
+    went_against_the_order: list = []
+
+    def arrive(number: int, account: int) -> dict:
+        order[0] += 1
+        on_place = waiting.setdefault((number, account), [])
+        # A place keeps its account's newest ten arrivals on its item.
+        on_place[:] = (on_place + [order[0]])[-10:]
+        return event(number, account, f"g{order[0]}")
+
+    def expected() -> int | None:
+        held = set(relay_of[0].held_back())
+        # The record as the relay reads it, with what is older than a day left out.
+        with relay_of[0].desk.counts() as looked:
+            record = json.loads(json.dumps(looked))
+        for _, number, account in sorted((arrived[0], number, account) for (number, account), arrived in waiting.items() if arrived):
+            if account not in held and not relay_of[0].item_bound(record, number):
+                return number
+        return None
+
+    def session(text, env):
+        number = int(env["DESK_ITEM"])
+        if number != wanted[0]:
+            went_against_the_order.append((wanted[0], number, {k: v[:2] for k, v in waiting.items() if v}))
+        handles = json.loads(env["DESK_ACCOUNTS"])
+        handled = {key: list(arrived) for key, arrived in waiting.items() if key[0] == number and key[1] in handles}
+        # While it runs, its writers and others write again, on its item and on others.
+        during = [arrive(rng.choice([number, number, rng.randrange(1, 6)]), rng.choice(writers)) for _ in range(rng.randrange(0, 3))]
+        if during:
+            relay_of[0].take(arrivals(*during))
+        for key, arrived in handled.items():
+            waiting[key] = [n for n in waiting[key] if n not in arrived]
+        clock[0] += 3 * 3600
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 1}
+
+    wanted = [None]
+    running.run_session = session
+    for step in range(45):
+        batch = [arrive(rng.randrange(1, 6), rng.choice(writers)) for _ in range(rng.randrange(1, 4))]
+        relay_of[0].take(arrivals(*batch))
+        if rng.random() < 0.15:
+            # A restart between two steps: what is kept and its order are on disk.
+            relay_of[0] = a_relay(place)
+            relay_of[0].run_session = session
+        if rng.random() < 0.7:
+            wanted[0] = expected()
+            relay_of[0].start_one()
+    assert not went_against_the_order, went_against_the_order[:3]
+
+
+# --- The ways a session ends: what stays kept, who is charged, which item counts -----------------
+
+NO_RESPONSE_AT_THE_TIME_BOUND = {"counts": None, "ended_by": "its time was up", "refused_sign_in": False, "turns": 0, "reads": 0, "at_a_bound": True}
+OVER_THE_BASE = {"counts": [30_000, 0, 0, 10], "ended_by": "its first response took in more than the bounds count on", "refused_sign_in": False,
+                 "turns": 1, "reads": 0, "at_a_bound": False, "over_the_base": True}  # fmt: skip
+
+
+def test_a_session_whose_time_ran_out_before_any_response_is_a_failure_of_the_desk_itself(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    running.run_session = lambda text, env: dict(NO_RESPONSE_AT_THE_TIME_BOUND)
+    writer = 1_300_000_101
+    running.take(arrivals(event(7, writer, "t1")))
+    running.start_one()
+    record = counted(place)
+    (session,) = record["sessions"]
+    # No outside text reached the model before its first response: nobody's doing. The arrival stays kept; no account and
+    # no item is counted or waits; the day is charged everything that was set aside.
+    assert session["let_in"] is False and session["ended"] is False and session["waits"] == [] and session["charged"] == session["reserved"]
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)]
+    assert running.item_bound(record, 7) is None and running.held_back() == [] and record["ended_in_a_row"] == {}
+    assert len(notices(place, "desk_down")) == 1
+    # Three in a row, and nothing more is started until the desk is started again.
+    running.start_one()
+    running.start_one()
+    assert running.starts_nothing and running.start_one() is False
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)]
+
+
+def test_a_session_whose_first_response_took_in_more_than_the_bounds_count_on_charges_no_account(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    running.run_session = lambda text, env: dict(OVER_THE_BASE)
+    writer = 1_300_000_102
+    running.take(arrivals(event(7, writer, "o1")))
+    running.start_one()
+    record = counted(place)
+    (session,) = record["sessions"]
+    # A fault of the desk, not of an outsider: the day is charged, no account and no item.
+    assert session["let_in"] is False and session["charged"] >= session["reserved"]
+    assert module("tools").most_used(record["sessions"]) == [] and running.held_back() == [] and running.item_bound(record, 7) is None
+    assert [(p["number"], p["account"]) for p in kept(place)] == [(7, writer)] and running.starts_nothing
+
+
+def test_what_a_session_cost_is_the_larger_count_of_each_class_of_tokens(place):
+    # Its responses report one count and its result another; the cost is weighed on the larger count of each class, so that
+    # neither can hide what the other says. Here the result's count of output alone is past the bound of one session.
+    behaviour = {"turns": 1, "usage": {"cache_read_input_tokens": 20_000, "output_tokens": 100},
+                 "result_usage": {"cache_creation_input_tokens": 1_000, "output_tokens": 13_000}}  # fmt: skip
+    watcher(place, [event(7, 1_300_000_103, "c1")])
+    code, _, _ = run_relay(place, behaviour=behaviour)
+    (session,) = counted(place)["sessions"]
+    assert session["counts"] == [0, 1_000, 20_000, 13_000], session
+    assert session["ended"] is True and session["charged"] == session["reserved"]
+
+
+# --- Tools that outlive their session ------------------------------------------------------------
+
+
+def test_the_tool_server_ends_with_its_session_and_waits_for_no_reading_call(place, monkeypatch):
+    tools = module("tools")
+    begun, release = threading.Event(), threading.Event()
+    real = tools.StandIn.item
+
+    def slow(self, number):
+        begun.set()
+        release.wait(60)
+        return real(self, number)
+
+    monkeypatch.setattr(tools.StandIn, "item", slow)
+
+    def lines():
+        yield json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_item", "arguments": {"number": 7}}}) + "\n"
+        begun.wait(10)
+
+    started = time.monotonic()
+    code = tools.serve(lines(), io.StringIO(), place.env(DESK_ITEM="7"))
+    took = time.monotonic() - started
+    release.set()
+    assert code == 0 and took < 10, took
+
+
+def test_a_reading_call_of_an_ended_session_changes_nothing_the_relay_reads_about_the_next(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    first, second = 1_300_000_201, 1_300_000_202
+    place.put(7, written(first, by(second)))
+    place.put(8, written(second))
+    envs = []
+
+    def session(text, env):
+        envs.append(env)
+        if env["DESK_ITEM"] == "7":
+            return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+        # The session for item 8 runs; the reading call of the session for item 7 finishes only now, in that session's tools.
+        late = module("tools").Desk(place.env() | {key: value for key, value in envs[0].items() if key.startswith("DESK_")})
+        late.read_item({"number": 7})
+        # The session for item 8 reads nothing and is ended at a bound.
+        return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 0, "at_a_bound": True}
+
+    running.run_session = session
+    running.take(arrivals(event(7, first, "s1")))
+    running.start_one()
+    clock[0] += 60
+    running.take(arrivals(event(8, second, "s2")))
+    running.start_one()
+    record = counted(place)
+    # Its payer was shown nothing in it, so the payer does not wait, and the item's count toward closing does not move.
+    assert record["sessions"][-1]["waits"] == [] and record["ended_in_a_row"] == {}
+    assert second not in running.held_back()
+
+
+def test_the_start_command_changes_nothing_in_a_state_folder_that_a_running_desk_holds(start, monkeypatch):
+    start.own_sign_in()
+    start.plan()
+    configuration = sorted(start.state.glob("claude-config-*"))
+    assert len(configuration) == 1
+    session_files = {path.name: path.read_bytes() for path in (start.state / "session").iterdir() if path.is_file()}
+    original = start.start.plan
+
+    def as_made_up(coordinator, state, stand_in=None, **_):
+        return original(coordinator=coordinator, state=state, stand_in=start.place.stand_in, environ=start.environ, copy=start.copy, machine=MACHINE)
+
+    monkeypatch.setattr(start.start, "plan", as_made_up)
+    # A desk runs on this state folder: it holds the folder's lock.
+    with open(start.state / "desk.lock", "a+") as held:
+        os.chmod(start.state / "desk.lock", 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for argv in (["--print"], []):
+            code = start.start.main(["--coordinator", "the-coordinator", "--state", str(start.state), "--stand-in", str(start.place.stand_in)] + argv)
+            assert code != 0
+            assert sorted(start.state.glob("claude-config-*")) == configuration and configuration[0].is_dir()
+            assert {path.name: path.read_bytes() for path in (start.state / "session").iterdir() if path.is_file()} == session_files
+
+
+# --- The digest's hour across a restart of the computer, and before every start ------------------
+
+
+def test_after_the_computer_was_started_again_the_hour_counts_from_that_start(place, monkeypatch):
+    tools = module("tools")
+    count, boot = [100_000.0], ["the first start of the computer"]
+    monkeypatch.setattr(tools, "ticks", lambda: count[0])
+    monkeypatch.setattr(tools, "boot", lambda: boot[0], raising=False)
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "First."})
+    assert place.desk().digest() is True
+    # The computer is started again, and its new count has passed the count at the last digest before anything waits.
+    boot[0], count[0] = "the second start of the computer", 100_001.0
+    place.desk(DESK_ITEM="8", DESK_ACCOUNTS=accounts(802)).tell_coordinator({"kind": "spam", "number": 8, "summary": "Second."})
+    # More than an hour passed: the whole of the new count, and the time before it.
+    assert place.desk().digest() is True
+    # Within one start of the computer the hour holds as before.
+    place.desk(DESK_ITEM="9", DESK_ACCOUNTS=accounts(803)).tell_coordinator({"kind": "spam", "number": 9, "summary": "Third."})
+    count[0] += 1_800
+    assert place.desk().digest() is False
+    count[0] += 1_800
+    assert place.desk().digest() is True
+
+
+def test_the_relay_looks_at_the_digest_before_its_first_session_and_before_it_ends(place, monkeypatch):
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "It waited for a digest."})
+    watcher(place, [])
+    running = a_relay(place)
+    # Only the digest's own hour decides; the relay's other looks are far apart. The arrival is kept already, so the
+    # relay's first look finds a session to start.
+    running.retry_seconds = 3_600
+    running.take(arrivals(event(8, 1_300_000_301, "r1")))
+    subjects_at_start = []
+
+    def session(text, env):
+        subjects_at_start.append([m["subject"] for m in place.sent("coordinator")])
+        return {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = session
+    running.run()
+    assert subjects_at_start and "Desk: digest" in subjects_at_start[0], subjects_at_start
+
+
+def test_a_digest_stopped_while_it_is_sent_is_not_sent_again_within_the_hour(place, monkeypatch):
+    tools = module("tools")
+    count = [50_000.0]
+    monkeypatch.setattr(tools, "ticks", lambda: count[0])
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "Waiting for a digest."})
+    real = tools.Desk.deliver
+
+    def stopped(self, subject, body):
+        real(self, subject, body)
+        raise Stopped()
+
+    monkeypatch.setattr(tools.Desk, "deliver", stopped)
+    with pytest.raises(Stopped):
+        place.desk().digest()
+    monkeypatch.setattr(tools.Desk, "deliver", real)
+    count[0] += 600
+    assert place.desk().digest() is False
+    count[0] += 3_000
+    assert place.desk().digest() is True
+    digests = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
+    # It comes twice, an hour apart: what it carried was not written down as carried.
+    assert len(digests) == 2 and all("Waiting for a digest." in body for body in digests)
+
+
+# --- Text that leaves: one form, the variants generated from its tables --------------------------
+
+# The tables of the form, said here a second time: what is one letter. Small kana are their full-size letter; a voiced or
+# half-voiced kana is its plain letter; katakana is hiragana; a mark that repeats a letter is that letter again.
+SMALL_KANA = dict(zip("ぁぃぅぇぉっゃゅょゎゕゖ", "あいうえおつやゆよわかけ"))
+REPEATS = {"々": "the kanji before it", "ゝ": "the kana before it", "ゞ": "the kana before it, voiced", "ヽ": "the kana before it",
+           "ヾ": "the kana before it, voiced"}  # fmt: skip
+
+
+def stated_letter(character: str) -> str:
+    """What one written character is to the form, worked out here from the rules LOCK.md states, not from guard.py."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", character).casefold()) if unicodedata.category(c) != "Mn")
+    plain = "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c for c in plain)
+    return "".join(SMALL_KANA.get(c, c) for c in plain)
+
+
+def kana_classes() -> list[list[str]]:
+    """Every kana the desk writes with, in groups that are one letter to the form; only groups of two or more."""
+    groups: dict[str, list[str]] = {}
+    for code in sorted(allowed_code_points()):
+        character = chr(code)
+        if (0x3041 <= code <= 0x3096 or 0x30A1 <= code <= 0x30FA) and character not in REPEATS:
+            groups.setdefault(stated_letter(character), []).append(character)
+    return [group for group in groups.values() if len(group) >= 2]
+
+
+def separators() -> list[str]:
+    """Every character the desk writes with that is no letter or digit: each may stand between the parts of a name."""
+    return [chr(c) for c in sorted(allowed_code_points()) if not chr(c).isalnum() and chr(c) not in REPEATS] + ["ー"]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_known_value_in_kana_is_found_in_every_spelling_of_its_letters(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    classes = kana_classes()
+    # Every group the form makes is tried.
+    assert len(classes) >= 40
+    missed = []
+    for group in classes:
+        others = rng.sample(classes, 2)
+        value = rng.choice(others[0]) + rng.choice(group) + rng.choice(others[1])
+        for variant in group:
+            text = value[0] + variant + value[2] + rng.choice(["さん", "に聞いてください。", "です"])
+            if guard.leaks(text, [("the made-up value", value)]) != ["the made-up value"]:
+                missed.append((value, text))
+    assert not missed, missed[:5]
+
+
+def test_a_mark_that_repeats_a_letter_is_that_letter_again():
+    guard, rng = module("guard"), random.Random(7)
+    kanji = [chr(c) for c in rng.sample(range(0x4E00, 0x9FFF), 6)]
+    hiragana = [g[0] for g in kana_classes() if 0x3041 <= ord(g[0]) <= 0x3096][:6]
+    missed = []
+    for repeat, letters in (("々", kanji), ("ゝ", hiragana), ("ゞ", hiragana), ("ヽ", hiragana), ("ヾ", hiragana)):
+        for letter in letters:
+            value = letter + letter + rng.choice(kanji if repeat == "々" else hiragana)
+            written = value[0] + repeat + value[2]
+            for known, text in ((value, written + "さん"), (written, value + "さん")):
+                if guard.leaks(text, [("the made-up value", known)]) != ["the made-up value"]:
+                    missed.append((known, text))
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [11, 12, 13])
+def test_a_long_known_value_is_found_however_wide_the_gaps_between_its_parts_and_whatever_is_attached(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    between = separators()
+    attached = ["", "x", "s", "에게", "님", "은", "さん", "たち", "の", "ing", "2"]
+    missed = []
+    for value in ("홍길동", "홍길", "たなかたろう", "佐藤一郎", "somebody", "gildonghong", "node42x7b"):
+        for _ in range(12):
+            cuts = sorted(rng.sample(range(1, len(value)), min(len(value) - 1, rng.choice([1, 2]))))
+            parts = [value[a:b] for a, b in zip([0] + cuts, cuts + [len(value)])]
+            text = rng.choice(attached) + "".join(part + "".join(rng.choice(between) for _ in range(rng.randrange(1, 9))) for part in parts[:-1]) + parts[-1] + rng.choice(attached)
+            if "the made-up value" not in guard.leaks("Ask " + text + " about it.", [("the made-up value", value)]):
+                missed.append((value, text))
+    assert not missed, missed[:5]
+
+
+def test_the_part_of_a_known_address_before_its_at_sign_is_a_known_value_of_its_own():
+    guard = module("guard")
+    known = [("the owner's git name or address", "gildong.hong@example.invalid")]
+    for text in ("Ask gildong.hong about it.", "It was gildonghong who wrote it.", "Write to gildong hong at example dot invalid.", "길동 gildong_hong입니다"):
+        assert guard.leaks(text, known) == ["the owner's git name or address"], text
+
+
+def test_the_path_of_the_copys_git_folder_is_looked_at_for_every_known_value(start, tmp_path):
+    # The owner's git name is a known value that the computer itself does not tell.
+    (tmp_path / "home" / ".gitconfig").write_text("[user]\n\tname = Gildong Hong\n\temail = gildong@example.invalid\n")
+    start.own_sign_in()
+    (tmp_path / "gildong-hong").mkdir()
+    start.committed(tmp_path / "gildong-hong" / "git")
+    assert "git folder" in start.refuses(stand_in=None)
+
+
+# Ways of writing a path that the computer accepts, each a rule: case, slashes turned round or doubled, spaces round a
+# slash, a dot for a folder itself, a folder followed by two dots, two dots at the root, the data volume of macOS.
+def a_spelling_of(path: str, rng: random.Random) -> str:
+    if rng.random() < 0.4 and not path.startswith("/System"):
+        # Through the data volume of macOS.
+        path = "/System/Volumes/Data" + path
+    parts = path.strip("/").split("/")
+    out = []
+    for part in parts:
+        for _ in range(rng.randrange(0, 3)):
+            out.append(rng.choice([".", rng.choice(["x", "a.b", "..x", "-"]) + "/..", ".."]) if not out else rng.choice([".", "x/.."]))
+        out.append("".join(c.upper() if rng.random() < 0.5 else c for c in part))
+    joined = ""
+    for part in out:
+        joined += rng.choice(["/", "//", "\\", "/ ", " /", "\\\\", "///"]) + part
+    return joined
+
+
+@pytest.mark.parametrize("seed", [21, 22, 23])
+def test_a_private_path_is_found_in_every_spelling_the_computer_accepts(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for path in ("/Users/you/notes", "/home/user/x", "/tmp/x", "/var/tmp/x", "/var/folders/dq/x", "/private/tmp/x", "/dev/shm/x",
+                 "/run/user/501/x", "/Volumes/Disk/x", "/etc/passwd", "/opt/x/y", "/Library/x"):  # fmt: skip
+        for _ in range(15):
+            text = a_spelling_of(path, rng)
+            if "a path outside the repository" not in guard.leaks(f"It is kept in {text} for now.", []):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [31, 32])
+def test_a_hidden_folder_of_this_computer_is_found_in_every_spelling(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for name in (".dodam", ".dodam-desk", ".ssh", ".coworker", ".aws", ".gnupg", ".claude", ".claude-config"):
+        for _ in range(10):
+            spelled = "".join(c.upper() if rng.random() < 0.5 else c for c in name)
+            text = spelled + rng.choice(["/", "\\", " / ", "//", "\\\\", "/./"]) + rng.choice(["secret", "watch-state.json", "id_rsa"])
+            if "a hidden folder of this computer" not in guard.leaks(f"Look at {text} now.", []):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+def test_a_report_to_the_coordinator_passes_the_check_on_known_values_and_paths(place):
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    assert "account name" in refused(desk, "tell_coordinator", kind="spam", number=7, summary="It is somebody-local who wrote it.")
+    assert "outside the repository" in refused(desk, "tell_coordinator", kind="problem", number=7, summary="The file is in /Users/you/notes.")
+    # A key an outsider wrote may still be quoted to the coordinator, who is not an outsider.
+    assert "accepted" in desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "They posted ghp_" + "Ab1" * 12 + " in a comment."})
+
+
+# The usual words of the claim, in the four languages: who was told, and that they were told. A point inside a word (a
+# version, the name of a file, a number) ends no sentence.
+TOLD_WORDS = {
+    "en": (["agents", "owner", "maintainers", "team"], ["told", "notified", "informed"], "The project's {whom} (see {inside}) have been {told}."),
+    "ko": (["에이전트", "소유자", "관리자"], ["알렸습니다", "전달했습니다", "보고했습니다"], "이 내용은 {inside} 기준으로 {whom}에게 {told}."),
+    "ja": (["エージェント", "所有者", "オーナー"], ["伝えました", "知らせました", "報告しました"], "{inside} について{whom}に{told}。"),
+    "es": (["agentes", "propietario", "dueño"], ["avisado", "informado", "notificado"], "Se ha {told} al {whom} sobre {inside}."),
+}
+POINTS_INSIDE_WORDS = ["v2.4", "README.md", "1.5", "docs.index", "3.14.2"]
+
+
+def test_the_claim_that_someone_was_told_is_refused_in_every_usual_wording(place):
+    desk = place.desk(DESK_ITEM="7")
+    missed = []
+    for language, (whom_words, told_words, sentence) in TOLD_WORDS.items():
+        for whom in whom_words:
+            for told in told_words:
+                for inside in POINTS_INSIDE_WORDS:
+                    text = sentence.format(whom=whom, told=told, inside=inside)
+                    try:
+                        desk.answer(ANSWER | {"number": 7, "text": text, "language": language})
+                        missed.append(text)
+                    except desk.tools.Refused as refusal:
+                        if "were or will be told" not in str(refusal):
+                            missed.append(text)
+    assert not missed, missed[:5]
+
+
+# --- Reads past the end, and the exemption for paths of the copy --------------------------------
+
+
+def a_read(path: str, offset: int, limit: int = 1) -> dict:
+    return {"tool_name": "Read", "tool_input": {"file_path": path, "offset": offset, "limit": limit}}
+
+
+def test_a_reading_call_past_the_last_line_or_of_an_empty_file_is_refused_before_it_runs(tmp_path):
+    guard, lock = module("guard"), lock_file()
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "two.md").write_text("one\ntwo\n")
+    (copy / "open.md").write_text("one\ntwo")
+    (copy / "empty.md").write_text("")
+    for path, offset in (("two.md", 3), ("two.md", 4), ("open.md", 3), ("empty.md", 1)):
+        assert isinstance(guard.bytes_of(a_read(path, offset), lock, copy), str), (path, offset)
+    assert guard.bytes_of(a_read("two.md", 2), lock, copy) == 3 + 12
+    assert guard.bytes_of(a_read("open.md", 1, 5), lock, copy) == 2 * (3 + 12)
+
+
+def test_only_a_path_of_the_copy_spelled_exactly_and_not_through_a_link_is_exempt_from_the_search_for_keys(tmp_path):
+    guard = module("guard")
+    copy = tmp_path / "copy"
+    (copy / "docs").mkdir(parents=True)
+    name = "Notes0123456789AbCdEfGh.md"
+    (copy / "docs" / name).write_text("x")
+    (copy / "Linked0123456789AbCdEfGh").symlink_to(copy / "docs")
+    (copy / "docs" / "Link0123456789AbCdEfGh.md").symlink_to(copy / "docs" / name)
+    key = "a long string shaped like a key"
+    assert key not in guard.leaks(f"See docs/{name} for it.", [], copy)
+    for word in (f"Linked0123456789AbCdEfGh/{name}", "docs/Link0123456789AbCdEfGh.md", f"docs/{name.upper()}", f"DOCS/{name}"):
+        assert key in guard.leaks(f"See {word} for it.", [], copy), word
+
+
+# --- Numbers that are cut --------------------------------------------------------------------------
+
+NUMBER_SHAPES = ["2025-01-31", "-77", "−9", "+45", "a1b2c3d4e", "1.2.3", "1,234.56", "08:15:42", "#1234", "v2.4", "3개", "12%", "(42)", "4.5e-3"]
+
+
+def test_no_line_of_the_desk_cuts_a_word_that_holds_a_digit():
+    tools = module("tools")
+    cut_inside = []
+    for shape in NUMBER_SHAPES:
+        text = "word " + shape + " end"
+        for limit in range(6, 5 + len(shape)):
+            if tools.cut(text, limit) != "word ":
+                cut_inside.append((shape, limit, tools.cut(text, limit)))
+    assert not cut_inside, cut_inside[:5]
+
+
+# --- What is handed to a tool of a live session ---------------------------------------------------
+
+
+def test_what_is_handed_to_a_live_session_tool_is_checked_whole():
+    guard, lock = module("guard"), lock_file()
+    # Opening the bridge takes its public name and nothing else.
+    for extra in ({"resume": "another-session"}, {"session": "x"}, {"host": "example.invalid"}):
+        call = {"tool_name": "mcp__coworker__open_bridge", "tool_input": {"name": "Dodam · desk"} | extra}
+        assert guard.judge_call(call, lock, Ways(True), MACHINE) is not None, extra
+    # A number is text too.
+    call = {"tool_name": "mcp__coworker__reply", "tool_input": {"thread": "t", "text": "Hello.", "count": 4242}}
+    assert guard.judge_call(call, lock, Ways(True), [("the computer's name", "4242")]) is not None
+
+
+# --- What the workflows start on a pull request --------------------------------------------------
+
+# The turned-round list: everything a step of a workflow may start, and why nothing a pull request from outside placed can run in
+# its place. A program of the runner: the runner's own image provides it. Python is the one that setup-python installs, or a
+# virtual environment that a step made in a protected folder.
+PROGRAMS_OF_THE_RUNNER = {"echo", "printf", "exit", "true", "false"}
+SHELL_WORDS = {"if", "then", "else", "elif", "fi", "!", "{", "}", "do", "done", "for", "while", "in"}
+# Options of Python that take a value, written attached or as the next word.
+PYTHON_TAKES_A_VALUE = set("mcWXQ")
+
+
+def python_start(words: list[str]) -> dict:
+    """What one start of Python runs: in isolated mode or not, and a module, code or a script."""
+    flags, n = set(), 1
+    while n < len(words):
+        word = words[n]
+        if word == "--":
+            return {"isolated": "I" in flags, "script": words[n + 1] if n + 1 < len(words) else None}
+        if word.startswith("--"):
+            n += 1
+            continue
+        if word.startswith("-") and len(word) > 1:
+            for at, letter in enumerate(word[1:], start=1):
+                if letter in PYTHON_TAKES_A_VALUE:
+                    value = word[at + 1 :] or (words[n + 1] if n + 1 < len(words) else "")
+                    if letter == "m":
+                        return {"isolated": "I" in flags, "module": value}
+                    if letter == "c":
+                        return {"isolated": "I" in flags, "code": value}
+                    n += 0 if word[at + 1 :] else 1
+                    break
+                flags.add(letter)
+            n += 1
+            continue
+        return {"isolated": "I" in flags, "script": word}
+    return {"isolated": "I" in flags}
+
+
+def test_every_way_of_writing_pythons_options_is_read():
+    assert python_start(["python", "-Im", "pip"]) == {"isolated": True, "module": "pip"}
+    assert python_start(["python", "-mpip"]) == {"isolated": False, "module": "pip"}
+    assert python_start(["python", "-B", "-I", "-m", "pip"]) == {"isolated": True, "module": "pip"}
+    assert python_start(["python3", "-BIm", "pytest"]) == {"isolated": True, "module": "pytest"}
+    assert python_start(["python", "-X", "utf8", "-m", "pip"]) == {"isolated": False, "module": "pip"}
+    assert python_start(["python", "-Wignore", "-c", "print(1)"]) == {"isolated": False, "code": "print(1)"}
+    assert python_start(["python", "-I", "--", "x.py"]) == {"isolated": True, "script": "x.py"}
+    assert python_start(["python", "-u", "x.py", "-m", "y"]) == {"isolated": False, "script": "x.py"}
+
+
+# The closed list of what the workflows start is the workflows themselves: every line, in its order and with its
+# indentation, comments and blank lines aside. Nothing is read out of a workflow but against this list, so a change to a
+# workflow changes this list in the same commit, where a reviewer sees it. A line that starts something carries its mark
+# ("runner", "protected" or "isolated") and one line of reason, and the mark is checked against the line and its folder.
+CLOSED_LIST: dict[str, list] = {
+    'ci.yml': [
+        'name: ci',
+        'on:',
+        '  push:',
+        '  pull_request:',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: ci-${{ github.ref }}',
+        '  cancel-in-progress: true',
+        'env:',
+        '  DODAM_PILOT_VARIANTS: skip',
+        'jobs:',
+        '  bench:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 25',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Install the pinned Harbor',
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m venv .harbor-venv', 'protected', "the runner's own module for environments, in the benchmark's folder"),
+        ('          .harbor-venv/bin/python -m pip install --quiet --require-hashes --only-binary=:all: -r harbor/requirements.txt', 'protected', "pip of the environment made the line before, inside the benchmark's folder, with hashes from a protected file"),
+        '      - name: Check that the leak test catches the released Harbor',
+        '        working-directory: bench',
+        ('        run: python -I ci/the_leak_test_catches_the_released_harbor.py', 'isolated', 'a script of the protected folder of checks, in isolated mode'),
+        "      - name: Apply Dodam's patch to Harbor",
+        '        working-directory: bench',
+        ('        run: python -m dodambench.harbor_patch apply', 'protected', "a module of the measuring tools, found in the benchmark's folder"),
+        '      - name: Run the tests',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider --ignore=tests/test_gemini.py --ignore=tests/test_desk.py --ignore=tests/test_desk_lock.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  variants:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 15',
+        '    env:',
+        '      DODAM_PILOT_VARIANTS: run',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Check that every pilot test fails on its broken variant',
+        '        working-directory: bench',
+        ('        run: python -I ci/every_pilot_test_fails_on_its_variant.py', 'isolated', 'a script of the protected folder of checks, in isolated mode'),
+        '      - name: Run the checks on the Gemini job',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  recorded:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 15',
+        '    strategy:',
+        '      fail-fast: false',
+        '      matrix:',
+        '        check:',
+        '          - pilot_replan.py --check --part schedule',
+        '          - pilot_replan.py --check --part forecast',
+        '          - claude_only.py --check --part 1/3',
+        '          - claude_only.py --check --part 2/3',
+        '          - claude_only.py --check --part 3/3',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Check that the recorded output is what the script gives',
+        '        working-directory: tools/plan',
+        ('        run: python -I ${{ matrix.check }}', 'isolated', "the plan's scripts from their protected folder, in isolated mode"),
+        '  attacks:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 60',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Build the Python language image',
+        '        working-directory: bench/images',
+        ('        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .', 'protected', 'an image built from the protected folder of images'),
+        '      - name: Run the tests that judge inside the image',
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '  protections:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 65',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        "      - name: Install the judge's pinned packages",
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        '      - name: Build the Python language image',
+        '        working-directory: bench/images',
+        ('        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .', 'protected', 'an image built from the protected folder of images'),
+        '      - name: Break each protection and see a test fail',
+        '        working-directory: bench',
+        ('        run: python experiments/check_protections.py', 'protected', 'a script of the protected security experiments'),
+    ],
+    'pages.yml': [
+        'name: pages',
+        'on:',
+        '  push:',
+        '    branches:',
+        '      - main',
+        '  schedule:',
+        '    - cron: "17 * * * *"',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: pages',
+        '  cancel-in-progress: false',
+        'jobs:',
+        '  build:',
+        "    if: github.ref == 'refs/heads/main'",
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 5',
+        '    permissions:',
+        '      contents: read',
+        '      issues: read',
+        '    outputs:',
+        '      changed: ${{ steps.page.outputs.changed }}',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '          fetch-depth: 0   # the latest merged changes are read from the history',
+        '      - name: Build the page with the values of now',
+        '        id: page',
+        '        env:',
+        '          GITHUB_TOKEN: ${{ github.token }}',
+        ('        run: python3 -I tools/site/build.py --live "$RUNNER_TEMP/site" --compare >> "$GITHUB_OUTPUT"', 'isolated', "the page's builder from its protected folder, in isolated mode; it writes whether the page changed to GitHub's own file for it"),
+        "      - if: github.event_name == 'push' || steps.page.outputs.changed == 'true'",
+        '        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0',
+        '        with:',
+        '          path: ${{ runner.temp }}/site',
+        '  deploy:',
+        '    needs: build',
+        "    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || needs.build.outputs.changed == 'true')",
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 5',
+        '    permissions:',
+        '      pages: write',
+        '      id-token: write',
+        '    environment:',
+        '      name: github-pages',
+        '      url: ${{ steps.deployment.outputs.page_url }}',
+        '    steps:',
+        '      - id: deployment',
+        '        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1',
+    ],
+    'site.yml': [
+        'name: site',
+        'on:',
+        '  push:',
+        '  pull_request:',
+        'permissions:',
+        '  contents: read',
+        'concurrency:',
+        '  group: site-${{ github.ref }}',
+        '  cancel-in-progress: true',
+        'jobs:',
+        '  layout:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 20',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Install the pinned browser driver',
+        '        run: |',
+        ('          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt', 'isolated', "pip in isolated mode from the root, with hashes from the site's protected file"),
+        '      - name: The committed pages are what the template builds',
+        ('        run: python -I tools/site/build.py --check', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Build what would be published, with a made-up status that carries markup in a title',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/site" --status tools/site/sample_status.json', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay the page out at every size with the question about measurement open, and check that it asks first',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/site" --consent', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '      - name: Build it again as it would be without a measurement ID',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/unmeasured" --status tools/site/sample_status.json --analytics ""', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out as well, and check that it asks no other host for anything',
+        ('        run: python -I tools/site/sweep.py --quick --site "$RUNNER_TEMP/unmeasured"', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '  desk:',
+        '    runs-on: ubuntu-24.04',
+        '    timeout-minutes: 40',
+        '    steps:',
+        '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+        '        with:',
+        '          persist-credentials: false',
+        '      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0',
+        '        with:',
+        '          python-version: "3.13"',
+        '      - name: Install the pinned browser driver',
+        '        run: |',
+        ('          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt', 'isolated', "pip in isolated mode from the root, with hashes from the site's protected file"),
+        '      - name: Install the pinned test runner',
+        '        working-directory: bench',
+        '        run: |',
+        ('          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt', 'protected', "pip in the benchmark's folder, with hashes from a protected file"),
+        "      - name: Run the desk's tests",
+        '        working-directory: bench',
+        ('        run: python -m pytest -q -p no:cacheprovider tests/test_desk.py tests/test_desk_lock.py', 'protected', "pytest with the benchmark's tests and settings, all in its protected folder"),
+        '      - name: Build what would be published with the way on GitHub open',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/github" --status tools/site/sample_status.json --open github', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out at every size',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/github" --desk github', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+        '      - name: Build it again with both ways open',
+        ('        run: python -I tools/site/build.py --live "$RUNNER_TEMP/both" --status tools/site/sample_status.json --open github,live', 'isolated', "the page's builder from its protected folder, in isolated mode"),
+        '      - name: Lay that out at every size',
+        ('        run: python -I tools/site/sweep.py --site "$RUNNER_TEMP/both" --desk github,live', 'isolated', "the page's checker from its protected folder, in isolated mode"),
+    ],
+}  # fmt: skip
+
+
+def the_workflows() -> dict[str, str]:
+    """Every workflow of the repository, by its name, as it is written."""
+    folder = ROOT / ".github" / "workflows"
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")])}
+
+
+def steps_of_the_workflows(workflows: dict[str, str] | None = None) -> list[dict]:
+    """Every step of every workflow: its file, its job's matrix, its folder, the script it runs, or the action it uses."""
+    found = []
+    for name, text in sorted((the_workflows() if workflows is None else workflows).items()):
+        lines = text.splitlines()
+        matrix: dict[str, list[str]] = {}
+        key = None
+        for n, line in enumerate(lines):
+            if re.match(r"^  [A-Za-z0-9_-]+:\s*$", line):
+                matrix, key = {}, None  # A job begins.
+            if (named := re.match(r"^\s{8,}([A-Za-z0-9_-]+):\s*$", line)) and "matrix:" in "".join(lines[max(0, n - 3) : n]):
+                key = named.group(1)
+                matrix[key] = []
+            elif key and (value := re.match(r"^\s+- (.+)$", line)) and not re.match(r"^\s*- (?:uses|name|run):", line):
+                matrix[key].append(value.group(1).strip())
+            elif key and not line.strip().startswith("#") and not re.match(r"^\s+- ", line):
+                key = None
+            # A step begins at every item of the list of steps, whatever key it begins with.
+            if re.match(r"^\s*- [A-Za-z][\w-]*:", line):
+                found.append({"workflow": name, "matrix": {k: list(v) for k, v in matrix.items()}, "folder": None, "run": [], "uses": None})
+            if found and (uses := re.match(r"^\s*-?\s*uses:\s*(\S+)", line)):
+                found[-1]["uses"] = uses.group(1)
+            elif found and (folder := re.match(r"^\s+(?:- )?working-directory:\s*(\S+)", line)):
+                found[-1]["folder"] = folder.group(1)
+            elif found and (run := re.match(r"^(\s+(?:- )?)run:\s*(.*)$", line)):
+                if run.group(2) not in ("|", ">"):
+                    found[-1]["run"].append(run.group(2))
+                else:
+                    for later in lines[n + 1 :]:
+                        if later.strip() and len(later) - len(later.lstrip()) <= len(run.group(1)):
+                            break
+                        found[-1]["run"].append(later.strip())
+    return found
+
+
+def commands_of(step: dict) -> list[list[str]]:
+    """Every simple command a step's script starts, with the values of its job's matrix put in. Every line must be one
+    simple command: a line with more than one (a separator, a pipe, a substitution, a redirection, a line that goes on) is
+    itself an entry that is not on the list. The one exception is a step's output written to GitHub's own file for it."""
+    simple = []
+    for line in step["run"]:
+        bare = line.strip().removesuffix(' >> "$GITHUB_OUTPUT"')
+        if bare and not bare.startswith("#") and WORKFLOW_METACHARACTERS.search(bare):
+            simple.append(["<more than one command on a line>", line.strip()])
+    if simple:
+        return simple
+    scripts = ["\n".join(step["run"])]
+    for name, values in step["matrix"].items():
+        marker = "${{ matrix." + name + " }}"
+        if any(marker in script for script in scripts):
+            scripts = [script.replace(marker, value) for script in scripts for value in values]
+    commands = []
+    for script in scripts:
+        lexer = shlex.shlex(script.replace("\\\n", " "), posix=True, punctuation_chars=True)
+        lexer.whitespace = " \t"
+        lexer.commenters = "#"
+        words: list[str] = []
+        skip_next = False
+        for token in list(lexer) + ["\n"]:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in ("\n", ";", "&&", "||", "|", "(", ")", ";;", "&", "$(", "`"):
+                if words:
+                    commands.append(words)
+                words = []
+                continue
+            if re.fullmatch(r"[<>]+&?|&>", token):
+                skip_next = True  # A redirection and the file or stream it names.
+                continue
+            if not words and (token in SHELL_WORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", token)):
+                continue  # A word of the shell itself, or a variable set before the command.
+            words.append(token)
+        if words:
+            commands.append(words)
+    return [c for c in commands if c and c[0] not in ("", "$")]
+
+
+def protected(path: str) -> bool:
+    """Whether a path of the repository is protected from pull requests from outside; one that climbs above the root is not."""
+    pr_files = module("pr_files")
+    normal = posixpath.normpath(path)
+    if normal.startswith("../") or normal == ".." or normal.startswith("/"):
+        return False
+    return any(pr_files._matches_folder(normal, folder) for folder in pr_files.PROTECTED_FOLDERS)
+
+
+def judged(step: dict, words: list[str]) -> str | None:
+    """Why this start could run something a pull request from outside placed, or None when it cannot."""
+    folder = step["folder"] or "."
+    program = words[0]
+    if program in PROGRAMS_OF_THE_RUNNER:
+        return None
+    if program in ("sh", "bash"):
+        # A shell runs a script, and only one from a protected folder.
+        script = next((word for word in words[1:] if not word.startswith("-")), None)
+        return None if script and protected(posixpath.join(folder, script)) else "a shell script from a folder that is not protected"
+    if program == "docker":
+        # Docker of the runner builds an image, and only from a Dockerfile and a context in a protected folder.
+        if words[1:2] != ["build"]:
+            return "docker started for anything but building an image"
+        rest, n, dockerfile, context = words[2:], 0, "Dockerfile", None
+        while n < len(rest):
+            if rest[n] in ("-f", "--file", "-t", "--tag"):
+                dockerfile = rest[n + 1] if rest[n] in ("-f", "--file") else dockerfile
+                n += 2
+            elif rest[n].startswith("-"):
+                n += 1
+            else:
+                context, n = rest[n], n + 1
+        if context is None or not protected(posixpath.join(folder, context, "x")) or not protected(posixpath.join(folder, dockerfile)):
+            return "an image built from a folder that is not protected"
+        return None
+    is_python = re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", program)
+    if not is_python:
+        return "a program that is not on the list"
+    if "/" in program and not protected(posixpath.join(folder, program, "..")):
+        return "a Python from a folder that is not protected"
+    started = python_start(words)
+    if "script" in started:
+        # A script is the code of its own file: it must come from a protected folder, in isolated mode too.
+        return None if started["script"] and protected(posixpath.join(folder, started["script"])) else "a script from a folder that is not protected"
+    if started.get("isolated"):
+        return None
+    # A module or code given on the command line: Python looks in the folder it runs in first.
+    return None if protected(posixpath.join(folder, "x")) else "a module or code started from a folder that is not protected, not in isolated mode"
+
+
+# A word of a workflow's command: plain letters, digits and signs that the shell reads as themselves, an empty word, or a
+# folder of the runner's own for temporary files. Anything else (a quote, a substitution, a separator, a redirection, a
+# variable) is outside the closed list, whatever it would do.
+COMMAND_WORD = re.compile(r'[A-Za-z0-9_.,:=@/+%-]+|""|"\$RUNNER_TEMP(?:/[A-Za-z0-9_.-]+)*"')
+VARIABLES_OF_THE_WORKFLOWS = {"DODAM_PILOT_VARIANTS", "GITHUB_TOKEN"}
+
+
+def mark_of(command: str, folder: str) -> str:
+    """What one command of a workflow starts, by the mark the closed list gives it: "runner" for a program of the runner,
+    "protected" for code that only a protected folder holds, "isolated" for Python in isolated mode; or why it is refused."""
+    words = command.removesuffix(' >> "$GITHUB_OUTPUT"').split(" ")
+    if not all(COMMAND_WORD.fullmatch(word) for word in words):
+        return "refused: a character or a word outside the closed list's own"
+    if any(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", word) for word in words):
+        return "refused: a variable set for a command"
+    module_at = next((n + 1 for n, word in enumerate(words[:-1]) if word == "-m" or re.fullmatch(r"-[A-Za-z]*m", word)), None)
+    for n, word in enumerate(words[1:], start=1):
+        path = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+        if n == module_at or path.startswith('"$RUNNER_TEMP') or path in ('""', "") or path.startswith("-"):
+            continue
+        # A word names a file when it has a folder, begins with a point, ends in a file's ending, or is there in the
+        # folder: with or without a slash, it is read as a path of that folder.
+        names_a_file = "/" in path or path.startswith(".") or re.search(r"\.[A-Za-z]\w*$", path) or (ROOT / folder / path).exists()
+        if names_a_file and not protected(posixpath.join(folder, path.split("::")[0])):
+            return "refused: a path that is not protected"
+    step = {"workflow": "", "matrix": {}, "folder": None if folder == "." else folder, "run": [], "uses": None}
+    program = words[0]
+    if program in PROGRAMS_OF_THE_RUNNER:
+        return "runner"
+    if program == "docker":
+        why = judged(step, words)
+        return "protected" if why is None else "refused: " + why
+    if re.fullmatch(r"(?:.*/)?python(?:3(?:\.\d+)?)?", program):
+        why = judged(step, words)
+        if why:
+            return "refused: " + why
+        isolated = python_start(words).get("isolated")
+        if not isolated and not protected(posixpath.join(folder, "x")):
+            return "refused: Python in a folder that is not protected, not in isolated mode"
+        return "isolated" if isolated else "protected"
+    return "refused: a program that is not on the list"
+
+
+def with_the_matrix(command: str, matrix: dict[str, list[str]]) -> list[str]:
+    """The command once for every value of its job's matrix that it names."""
+    commands = [command]
+    for name, values in matrix.items():
+        marker = "${{ matrix." + name + " }}"
+        if marker in command:
+            commands = [one.replace(marker, value) for one in commands for value in values]
+    return commands
+
+
+# The one notation the closed list reads, line by line: a key that opens what follows it (one of a short list, a job or
+# an axis of a matrix), a key with a plain value on its line, an item with a plain value, or a key run with a block of
+# commands below it. A plain value holds no flow, anchor, alias, tag or folded text: no brace or bracket outside GitHub's
+# own expressions, and none of these signs at its start. Every other line fails, whatever YAML would make of it.
+OPENING_KEYS = {"on", "push", "pull_request", "workflow_dispatch", "schedule", "permissions", "concurrency", "env", "jobs", "steps", "with",
+                "strategy", "matrix", "outputs", "branches", "paths", "types", "inputs", "environment"}  # fmt: skip
+KEY_LINE = re.compile(r"( *)(- )?([A-Za-z_][A-Za-z0-9_-]*):(?: (.*))?")
+ITEM_LINE = re.compile(r"( *)- (\S.*)")
+NOT_THE_NOTATION = "a line not in the one notation the closed list reads"
+
+
+def plain(value: str) -> bool:
+    bare = re.sub(r"\$\{\{[^{}]*\}\}", "", value).strip()
+    return bool(value.strip()) and (not bare or bare[0] not in "{[&*!|>%@`") and not any(sign in bare for sign in "{}[]")
+
+
+def notation_findings(name: str, lines: list[str]) -> list[tuple[str, ...]]:
+    found: list[tuple[str, ...]] = []
+    block, parents = None, []
+    for line in lines:
+        indent = len(line) - len(line.lstrip(" "))
+        if block is not None and indent > block:
+            continue  # A command of a block of run, which its mark reads.
+        block = None
+        key = KEY_LINE.fullmatch(line) if "\t" not in line else None
+        item = ITEM_LINE.fullmatch(line) if "\t" not in line else None
+        if key:
+            depth = indent + (2 if key.group(2) else 0)
+            while parents and parents[-1][0] >= depth:
+                parents.pop()
+            parent = parents[-1][1] if parents else None
+            value = key.group(4)
+            if value is None and (key.group(3) in OPENING_KEYS or parent in ("jobs", "matrix")):
+                parents.append((depth, key.group(3)))
+                continue
+            if value == "|" and key.group(3) == "run":
+                block = depth
+                continue
+            if value is not None and plain(value):
+                continue
+        elif item and plain(item.group(2)) and not re.match(r"""["']?[\w-]+["']?\s*:(?:\s|$)""", item.group(2)):
+            continue  # An item with a plain value; one that holds a key is a step or a mapping written another way.
+        found.append((name, line.strip(), NOT_THE_NOTATION))
+    return found
+
+
+def closed_list_findings(workflows: dict[str, str] | None = None) -> list[tuple[str, ...]]:
+    """What the closed list refuses in the given workflows, or in the repository's own. The list is the workflows
+    themselves, line by line: nothing that is not on it runs, and every line that starts something carries a mark that
+    is checked against the line."""
+    workflows = the_workflows() if workflows is None else workflows
+    found: list[tuple[str, ...]] = []
+    if sorted(workflows) != sorted(CLOSED_LIST):
+        found.append(("the workflows", "a workflow that is not on the closed list, or one on it that is gone"))
+    for name, text in sorted(workflows.items()):
+        held = CLOSED_LIST.get(name, [])
+        written = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if written != [entry if isinstance(entry, str) else entry[0] for entry in held]:
+            at = next(n for n, (one, other) in enumerate(itertools.zip_longest(written, [e if isinstance(e, str) else e[0] for e in held])) if one != other)
+            found.append((name, f"line {at + 1} of those that count", "a line that is not on the closed list"))
+            continue
+        found += notation_findings(name, written)
+        marked = [(entry[0].strip().removeprefix("- ").removeprefix("run:").strip(), entry[1]) for entry in held if not isinstance(entry, str)]
+        steps = steps_of_the_workflows({name: text})
+        commands = [(line.strip(), step) for step in steps for line in step["run"] if line.strip() and not line.strip().startswith("#")]
+        if [command for command, _ in commands] != [command for command, _ in marked]:
+            found.append((name, "a line that starts something without a mark, or a mark on a line that starts nothing"))
+            continue
+        for (command, step), (_, mark) in zip(commands, marked, strict=True):
+            if mark not in ("runner", "protected", "isolated"):
+                found.append((name, command, "a mark that is not one of the three kinds"))
+                continue
+            for one in with_the_matrix(command, step["matrix"]):
+                if (got := mark_of(one, step["folder"] or ".")) != mark:
+                    found.append((name, one, f"marked {mark}: {got}"))
+        for step in steps:
+            # An action is named by the forty digits of its commit, from outside the repository.
+            if step["uses"] is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}", step["uses"]):
+                found.append((name, step["uses"], "an action that is not pinned, or from the repository itself"))
+        for n, line in enumerate(written):
+            if re.match(r"^\s*(?:- )?(?:shell|defaults|container|services)\s*:", line):
+                found.append((name, line.strip(), "a key that decides how lines run, which the closed list does not hold"))
+            if re.match(r"^\s*(?:- )?env:\s*$", line):
+                indent = len(line) - len(line.lstrip())
+                for later in written[n + 1 :]:
+                    if len(later) - len(later.lstrip()) <= indent:
+                        break
+                    variable = later.strip().split(":", 1)[0]
+                    if variable not in VARIABLES_OF_THE_WORKFLOWS:
+                        found.append((name, variable, "a variable that is not on the list"))
+        if "GITHUB_ENV" in text or "GITHUB_PATH" in text:
+            found.append((name, "a step that sets what later steps are given"))
+    return found
+
+
+def test_every_thing_the_workflows_start_is_protected_or_started_in_isolated_mode():
+    assert sum(len(commands_of(step)) for step in steps_of_the_workflows()) >= 25
+    assert closed_list_findings() == []
+
+
+def changed_workflows(rng: random.Random) -> list[tuple[str, dict[str, str]]]:
+    """The repository's workflows, each changed once in a way that decides what a line starts or how it runs: a variable set
+    before a command, an option put before what a program runs, a folder of the job's or of a step's that is not protected,
+    and a shell of the step's own. The names, options and folders are drawn."""
+    workflows, changed = the_workflows(), []
+    def name() -> str:
+        return rng.choice(["PYTHON", "LD_", "BASH_", "DYLD_", "GIT_", "NODE_", ""]) + "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ_") for _ in range(rng.randint(2, 8)))
+    def folder() -> str:
+        return rng.choice(["docs", "site", "tools", ".", "docs/" + "".join(rng.choice("abcdefgh") for _ in range(5))])
+    for file, text in workflows.items():
+        lines = text.splitlines()
+        inside_run = None
+        for n, line in enumerate(lines):
+            indent = len(line) - len(line.lstrip())
+            if inside_run is not None and line.strip() and indent <= inside_run:
+                inside_run = None
+            single = re.match(r"^(\s*(?:- )?run:\s*)(?![|>]\s*$)(\S.*)$", line)
+            command = (single.group(1), single.group(2)) if single else ((line[:indent], line.strip()) if inside_run is not None and line.strip() and not line.strip().startswith("#") else None)
+            if re.match(r"^(\s*(?:- )?)run:\s*[|>]\s*$", line):
+                inside_run = len(re.match(r"^(\s*(?:- )?)", line).group(1)) - (2 if "- run" in line else 0)
+            if command:
+                head, rest = command
+                words = rest.split(" ", 1)
+                for kind, new in (("a variable set before the command", f"{head}{name()}={folder()}/{rng.choice(['x', 'x.so', 'x.sh', 'x.py'])} {rest}"),
+                                  ("an option before what is run", f"{head}{words[0]} --{rng.choice(['rcfile', 'init-file', 'config', 'prefix'])}={folder()}/x {words[1] if len(words) > 1 else ''}".rstrip())):  # fmt: skip
+                    changed.append((f"{file}:{n + 1}: {kind}", workflows | {file: "\n".join(lines[:n] + [new] + lines[n + 1 :]) + "\n"}))
+                if indent >= 8 and single:
+                    shell = " " * (len(head) - len(head.lstrip(" -")) ) + f"shell: bash --rcfile {folder()}/x {{0}}"
+                    changed.append((f"{file}:{n + 1}: a shell of the step's own", workflows | {file: "\n".join(lines[:n] + [shell, line] + lines[n + 1 :]) + "\n"}))
+            if (where := re.match(r"^(\s*(?:- )?working-directory:\s*)(\S+)\s*$", line)):
+                changed.append((f"{file}:{n + 1}: a step's folder that is not protected", workflows | {file: "\n".join(lines[:n] + [where.group(1) + folder()] + lines[n + 1 :]) + "\n"}))
+            if re.match(r"^    runs-on:", line):
+                defaults = ["    defaults:", "      run:", f"        working-directory: {folder()}"]
+                changed.append((f"{file}:{n + 1}: a folder of the job's own", workflows | {file: "\n".join(lines[: n + 1] + defaults + lines[n + 1 :]) + "\n"}))
+    return changed
+
+
+def test_a_mark_that_does_not_hold_for_its_line_is_refused(monkeypatch):
+    lists = 0
+    for name, held in CLOSED_LIST.items():
+        for n, entry in enumerate(held):
+            if isinstance(entry, str):
+                continue
+            for other in ("runner", "protected", "isolated"):
+                if other != entry[1]:
+                    monkeypatch.setitem(CLOSED_LIST, name, held[:n] + [(entry[0], other, entry[2])] + held[n + 1 :])
+                    assert closed_list_findings(), (name, n, other)
+                    lists += 1
+            # A line that starts something, held without its mark.
+            monkeypatch.setitem(CLOSED_LIST, name, held[:n] + [entry[0]] + held[n + 1 :])
+            assert closed_list_findings(), (name, n)
+        monkeypatch.setitem(CLOSED_LIST, name, held)
+    assert lists >= 50, lists
+
+
+def agreeing(workflows: dict[str, str]) -> dict[str, list]:
+    """A closed list that agrees with the given workflows line by line, as one who changes both in one commit would write
+    it: every line that the reading of steps takes for a command carries a mark, the one that holds where one does."""
+    listed = {}
+    for name, text in workflows.items():
+        steps = steps_of_the_workflows({name: text})
+        commands = [(line.strip(), step) for step in steps for line in step["run"] if line.strip() and not line.strip().startswith("#")]
+        held, k = [], 0
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if k < len(commands) and line.strip().removeprefix("- ").removeprefix("run:").strip() == commands[k][0]:
+                command, step = commands[k]
+                k += 1
+                marks = [mark_of(one, step["folder"] or ".") for one in with_the_matrix(command, step["matrix"])]
+                held.append((line, next((m for m in marks if not m.startswith("refused")), "protected"), "made up"))
+            else:
+                held.append(line)
+        listed[name] = held
+    return listed
+
+
+SITE_CHECK = "        run: python -I tools/site/build.py --check"
+GEMINI_TESTS = "        run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py"
+# Each invariant of the closed list, broken alone in a workflow with which the list agrees: (what the finding says, the
+# workflow, the line it replaces, the lines put in its place).
+INVARIANT_VARIANTS = [
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run:", "          python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        env: { PYTHONPATH: docs }", SITE_CHECK]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, [SITE_CHECK, "      - { name: More, run: python -I tools/site/build.py --check }"]),
+    ("a line not in the one notation", "ci.yml", GEMINI_TESTS, ["        working-directory:", "          bench", GEMINI_TESTS]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        name: &named Check", SITE_CHECK]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: !!str python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: >", "          python -I tools/site/build.py --check"]),
+    ("an action that is not pinned", "site.yml", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1", ["      - uses: actions/checkout@v7"]),
+    ("a key that decides how lines run", "site.yml", SITE_CHECK, ["        shell: bash", SITE_CHECK]),
+    ("a variable that is not on the list", "site.yml", SITE_CHECK, ["        env:", "          PYTHONPATH: docs", SITE_CHECK]),
+    ("a step that sets what later steps are given", "site.yml", SITE_CHECK, ['        run: echo x >> "$GITHUB_ENV"']),
+    ("a variable set for a command", "site.yml", SITE_CHECK, ["        run: PYTHONPATH=docs python -I tools/site/build.py --check"]),
+    ("a path that is not protected", "ci.yml", GEMINI_TESTS, ["        run: python -m pytest -q -c ../docs/pytest.ini tests/test_gemini.py"]),
+    ("a character or a word outside", "ci.yml", GEMINI_TESTS, ["        run: python -m pytest -q 'tests/test_gemini.py'"]),
+    ("a program that is not on the list", "ci.yml", GEMINI_TESTS, ["        run: sh ci/check.sh"]),
+    ("not in isolated mode", "site.yml", SITE_CHECK, ["        run: python tools/site/build.py --check"]),
+    ("docker started for anything but building", "ci.yml", "        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .", ["        run: docker run dodam-bench/python:dev"]),
+    ("not protected", "ci.yml", "          - claude_only.py --check --part 1/3", ["          - ../../docs/x.py"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["      -   run: python -I tools/site/build.py --check"]),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, [SITE_CHECK, '      - "run": python -I tools/site/build.py --check']),
+    ("a line not in the one notation", "site.yml", SITE_CHECK, ["        run: python -I", "          tools/site/build.py --check"]),
+    ("not protected", "site.yml", "          python -I -m pip install --require-hashes --only-binary=:all: -r tools/site/requirements.txt",
+     ["          python -I -m pip install --require-hashes --only-binary=:all: -r requirements.txt"]),
+    ("not protected", "site.yml", SITE_CHECK, ["        run: python -I -m pytest -q -c setup.cfg bench/tests"]),
+]
+
+
+@pytest.mark.parametrize("says, workflow, line, put", INVARIANT_VARIANTS)
+def test_each_invariant_of_the_closed_list_catches_its_variant_when_the_list_agrees(monkeypatch, says, workflow, line, put):
+    workflows = the_workflows()
+    lines = workflows[workflow].split("\n")
+    at = lines.index(line)
+    changed = workflows | {workflow: "\n".join(lines[:at] + put + lines[at + 1 :])}
+    monkeypatch.setitem(globals(), "CLOSED_LIST", agreeing(changed))
+    findings = closed_list_findings(changed)
+    assert any(says in " | ".join(map(str, finding)) for finding in findings), findings
+
+
+def test_a_wrong_mark_a_missing_mark_a_line_off_the_list_and_a_workflow_off_the_list_are_each_caught(monkeypatch):
+    workflows = the_workflows()
+    listed = agreeing(workflows)
+    at = next(n for n, entry in enumerate(listed["ci.yml"]) if not isinstance(entry, str))
+    entry = listed["ci.yml"][at]
+    cases = [("marked", workflows, listed | {"ci.yml": listed["ci.yml"][:at] + [(entry[0], "runner", "made up")] + listed["ci.yml"][at + 1 :]}),
+             ("without a mark", workflows, listed | {"ci.yml": listed["ci.yml"][:at] + [entry[0]] + listed["ci.yml"][at + 1 :]}),
+             ("not on the closed list", workflows | {"site.yml": workflows["site.yml"].replace(SITE_CHECK, SITE_CHECK + " ")}, listed),
+             ("a workflow that is not on the closed list", workflows | {"more.yaml": "name: more\n"}, listed)]  # fmt: skip
+    for says, given, held in cases:
+        monkeypatch.setitem(globals(), "CLOSED_LIST", held)
+        assert any(says in " | ".join(map(str, finding)) for finding in closed_list_findings(given)), says
+
+
+def test_a_mark_is_one_of_the_three_kinds_and_never_a_refusal(monkeypatch):
+    workflows = the_workflows()
+    bad = "        run: python docs/x.py"
+    changed = workflows | {"site.yml": workflows["site.yml"].replace(SITE_CHECK, bad)}
+    listed = agreeing(changed)
+    at = next(n for n, entry in enumerate(listed["site.yml"]) if not isinstance(entry, str) and entry[0] == bad)
+    refusal = mark_of("python docs/x.py", ".")
+    assert refusal not in ("runner", "protected", "isolated")
+    listed["site.yml"][at] = (bad, refusal, "made up")
+    monkeypatch.setitem(globals(), "CLOSED_LIST", listed)
+    assert closed_list_findings(changed), refusal
+
+
+def test_every_workflow_file_is_read_whatever_its_ending(tmp_path, monkeypatch):
+    folder = tmp_path / ".github" / "workflows"
+    folder.mkdir(parents=True)
+    for name in ("a.yml", "b.yaml"):
+        (folder / name).write_text("name: x\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    assert sorted(the_workflows()) == ["a.yml", "b.yaml"]
+
+
+@pytest.mark.parametrize("seed", [151, 152])
+def test_every_change_to_what_decides_how_a_workflow_line_runs_is_refused_by_the_closed_list(seed):
+    changed = changed_workflows(random.Random(seed))
+    assert len(changed) >= 60, len(changed)
+    missed = [where for where, workflows in changed if not closed_list_findings(workflows)]
+    assert missed == [], (len(missed), missed[:8])
+
+
+def test_a_path_that_climbs_above_the_root_or_out_of_a_protected_folder_is_not_protected():
+    assert protected("bench/x.py") and protected("tools/desk/relay.py")
+    for path in ("bench/../docs/x.py", "bench/../../x.py", "../bench/x.py", "tools/desk/../../docs/x.py", "/bench/x.py"):
+        assert not protected(path), path
+    step = {"folder": "bench/../docs", "matrix": {}, "run": [], "uses": None}
+    assert judged(step, ["python", "pilot_replan.py"]) is not None and judged(step, ["python", "-m", "pytest"]) is not None
+    # A script from a folder that is not protected, in isolated mode too, and a shell script from it.
+    assert judged(step, ["python", "-I", "pilot_replan.py"]) is not None and judged(step, ["bash", "x.sh"]) is not None
+
+
+def test_lock_md_says_what_the_form_folds_and_what_is_searched_and_every_way_a_session_ends():
+    said = said_in_lock_md()
+    for folded in ("the width of a character", "case;", "that looks like a Latin one", "every mark, taken off", "katakana, as hiragana, the voiced ones too",
+                   "a small kana, as its full-size letter", "every form of a Korean letter", "a digit, as the letter it is written for",
+                   "a mark that repeats a letter", "Every other character is a separator", "as a run of letters in the form, with any number of separators",
+                   "A value that is an address is searched also by its part before the at sign", "A path and a hidden folder are searched in three spellings"):
+        assert folded in said, folded
+    # One table with every way a session ends, in the order the relay looks at them.
+    text = (DESK / "LOCK.md").read_text(encoding="utf-8")
+    table = text[text.index("| How the session ended |"):].split("\n\n")[0].splitlines()[2:]
+    rows = [line for line in table if line.startswith("| ")]
+    assert len(rows) == 9, rows
+    assert [row.split(" | ")[1] for row in rows] == ["Kept"] * 7 + ["Handled"] * 2, rows
+
+
+# =================================================================================================
+# What the review of the mends found: each as its class
+# =================================================================================================
+
+import ast  # noqa: E402
+
+
+def test_a_session_during_which_the_desk_is_stopped_leaves_the_items_count_toward_closing_as_it_was(place, monkeypatch):
+    running, clock, _ = in_process(place, monkeypatch)
+    writer = 1_300_000_401
+    place.put(7, written(writer))
+
+    def shown_and_ended(text, env):
+        module("tools").Desk(place.env() | {key: value for key, value in env.items() if key.startswith("DESK_")}).read_item({"number": 7})
+        return {"counts": [10, 0, 0, 10], "ended_by": "its time was up", "refused_sign_in": False, "turns": 2, "reads": 1, "at_a_bound": True}
+
+    running.run_session = shown_and_ended
+    running.take(arrivals(event(7, writer, "c1")))
+    running.start_one()
+    assert counted(place)["ended_in_a_row"] == {"7": 1}
+    clock[0] += 86_400 + 1
+
+    def stopped(text, env):
+        running.stopping.set()
+        return {"counts": [10, 0, 0, 10], "ended_by": "the desk is stopping", "refused_sign_in": False, "turns": 1, "reads": 0}
+
+    running.run_session = stopped
+    running.take(arrivals(event(7, writer, "c2")))
+    running.start_one()
+    assert counted(place)["ended_in_a_row"] == {"7": 1}
+
+
+# --- What leaves is what was checked: the report as kept, the digest as cut, the answer as posted ----------
+
+
+def what_leaves(place, keys: bool) -> list:
+    """Every comment and every message to the coordinator, exactly as sent, that the check on text that leaves refuses."""
+    guard = module("guard")
+    machine = MACHINE + [("the made-up value", "Elizabeth"), ("the made-up value", "temtaylor"), ("the made-up value", "Yang")] + guard.state_paths(place.state)
+    sent = [m["body"] for m in place.sent("comments")] if keys else [m["body"] for m in place.sent("coordinator")]
+    return [(body, guard.leaks(body, machine, place.copy, ("BrilliantTiger", "dodam"), keys=keys)) for body in sent if guard.leaks(body, machine, place.copy, ("BrilliantTiger", "dodam"), keys=keys)]
+
+
+def a_desk_with_values(place, **more):
+    desk = place.desk(**more)
+    desk.machine = MACHINE + [("the made-up value", "Elizabeth"), ("the made-up value", "temtaylor"), ("the made-up value", "Yang")]
+    return desk
+
+
+@pytest.mark.parametrize("seed", [41, 42])
+def test_a_report_is_checked_as_it_is_kept_and_sent(place, seed):
+    rng = random.Random(seed)
+    for n, (path, kind) in enumerate([("/Users/you/notes", "vulnerability"), (".dodam/secret", "problem"), ("/tmp/x", "spam")]):
+        # Line breaks and tabs round the slashes, which the kept line makes plain spaces.
+        parts = path.split("/")
+        breaks = parts[0] + "".join(rng.choice(["\n", "\t", " \n ", "\n\t", ""]) + "/" + rng.choice(["\n", "\t", ""]) + part for part in parts[1:])
+        desk = a_desk_with_values(place, DESK_ITEM=str(7 + n), DESK_ACCOUNTS=accounts(801 + n))
+        place.put(7 + n, item())
+        try:
+            desk.tell_coordinator({"kind": kind, "number": 7 + n, "summary": f"The file is in {breaks} now."})
+        except desk.tools.Refused:
+            pass
+    place.desk().digest(force=True)
+    assert what_leaves(place, keys=False) == []
+
+
+def test_a_digest_is_checked_as_it_is_sent_its_lines_cut_and_its_fixed_words_with_them(place, monkeypatch):
+    tools = module("tools")
+    monkeypatch.setattr(tools, "ticks", lambda: 90_000.0)
+    limit = lock_file()["coordinator"]["digest_line_chars"]
+    # A line that a cut would end inside a word, and a line whose first word follows the digest's own words.
+    long_line = "x" * (limit - 8) + " the Yangtze river."
+    a_desk_with_values(place, DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": long_line})
+    a_desk_with_values(place, DESK_ITEM="7", DESK_ACCOUNTS=accounts(802)).tell_coordinator({"kind": "question_unanswered", "number": 7, "summary": "aylor is here."})
+    a_desk_with_values(place).digest()
+    assert [m for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
+    assert what_leaves(place, keys=False) == []
+
+
+def test_an_answer_is_checked_as_it_is_posted_with_its_first_line_and_its_fixed_sentence(place):
+    desk = a_desk_with_values(place, DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.tell_coordinator({"kind": "problem", "number": 7, "summary": "A problem to look at."})
+    for text in ("Please ask Elizabe", "Thanks, ask Eliza", "Elizabeth"[:-2]):
+        try:
+            desk.answer({"number": 7, "text": text, "language": "en", "agents_told": "told"})
+        except desk.tools.Refused:
+            pass
+    assert what_leaves(place, keys=True) == []
+
+
+@pytest.mark.parametrize("seed", [51, 52])
+def test_no_line_of_the_desk_is_cut_inside_a_word(seed):
+    """Never inside a run of Latin letters and digits, nor inside a word that holds a digit: a cut there would make a new
+    word, and a short value is found as a whole word. Between letters of Korean or Japanese a cut may fall."""
+    tools, rng = module("tools"), random.Random(seed)
+    sentences = [s for found in honest_sentences().values() for s in found]
+    latin = re.compile(r"[A-Za-z0-9ÁÉÍÑÓÚÜáéíñóúüªº]")
+    inside = []
+    for sentence in rng.sample(sentences, 400):
+        limit = rng.randrange(1, len(sentence))
+        got = tools.cut(sentence, limit)
+        if got == sentence:
+            continue
+        at = len(got)
+        word = re.search(r"\S*$", sentence[:at]).group(0) + re.match(r"\S*", sentence[at:]).group(0)
+        if not sentence.startswith(got) or at > limit or (latin.match(sentence[at - 1:at] or " ") and latin.match(sentence[at])) or (
+                any(c.isdigit() for c in word) and not sentence[at - 1:at].isspace() and not sentence[at].isspace() and at > 0):  # fmt: skip
+            inside.append((sentence, limit, got))
+    assert not inside, inside[:3]
+
+
+# --- Neighbours: the words of the told claim, an address's tag, paths after a letter of another alphabet ----
+
+
+TOLD_WHOM_STATED = {"en": ["agents", "maintainers", "team", "coordinator", "owner"], "ko": ["에이전트", "관리자", "팀", "코디네이터", "소유자", "오너"],
+                    "ja": ["エージェント", "メンテナ", "チーム", "コーディネーター", "所有者", "オーナー"],
+                    "es": ["agentes", "mantenedores", "equipo", "coordinador", "propietario", "dueño"]}  # fmt: skip
+
+
+def test_every_word_for_whom_in_every_language_is_known_to_the_told_check(place):
+    tools = module("tools")
+    # The words the tool knows, from its own table when it has one, and at least the words LOCK.md names for each language.
+    table = getattr(tools, "WHOM_WORDS", {})
+    missed = []
+    for language, (_, told_words, sentence) in TOLD_WORDS.items():
+        for whom in sorted(set(TOLD_WHOM_STATED[language]) | set(table.get(language, []))):
+            for told in told_words:
+                for inside in POINTS_INSIDE_WORDS[:2]:
+                    text = sentence.format(whom=whom, told=told, inside=inside)
+                    if not tools.says_agents_were_told(text):
+                        missed.append(text)
+    assert not missed, missed[:5]
+
+
+SHORT_FORMS_STATED = ["e.g.", "i.e.", "cf.", "etc.", "vs.", "approx.", "incl.", "p. ej.", "aprox.", "Sr.", "Sra."]
+
+
+def test_the_point_of_a_short_form_ends_no_sentence_of_the_told_check():
+    tools = module("tools")
+    table = getattr(tools, "SHORT_FORMS", [])
+    missed = []
+    for short in sorted(set(SHORT_FORMS_STATED) | set(table)):
+        for text in (f"The project's agents, {short} the reviewers, have been told.", f"Se ha avisado al equipo, {short} los agentes."):
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+def test_the_part_of_an_address_before_its_tag_is_a_known_value_too():
+    guard = module("guard")
+    known = [("the owner's git name or address", "gildong+desk@example.invalid")]
+    for text in ("Ask gildong about it.", "gildong님에게 물어보세요.", "gildong+desk wrote it."):
+        assert guard.leaks(text, known) == ["the owner's git name or address"], text
+
+
+@pytest.mark.parametrize("seed", [61, 62])
+def test_a_path_or_a_hidden_folder_is_found_after_a_letter_of_any_alphabet(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    # Letters of other alphabets; a Latin letter or digit before a slash makes a relative path of the repository instead.
+    letters = [g[0] for g in kana_classes()][:20] + ["파", "일", "은", "名", "前", "é"]
+    missed = []
+    for target, kind in (("/Users/you/notes", "a path outside the repository"), ("/tmp/x", "a path outside the repository"),
+                         (".ssh/id_rsa", "a hidden folder of this computer"), ("~you/notes", "a path outside the repository")):  # fmt: skip
+        for _ in range(8):
+            before = rng.choice(letters) if not target.startswith("/") or rng.random() < 0.8 else ""
+            text = "設定は" + before + target + rng.choice(["에 있습니다.", "にあります。", " now."])
+            if kind not in guard.leaks(text, []):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("path", ["../../../../../../../tmp/x", "..\\..\\..\\..\\tmp\\x", "../../../Users/you/notes", ".. / .. / .. /tmp/x"])
+def test_a_relative_path_that_climbs_out_of_the_copy_to_a_private_folder_is_refused(path):
+    assert "a path outside the repository" in module("guard").leaks(f"Look in {path} for it.", [])
+
+
+# --- What protected tests start is on the closed list too --------------------------------------------------
+
+
+def started_by_the_tests() -> list[tuple[str, int, str, str]]:
+    """What the tests of the benchmark's folder put on Python's search path, load from a file, or start with Python, wherever
+    the path is written in the test itself: the file, the line, what is done, and the path in the repository."""
+    files = [*sorted((ROOT / "bench" / "tests").glob("*.py")), *sorted((ROOT / "bench" / "ci").glob("*.py"))]
+    return started_by({str(path.relative_to(ROOT)): path.read_text(encoding="utf-8") for path in files})
+
+
+def started_by(sources: dict[str, str]) -> list[tuple[str, int, str, str]]:
+    """What the given Python files put on the search path, load from a file, or start with Python."""
+    found = []
+    for name, source in sorted(sources.items()):
+        tree = ast.parse(source)
+        known: dict[str, list[str]] = {}
+
+        def value(node) -> list[str]:
+            """The paths of the repository an expression stands for, as far as the test file itself says."""
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return [node.value]
+            if isinstance(node, ast.Name):
+                return known.get(node.id, [])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "str" and node.args:
+                return value(node.args[0])
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                return [posixpath.join(a, b) for a in value(node.left) for b in value(node.right)]
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path" and len(node.args) == 1:
+                return value(node.args[0])
+            if isinstance(node, ast.Subscript) and "parents" in ast.unparse(node.value) and "__file__" in ast.unparse(node.value):
+                # The folders above the file itself, counted from its own folder.
+                if not re.fullmatch(r"\d", ast.unparse(node.slice)):
+                    return []
+                folder = posixpath.dirname(name)
+                for _ in range(int(ast.unparse(node.slice))):
+                    folder = posixpath.dirname(folder)
+                return [folder]
+            if isinstance(node, ast.Attribute) and node.attr == "parent" and "__file__" in ast.unparse(node.value) and "parent" not in ast.unparse(node.value):
+                return [posixpath.dirname(name)]
+            if isinstance(node, ast.JoinedStr):
+                texts = [""]
+                for part in node.values:
+                    pieces = [part.value] if isinstance(part, ast.Constant) else (value(part.value) if isinstance(part, ast.FormattedValue) and part.format_spec is None and part.conversion == -1 else [])
+                    texts = [text + piece for text in texts for piece in pieces]
+                return texts
+            return []
+
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1 and isinstance(statement.targets[0], ast.Name):
+                known[statement.targets[0].id] = value(statement.value)
+            elif isinstance(statement, ast.For) and isinstance(statement.target, ast.Name) and isinstance(statement.iter, ast.Tuple):
+                known[statement.target.id] = [v for element in statement.iter.elts for v in value(element)]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and isinstance(node.iter, ast.Tuple):
+                known.setdefault(node.target.id, [v for element in node.iter.elts for v in value(element)])
+        def listed(node) -> list[str]:
+            """The paths a list written in the file holds, each read; empty when any cannot be read."""
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                sides = [side for side in (node.left, node.right) if ast.unparse(side) != "sys.path"]
+                return [p for side in sides for p in listed(side)] if all(listed(side) for side in sides) else []
+            if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+                return []
+            paths = [value(element) for element in node.elts]
+            return [p for each in paths for p in each] if all(paths) else []
+
+        def variables(node) -> list[str]:
+            """The paths that variables which decide where code is looked for are given; empty when any cannot be read."""
+            if not isinstance(node, ast.Dict) or any(key is None or not isinstance(key, ast.Constant) for key in node.keys):
+                return []
+            paths = [CHECKED]
+            for key, given in zip(node.keys, node.values, strict=True):
+                if key.value in SEARCH_VARIABLES:
+                    read_paths = [part for whole in value(given) for part in whole.split(":") if part]
+                    if not read_paths:
+                        return []
+                    paths += read_paths
+            return paths
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                text = ast.unparse(node)
+                for target in targets:
+                    aimed = ast.unparse(target.value if isinstance(target, ast.Subscript) else target)
+                    if aimed == "sys.path":
+                        found.extend((name, node.lineno, "put on the search path", p, text) for p in (listed(node.value) or [CANNOT_BE_READ]))
+                    elif aimed == "os.environ":
+                        key = target.slice if isinstance(target, ast.Subscript) else None
+                        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                            found.append((name, node.lineno, "set in the environment", CANNOT_BE_READ, text))
+                        elif key.value in SEARCH_VARIABLES:
+                            paths = [part for whole in value(node.value) for part in whole.split(":") if part]
+                            found.extend((name, node.lineno, "set in the environment", p, text) for p in (paths or [CANNOT_BE_READ]))
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            called, text = ast.unparse(node.func), ast.unparse(node)
+
+            def read(what: str, paths: list[str]) -> None:
+                found.extend((name, node.lineno, what, p, text) for p in (paths or [CANNOT_BE_READ]))
+
+            first = node.args[0] if node.args else None
+            constant = isinstance(first, ast.Constant) and isinstance(first.value, str)
+            if called in ("exec", "eval", "compile"):
+                if not constant:
+                    read("run as code", [])
+                continue
+            if called in ("__import__", "importlib.import_module", "runpy.run_module"):
+                read("loaded as a module", [MODULE_OR_CODE] if constant else [])
+                continue
+            if called == "sys.path.extend":
+                read("put on the search path", listed(first) if first is not None else [])
+                continue
+            if called in ("os.environ.update", "os.environ.setdefault", "os.putenv", "monkeypatch.setenv", "monkeypatch.setitem", "monkeypatch.delenv"):
+                arguments = node.args[1:] if called == "monkeypatch.setitem" else node.args
+                if called == "monkeypatch.setitem" and ast.unparse(node.args[0]) != "os.environ":
+                    continue
+                key = arguments[0] if arguments else None
+                if called == "os.environ.update":
+                    read("set in the environment", variables(key) if key is not None else [])
+                elif not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                    read("set in the environment", [])
+                elif key.value in SEARCH_VARIABLES and called != "monkeypatch.delenv":
+                    given = arguments[1] if len(arguments) > 1 else None
+                    read("set in the environment", [part for whole in (value(given) if given is not None else []) for part in whole.split(":") if part])
+                continue
+            if called in STARTS or re.fullmatch(r"os\.(?:exec|spawn|posix_spawn)\w*", called):
+                for keyword in node.keywords:
+                    if keyword.arg == "env":
+                        read("set for a start", variables(keyword.value))
+
+            if called in ("sys.path.insert", "sys.path.append") and node.args:
+                read("put on the search path", value(node.args[-1]))
+            elif called.endswith("spec_from_file_location") or called.endswith("run_path") or called.endswith("run_module"):
+                given = node.args[-1] if called.endswith("spec_from_file_location") and len(node.args) >= 2 else (node.args[0] if node.args else None)
+                read("loaded from a file", value(given) if given is not None and not called.endswith("run_module") else [])
+            elif called in STARTS or re.fullmatch(r"os\.(?:exec|spawn|posix_spawn)\w*", called):
+                read("started", started_words(node, called, value))
+    # A name without a folder is a file of the folder the process starts in, which no test fixes: it is read from the root.
+    return [(name, line, what, posixpath.normpath(p), text) for name, line, what, p, text in found if p and not p.startswith("/")]
+
+
+# What the scan reads as a start: calls written with the module's own name. A shell's text, a program or a script that
+# is computed while the test runs, and a function of these modules taken under another name are what it cannot read.
+STARTS = {"subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen", "subprocess.getoutput",
+          "subprocess.getstatusoutput", "os.system", "os.popen", "pty.spawn", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}  # fmt: skip
+CANNOT_BE_READ = "<what the scan cannot read>"
+CHECKED = "<read, and nothing in it decides where code is looked for>"
+# Variables that decide where a program or Python looks for code. Others are read as data.
+SEARCH_VARIABLES = {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONPLATLIBDIR", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "BASH_ENV", "ENV"}  # fmt: skip
+MODULE_OR_CODE = "<a module or code given to Python>"
+PROGRAM_OF_THE_COMPUTER = "<a program of the computer, by its name>"
+# The starts and loads of the project's own tests that the scan cannot read: each word for word, with its reason. A start
+# the scan cannot read and that is not here fails, and so does an entry here that no longer stands in a test.
+READ_BY_HAND = [
+    ('bench/tests/test_cli_convert.py', "subprocess.run(['sh', '-c', script], capture_output=True)",
+     "a shell given the task's test script, which the test builds from a text of the same file"),
+    ('bench/tests/test_cli_isolation.py', "subprocess.run([sys.executable, f'experiments/{script}', '--quick'], cwd=BENCH, capture_output=True, text=True, timeout=seconds)",
+     "an experiment script of the protected folder of experiments, by a name from the test's own list"),
+    ('bench/tests/test_cli_isolation.py', 'subprocess.run(reader_command(name, group), check=True, capture_output=True)',
+     "docker started with the reader helper's command, which a function of the same file builds"),
+    ('bench/tests/test_cli_judge.py', "subprocess.Popen([sys.executable, str(tmp_path / 'watched.py'), str(tmp_path / 'log'), str(tmp_path / 'helper.py')], cwd=tmp_path, stderr=subprocess.PIPE)",
+     'a helper the test writes into its own temporary folder from a text of the same file'),
+    ('bench/tests/test_desk_lock.py', 'subprocess.run(command, shell=True, input=json.dumps(call), capture_output=True, text=True, timeout=60)',
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', "subprocess.run(command, shell=True, input=json.dumps({'tool_name': 'Read', 'tool_input': {'file_path': 'x', 'limit': 1}}), capture_output=True, text=True)",
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', "subprocess.run(command, shell=True, input=json.dumps(call | {'session_id': 's1'}), capture_output=True, text=True, timeout=60)",
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_desk_lock.py', 'subprocess.run(command, shell=True, input=call, capture_output=True, text=True, timeout=60)',
+     'the check that runs before every tool call, as the start writes it, run as Claude Code runs it'),
+    ('bench/tests/test_experiment_scripts.py', "importlib.util.spec_from_file_location(name, BENCH / 'experiments' / f'{name}.py')",
+     'an experiment script of the protected folder of experiments, by the name the test gives'),
+    ('bench/tests/test_gemini.py', 'subprocess.run([GIT, *args], cwd=cwd, env=env, capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL)',
+     'git of the computer, found on its search path'),
+    ('bench/tests/test_gemini.py', 'subprocess.run([\'/bin/sh\', \'-c\', f\'{ssh} "$@"\', \'ssh\', \'git@example.invalid\', \'git-receive-pack x\'], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)',
+     'the command the job gives git for ssh, run as git runs it, with made-up arguments'),
+    ('bench/tests/test_gemini.py', "subprocess.run([sys.executable, '-I', str(self.root / 'runner.py'), str(spec_path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)",
+     "the job's runner, which the test copies into its own temporary folder"),
+    ('bench/tests/test_harbor_patch.py', "subprocess.run([str(HARBOR_VENV / 'bin' / 'python'), '-I', str(PROBE)], capture_output=True, text=True, timeout=120, env={'DODAM_PROBE_SECRET': FAKE_SECRET, 'PATH': HOST_PATH, 'HOME': os.environ.get('HOME', '/tmp'), **HOST_CLI_ENV})",
+     "a probe beside this test file, with Python of the benchmark's own environment for the released Harbor"),
+    ('bench/tests/test_harbor_patch.py', "subprocess.run([str(HARBOR_VENV / 'bin' / 'python'), '-I', str(USES_PROBE)], capture_output=True, text=True, timeout=120, cwd=tmp_path, env={'PATH': HOST_PATH, 'HOME': str(tmp_path), 'LITELLM_LOCAL_MODEL_COST_MAP': 'True'})",
+     "a probe beside this test file, with Python of the benchmark's own environment for the released Harbor"),
+    ('bench/tests/test_pilot.py', "subprocess.Popen([sys.executable, str(tmp_path / 'driver.py'), str(BENCH), str(tmp_path), stage, str(int(sig))], env={**os.environ, 'STAND_IN_MODE': mode}, stdout=subprocess.DEVNULL, stderr=said)",
+     'a driver the test writes into its own temporary folder from a text of the same file'),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'build.py'], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'anchors.py'], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', "subprocess.run([sys.executable, 'build_doc.py', str(out)], cwd=plan_copy, check=True, capture_output=True)",
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_report.py', 'subprocess.run([sys.executable, *command], cwd=plan_copy, check=True, capture_output=True)',
+     "a script of the plan's tools, run in the test's own copy of that folder"),
+    ('bench/tests/test_pilot_variants.py', "subprocess.run([sys.executable, '-m', 'pytest', '-q', '-rfp', '-p', 'no:cacheprovider', f'tests/{file}::{test}'], cwd=folder / 'bench', capture_output=True, text=True)",
+     "pytest in the test's own copy of the repository, on the test it has broken"),
+    ('bench/tests/test_pilot_variants.py', "subprocess.run([sys.executable, 'render.py'], cwd=folder / 'tools' / 'pilot', check=True, capture_output=True)",
+     "the trial run's renderer in the test's own copy of the repository"),
+    ('bench/tests/test_desk_lock.py', "subprocess.run([sys.executable, str(DESK / 'start.py'), '--coordinator', 'the-coordinator', '--state', str(start.state), '--print'], capture_output=True, text=True, env=start.environ)",
+     "the desk's start, from its protected folder, run with the made-up environment of the start's tests"),
+    ('bench/tests/test_desk_lock.py', "monkeypatch.setenv('PATH', self.environ['PATH'])",
+     "the start's tests put their own folder of stand-in programs first on the search path for programs"),
+    ('bench/tests/test_proctable.py', 'monkeypatch.setenv(\'PATH\', f"{tmp_path}{os.pathsep}{os.environ[\'PATH\']}")',
+     'the test puts its own temporary folder of stand-in programs first on the search path for programs'),
+]  # fmt: skip
+PYTHON_NAME = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?")
+
+
+def started_words(node: ast.Call, called: str, value) -> list[str]:
+    """The paths in the repository that one start runs, as the file names them; empty when the scan cannot read it."""
+    keywords = {k.arg: k.value for k in node.keywords}
+    shell = keywords.get("shell")
+    if (called in ("os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "asyncio.create_subprocess_shell")
+            or called.startswith(("os.exec", "os.spawn", "os.posix_spawn")) or "executable" in keywords or None in keywords
+            or shell is not None and not (isinstance(shell, ast.Constant) and shell.value is False)):  # fmt: skip
+        return []
+    if called == "asyncio.create_subprocess_exec":
+        words = list(node.args)
+    else:
+        argv = node.args[0] if node.args else keywords.get("args")
+        if not isinstance(argv, (ast.List, ast.Tuple)):
+            return []
+        words = list(argv.elts)
+    if not words or isinstance(words[0], ast.Starred):
+        return []
+    folders = [""]
+    if "cwd" in keywords:
+        folders = value(keywords["cwd"])
+        if not folders:
+            return []
+
+    def spelled(word) -> list[str]:
+        if isinstance(word, ast.Constant) and isinstance(word.value, str):
+            return [word.value]
+        return value(word)
+
+    def placed(paths: list[str]) -> list[str]:
+        return [p if p.startswith("/") else posixpath.join(folder, p) for p in paths for folder in folders]
+
+    first = "python" if ast.unparse(words[0]) == "sys.executable" else (spelled(words[0]) or [None])[0]
+    if first is None:
+        return []
+    if PYTHON_NAME.fullmatch(first):
+        named = ["python"] + [word.value if isinstance(word, ast.Constant) and isinstance(word.value, str) else f"<word {n}>" for n, word in enumerate(words[1:], start=1)]
+        started = python_start(named)
+        if "script" not in started:
+            return [MODULE_OR_CODE]
+        if started["script"] is None:
+            return []
+        script = words[named.index(started["script"])]
+        return placed(spelled(script)) or []
+    if posixpath.basename(first) in ("sh", "bash", "dash", "zsh"):
+        if len(words) < 2 or isinstance(words[1], ast.Starred) or any(isinstance(word, ast.Constant) and str(word.value).startswith("-") for word in words[1:]):
+            return []
+        return placed(spelled(words[1]))
+    # Another program: by its name, a program of the computer; by a path, that path.
+    return placed([first]) if "/" in first else [PROGRAM_OF_THE_COMPUTER]
+
+
+@pytest.mark.parametrize("seed", [161, 162])
+def test_a_script_that_a_test_starts_by_a_bare_name_or_with_any_python_is_found_and_is_not_protected(seed):
+    """A name without a folder is a file of the folder the test starts in, which no test fixes: it is read from the root of
+    the repository, which is not protected. Python is started by its own path or by its name."""
+    rng = random.Random(seed)
+    missed = []
+    for _ in range(40):
+        script = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz_") for _ in range(rng.randint(3, 12))) + ".py"
+        python = rng.choice(["sys.executable", '"python"', '"python3"', '"python3.13"'])
+        options = rng.choice(["", '"-I", ', '"-B", ', '"-u", '])
+        call = rng.choice(["subprocess.run", "subprocess.check_call", "subprocess.Popen", "subprocess.check_output"])
+        source = f"import subprocess\nimport sys\n\n\ndef test_it():\n    {call}([{python}, {options}\"{script}\"])\n"
+        found = [entry for entry in started_by({"test_made_up.py": source}) if entry[3] == script]
+        if not found or protected(found[0][3]):
+            missed.append((python, options, script))
+    assert missed == [], missed[:5]
+
+
+SCAN_HEAD = ('import os\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nROOT = Path(__file__).resolve().parents[2]\n'
+             'SCRIPT = "{script}"\n\n\ndef test_it(command, rest, text, where, program):\n    {call}\n')  # fmt: skip
+# Starts whose script the file itself names, in every form the scan reads: a path joined to the root, a name given
+# above, a tuple, Python by its name, a folder to start in.
+READABLE_STARTS = ['subprocess.run([sys.executable, str(ROOT / "{script}")])', "subprocess.run([sys.executable, SCRIPT])",
+                   'subprocess.run((sys.executable, "{script}"))', 'subprocess.check_call(["python3", "-u", "{script}"])',
+                   'subprocess.Popen([sys.executable, "-B", SCRIPT], cwd=str(ROOT))', 'subprocess.run(["sh", "{script}"])']  # fmt: skip
+# Starts the scan cannot read: what is started, or where, is computed while the test runs.
+UNREADABLE_STARTS = ["subprocess.run(command)", "subprocess.run([sys.executable, *rest])", "subprocess.run([sys.executable, text.strip()])",
+                     'subprocess.run([sys.executable, "{script}"], cwd=where)', 'subprocess.run([program, "{script}"])',
+                     "subprocess.run(text, shell=True)", "os.system(text)", "os.execv(sys.executable, command)", 'subprocess.run(["sh", text])',
+                     "subprocess.Popen(args=command)"]  # fmt: skip
+
+
+LOADS_AND_SEARCH_PATHS = ['sys.path.insert(0, os.path.join(str(ROOT), "docs"))', 'exec(open("../docs/x.py").read())', 'sys.path[:0] = ["../docs"]',
+                          'subprocess.run([sys.executable, "-m", "x"], env={"PYTHONPATH": "../docs"})', 'sys.path.extend(["../docs"])',
+                          'sys.path += ["../docs"]', 'os.environ["PYTHONPATH"] = "../docs"', 'eval(compile(open("../docs/x.py").read(), "x", "exec"))',
+                          "importlib.import_module(text)", "__import__(text)", "runpy.run_module(text)", 'sys.path = ["../docs"] + sys.path']  # fmt: skip
+
+
+@pytest.mark.parametrize("line", LOADS_AND_SEARCH_PATHS)
+def test_every_way_a_test_loads_code_or_sets_where_it_is_looked_for_is_read_or_fails(line):
+    source = ("import importlib\nimport os\nimport runpy\nimport subprocess\nimport sys\nfrom pathlib import Path\n\n"
+              f"ROOT = Path(__file__).resolve().parents[2]\n\n\ndef test_it(text):\n    {line}\n")  # fmt: skip
+    found = started_by({"bench/tests/test_made_up.py": source})
+    assert any(entry[3] not in (MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER, CHECKED) and not protected(entry[3]) for entry in found), (line, found)
+
+
+@pytest.mark.parametrize("seed", [191, 192])
+def test_the_scan_finds_every_start_it_reads_and_fails_on_every_start_it_cannot_read(seed):
+    rng = random.Random(seed)
+    missed = []
+    for call in READABLE_STARTS + UNREADABLE_STARTS:
+        script = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz_") for _ in range(rng.randint(3, 10))) + rng.choice([".py", ".sh"])
+        source = SCAN_HEAD.format(script=script, call=call.format(script=script))
+        found = started_by({"bench/tests/test_made_up.py": source})
+        if not any(not protected(entry[3]) for entry in found):
+            missed.append(call)
+    assert missed == [], missed
+
+
+def test_what_the_tests_put_on_the_search_path_load_or_start_comes_from_a_protected_folder():
+    found = started_by_the_tests()
+    assert len(found) >= 5, found
+    unread = {(entry[0], entry[4]) for entry in found if entry[3] == CANNOT_BE_READ}
+    listed = {(file, call) for file, call, _ in READ_BY_HAND}
+    assert sorted(unread - listed) == [], "a start the scan cannot read, and that is not on the list"
+    assert sorted(listed - unread) == [], "an entry of the list that no longer stands in a test"
+    marks = (CANNOT_BE_READ, MODULE_OR_CODE, PROGRAM_OF_THE_COMPUTER, CHECKED)
+    assert [entry[:4] for entry in found if entry[3] not in marks and not protected(entry[3])] == []
+
+
+def test_docker_is_started_only_to_build_an_image_from_a_protected_folder():
+    step = {"folder": "bench/images", "matrix": {}, "run": [], "uses": None}
+    assert judged(step, ["docker", "build", "--quiet", "-f", "python/Dockerfile", "-t", "x", "."]) is None
+    for words in (["docker", "run", "x"], ["docker", "build", "-f", "../../docs/Dockerfile", "."], ["docker", "build", "../../docs"]):
+        assert judged(step, words) is not None, words
+
+
+# --- The notes of the review ---------------------------------------------------------------------------------
+
+
+def test_the_relay_looks_at_the_digest_once_more_before_it_ends(place, monkeypatch):
+    watcher(place, [])
+    running = a_relay(place)
+    running.retry_seconds = 3_600
+    running.take(arrivals(event(8, 1_300_000_501, "l1")))
+    looked = running.start_one
+    calls = []
+
+    def a_look_that_writes_a_line():
+        # The first look starts the session; the next writes a line for the digest and finds nothing to start, and the
+        # desk then ends, being told to end once nothing is left to do.
+        calls.append(1)
+        if len(calls) == 2:
+            running.desk.note("session_ended", "A line written at the relay's last look.", 8)
+            return False
+        return looked()
+
+    running.start_one = a_look_that_writes_a_line
+    running.run_session = lambda text, env: {"counts": [10, 0, 0, 10], "ended_by": None, "refused_sign_in": False, "turns": 1, "reads": 0}
+    running.run()
+    assert [m for m in place.sent("coordinator") if m["subject"] == "Desk: digest" and "the relay's last look" in m["body"]]
+
+
+def test_where_the_computer_gives_no_name_for_its_start_a_count_smaller_than_the_last_tells_it(place, monkeypatch):
+    tools = module("tools")
+    count = [100_000.0]
+    monkeypatch.setattr(tools, "ticks", lambda: count[0])
+    monkeypatch.setattr(tools, "boot", lambda: None, raising=False)
+    place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801)).tell_coordinator({"kind": "spam", "number": 7, "summary": "First."})
+    assert place.desk().digest() is True
+    place.desk(DESK_ITEM="8", DESK_ACCOUNTS=accounts(802)).tell_coordinator({"kind": "spam", "number": 8, "summary": "Second."})
+    # The same start: an hour is counted from the last digest.
+    count[0] += 1_800
+    assert place.desk().digest() is False
+    # A new start: the count is smaller than the last, and the time since that start is taken.
+    count[0] = 3_700.0
+    assert place.desk().digest() is True
+
+
+def test_the_number_of_honest_sentences_in_lock_md_is_the_number_checked():
+    total = sum(map(len, honest_sentences().values()))
+    assert f"of the {total:,} sentences of the project's own page in four languages and of both charters" in said_in_lock_md(), total
+
+
+def test_the_form_folds_the_same_letters_in_another_form_and_nothing_across_scripts_or_kanji():
+    """The boundary of the form, stated in LOCK.md as a class: it folds the forms of one letter for the scripts whose tables it
+    holds; it reads no script as another, by sound or by reading, and no kanji as another kanji."""
+    guard, rng = module("guard"), random.Random(71)
+    # Every kana of one group is one letter; two letters of two groups stay two.
+    classes = kana_classes()
+    for group in classes:
+        assert len({guard.reduced(letter) for letter in group}) == 1, group
+    assert len({guard.reduced(group[0]) for group in classes}) == len(classes)
+    # No kanji is folded into another, and a name in kanji is found in the characters it is written in.
+    kanji = [chr(c) for c in rng.sample(range(0x4E00, 0x9FFF), 400)]
+    assert len({guard.reduced(c) for c in kanji}) == len(kanji)
+    for name in ("".join(rng.sample(kanji, 3)) for _ in range(20)):
+        assert guard.leaks(name + "さん", [("the made-up value", name)]) == ["the made-up value"]
+    # Hanja and Hangul, katakana and Latin letters are different letters, whatever they sound like.
+    assert guard.reduced("洪吉童") != guard.reduced("홍길동") and guard.reduced("スミス") != guard.reduced("smith")
+    assert guard.leaks("洪吉童さん", [("the made-up value", "홍길동")]) == [] and guard.leaks("スミスさん", [("the made-up value", "Smith")]) == []
+
+
+# --- What an agent tool reads from a checkout by itself is not for a pull request from outside -------------------
+
+# The names under which the agent tools the charter names (Claude Code, Codex CLI, the Antigravity CLI) read a file as
+# rules, by their documentation, each with a local variant; the test spells them in other cases too.
+RULE_FILE_NAMES = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "AGENT.md", "GEMINI.md", "GEMINI.local.md"]
+HIDDEN_PARTS = [".claude", ".codex", ".gemini", ".agent", ".agents", ".mcp.json", ".cursor", ".vscode", ".github", ".x", ".env", "..."[:2] + "hidden"]
+PLACES = ["", "docs/", "tools/plan/", "bench/tasks/a-brand-new-task/", "bench/tests/", "site/ko/", "a/b/c/"]
+
+
+def classified(files: list[dict]) -> dict:
+    pr_files = module("pr_files")
+    files = files + [{"filename": "bench/tests/test_zz_brand_new.py", "status": "added"}]
+    return pr_files.classify_pr_files(files, changed_files=len(files), draft=False, base_ref="main", task_folders=["web-signup"],
+                                      main_task_folders=["web-signup"], main_test_entries=["test_site.py"], repo_root=None)  # fmt: skip
+
+
+def spelled_otherwise(name: str, rng: random.Random) -> str:
+    return "".join(c.upper() if rng.random() < 0.5 else c.lower() for c in name)
+
+
+@pytest.mark.parametrize("seed", [81, 82])
+def test_a_file_an_agent_tool_reads_as_rules_is_not_for_a_pull_request_from_outside(seed):
+    rng = random.Random(seed)
+    let_through = []
+    for name in RULE_FILE_NAMES:
+        for place in PLACES:
+            for spelled in (name, spelled_otherwise(name, rng)):
+                path = place + spelled
+                for files in ([{"filename": path, "status": rng.choice(["added", "modified", "removed"])}],
+                              [{"filename": "docs/notes.md", "status": "renamed", "previous_filename": path}],
+                              [{"filename": path, "status": "renamed", "previous_filename": "docs/notes.md"}]):  # fmt: skip
+                    got = classified(files)
+                    if got.get("ready_for_review") is not False or not got.get("protected_folders"):
+                        let_through.append((files, got))
+    assert not let_through, let_through[:3]
+
+
+@pytest.mark.parametrize("seed", [83, 84])
+def test_a_path_with_a_part_that_begins_with_a_dot_is_not_for_a_pull_request_from_outside(seed):
+    rng = random.Random(seed)
+    let_through = []
+    for hidden in HIDDEN_PARTS:
+        for place in PLACES:
+            for spelled in (hidden, spelled_otherwise(hidden, rng)):
+                for path in (place + spelled, place + spelled + "/settings.json", place + spelled + "/rules/x.md"):
+                    for files in ([{"filename": path, "status": "added"}], [{"filename": "docs/x.md", "status": "renamed", "previous_filename": path}]):
+                        got = classified(files)
+                        if got.get("ready_for_review") is not False or not got.get("protected_folders"):
+                            let_through.append((files, got))
+    assert not let_through, let_through[:3]
+
+
+def test_the_session_hears_of_such_a_file_in_fixed_words_without_its_name(place):
+    # A new task, and a new test beside it, that carry a rule file and a hidden folder: the reading tool names neither file.
+    files = [{"filename": "bench/tasks/a-brand-new-task/CLAUDE.md", "status": "added"},
+             {"filename": "bench/tasks/a-brand-new-task/.claude/settings.json", "status": "added"},
+             {"filename": "bench/tests/test_brand_new.py", "status": "added"}]  # fmt: skip
+    got = verdict(place, files)
+    assert got["ready_for_review"] is False and len(got["protected_folders"]) >= 2, got
+    # What the project takes from outside stays open: a new task and a new test without such a file.
+    plain = [{"filename": "bench/tasks/a-brand-new-task/task.toml", "status": "added"}, {"filename": "bench/tests/test_brand_new.py", "status": "added"}]
+    assert verdict(place, plain) == {"protected_folders": [], "adds_new_test": True, "ready_for_review": True}
+
+
+def test_no_existing_task_or_test_holds_a_hidden_file_or_a_rule_file():
+    # So the rule refuses nothing the project takes from outside today.
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files", "bench/tasks", "bench/tests"], capture_output=True, text=True, check=True).stdout.split()
+    assert tracked and [path for path in tracked if any(part.startswith(".") for part in path.split("/"))] == []
+    assert [path for path in tracked if path.split("/")[-1].casefold() in {name.casefold() for name in RULE_FILE_NAMES}] == []
+
+
+# =================================================================================================
+# What Google's model found at the head before merging: each as its class
+# =================================================================================================
+
+
+def test_what_agent_tools_read_under_a_name_without_a_dot_and_a_name_the_computer_could_read_otherwise_are_not_for_outside():
+    rng = random.Random(91)
+    let_through = []
+    for folder in ("_agents", "_agent"):
+        for place in PLACES:
+            for spelled in (folder, spelled_otherwise(folder, rng)):
+                for rest in ("/hooks.json", "/rules/x.md", "/plugins/p/plugin.json"):
+                    got = classified([{"filename": place + spelled + rest, "status": "added"}])
+                    if got.get("ready_for_review") is not False and not got.get("refused"):
+                        let_through.append((place + spelled + rest, got))
+    # A name with a backslash or a control character could be read as another path: it is refused.
+    for name in ("docs\\CLAUDE.md", "docs\\.claude\\settings.json", "a\\b.md", "docs/x\tCLAUDE.md"):
+        got = classified([{"filename": name, "status": "added"}])
+        if not got.get("refused"):
+            let_through.append((name, got))
+    assert not let_through, let_through[:4]
+
+
+SHORT_LATIN = ["Kim", "Lee", "Yang", "Al", "Jo"]
+
+
+def test_a_mark_that_repeats_a_letter_after_a_latin_letter_takes_nothing_from_the_word_before_it():
+    guard = module("guard")
+    missed = []
+    for value in SHORT_LATIN:
+        for mark in REPEATS:
+            for after in ("", "さん", "です", "에게"):
+                text = value + mark + after
+                if guard.leaks(text, [("name", value)]) != ["name"]:
+                    missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The words for whom as stems, in the languages that bend them, and words of Latin letters with a Korean or Japanese
+# ending attached; and a sentence with an ellipsis inside it.
+TOLD_STEMS = {"es": ["coordinadora", "coordinadoras", "coordinadores", "mantenedora", "mantenedoras", "propietarias", "dueñas", "responsables", "agentes"],
+              "en": ["coordination", "coordinators", "maintainers", "owners", "agents", "team"]}  # fmt: skip
+
+
+def test_the_told_check_knows_every_form_of_its_words_and_reads_through_an_ellipsis():
+    tools = module("tools")
+    missed = []
+    for word in TOLD_STEMS["es"]:
+        for text in (f"Se ha avisado a las {word} del proyecto.", f"Se ha avisado a la {word}."):
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+    for word in TOLD_STEMS["en"] + ["coordinator", "owner", "agentes", "equipo"]:
+        for ending, told in (("에게", "알렸습니다."), ("께", "전달했습니다."), ("に", "伝えました。"), ("へ", "報告しました。")):
+            text = f"이 내용은 {word}{ending} {told}" if told.endswith(".") else f"{word}{ending}{told}"
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+        if not tools.says_agents_were_told(f"The project's {word}... have been told."):
+            missed.append(f"The project's {word}... have been told.")
+        if not tools.says_agents_were_told(f"The project's {word}… have been told."):
+            missed.append(f"The project's {word}… have been told.")
+    assert not missed, missed[:5]
+
+
+def main_as_a_path(text: str) -> str:
+    """How the desk made other spellings of a path plain before this round, kept here word for word: whatever it found, the
+    desk still finds."""
+    text = re.sub(r"(?i)/+[ \t]*system[ \t]*/+[ \t]*volumes[ \t]*/+[ \t]*data(?=[ \t]*/)", "", text.replace("\\", "/"))
+    before = None
+    while before != text:
+        before = text
+        text = re.sub(r"/[ \t]*\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"/[ \t]*(?!\.\.?[ \t]*/)[^/\s]+[ \t]*/[ \t]*\.\.(?=[ \t]*/)", "", text)
+        text = re.sub(r"(?<![\w./])/[ \t]*\.\.(?=[ \t]*/)", "", text)
+    return text
+
+
+MAIN_PRIVATE_PLACE = re.compile(r"(?i)(?<![\w.])/+[ \t]*(?:users|home|root|var[ \t]*/+[ \t]*(?:root|tmp|folders)|private|volumes|tmp|etc|opt"
+                                r"|library|dev[ \t]*/+[ \t]*shm|run[ \t]*/+[ \t]*user)[ \t]*/+[ \t]*[^\s/]")  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", [101, 102, 103])
+def test_every_path_that_the_desk_found_before_this_round_it_still_finds(seed):
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for _ in range(400):
+        before = rng.choice(["", "tmp", "docs", "a.b", "x-", "파일은", "ファイルは", "(", "~"])
+        path = "".join(rng.choice(["/", "\\", "//", "\\\\", "/\\", "\\/", " / ", "/./", "/../"]) + rng.choice(["users", "tmp", "home", "x", "..", ".", "var", "folders", "you"])
+                       for _ in range(rng.randrange(2, 5)))  # fmt: skip
+        text = f"See {before}{path} now."
+        plain = unicodedata.normalize("NFKC", text)
+        if (MAIN_PRIVATE_PLACE.search(plain) or MAIN_PRIVATE_PLACE.search(main_as_a_path(plain))) and "a path outside the repository" not in guard.leaks(text, []):
+            missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("text", ["Look in ./../../tmp/x for it.", "Look in .\\..\\..\\tmp\\x for it.", "Look in docs/../../../Users/you/notes for it.",
+                                  "Look in a/b/../../../../tmp/x for it.", "Look in ~you / notes for it.", "Look in ~ / secret for it.",
+                                  "경로는C:\\secret\\file 입니다.", "ファイルはC:\\data\\notes", "파일은d:/data/notes"])  # fmt: skip
+def test_a_relative_path_that_climbs_out_a_home_folder_with_spaces_and_a_drive_after_any_letter_are_found(text):
+    assert "a path outside the repository" in module("guard").leaks(text, [])
+
+
+def test_a_place_cut_to_its_newest_arrivals_in_a_batch_is_as_old_as_what_it_keeps(tmp_path):
+    relay = module("relay")
+    folder = tmp_path / "state"
+    folder.mkdir(mode=0o700)
+    kept = relay.Kept(folder / "held-events.json", most=6, most_per_account=5)
+    for n, (item, account) in enumerate([(1, 101), (2, 202), (3, 101), (4, 202), (5, 305), (6, 306)], start=1):
+        kept.put_all([event(item, account, f"k{n}")])
+    gone: list = []
+    # One batch: ten new arrivals of the first place's writer on its item, then a newcomer's arrival.
+    kept.put_all([event(1, 101, f"new{n}") for n in range(10)] + [event(99, 505, "newcomer")], gone=gone)
+    places = {(p["number"], p["account"]) for p in kept.entries()}
+    # The oldest place by the order of arrivals went: the second, whose one arrival came before everything the first keeps.
+    assert (99, 505) in places and (1, 101) in places and (2, 202) not in places, (places, gone)
+
+
+def test_desk_down_without_a_record_sends_only_what_passes_the_check(place):
+    (place.state / "desk-counts.json").write_text("{damaged")
+    (place.state / "desk-counts.json").chmod(0o600)
+    desk = place.desk()
+    desk.machine = MACHINE
+    desk.desk_down("Failure caused by somebody-local in /Users/you/secret.")
+    guard = module("guard")
+    assert [m for m in place.sent("coordinator") if guard.leaks(m["body"], MACHINE + guard.state_paths(place.state), place.copy, keys=False)] == []
+    assert place.sent("coordinator"), "the desk said nothing"
+
+
+def test_a_number_of_the_desks_own_lines_never_stops_the_digest(place, monkeypatch):
+    tools = module("tools")
+    monkeypatch.setattr(tools, "ticks", lambda: 70_000.0)
+    machine = MACHINE + [("the owner's git name or address", "Tobias")]
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = machine
+    # An account whose number reads as the value, digit by digit, had arrivals dropped; a vulnerability report waits.
+    desk.count(tools.DROPPED, account=170814500, item=7)
+    real = tools.Desk.deliver
+    monkeypatch.setattr(tools.Desk, "deliver", lambda self, subject, body: (_ for _ in ()).throw(tools.Refused("not now")))
+    desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": "Something that looks like one."})
+    monkeypatch.setattr(tools.Desk, "deliver", real)
+    looking = place.desk()
+    looking.machine = machine
+    assert looking.digest() is True
+    (body,) = [m["body"] for m in place.sent("coordinator") if m["subject"] == "Desk: digest"]
+    assert "- vulnerability, item 7: " in body
+    # A number of the desk's own replaces no text that passes the check.
+    assert "Something that looks like one." in body
+    # The desk's own numbers are fixed fields and are not searched; everything else in the digest passes the check.
+    guard = module("guard")
+    assert guard.leaks(re.sub(r"\d+", "", body), machine + guard.state_paths(place.state), place.copy, ("BrilliantTiger", "dodam"), keys=False) == []
+
+
+@pytest.mark.parametrize("text, limit, want", [("Habla español bien", 11, "Habla "), ("Pide a León hoy", 10, "Pide a "), ("Sí, es así", 9, "Sí, es ")])
+def test_a_latin_word_with_an_accent_is_not_cut(text, limit, want):
+    assert module("tools").cut(text, limit) == want
+
+
+def test_the_copys_git_folder_is_looked_at_where_the_computer_resolves_it(start, tmp_path):
+    (tmp_path / "home" / ".gitconfig").write_text("[user]\n\tname = Gildong Hong\n\temail = gildong@example.invalid\n")
+    start.own_sign_in()
+    (tmp_path / "gildong-hong-secret").mkdir()
+    real = tmp_path / "gildong-hong-secret" / "git"
+    start.committed(real)
+    link = tmp_path / "plain-link"
+    link.symlink_to(real)
+    (start.copy / ".git").write_text(f"gitdir: {link}\n")
+    assert "git folder" in start.refuses(stand_in=None)
+
+
+def test_the_public_names_of_the_repository_are_never_refused_in_a_path_at_the_start(tmp_path, monkeypatch):
+    started = Start(tmp_path / "dodam", monkeypatch)
+    (tmp_path / "dodam" / "home" / ".gitconfig").write_text("[user]\n\tname = Somebody Else\n\temail = dodam+kim@example.invalid\n")
+    started.own_sign_in()
+    started.plan()
+
+
+def test_the_closed_list_reads_every_start_however_it_is_written(tmp_path, monkeypatch):
+    plain = {"workflow": "x.yml", "folder": None, "matrix": {}, "run": [], "uses": None}
+    # A script from a folder that is not protected is the pull request's own code, in isolated mode too.
+    assert judged(plain, ["python", "-I", "docs/evil.py"]) is not None
+    # Python that reads its script from standard input, and a command inside a quoted substitution.
+    bench = plain | {"folder": "bench"}
+    assert any(judged(bench, words) for words in commands_of(bench | {"run": ["python < ../docs/evil.py"]}))
+    assert any(judged(plain, words) for words in commands_of(plain | {"run": ['out="$(bash docs/evil.sh)"']}))
+    # A step that begins with its script, without a name, does not take the folder of the step before it.
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "x.yml").write_text(
+        "on: pull_request\njobs:\n  x:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: one\n        working-directory: bench\n"
+        "        run: echo hi\n      - run: python -m shadow_mod\n", encoding="utf-8")
+    # And what a test starts with Python in isolated mode, from a folder that is not protected.
+    (tmp_path / "bench" / "tests").mkdir(parents=True)
+    (tmp_path / "bench" / "tests" / "test_x.py").write_text('import subprocess, sys\nsubprocess.run([sys.executable, "-I", "docs/evil.py"])\n', encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    steps = steps_of_the_workflows()
+    assert [step["folder"] for step in steps] == ["bench", None], steps
+    assert any(judged(steps[1], words) for words in commands_of(steps[1]))
+    assert [entry for entry in started_by_the_tests() if not protected(entry[3])], started_by_the_tests()
+
+
+def test_lock_md_does_not_call_the_plans_folder_open_to_pull_requests_from_outside():
+    assert "The scripts of the plan, in a folder that pull requests from outside may change" not in said_in_lock_md()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "the scripts are in a folder that pull requests from outside may change" not in workflow
+
+
+# =================================================================================================
+# What the review at the head before merging found: each as its class
+# =================================================================================================
+
+# The patterns of the words for whom as the desk had them before this round, word for word: whatever they found, the
+# desk still finds.
+MAIN_WHOM = re.compile(
+    r"(?i)\b(?:agents?|maintainers?|coordinat\w+|team|owners?|staff|agentes?|mantenedor\w*|responsables?|equipo|coordinador\w*)\b"
+    r"|에이전트|관리자|담당|메인테이너|코디네이터|エージェント|メンテナ|担当|チーム|管理者|コーディネーター"
+)
+
+
+@pytest.mark.parametrize("seed", [111, 112])
+def test_every_told_claim_the_desk_refused_before_this_round_it_still_refuses(seed):
+    tools, rng = module("tools"), random.Random(seed)
+    stems = {"coordinat": ["ion", "e", "ed", "or", "ors", "ing"], "mantenedor": ["", "a", "as", "es"], "coordinador": ["", "a", "as", "es"],
+             "agent": ["", "s"], "maintainer": ["", "s"], "owner": ["", "s"], "agente": ["", "s"], "responsable": ["", "s"]}  # fmt: skip
+    verbs = ["I've passed this on to", "I informed the", "He avisado a las", "Se lo he comunicado a las", "He notificado a la", "I told the"]
+    missed = []
+    for stem, ends in stems.items():
+        for end in ends:
+            for verb in verbs:
+                text = f"{verb} {stem}{end}{rng.choice(['.', ' del proyecto.', ' today.'])}"
+                if MAIN_WHOM.search(text) and tools.PASSING_ON.search(text) and not tools.says_agents_were_told(text):
+                    missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The class of a point that ends no sentence: a point that a lowercase letter or a digit follows after a space, and one or
+# two letters with points, as in a time of day or a short name of a country.
+@pytest.mark.parametrize("inside", ["a las 5 p. m. al", "como Ud. pidió, al", "como Uds. pidieron, a los", "to Prof. Kim's", "the U.S.", "at 3 p.m. to the",
+                                    "al dpto. de los", "a las 9 a. m. al", "por EE. UU. al", "via St. Louis to the", "con Vd. al", "to Jr. and the"])  # fmt: skip
+def test_a_point_that_ends_no_sentence_does_not_split_the_told_claim(inside):
+    tools = module("tools")
+    for text in (f"I've passed this on {inside} maintainers.", f"Lo he comunicado {inside} equipo."):
+        assert tools.says_agents_were_told(text), text
+
+
+@pytest.mark.parametrize("path", ["./../../../../../../../../tmp/secret", "notes/../../../../../../../../tmp/secret", ".\\..\\..\\..\\..\\tmp\\x",
+                                  "a/./b/../../../../tmp/x", "docs/./../.././../Users/you/notes"])  # fmt: skip
+def test_a_relative_path_is_made_plain_before_its_climb_is_read(path):
+    assert "a path outside the repository" in module("guard").leaks(f"Look in {path} now.", [])
+
+
+def characters_of_every_class(rng: random.Random, each: int = 3) -> dict[str, list[str]]:
+    """Characters drawn from every class of Unicode (letters of each case, marks, digits, signs, punctuation, separators,
+    formats) and from every alphabet the form folds (Latin with accents, Korean, kana, kanji, full width)."""
+    by_class: dict[str, list[str]] = {}
+    for code in range(0x21, 0x10000):
+        kind = unicodedata.category(chr(code))
+        if kind not in ("Cc", "Cs", "Co", "Cn"):
+            by_class.setdefault(kind, []).append(chr(code))
+    for alphabet, first, last in (("Latin with accents", 0xC0, 0x17F), ("Korean", 0xAC00, 0xD7A3), ("hiragana", 0x3041, 0x3096),
+                                  ("katakana", 0x30A1, 0x30FA), ("kanji", 0x4E00, 0x9FFF), ("full width", 0xFF01, 0xFF5E)):  # fmt: skip
+        by_class[alphabet] = [chr(code) for code in range(first, last + 1)]
+    return {kind: rng.sample(chars, min(each, len(chars))) for kind, chars in sorted(by_class.items())}
+
+
+@pytest.mark.parametrize("seed", [171, 172])
+def test_a_climbing_step_is_found_whatever_stands_straight_before_it(seed):
+    """Free of position: a climbing step leaves the copy wherever it stands in the text, so what follows it is read from the
+    root, whatever character of whatever class stands straight before it. A character the desk never writes refuses the
+    text before any path is looked for, which refuses it too."""
+    guard, rng = module("guard"), random.Random(seed)
+    missed = []
+    for kind, chars in characters_of_every_class(rng).items():
+        for char in chars:
+            for place in ("tmp/secret", "Users/you/notes"):
+                for text in (f"{char}./../{place}", f"{char}../{place}", f"word{char}./../../{place}", f"Look in {char}{char}./../{place} now."):
+                    if guard.leaks(text, []) != [guard.NOT_ALLOWED] and "a path outside the repository" not in guard.leaks(text, []):
+                        missed.append((kind, hex(ord(char)), text.index(char)))
+    assert missed == [], (len(missed), missed[:8])
+
+
+def test_every_part_of_an_address_split_at_a_plus_is_a_known_value():
+    guard = module("guard")
+    known = [("the owner's git name or address", "12345+gildong@users.noreply.github.com")]
+    for text in ("Ask gildong about it.", "gildong님에게 물어보세요.", "It was gildong."):
+        assert guard.leaks(text, known) == ["the owner's git name or address"], text
+
+
+@pytest.mark.parametrize("folder", ["bench/dodambench/", "bench/images/", ".github/", "bench/tests/", "bench/tasks/", "bench/experiments/", "bench/harbor/",
+                                    "bench/records/", "tools/desk/", "tools/gemini/", "tools/site/", "tools/plan/", "tools/pilot/", "bench/"])  # fmt: skip
+def test_a_pull_request_that_changes_a_file_of_any_protected_folder_is_not_ready(folder):
+    pr_files = module("pr_files")
+    path = {"bench/tests/": "bench/tests/test_site.py", "bench/tasks/": "bench/tasks/web-signup/task.toml", "bench/": "bench/pyproject.toml",
+            "tools/site/": "tools/site/build.py"}.get(folder, folder + "x.py")  # fmt: skip
+    for how in ({"filename": path, "status": "modified"}, {"filename": path, "status": "added"}, {"filename": "docs/x.md", "status": "renamed", "previous_filename": path}):
+        got = classified([how])
+        assert got.get("ready_for_review") is False and folder in got.get("protected_folders", []), (folder, how, got)
+    assert folder in pr_files.PROTECTED_FOLDERS
+
+
+# --- Additions for the round: counts and generated variants ---------------------------------------------
+
+
+def test_a_session_on_the_desks_own_sign_in_is_given_no_hidden_value_when_it_starts(start):
+    """A count, not a sentence: everything a session is given when it starts (its environment, its arguments, its working
+    folder, the first text it is shown) holds no hidden value in the form the lock uses."""
+    start.own_sign_in()
+    planned = start.plan()
+    guard, relay = module("guard"), module("relay")
+    known = MACHINE + [tuple(pair) for pair in json.loads((start.state / "session" / "known.json").read_text())]
+    given = [*planned["argv"], str(Path(planned["argv"][0]).resolve()), *planned["env"], *planned["env"].values(), planned["cwd"],
+             relay.news_message([event(7, 1001, "e1")])]  # fmt: skip
+    found = {piece[:80]: guard.names(piece, known, ("BrilliantTiger", "dodam")) for piece in given}
+    assert {piece: kinds for piece, kinds in found.items() if kinds} == {}
+
+
+def test_a_variable_a_session_would_be_given_that_names_a_hidden_value_stops_the_start_which_names_only_its_kind(start):
+    start.own_sign_in()
+    rng = random.Random(181)
+    passed = [name for name in lock_file()["environment"] if name not in ("HOME", "USER", "LOGNAME", "TMPDIR")]
+    assert passed
+    for name in passed:
+        for _, value in MACHINE:
+            environ = start.environ | {name: rng.choice(["", "x-", "en_"]) + value + rng.choice(["", ".UTF-8", "-256color"])}
+            said = start.refuses(environ=environ)
+            assert "a variable" in said and value.casefold() not in said.casefold(), (name, said)
+
+
+def test_an_argument_a_session_would_be_given_that_names_a_hidden_value_stops_the_start_which_names_only_its_kind(start):
+    start.own_sign_in()
+    brief = start.copy / "tools" / "desk" / "brief.md"
+    for _, value in MACHINE:
+        brief.write_text(f"Standing instructions for the desk, kept by {value}.\n", encoding="utf-8")
+        said = start.refuses()
+        assert "an argument" in said and value.casefold() not in said.casefold(), said
+
+
+def test_a_program_whose_real_path_names_a_hidden_value_is_started_from_a_path_of_the_desks_own(start, tmp_path):
+    """The program's own path is part of what a session is given: when its real path names the owner, the start puts the
+    same program in a folder of the desk's own in the state folder and starts it from there."""
+    start.own_sign_in()
+    real = tmp_path / "somebody-local" / ".local" / "share" / "claude" / "claude"
+    real.parent.mkdir(parents=True)
+    version = lock_file()["claude_version"]
+    real.write_text(f"""#!/bin/sh\nif [ "$1" = auth ]; then echo '{{"loggedIn": true, "authMethod": "oauth_token"}}'; else echo "{version} (Claude Code)"; fi\n""")
+    real.chmod(0o755)
+    (start.bin / "claude").unlink()
+    (start.bin / "claude").symlink_to(real)
+    planned = start.plan()
+    program = Path(planned["argv"][0])
+    assert program.resolve() == program and program.is_relative_to(start.state), program
+    assert module("guard").names(str(program), MACHINE, ("BrilliantTiger", "dodam")) == []
+    assert program.read_bytes() == real.read_bytes()
+
+
+OWN_SHOWS = '{"loggedIn": true, "authMethod": "oauth_token"}'
+SIGN_INS = {
+    "the owner's, with an address": (False, '{"loggedIn": true, "email": "somebody@example.invalid", "orgName": "Somebody Household"}'),
+    "the owner's, without an address": (False, OWN_SHOWS),
+    "the owner's, saying nothing": (False, '{"loggedIn": true}'),
+    "the desk's own, as its settings say": (True, OWN_SHOWS),
+    "the desk's own, with an address": (True, '{"loggedIn": true, "authMethod": "oauth_token", "email": "desk@example.invalid"}'),
+    "the desk's own, another way of signing in": (True, '{"loggedIn": true, "authMethod": "claude.ai"}'),
+    "the desk's own, saying less": (True, '{"loggedIn": true}'),
+    "the desk's own, saying more": (True, '{"loggedIn": true, "authMethod": "oauth_token", "orgName": "Somewhere"}'),
+}
+WAYS = {"no way": FACTS.replace("[ways.github]\nopen = true", "[ways.github]\nopen = false"), "GitHub": FACTS}
+
+
+@pytest.mark.parametrize("sign_in", sorted(SIGN_INS))
+@pytest.mark.parametrize("ways", sorted(WAYS))
+def test_a_way_is_open_only_on_the_desks_own_sign_in_as_its_settings_name_it_and_after_a_count_of_zero(tmp_path, monkeypatch, sign_in, ways):
+    started = Start(tmp_path, monkeypatch, facts=WAYS[ways])
+    own, shows = SIGN_INS[sign_in]
+    if own:
+        started.own_sign_in()
+        (started.bin / "own-status").write_text(shows)
+    else:
+        (started.bin / "owner-status").write_text(shows)
+    started.committed()
+    allowed = sign_in == "the desk's own, as its settings say"
+    try:
+        planned = started.plan(stand_in=None)
+    except started.start.Problem as refusal:
+        assert not allowed, str(refusal)
+        return
+    if ways != "no way":
+        assert allowed, sign_in
+        assert planned["own_sign_in"] and planned["exposure"]["counted"] > 0 and planned["exposure"]["found"] == 0, planned.get("exposure")
+
+
+def a_program_whose_real_path_names_the_owner(start, tmp_path) -> Path:
+    real = tmp_path / "somebody-local" / ".local" / "share" / "claude" / "claude"
+    real.parent.mkdir(parents=True)
+    version = lock_file()["claude_version"]
+    real.write_text(f"""#!/bin/sh\nif [ "$1" = auth ]; then echo '{OWN_SHOWS}'; else echo "{version} (Claude Code)"; fi\n""")
+    real.chmod(0o755)
+    (start.bin / "claude").unlink()
+    (start.bin / "claude").symlink_to(real)
+    return real
+
+
+@pytest.mark.parametrize("there", ["a link", "open to others", "not to be run", "other bytes", "a folder for the new copy"])
+def test_a_copy_of_the_program_that_does_not_hold_is_not_reused(start, tmp_path, there):
+    start.own_sign_in()
+    real = a_program_whose_real_path_names_the_owner(start, tmp_path)
+    folder = start.state / "program"
+    folder.mkdir(mode=0o700)
+    copy = folder / "claude"
+    if there == "a link":
+        copy.symlink_to(real)
+    elif there == "a folder for the new copy":
+        (folder / "claude.new").mkdir()
+    else:
+        copy.write_bytes(real.read_bytes() + (b"# other\n" if there == "other bytes" else b""))
+        copy.chmod({"open to others": 0o777, "not to be run": 0o600}.get(there, 0o700))
+    program = Path(start.plan()["argv"][0])
+    info = os.lstat(program)
+    assert stat.S_ISREG(info.st_mode) and info.st_mode & 0o777 == 0o700 and info.st_uid == os.getuid(), (there, oct(info.st_mode))
+    assert program.read_bytes() == real.read_bytes()
+
+
+@pytest.mark.parametrize("change", ["other bytes", "open to others", "a link", "a folder open to others", "another owner"])
+def test_a_copy_of_the_program_is_checked_again_when_each_session_starts(start, tmp_path, monkeypatch, change):
+    start.own_sign_in()
+    real = a_program_whose_real_path_names_the_owner(start, tmp_path)
+    planned = start.plan()
+    program = Path(planned["argv"][0])
+    relay = module("relay")
+    running = relay.Relay(planned, {"PATH": "/usr/bin:/bin"}, typed=io.StringIO(""), shown=io.StringIO(), exit_when_idle=True,
+                          retry_seconds=0.05, quiet_seconds=0.4)  # fmt: skip
+    if change == "other bytes":
+        program.write_bytes(program.read_bytes() + b"# other\n")
+    elif change == "open to others":
+        program.chmod(0o777)
+    elif change == "a link":
+        program.unlink()
+        program.symlink_to(real)
+    elif change == "a folder open to others":
+        program.parent.chmod(0o777)
+    else:
+        uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: uid + 1)
+    try:
+        seen = running.run_session("Hello.", planned["env"])
+    except module("state").StateProblem:
+        seen = {"not_started": True}
+    assert seen.get("not_started") is True, (change, seen)
+
+
+CLAIMS = ["Told the team about it.", "Informed the maintainers.", "Passed it on to the agents.", "Avisé al equipo.", "I've passed this on to the owner.",
+          "Se lo he comunicado al responsable."]  # fmt: skip
+
+
+def test_a_told_claim_written_straight_after_a_short_word_or_a_short_form_is_refused_whatever_main_refuses():
+    """Generated from the rule and the table: every word of one or two letters and every short form of the list, with a
+    point and no space, and then a told claim. Whatever main's check refuses, the desk refuses."""
+    tools = module("tools")
+    letters = "abcdefghijklmnopqrstuvwxyzñ"
+    words = [*letters, *(a + b for a in letters for b in letters), *(a.upper() + b for a in letters for b in letters)]
+    words += [form.rstrip(".") for form in getattr(tools, "SHORT_FORMS", [])]
+    missed = []
+    for word in words:
+        for claim in CLAIMS:
+            text = f"Done, {word}.{claim}"
+            if main_says_told(text) and not tools.says_agents_were_told(text):
+                missed.append(text)
+    assert missed == [], (len(missed), missed[:6])
+
+
+LEAVING = ["Failure while reading /tmp/secret/notes.txt and /Users/you/x.", "It broke for the account somebody-local, on Somebodys-MacBook."]
+
+
+@pytest.mark.parametrize("text", LEAVING)
+@pytest.mark.parametrize("record", ["with its record", "without its record"])
+def test_the_relays_report_that_the_desk_is_down_never_carries_a_path_or_a_known_value(place, monkeypatch, text, record):
+    tools = module("tools")
+    desk = place.desk()
+    desk.machine = MACHINE
+    if record == "without its record":
+        monkeypatch.setattr(tools.Desk, "counts", lambda self: (_ for _ in ()).throw(tools.Refused("damaged")))
+    assert desk.desk_down(text) is True
+    (body,) = [m["body"] for m in place.sent("coordinator")]
+    assert "desk_down" in body
+    for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
+        assert piece not in body, (record, piece)
+
+
+@pytest.mark.parametrize("text", LEAVING)
+def test_a_note_and_a_notice_to_the_coordinator_never_carry_a_path_or_a_known_value(place, monkeypatch, text):
+    tools = module("tools")
+    monkeypatch.setattr(tools, "ticks", lambda: 70_000.0)
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = MACHINE
+    desk.note("session_ended", text, 7)
+    # A summary that holds such a thing is refused at the tool, and nothing of it is kept.
+    with pytest.raises(tools.Refused):
+        desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": text})
+    looking = place.desk()
+    looking.machine = MACHINE
+    looking.digest(force=True)
+    bodies = [m["body"] for m in place.sent("coordinator")]
+    assert bodies and any("session_ended" in body for body in bodies), bodies
+    for body in bodies:
+        for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
+            assert piece not in body, (piece, body[:200])
+
+
+@pytest.mark.parametrize("text", LEAVING)
+def test_a_notice_whose_summary_got_past_the_tool_still_never_carries_a_path_or_a_known_value(place, monkeypatch, text):
+    """The second wall: with the tool's own check taken away, the summary reaches the message, and the check of variable
+    parts replaces it before it goes."""
+    tools = module("tools")
+    monkeypatch.setattr(tools.Desk, "holds", lambda self, text, keys=True: [])
+    desk = place.desk(DESK_ITEM="7", DESK_ACCOUNTS=accounts(801))
+    desk.machine = MACHINE
+    desk.tell_coordinator({"kind": "vulnerability", "number": 7, "summary": text})
+    bodies = [m["body"] for m in place.sent("coordinator")]
+    assert bodies and any("vulnerability" in body for body in bodies), bodies
+    for body in bodies:
+        for piece in ("/tmp/secret", "/Users/you", "somebody-local", "Somebodys-MacBook"):
+            assert piece not in body, (piece, body[:200])
+
+
+def main_says_told(text: str) -> bool:
+    """The told check as the desk had it before this round, word for word: whatever it refused, the desk still refuses."""
+    tools = module("tools")
+    return any(tools.MAIN_PASSING_ON.search(sentence) and MAIN_WHOM.search(sentence) for sentence in re.split(r"[.!?。！？\n]+", text))
+
+
+@pytest.mark.parametrize("seed", [121, 122, 123])
+def test_every_told_claim_the_earlier_check_refused_is_refused_on_generated_forms(seed):
+    tools, rng = module("tools"), random.Random(seed)
+    stems = ["agent", "maintainer", "coordinat", "team", "owner", "staff", "agente", "mantenedor", "responsable", "equipo", "coordinador"]
+    endings = ["", "s", "e", "es", "a", "as", "ion", "ed", "ing", "or", "ors", "ores", "ora", "oras"]
+    verbs = ["I've passed this on to the", "I informed the", "He avisado a las", "Se lo he comunicado a la", "We told the", "Lo he notificado al"]
+    particles = ["", "에게", "께", "に", "へ", "님"]
+    missed = []
+    for _ in range(600):
+        word = rng.choice(stems) + rng.choice(endings) + rng.choice(particles)
+        text = f"{rng.choice(verbs)} {word}{rng.choice(['.', ' today.', ' del proyecto.', '!'])}"
+        if main_says_told(text) and not tools.says_agents_were_told(text):
+            missed.append(text)
+    assert not missed, missed[:5]
+
+
+@pytest.mark.parametrize("seed", [131, 132])
+def test_no_point_of_a_short_form_or_of_one_or_two_letters_or_before_a_small_letter_splits_the_told_claim(seed):
+    """Generated from the rule: a point that a space and a small letter or a digit follow ends no sentence, nor does the
+    point of one or two letters (also as a pair, as in a time of day or a country), nor the point of a short form of the
+    tool's list, whatever follows it, nor an ellipsis."""
+    tools, rng = module("tools"), random.Random(seed)
+    table = getattr(tools, "SHORT_FORMS", []) + ["Prof.", "Ud.", "Uds.", "Vd.", "St.", "Jr.", "dpto."]
+    letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    missed = []
+    for _ in range(300):
+        kind = rng.randrange(5)
+        if kind == 0:
+            inside = rng.choice(letters) + rng.choice(["", rng.choice(letters)]) + ". " + rng.choice(["the", "a", "3", "los", "el"])
+        elif kind == 1:
+            inside = "".join(rng.choice(letters) + rng.choice(["", rng.choice(letters)]) + "." + rng.choice(["", " "]) for _ in range(rng.choice([1, 2]))) + " Kim's"
+        elif kind == 2:
+            inside = rng.choice(table) + " " + rng.choice(["Kim's", "the", "Louis", "3"])
+        elif kind == 3:
+            inside = "word" + rng.choice(["...", "…", ". . ."]) + " then"
+        else:
+            inside = "pidió" + ". " + rng.choice(["al", "a la", "3"])
+        for text in (f"I've passed this on, {inside}, to the maintainers.", f"Lo he comunicado, {inside}, al equipo."):
+            if not tools.says_agents_were_told(text):
+                missed.append(text)
+    assert not missed, missed[:5]
+
+
+# The names under which the three agent tools that the project uses read a file as rules, by their documentation at the
+# installed versions (Claude Code, Codex CLI, the Antigravity CLI), each with its local variants.
+RULE_FILE_TABLE = ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "AGENT.md", "GEMINI.md"]
+
+
+def test_the_rule_file_names_of_the_three_tools_are_refused_in_every_open_folder_and_other_names_are_not():
+    rng = random.Random(141)
+    for name in RULE_FILE_TABLE:
+        for place in ("", "docs/", "docs/benchmark/", "bench/tasks/a-brand-new-task/steps/build/"):
+            got = classified([{"filename": place + spelled_otherwise(name, rng), "status": "added"}])
+            assert got.get("ready_for_review") is False, (place, name, got)
+    for name in ("README.md", "notes.md", "guide.ko.md", "claudette.md"):
+        assert classified([{"filename": "docs/" + name, "status": "added"}]).get("ready_for_review") is True, name
+
+
+WORKFLOW_METACHARACTERS = re.compile(r"[;&|`<>]|\$\(|\\$")
+
+
+def test_every_line_a_workflow_runs_is_one_simple_command():
+    """Anything longer is a script in a protected folder, so the closed list reads every start with nothing left to parse.
+    The one exception is a step's output written to GitHub's own file for it."""
+    complex_lines = []
+    for step in steps_of_the_workflows():
+        for line in step["run"]:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            bare = line.removesuffix(' >> "$GITHUB_OUTPUT"')
+            if WORKFLOW_METACHARACTERS.search(bare):
+                complex_lines.append((step["workflow"], line))
+    assert complex_lines == [], complex_lines

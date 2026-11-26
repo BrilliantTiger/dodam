@@ -33,6 +33,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse  # noqa: E402
+import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
@@ -40,6 +41,7 @@ import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
+from contextlib import ExitStack  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -52,6 +54,10 @@ import relay  # noqa: E402
 import state as state_files  # noqa: E402
 import tools  # noqa: E402
 
+
+
+# The project's name on GitHub and the repository's name: public, and never refused in a path.
+PUBLIC = ("BrilliantTiger", "dodam")
 
 
 def default_state() -> Path:
@@ -83,8 +89,10 @@ NAMES = {"type": list, "of": str}
 COUNT = {"type": int}
 SENTENCES = {"en": NAME, "ko": NAME, "ja": NAME, "es": NAME}
 WEIGHT = {"type": (int, float)}
+# What a sign-in shows, every field, as Claude Code gives it: names to plain values, signed in.
+SHOWN = {"type": "shown"}
 LOCK_SHAPE = {
-    "claude_version": NAME, "model": NAME, "repository": NAME, "live_server": NAME, "path": NAME,
+    "claude_version": NAME, "own_sign_in_shows": SHOWN, "model": NAME, "repository": NAME, "live_server": NAME, "path": NAME,
     "builtin_tools": NAMES, "desk_tools": NAMES, "live_tools": NAMES, "live_tools_never": NAMES, "labels": NAMES, "environment": NAMES,
     "labels_per_day": COUNT,
     "labels_per_account_per_day": COUNT,
@@ -180,6 +188,31 @@ def which(name: str) -> str:
     return str(Path(found).resolve())
 
 
+def program_of_the_desks_own(program: str, state: Path) -> str:
+    """The same program in a folder of the desk's own in the state folder, so that its own path names nothing of the
+    owner's. A copy that is there is reused only when it holds (state.program_holds); otherwise a new one replaces it,
+    and a copy that still does not hold is not started."""
+    folder = state_files.folder(state / "program", "The folder of the program in the state folder", make=True)
+    target = folder / "claude"
+    if not state_files.program_holds(target, program):
+        descriptor, fresh = tempfile.mkstemp(dir=folder, prefix="claude.", suffix=".new")
+        try:
+            with os.fdopen(descriptor, "wb") as out, open(program, "rb") as original:
+                out.write(original.read())
+            os.chmod(fresh, 0o700)
+            os.replace(fresh, target)
+        except OSError:
+            Path(fresh).unlink(missing_ok=True)
+            raise Problem("The copy of the program in the state folder could not be made.") from None
+    if not state_files.program_holds(target, program):
+        raise Problem("The copy of the program in the state folder is not what was copied, or others may change it. Nothing is started.")
+    return str(target)
+
+
+# What a session is given at its start, by the kind of thing that carries it: the start names the kind, never the value.
+GIVEN_AT_THE_START = ("the program's own path", "an argument", "a variable", "the working folder")
+
+
 def version_tuple(text: str) -> tuple[int, ...]:
     """A released version: numbers and dots and nothing else. A version with a suffix is not a release."""
     word = text.strip().split()[0] if text.strip() else ""
@@ -206,6 +239,8 @@ def fits(value, shape) -> bool:
     if "type" not in shape:
         return isinstance(value, dict) and set(value) == set(shape) and all(fits(value[key], shape[key]) for key in shape)
     kind = shape["type"]
+    if kind == "shown":
+        return isinstance(value, dict) and value.get("loggedIn") is True and all(isinstance(k, str) and isinstance(v, (str, bool)) for k, v in value.items())
     if kind is int:
         return isinstance(value, int) and not isinstance(value, bool) and value >= 1
     if kind == (int, float):
@@ -283,42 +318,44 @@ def own_configuration(state: Path) -> Path:
     return state_files.folder(Path(tempfile.mkdtemp(prefix=CLAUDE_CONFIG_PREFIX, dir=state)), "The desk's own configuration folder for Claude")
 
 
-def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str, str], str | None, list[str]]:
+def sign_in(claude: str, state: Path, environ: dict[str, str]) -> tuple[dict[str, str], str | None, list[str], dict | None]:
     """The desk's own sign-in to Claude when the owner made one, and what each sign-in shows.
 
     Returns what to add to a session's environment, the address the session's sign-in shows (None when
-    it shows none), and everything either sign-in shows about the account (to be refused in outgoing text).
+    it shows none), everything either sign-in shows about the account (to be refused in outgoing text), and all that
+    the desk's own sign-in shows (None on the owner's), to be compared exactly with what the lock names for it.
     Claude Code answers this question without asking the service, so the answer says nothing about
     whether a token is good, and nothing about what a session is told once it talks to the service.
     """
 
-    def shown_by(env: dict[str, str]) -> tuple[bool, dict[str, str]]:
+    def shown_by(env: dict[str, str]) -> tuple[bool, dict[str, str], dict | None]:
         code, output = run([claude, "auth", "status"], env=env)
         try:
             status = json.loads(output)
         except ValueError:
             status = None
         if code != 0 or not isinstance(status, dict) or status.get("loggedIn") is not True:
-            return (False, {})
-        return (True, {key: status[key].strip() for key in SHOWN_ABOUT_THE_ACCOUNT if isinstance(status.get(key), str) and status[key].strip()})
+            return (False, {}, None)
+        shown = {key: status[key].strip() for key in SHOWN_ABOUT_THE_ACCOUNT if isinstance(status.get(key), str) and status[key].strip()}
+        return (True, shown, status)
 
     base = {key: environ[key] for key in ("HOME", "USER", "LOGNAME", "PATH") if key in environ}
-    owner_signed_in, owner = shown_by(base)
+    owner_signed_in, owner, _ = shown_by(base)
     token = state_files.read(state / CLAUDE_TOKEN_FILE, "The desk's sign-in to Claude (claude-token)")
     if token is None:
         if not owner_signed_in:
             raise Problem("Claude Code is not signed in.")
-        return ({}, owner.get("email"), sorted(set(owner.values())))
+        return ({}, owner.get("email"), sorted(set(owner.values())), None)
     token = token.strip()
     if not token or any(character.isspace() for character in token):
         raise Problem("The desk's sign-in to Claude (claude-token) is empty or damaged.")
     # The token reaches a session through its environment only, with a configuration folder of the desk's own,
     # so that nothing of the owner's sign-in or settings is read.
     extra = {"CLAUDE_CODE_OAUTH_TOKEN": token, "CLAUDE_CONFIG_DIR": str(own_configuration(state))}
-    signed_in, own = shown_by(base | extra)
+    signed_in, own, own_status = shown_by(base | extra)
     if not signed_in:
         raise Problem("The desk's sign-in to Claude (claude-token) was not accepted.")
-    return (extra, own.get("email"), sorted(set(owner.values()) | set(own.values())))
+    return (extra, own.get("email"), sorted(set(owner.values()) | set(own.values())), own_status)
 
 
 def known_values(shown: list[str], environ: dict[str, str]) -> list[list[str]]:
@@ -340,9 +377,11 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
          machine: list[tuple[str, str]] | None = None) -> dict:  # fmt: skip
     """Check everything, write the session's configuration files, and say what to start."""
     environ = dict(os.environ) if environ is None else environ
+    # What is checked is the copy's real path, as the command line gives it: a link handed to the start is followed.
+    copy = Path(os.path.realpath(copy))
     # Claude Code tells a session the path of its working folder. A path with the account's or the computer's name
     # in it would put that name into every session, so the desk does not start from such a path.
-    found = guard.names(str(copy), guard.machine_words() if machine is None else machine)
+    found = guard.names(str(copy), guard.machine_words() if machine is None else machine, PUBLIC)
     if found:
         raise Problem("The path of the desk's copy holds " + ", ".join(found) + ". Put the copy in a folder whose path names neither.")
     desk_folder = copy / "tools" / "desk"
@@ -414,13 +453,21 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
             f"The lock was checked against Claude Code {lock['claude_version']}; another version is installed. "
             "Run the lock check on the new version and change the pinned version with it."
         )
-    own_sign_in, session_email, shown_about_the_account = sign_in(claude, state, environ)
+    own_sign_in, session_email, shown_about_the_account, own_shows = sign_in(claude, state, environ)
     if stand_in is None and (facts.github_open or facts.live_open) and session_email:
         # A session cannot give away what it does not hold. With the owner's sign-in it holds the owner's address.
         raise Problem(
             "A way in is open, but the sign-in the sessions would use shows an email address, which Claude Code tells every "
             "session. Put a sign-in of the desk's own in the state folder (claude-token), or close every way in."
         )
+    ways_open = stand_in is None and (facts.github_open or facts.live_open)
+    if ways_open and not own_sign_in:
+        raise Problem("A way in is open, but the sessions would use the owner's sign-in. A way is opened only on the desk's own sign-in: "
+                      "put it in the state folder (claude-token), or close every way in.")
+    if ways_open and own_shows != lock["own_sign_in_shows"]:
+        # That no address is shown proves nothing: the sign-in is the desk's own only when it shows exactly what the lock names.
+        raise Problem("A way in is open, but the desk's own sign-in does not show exactly what the lock names for it, so the start "
+                      "cannot tell that it is the desk's. Nothing is started.")
 
     desk_env = {
         "DESK_LOCK": str(desk_folder / "lock.json"),
@@ -429,6 +476,8 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "DESK_COPY": str(copy),
         "DESK_COORDINATOR": coordinator,
     }
+    # Where the copy's git folder is, as the copy itself says: a session can read it.
+    pointer = ""
     if stand_in is not None:
         stand_in = stand_in.resolve()
         if not (stand_in / "items").is_dir():
@@ -438,14 +487,17 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         # The copy's git folder holds the names and addresses of whoever worked in it. It is kept outside the copy.
         if (copy / ".git").is_dir():
             raise Problem("The copy's git folder is inside the copy, where a session can read it. Make the copy with its git folder outside (git clone --separate-git-dir).")
-        # The copy holds one line that says where its git folder is, and a session can read that line.
+        # The copy holds one line that says where its git folder is, and a session can read that line. It is looked at below
+        # with every other path a session can be shown, for every known value; a path given from the copy is looked at as
+        # the computer resolves it too.
         try:
             pointer = (copy / ".git").read_text(encoding="utf-8")
         except OSError:
             pointer = ""
-        named = guard.names(pointer, guard.machine_words() if machine is None else machine)
-        if named:
-            raise Problem("The path of the copy's git folder holds " + ", ".join(named) + ". Keep it in a folder whose path names neither.")
+        target = pointer.strip().removeprefix("gitdir:").strip()
+        if target:
+            # Where the computer resolves it, through every link: a link with a plain name can lead to a folder whose path names someone.
+            pointer += "\n" + os.path.realpath(os.path.join(str(copy), target))
         # Ignored files are looked for too: a session can read them like any other file.
         code, output = run(["git", "-C", str(copy), "status", "--porcelain", "--ignored"])
         if code != 0 or output.strip():
@@ -470,10 +522,17 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     # Every path a session can be shown is looked at for every known value, in reduced form: the copy (its working
     # folder), the state folder with the configuration folder in it, and the command of the check.
     values = (guard.machine_words() if machine is None else list(machine)) + [(kind, value) for kind, value in known]
-    for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook)):
-        found = guard.names(path, values)
+    for what, path in (("the desk's copy", str(copy)), ("the state folder", str(state)), ("the check before every tool call", hook),
+                       ("the copy's git folder", pointer)):
+        found = guard.names(path, values, PUBLIC)
         if found:
             raise Problem(f"The path of {what} holds " + ", ".join(found) + ". A session is shown this path. Use a folder whose path names none of them.")
+    program_source = None
+    if own_sign_in and guard.names(claude, values, PUBLIC):
+        program_source = claude
+        # The program's real path is part of what a session is given. Where it names the owner, the session is started
+        # from the same program in a folder of the desk's own.
+        claude = program_of_the_desks_own(claude, state)
     live = lock["live_server"]
     settings = {
         # Claude Code otherwise describes the repository to the session, the owner's git name included.
@@ -525,6 +584,22 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env.update(own_sign_in)
+    exposure = {"counted": 0, "found": None}
+    if own_sign_in:
+        # On the desk's own sign-in a session is given nothing that names the owner: a home folder and a folder for
+        # temporary files of its own in the state folder, and a name of the desk's own for the account.
+        env["HOME"] = str(state_files.folder(state / "session-home", "The session's home folder in the state folder", make=True))
+        env["TMPDIR"] = str(state_files.folder(state / "session-tmp", "The session's folder for temporary files in the state folder", make=True))
+        env["USER"] = env["LOGNAME"] = "desk"
+        # A count, not a promise: everything the session is given at its start, by its kind, holds no known value. Where
+        # one does, the session is not started, and only the kind of thing that carried it is said.
+        given = [("the program's own path", str(Path(argv[0]).resolve())), *(("an argument", word) for word in argv),
+                 *(("a variable", text) for pair in env.items() for text in pair), ("the working folder", str(copy))]  # fmt: skip
+        carried = {kind for kind, text in given if guard.names(text, values, PUBLIC)}
+        exposure = {"counted": len(given), "found": len(carried)}
+        if carried:
+            raise Problem("On the desk's own sign-in, what a session would be given at its start names the owner, in "
+                          + ", ".join(kind for kind in GIVEN_AT_THE_START if kind in carried) + ". Nothing is started.")
     # The watcher gets the same sign-in to GitHub as the tools: the desk's own token when there is one.
     if stand_in is not None:
         watcher_env = {"PATH": lock["path"], "DESK_STAND_IN": str(stand_in)}
@@ -532,6 +607,8 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         watcher_env = tools.GitHub(lock["repository"], desk_env["DESK_GH"], state, lock["path"]).environment()
     # The watcher is run from the copy and must leave no compiled file in it.
     watcher_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if ways_open and not exposure["counted"]:
+        raise Problem("A way in is open, but what a session is given was not counted. Nothing is started.")
     return {
         "argv": argv,
         "env": env,
@@ -541,6 +618,10 @@ def plan(coordinator: str, state: Path, stand_in: Path | None = None, environ: d
         "settings": settings,
         "servers": sorted(servers),
         "own_sign_in": bool(own_sign_in),
+        # What the start counted of what a session is given, on the desk's own sign-in; nothing is counted on the owner's.
+        "exposure": exposure,
+        # The program the copy was made from, so that the relay looks at the copy again before every session.
+        "program_source": program_source,
         "watcher_env": watcher_env,
     }
 
@@ -554,22 +635,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--say", default=None, help="a first message for a session (for the lock check)")
     parser.add_argument("--exit-when-idle", action="store_true", help="end once there is nothing left to do (for the lock check)")
     options = parser.parse_args(argv)
-    try:
-        planned = plan(options.coordinator, options.state or default_state(), options.stand_in)
-    except Problem as problem:
-        sys.stderr.write(f"The desk was not started. {problem}\n")
-        return 1
-    except Exception as error:  # Whatever was not expected is a reason not to start, said in one line.
-        sys.stderr.write(f"The desk was not started. Something it relies on could not be checked ({type(error).__name__}).\n")
-        return 1
-    watcher_env = planned.pop("watcher_env")
-    if options.show:
-        # What is shown holds no token.
-        planned["env"] = {key: ("<kept out of what is shown>" if key == "CLAUDE_CODE_OAUTH_TOKEN" else value) for key, value in planned["env"].items()}
-        json.dump(planned, sys.stdout, indent=1)
-        sys.stdout.write("\n")
-        return 0
-    return relay.Relay(planned, watcher_env, say=options.say, exit_when_idle=options.exit_when_idle).run()
+    with ExitStack() as stack:
+        try:
+            # One desk for one state folder. Its lock is taken before anything in the folder is read or written, and held
+            # for as long as the desk runs: a second start, or one that only shows what it would start, changes nothing
+            # in a folder that a running desk holds.
+            state = state_folder(options.state or default_state(), COPY)
+            held = stack.enter_context(state_files.opened(state / "desk.lock", "The file desk.lock in the state folder"))
+            try:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise Problem("Another desk is already running on this state folder. Nothing in it was changed.") from None
+            planned = plan(options.coordinator, state, options.stand_in)
+        except (Problem, state_files.StateProblem) as problem:
+            sys.stderr.write(f"The desk was not started. {problem}\n")
+            return 1
+        except Exception as error:  # Whatever was not expected is a reason not to start, said in one line.
+            sys.stderr.write(f"The desk was not started. Something it relies on could not be checked ({type(error).__name__}).\n")
+            return 1
+        watcher_env = planned.pop("watcher_env")
+        if options.show:
+            # What is shown holds no token.
+            planned["env"] = {key: ("<kept out of what is shown>" if key == "CLAUDE_CODE_OAUTH_TOKEN" else value) for key, value in planned["env"].items()}
+            json.dump(planned, sys.stdout, indent=1)
+            sys.stdout.write("\n")
+            return 0
+        return relay.Relay(planned, watcher_env, say=options.say, exit_when_idle=options.exit_when_idle, held=held).run()
 
 
 if __name__ == "__main__":

@@ -451,11 +451,11 @@ def search_of_the_stream(stream: str, values: list, asks_what_it_knows: bool, ow
         of_the_sign_in = sorted({value for kind, value in values if kind == SHOWN_BY_A_SIGN_IN}, key=len, reverse=True)
         for value in of_the_sign_in:
             stream = re.sub(re.escape(value), " ", stream, flags=re.IGNORECASE)
-        reduced = [guard.Spelled(value).letters for value in of_the_sign_in]
+        reduced = [guard.form(value).letters for value in of_the_sign_in]
         taken_out = [SHOWN_BY_A_SIGN_IN] if of_the_sign_in else []
         rest = [(kind, value) for kind, value in values if kind != SHOWN_BY_A_SIGN_IN]
-        not_searched = sorted({kind for kind, value in rest if any(guard.Spelled(value).letters in part for part in reduced)})
-        values = [(kind, value) for kind, value in rest if not any(guard.Spelled(value).letters in part for part in reduced)]
+        not_searched = sorted({kind for kind, value in rest if any(guard.form(value).letters in part for part in reduced)})
+        values = [(kind, value) for kind, value in rest if not any(guard.form(value).letters in part for part in reduced)]
     return {"found": sorted(set(guard.names(stream, values))), "taken_out": taken_out, "not_searched": not_searched}
 
 

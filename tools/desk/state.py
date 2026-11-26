@@ -26,6 +26,26 @@ def _closed(info: os.stat_result) -> bool:
     return info.st_uid == os.getuid() and not info.st_mode & 0o077
 
 
+def program_holds(program: Path, source: str) -> bool:
+    """Whether a copy of a program is what was checked, at the moment it is looked at: an ordinary file and no link,
+    of this account, runnable by it and writable by no other, in a folder of this account that no other may write, with
+    the bytes of the program it was copied from."""
+    try:
+        folder, info = os.lstat(program.parent), os.lstat(program)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(folder.st_mode) or not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o100:
+        return False
+    if any(what.st_uid != os.getuid() or what.st_mode & 0o022 for what in (folder, info)):
+        return False
+    try:
+        descriptor = os.open(program, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        with os.fdopen(descriptor, "rb") as copy, open(source, "rb") as original:
+            return copy.read() == original.read()
+    except OSError:
+        return False
+
+
 def folder(path: Path, what: str, make: bool = False) -> Path:
     try:
         info = os.lstat(path)

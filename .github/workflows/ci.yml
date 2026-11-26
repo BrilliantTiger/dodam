@@ -39,17 +39,7 @@ jobs:
           .harbor-venv/bin/python -m pip install --quiet --require-hashes --only-binary=:all: -r harbor/requirements.txt
       - name: Check that the leak test catches the released Harbor
         working-directory: bench
-        run: |
-          set +e
-          out=$(python -m pytest -q -p no:cacheprovider "tests/test_harbor_patch.py::test_a_listed_credential_stays_off_the_command_line_and_reaches_the_docker_cli_environment" 2>&1)
-          code=$?
-          set -e
-          if [ "$code" -ne 1 ] || ! printf '%s' "$out" | grep -q "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-PROBE"; then
-            printf '%s\n' "$out"
-            echo "The leak test did not find the made-up secret on the command line of the released Harbor."
-            exit 1
-          fi
-          echo "As expected, the leak test fails on the released Harbor: the made-up secret is on the command line."
+        run: python -I ci/the_leak_test_catches_the_released_harbor.py
       - name: Apply Dodam's patch to Harbor
         working-directory: bench
         run: python -m dodambench.harbor_patch apply
@@ -94,13 +84,7 @@ jobs:
           python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
       - name: Check that every pilot test fails on its broken variant
         working-directory: bench
-        run: |
-          out=$(python -m pytest -q -p no:cacheprovider -rs tests/test_pilot_variants.py 2>&1) || { printf '%s\n' "$out"; exit 1; }
-          printf '%s\n' "$out"
-          if printf '%s' "$out" | grep -q "skipped"; then
-            echo "A part of the variants check was skipped in the job that is there to run it."
-            exit 1
-          fi
+        run: python -I ci/every_pilot_test_fails_on_its_variant.py
       - name: Run the checks on the Gemini job
         working-directory: bench
         run: python -m pytest -q -p no:cacheprovider tests/test_gemini.py
@@ -129,7 +113,8 @@ jobs:
           python-version: "3.13"
       - name: Check that the recorded output is what the script gives
         working-directory: tools/plan
-        run: python ${{ matrix.check }}
+        # In isolated mode, so that nothing placed on a search path runs in place of what is named.
+        run: python -I ${{ matrix.check }}
 
   # What a judged program, its build and a served web program can reach, tried from inside the
   # verifier's container: the judge runs as root in a container of the Python image, without network

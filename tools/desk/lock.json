@@ -1,5 +1,6 @@
 {
   "claude_version": "2.1.327",
+  "own_sign_in_shows": {"loggedIn": true, "authMethod": "oauth_token"},
   "model": "sonnet",
   "repository": "BrilliantTiger/dodam",
   "builtin_tools": [

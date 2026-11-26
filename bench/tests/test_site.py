@@ -960,7 +960,8 @@ def workflow_triggers(name: str) -> str:
 
 def test_every_merge_to_main_and_a_fixed_interval_build_the_page_and_nothing_else_does():
     triggers = workflow_triggers("pages.yml")
-    assert re.search(r"push:\s*\n\s+branches:\s*\[\s*main\s*\]", triggers)
+    # The branch list is written in the one notation the closed list of the workflows reads: one item a line.
+    assert re.search(r"push:\s*\n\s+branches:\s*\n\s+- main\s*\n", triggers)
     assert "paths" not in triggers, "a merge that does not touch site/ would not build the page"
     assert re.search(r"schedule:\s*\n\s+- cron: \"\d+ \* \* \* \*\"", triggers), "the page is not built again every hour"
     assert not re.search(r"pull_request|workflow_dispatch|workflow_run|issue", triggers), "something else can deploy the page"
@@ -1092,7 +1093,7 @@ def test_the_status_is_what_the_charter_says_about_now():
 
 
 STATUS_VARIANTS = [
-    ("- 판: v0.14 (2026-11-23)", "- 판: v0.15 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.15", "2026-12-24")),
+    ("- 판: v0.15 (2026-11-23)", "- 판: v0.16 (2026-12-24)", lambda s: (s["charter"]["version"], s["charter"]["date"]), ("0.16", "2026-12-24")),
     ("~ 2027년 2월 24일 | 방향 고정", "~ 2027년 3월 31일 | 방향 고정", lambda s: (s["step"]["gate_plan"], s["step"]["gate_today"]), ("2027-03-31", None)),
     ("지금 조건에서 가운데 2027-06-23,", "지금 조건에서 가운데 2027-08-04,", lambda s: s["step"]["gate_today"], "2027-08-04"),
     ("(2027-02-24까지 닿을 확률 4%)", "(2027-02-24까지 닿을 확률 9%)", lambda s: s["step"]["gate_today_chance"], 9),
