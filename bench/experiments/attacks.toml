@@ -619,6 +619,78 @@ tests = [
 
 [[attack]]
 class = "memory"
+name = "making and removing files or processes over and over"
+tries = "the program makes small files and removes them, or starts short processes and waits for them, over and over, so that the kernel's records rise and fall again"
+must = "records that rise and fall again are not added up: a program that holds nothing more is not ended for memory"
+tests = [
+    "tests/test_cli_isolation.py::test_a_program_that_keeps_making_and_removing_files_or_processes_is_not_ended_for_memory",
+]
+
+[[attack]]
+class = "memory"
+name = "reading and writing files while the judge reads the container"
+tries = "the program, in two processes, reads a file again and again or writes files into its folder and removes them, next to its limit or above it, while the judge reads the container's figures one after another"
+must = "a program within its limit is not ended for memory and one above it fails for memory; a reading whose parts moved across a line, or that was cut by time, ends nothing and keeps its case from passing"
+tests = [
+    "tests/test_cli_isolation.py::test_what_a_program_does_while_the_judge_measures_neither_fails_it_nor_hides_its_memory",
+    "tests/test_cli_judge.py::test_a_figure_is_made_of_readings_that_belong_together",
+    "tests/test_cli_judge.py::test_each_part_of_a_reading_is_taken_as_it_can_be_trusted",
+    "tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_taken_never_passes_and_is_never_ended_by_it",
+]
+
+[[attack]]
+class = "memory"
+name = "records that many processes hold at the container's cap"
+tries = "the program's processes hold the kernel's records of many files until the container stands at its cap"
+must = "the kernel ends the program's processes and never the case runner while one of them is left, or the count ends the program first; the case fails for memory, with a result"
+tests = [
+    "tests/test_cli_isolation.py::test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_case_runner",
+]
+
+[[attack]]
+class = "memory"
+name = "records made after earlier activity, or while the kernel takes old ones back"
+tries = "an earlier case leaves cache and records behind, and the case then makes records and holds them, also while the container is held at its cap"
+must = "what the case's records grow by beyond the amount left out counts as its memory; and the case passes only where its memory and every record of the kernel's that stands, beyond that amount, lie within its limit"
+tests = [
+    "tests/test_cli_isolation.py::test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left",
+    "tests/test_cli_isolation.py::test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound",
+]
+
+[[attack]]
+class = "memory"
+name = "records that stood before the case, held"
+tries = "the case holds the records of files its build left, or of files an earlier case looked at, which stand already and make no figure rise"
+must = "the case passes only where its memory and every record of the kernel's that stands, beyond the amount left out, lie within its limit and leave the container its room below the cap; elsewhere it is unmeasured"
+tests = [
+    "tests/test_cli_judge.py::test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_whatever_stood",
+    "tests/test_cli_judge.py::test_records_that_stand_count_against_the_room_below_the_cap",
+    "tests/test_cli_isolation.py::test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left",
+]
+
+[[attack]]
+class = "memory"
+name = "records made while older ones are given back, one for one"
+tries = "the case makes its records at the pace the kernel gives back older ones, between two readings, in pulses or between the two halves of a reading, so that the figure does not rise"
+must = "the case passes only where its memory and every record of the kernel's that stands, beyond the amount left out, lie within its limit; elsewhere it is unmeasured"
+tests = [
+    "tests/test_cli_judge.py::test_no_case_passes_holding_more_than_its_limit_and_the_amount_left_out_whatever_stood",
+    "tests/test_cli_isolation.py::test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound",
+]
+
+[[attack]]
+class = "passing as unjudged"
+name = "a case whose memory the judge cannot read"
+tries = "after its test passes, leaves it unjudged or fails, a case's memory cannot be read so as to say on which side of a line it lies; or the case runner's note of it cannot be read"
+must = "such a case never passes: when its test would pass or leave it unjudged it is unmeasured, and the tool that checks prepared solutions reads it as a fault of measuring; when its test fails, the failure stands; a note that cannot be read leaves no case of its file passed or unjudged"
+tests = [
+    "tests/test_cli_judge.py::test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unjudged_becomes_unmeasured",
+    "tests/test_vet.py::test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution",
+    "tests/test_cli_judge.py::test_a_note_the_judge_cannot_read_leaves_no_case_of_its_file_passed_or_unjudged",
+]
+
+[[attack]]
+class = "memory"
 name = "locking pages of files in memory"
 tries = "the program, alone or with many processes, locks pages in memory: a range, everything it has, a mapping asked for as locked, shared memory; a locked page of a file cannot be given back by the kernel"
 must = "nothing of the program's side, in the build or in a run, can lock memory; and a page of a file that stands on neither of the kernel's two lists counts as memory whatever keeps it off them"

@@ -66,7 +66,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -213,6 +213,29 @@ RECORDS_LEFT_OUT_MB = 16           # the most of the kernel's records that is le
 HIGHS_KEPT = 10                    # how many runs with a new high above the limit the result names
 RUNNER_MARK = 500                  # the kernel's mark of the case runner; the program's side has 1000, the judge 0
 MEMORY_RESERVE_MB = 128            # the judge ends a program that leaves the container less than this
+# One figure of the container is made of several of the kernel's files, read one after another while
+# the program runs. What can be given back is read before and after the container's total, and a
+# reading whose two halves differ by more than TOGETHER_BYTES, or that took longer than
+# TOGETHER_SECONDS, is read again, up to TOGETHER_TRIES times.
+TOGETHER_BYTES = 2**20
+TOGETHER_SECONDS = 0.001
+TOGETHER_TRIES = 8
+# A reading whose every try took longer than TOGETHER_SECONDS was not read in one piece, and one that
+# still moved more than TOGETHER_BYTES can say only that the figure lies within what moved. When it
+# cannot say on which side of a line the figure lies, it ends nothing, and its case cannot pass: a case
+# that would pass, or would be left unjudged, is UNMEASURED. What its test decided otherwise stands.
+UNMEASURED = "unmeasured"
+# every outcome the judge gives a case: pytest's three, and the judge's own for a case not judged for measuring
+OUTCOMES = ("passed", "failed", "skipped", UNMEASURED)
+NOT_JUDGED_FOR_MEASURING = ("not judged: the judge could not take a reading of the container's memory that says "
+                            "on which side of a line it lies")
+# the other reasons for it, each of its own: the notes of the file could not be read, the case's note could
+# not be written, or the test has fewer notes than cases of the program it opened, or did not say how many
+NOTES_UNREADABLE = "not judged: the notes of the memory of this file's cases could not be read"
+NOTE_LOST = "not judged: the note of this case's memory could not be written"
+NOTE_MISSING = "not judged: the test has fewer notes of its cases' memory than cases of the program it opened"
+UNMEASURED_REASONS = (NOT_JUDGED_FOR_MEASURING, NOTES_UNREADABLE, NOTE_LOST, NOTE_MISSING)
+MACHINE_INFO = Path("/proc/meminfo")   # what the machine has, its swap included
 PROCESS_CEILING = 4096             # a cap on processes above this bounds nothing on a small machine
 CASE_ENTRIES = 20000               # how many files and folders a case may hold
 TREE_ENTRIES = 500_000             # how many entries a tree the program's side left may hold
@@ -492,7 +515,45 @@ def _group_number(group: Path, name: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
-def container_memory(group: Path = GROUP) -> dict[str, int]:
+def _given_back(group: Path) -> tuple[int, int]:
+    """Of what the kernel counts for the container: the pages of files on disk that stand on its two
+    lists for pages of files, and its records of names, files and pages of that cache."""
+    stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
+    return (int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0)),
+            int(stat_lines.get("slab_reclaimable", 0)))
+
+
+def _swap_of(group: Path, machine_info: Path) -> int:
+    """How much the container may move out to swap, in bytes: its own allowance, and no more than
+    the machine has; all the machine has when the container has no allowance of its own; none on a
+    kernel that does not count swap for a container, and none on a machine without swap."""
+    machine_swap = 0
+    try:
+        for line in machine_info.read_text().splitlines():
+            if line.startswith("SwapTotal:"):
+                machine_swap = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        machine_swap = 0
+    allowed = _group_number(group, "memory.swap.max")
+    try:
+        unbounded = (group / "memory.swap.max").read_text().strip() == "max"
+    except OSError:
+        unbounded = False
+    return machine_swap if unbounded else min(allowed or 0, machine_swap)
+
+
+_SWAP_ALLOWED: dict[tuple[str, str], int] = {}
+
+
+def swap_allowed(group: Path = GROUP) -> int:
+    """The swap the container may use, read once: it does not change while the container runs."""
+    key = (str(group), str(MACHINE_INFO))
+    if key not in _SWAP_ALLOWED:
+        _SWAP_ALLOWED[key] = _swap_of(group, MACHINE_INFO)
+    return _SWAP_ALLOWED[key]
+
+
+def container_memory(group: Path = GROUP, outside=None) -> dict[str, int]:
     """What the kernel counts for this container, in bytes. "taken" is the container's count:
     everything in memory together with what was moved out to swap, less two things. Memory in
     shared memory and in memory-backed folders is counted, and so is memory the kernel swapped
@@ -503,14 +564,58 @@ def container_memory(group: Path = GROUP) -> dict[str, int]:
     off them. A page on the lists that something holds is taken out all the same; the ways of
     holding one that are known are refused where the program's side is confined, and it is not
     shown that there is no other. "all" is everything in
-    memory, those included, which is what the kernel's own highest value counts."""
-    current = int((group / "memory.current").read_text())
-    stat_lines = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines())
-    swapped = _group_number(group, "memory.swap.current") or 0
-    gives_back = int(stat_lines.get("slab_reclaimable", 0))
-    can_be_given_back = int(stat_lines.get("inactive_file", 0)) + int(stat_lines.get("active_file", 0))
-    return {"taken": current - can_be_given_back + swapped - gives_back,
-            "all": current, "cap": _group_number(group, "memory.max") or 0, "records": gives_back}
+    memory, those included, which is what the kernel's own highest value counts. "cap" is the
+    memory cap and the swap the container may use: the room it has. `outside`, when given, says
+    how much the cases' files hold ("files").
+
+    The parts are files read one after another, while a program may read files, write them or
+    remove them. So what can be given back, and the cases' files, are read before and after the
+    total, and the smaller of the two is taken: a page or a file that came or went while the total
+    was read neither lowers the figure nor raises it by more than what moved. A reading whose two
+    halves differ by more than TOGETHER_BYTES, or that took longer than TOGETHER_SECONDS, is read
+    again, up to TOGETHER_TRIES times; then a reading that took no longer than that comes before one
+    that did, and of those the one whose halves moved least is taken. What came and went while a reading
+    was cut by time no half shows, so such a reading is "late": it says nothing of either side."""
+    best = None
+    for _ in range(TOGETHER_TRIES):
+        began = time.monotonic()
+        file_before, records_before = _given_back(group)
+        files_before = outside() if outside is not None else 0
+        swapped_before = _group_number(group, "memory.swap.current") or 0
+        current = int((group / "memory.current").read_text())
+        swapped_after = _group_number(group, "memory.swap.current") or 0
+        file_after, records_after = _given_back(group)
+        files_after = outside() if outside is not None else 0
+        took = time.monotonic() - began
+        moved = (abs(file_after - file_before) + abs(records_after - records_before) + abs(files_after - files_before)
+                 + abs(swapped_after - swapped_before))
+        # one value of the records for the figure and for their own count, so that nothing is counted twice
+        reading = (took > TOGETHER_SECONDS, moved, took, current, max(swapped_before, swapped_after),
+                   min(file_before, file_after), min(records_before, records_after), min(files_before, files_after))
+        if best is None or reading[:3] < best[:3]:
+            best = reading
+        if moved <= TOGETHER_BYTES and took <= TOGETHER_SECONDS:
+            break
+    late, moved, took, current, swapped, can_be_given_back, records, files = best
+    memory_max = _group_number(group, "memory.max") or 0
+    return {"taken": current - can_be_given_back + swapped - records,
+            "all": current, "cap": memory_max + swap_allowed(group) if memory_max else 0, "records": records,
+            "files": files, "moved": moved, "late": int(late)}
+
+
+# the kernel's own part of a container, as memory.stat names it
+KERNEL_PARTS = ("kernel_stack", "pagetables", "sec_pagetables", "percpu", "sock", "vmalloc", "slab_unreclaimable")
+
+
+def kernel_part(group: Path = GROUP) -> int:
+    """What the kernel holds for the container of its own: the stacks and page tables of its
+    processes, memory for each processor, sockets, and the records it cannot give back. Part of
+    what it kept of processes that ended goes a while after them; 0 where it says nothing."""
+    try:
+        stat = dict(line.split()[:2] for line in (group / "memory.stat").read_text().splitlines() if line.strip())
+        return sum(int(stat.get(part, 0)) for part in KERNEL_PARTS)
+    except (OSError, ValueError):
+        return 0
 
 
 def highest_memory(group: Path = GROUP) -> int:
@@ -545,12 +650,10 @@ def container_caps(disk_mb: int | None = None, group: Path = GROUP,
         return JudgeFault(json.dumps({"severity": "error", "file": "container", "key": key, "message": message}))
 
     memory, processes = number("memory.max"), number("pids.max")
-    machine = machine_swap = 0
+    machine = 0
     for line in machine_info.read_text().splitlines():
         if line.startswith("MemTotal:"):
             machine = int(line.split()[1]) * 1024
-        if line.startswith("SwapTotal:"):
-            machine_swap = int(line.split()[1]) * 1024
     if memory is None:
         raise refuse("memory", "the container has no memory cap, so nothing bounds the memory the program takes")
     if memory > machine:
@@ -562,12 +665,7 @@ def container_caps(disk_mb: int | None = None, group: Path = GROUP,
     if refusing_filter() is None:
         raise refuse("machine", f"no call filter is known for a {platform.machine()} machine")
     # how much of the machine's swap this container may use: none when the machine has none
-    allowed = number("memory.swap.max")
-    try:
-        unbounded = (group / "memory.swap.max").read_text().strip() == "max"
-    except OSError:
-        unbounded = False
-    swap = machine_swap if unbounded else min(allowed or 0, machine_swap)
+    swap = _swap_of(group, machine_info)
     caps = {"memory_mb": memory // 2**20, "processes": processes, "swap_mb": swap // 2**20}
     if disk_mb is not None:
         try:
@@ -759,7 +857,7 @@ def tests_in(source: bytes | str) -> int:
 def reward_of(cases: list[dict], build_ok: bool, step: str, separated: bool) -> dict:
     """The reward of a judging at `step`, from its cases: what the judge writes, and what the tool
     that checks prepared solutions compares a judging's reward with."""
-    judged = [c for c in cases if c["outcome"] != "skipped"]
+    judged = [c for c in cases if c["outcome"] in ("passed", "failed")]
     failed = [c for c in judged if c["outcome"] == "failed"]
     reward = {"build_ok": 1.0 if build_ok else 0.0}
     for kind in ("functional", "boundary", "security"):
@@ -771,7 +869,9 @@ def reward_of(cases: list[dict], build_ok: bool, step: str, separated: bool) -> 
         reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
         reward[f"{kind}_judged"] = float(len(of_kind))
     reward.update({
-        "unjudged": float(len(cases) - len(judged)),
+        "unjudged": float(sum(c["outcome"] == "skipped" for c in cases)),
+        # cases not judged for measuring: no pass, and no judgement of the program either
+        "unmeasured": float(sum(c["outcome"] == UNMEASURED for c in cases)),
         "vulns_found": float(sum(c["kind"] == "security" for c in failed)),
         "regression_broken": float(sum(c["step"] != step for c in failed)),
         "reward": 1.0 if build_ok and cases and all(c["outcome"] == "passed" for c in cases) else 0.0,
@@ -1037,6 +1137,33 @@ def keep_private(folder: Path) -> None:
                     raise JudgeFault(f"cannot protect {parent}: {exc}") from None
 
 
+# what a case runner's note of a case holds, each of its own type
+NOTE_FIELDS = {"case": str, "unsettled": bool, "undecided": int, "grown": int, "left_out": int, "counted": int,
+               "bound": (int, type(None)), "fell": int}
+
+
+def _note_of(line: bytes) -> dict | None:
+    """One case runner's note of a case, or None where the line is not one whole."""
+    try:
+        note = json.loads(line.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(note, dict):
+        return None
+    for name, kind in NOTE_FIELDS.items():
+        value = note.get(name)
+        if not isinstance(value, kind) or isinstance(value, bool) and kind is not bool:
+            return None
+    return note
+
+
+def _note_belongs(note: dict, path: Path, case: dict) -> bool:
+    """Whether a note is of this case: of the same file of tests and the same name, as the judge names
+    a case after its test."""
+    parts = note["case"].split("::")
+    return len(parts) > 1 and PurePosixPath(parts[0]).name == path.name and parts[-1] == case["name"]
+
+
 class CliRun:
     """How the hidden tests of a command-line task reach the program: settings for dodam_cli.py."""
 
@@ -1094,11 +1221,16 @@ class CliRun:
         self.highs_file = self.private / "highs.jsonl"
         self.records_file = self.private / "records.jsonl"
         self.records_highest = 0       # the most the kernel's records grew by in one case of this judging
+        self.undecided = 0             # readings that could not say on which side of a line the figure lay
         # the case runner gives every case its own home, temporary folder and working folder
         env = {k: v for k, v in for_the_programs_side({**os.environ, **extra_env}).items() if k != "HOME"}
         settings = {"command": command, "uid": self.uid, "gid": self.uid, "limits": limits,
                     "work_root": str(self.work_root), "fault_file": str(self.fault_file), "env": env,
                     "highs_file": str(self.highs_file), "records_file": str(self.records_file)}
+        if run_as:
+            # the judge's own processes besides the case runner, the container's first and this one,
+            # whose memory the runner takes out of every figure
+            settings["judge_statuses"] = ["/proc/1/status", f"/proc/{os.getpid()}/status"]
         self.settings_file = self.private / "settings.json"
         self.settings_file.write_text(json.dumps(settings), encoding="utf-8")
         # the tests get nothing that differs from one language to the next but the settings file itself
@@ -1110,7 +1242,7 @@ class CliRun:
         tests = tests_in(path.read_bytes())
         timeout = file_seconds(tests, self.limits["timeout_sec"])
         cases = run_cases(path, self.test_env, timeout, lambda: self.give_back(not_run), ended)
-        self.note_records(cases)
+        self.note_records(path, cases)
         if self.fault_file.exists():
             raise JudgeFault(self.fault_file.read_text(encoding="utf-8").strip()[:2000])
         self.sweep()
@@ -1123,21 +1255,67 @@ class CliRun:
             raise JudgeFault(f"{path.name}: pytest listed {len(cases)} cases where the judge counted {tests} tests")
         return cases
 
-    def note_records(self, cases: list[dict]) -> None:
-        """Write into each case's outcome how much of the kernel's records was left out of its
-        memory and how much was counted, as the case runner noted it, so that a case that failed
-        for memory shows why."""
+    def note_records(self, path: Path, cases: list[dict]) -> None:
+        """Write into each case of the file of tests at `path` how much of the kernel's records was
+        left out of its memory and how much was counted, and how many of its readings could not
+        decide, as the case runner noted it, so that a case that failed for memory shows why. A note
+        belongs to the case of its own file and name. A case the judge decided itself, which no runner
+        ran, keeps the judge's outcome and reason. A case whose test failed stays failed. A case its
+        runner reported passed or unjudged is UNMEASURED, with the first of these that holds as its
+        reason: the notes of the file cannot be read whole (then which case a note belonged to cannot be
+        told); its note could not be written; the program is separated and the test has fewer notes
+        than cases of the program it opened, or did not say how many; a reading could not say on which
+        side of a line the figure lay. The notes are removed on every path, so that the next file of
+        tests starts with none."""
+        unreadable = False
         try:
-            noted = [json.loads(line) for line in self.records_file.read_text(encoding="utf-8").splitlines() if line]
-            self.records_file.unlink()
-        except (OSError, ValueError):
-            noted = []
+            lines = self.records_file.read_bytes().splitlines()
+        except FileNotFoundError:
+            lines = []
+        except OSError:
+            lines, unreadable = [], True
+        finally:
+            try:
+                self.records_file.unlink(missing_ok=True)
+            except OSError as exc:
+                raise JudgeFault(f"cannot remove the case runners' notes: {exc}") from None
+        noted = []
+        for line in lines:
+            if not line.strip():
+                continue
+            note = _note_of(line)
+            if note is None:
+                unreadable = True
+            else:
+                noted.append(note)
         for case in cases:
-            mine = [n for n in noted if n["case"].split("::")[-1] == case["name"]]
+            opened, lost = case.pop("opened", None), case.pop("lost", False)
+            if not case.pop("ran", True):
+                # decided by the judge without a run: it keeps the judge's outcome and reason, and no note,
+                # of an earlier run of its test either, is read against it
+                continue
+            mine = [n for n in noted if _note_belongs(n, path, case)]
             if mine:
                 case["records_left_out_bytes"] = max(n["left_out"] for n in mine)
                 case["records_counted_bytes"] = max(n["counted"] for n in mine)
+                case["undecided_readings"] = sum(n["undecided"] for n in mine)
+                # the most the case can have held, where a reading worked it out, and how far its figure fell
+                bounds = [n["bound"] for n in mine if n["bound"] is not None]
+                if bounds:
+                    case["memory_bound_bytes"] = max(bounds)
+                case["fell_below_start_bytes"] = max(n["fell"] for n in mine)
                 self.records_highest = max(self.records_highest, max(n["grown"] for n in mine))
+                self.undecided += case["undecided_readings"]
+            if case["outcome"] not in ("passed", "skipped"):
+                # failed by its test: it keeps its outcome and reason
+                continue
+            # where the program is separated every case of the program has a note: a test that opened
+            # one, or of which that is not known, with fewer cannot pass
+            missing = bool(self.run_as) and (opened is None or len(mine) < opened)
+            reason = (NOTES_UNREADABLE if unreadable else NOTE_LOST if lost else NOTE_MISSING if missing
+                      else NOT_JUDGED_FOR_MEASURING if any(n["unsettled"] for n in mine) else None)
+            if reason is not None:
+                case["outcome"], case["message"] = UNMEASURED, reason
 
     def highs(self) -> dict:
         """The runs in which the container's memory made a new high above what the case may take,
@@ -1148,7 +1326,7 @@ class CliRun:
             noted = [json.loads(line) for line in self.highs_file.read_text(encoding="utf-8").splitlines() if line]
         except (OSError, ValueError):
             noted = []
-        noted.sort(key=lambda run: -run["above_the_limit_mb"])
+        noted.sort(key=lambda run: -run.get("above_the_limit_bytes", run["above_the_limit_mb"] * 2**20))
         return {"fails_a_case": False, "runs": len(noted), "largest": noted[:HIGHS_KEPT]}
 
     def give_back(self, not_run: str) -> tuple[str, str] | None:
@@ -1385,7 +1563,11 @@ def pytest_runtest_logfinish(nodeid, location) -> None:
         # Whatever the kernel ended while this case ran, the case fails. The runner stops here; the
         # judge gives back what the case took and runs the cases that are left with a new runner.
         outcome, message = "failed", KERNEL_ENDED
-    _note_progress({"case": nodeid, "outcome": outcome, "message": message})
+    # how many cases of the program the test opened, and whether the note of one could not be written
+    runner = sys.modules.get("dodam_cli")
+    opened = getattr(runner, "_opened", {}).get(nodeid, 0) if runner is not None else 0
+    lost = nodeid in getattr(runner, "_lost", ()) if runner is not None else False
+    _note_progress({"case": nodeid, "outcome": outcome, "message": message, "opened": opened, "lost": lost})
     if stop and _runner["session"] is not None:
         _runner["session"].shouldstop = KERNEL_ENDED
 
@@ -1454,6 +1636,25 @@ def run_pytest(test_path: Path, env: dict[str, str], timeout: float, said: str) 
                 TREE_CLOCK.left = min(TREE_CLOCK.left, left_now())
 
 
+# The ways a case runner's run ends, as the judge tells them. The cases such an end leaves undecided are
+# decided by the judge with these words.
+RUNNER_ENDS = ("by itself", "its time was up", "the kernel ended it", "a signal ended it", "with an exit code of its own")
+
+
+def runner_end(code: int | None, kernel_ended: bool) -> str:
+    """How a case runner's run ended, in the judge's words: one of RUNNER_ENDS, from its exit code (None
+    where its time was up) and whether the kernel ended a process meanwhile; nothing where it ended by
+    itself, with an exit code pytest gives."""
+    if code is None:
+        return TIMED_OUT
+    if code < 0:
+        return (KERNEL_ENDED.replace("a process", "the case runner") if kernel_ended
+                else f"the case runner was ended by signal {-code}")
+    if code not in (0, 1, 2, 5):
+        return f"the case runner ended with exit code {code}"
+    return ""
+
+
 def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=None,
               ended: list[dict] | None = None) -> list[dict]:
     """Run one file of hidden tests and say how each case came out.
@@ -1478,14 +1679,7 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
             # what the runner spent walking and removing is the step's time for that, not the file's
             used = tree_before - TREE_CLOCK.left if tree_before is not None and TREE_CLOCK.left is not None else 0.0
             spent += time.monotonic() - began - used
-            how = ""
-            if code is None:
-                how = TIMED_OUT
-            elif code < 0:
-                how = (KERNEL_ENDED.replace("a process", "the case runner") if killed_for_memory() > kills
-                       else f"the case runner was ended by signal {-code}")
-            elif code not in (0, 1, 2, 5):
-                how = f"the case runner ended with exit code {code}"
+            how = runner_end(code, killed_for_memory() > kills)
             records = read_progress(progress)
             faults = [r["fault"] for r in records if "fault" in r]
             if faults:
@@ -1533,14 +1727,28 @@ def run_cases(test_path: Path, env: dict[str, str], timeout: float, give_back=No
                     left, fruitless = left[1:], 0
                 if not left:
                     return [{"name": case.split("::")[-1], "outcome": decided[case]["outcome"],
-                             "message": decided[case]["message"]} for case in listed]
+                             "message": decided[case]["message"], **_case_notes(decided[case])} for case in listed]
             verdict = give_back() if give_back is not None else None
             if verdict is not None and listed:
                 outcome, message = verdict
+                # a case decided here was not run: it is the judge's, with no count, note or lost note
                 return [{"name": case.split("::")[-1], "outcome": decided.get(case, {}).get("outcome", outcome),
-                         "message": decided.get(case, {}).get("message", message)} for case in listed]
+                         "message": decided.get(case, {}).get("message", message),
+                         **(_case_notes(decided[case]) if case in decided else {"ran": False})}
+                        for case in listed]
     finally:
         shutil.rmtree(private, ignore_errors=True)
+
+
+def _case_notes(record: dict) -> dict:
+    """What the case runner said of a test besides its outcome: how many cases of the program it opened
+    and whether the note of one was lost. Where the runner said nothing, these are left out."""
+    said = {}
+    if isinstance(record.get("opened"), int) and not isinstance(record.get("opened"), bool):
+        said["opened"] = record["opened"]
+    if record.get("lost") is True:
+        said["lost"] = True
+    return said
 
 
 def _note_progress_to(path: str, record: dict) -> None:
@@ -1699,12 +1907,18 @@ def judge_step(tests_dir: Path, app_dir: Path, step: str, out_dir: Path, run_as:
         # and how many processes the kernel ended there
         report["memory"] = {"highest_mb": highest_memory() // 2**20, "times_at_cap": memory_events().get("max", 0),
                             "ended_by_the_kernel": killed_for_memory()}
+
         records["at_end"] = container_memory()["records"]
         report["memory"]["records_mb"] = {name: round(value / 2**20, 1) for name, value in records.items()}
         if highs is not None:
             # the runs that made a new high of the container's memory above the case's limit
             report["memory"]["highs_above_the_limit"] = highs
 
+    if cli is not None:
+        # how many readings of the step's cases could not say on which side of a line the figure lay
+        report.setdefault("memory", {})["undecided_readings"] = cli.undecided
+    # the cases not judged for measuring, by name: their count is in the reward
+    report[UNMEASURED] = [f"{c['file']}::{c['name']}" for c in report["tests"] if c["outcome"] == UNMEASURED]
     reward = reward_of(report["tests"], report["build_ok"], step, bool(run_as))
     write_output(out_dir / "details.json", json.dumps(report, indent=1, ensure_ascii=False))
     write_output(out_dir / "reward.json", json.dumps(reward, indent=1))

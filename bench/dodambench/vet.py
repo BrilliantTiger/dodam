@@ -29,7 +29,8 @@ from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from .convert import to_harbor, verifier_env
-from .judge import LEFT_BEHIND, JudgeFault, judge, names_of_tests, reward_of
+from .judge import (LEFT_BEHIND, OUTCOMES, UNMEASURED, UNMEASURED_REASONS, JudgeFault, judge, names_of_tests,
+                    reward_of)
 from .languages import LANGUAGES, Language
 from .task import (PROCESS_CAP, Task, TaskError, TestFile, cases_mount, container_memory_mb, load_task,
                    materialize, task_problems)
@@ -56,7 +57,6 @@ class VetError(Exception):
 
 # --- what a judging left, as the one record the judging code reads ---
 
-OUTCOMES = ("passed", "failed", "skipped")         # every outcome the judge gives a case
 REWARD_KEYS = tuple(reward_of([], True, "", True))  # the parts of the judge's reward
 # The most a file a judging left may hold. The largest of 70 results of earlier judgings held 17,130
 # bytes; a case's message is at most 300 characters and the build's log 2,000.
@@ -85,6 +85,8 @@ class Judged:
     left_behind: str          # what the program's side left that the judge could not take back; empty when nothing
     cases: tuple[Case, ...]
     reward: dict              # the judge's reward, the one the cases give
+    bounds: tuple[int, ...] = ()  # the most each case that passed or was not judged for measuring can have held,
+    #                               where the judge worked it out
 
 
 def _not_of_the_shape(file: str, key: str, what: str) -> JudgeFault:
@@ -150,6 +152,9 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.name", "a text that is not empty")
         if case["outcome"] not in OUTCOMES:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.outcome", f"one of {', '.join(OUTCOMES)}")
+        if case["outcome"] == UNMEASURED and case["message"] not in UNMEASURED_REASONS:
+            raise _not_of_the_shape(DETAILS_FILE, f"{key}.message", "the judge's own words for a case not judged "
+                                                                    "for measuring")
         own = files.get(case["file"])
         if own is None:
             raise _not_of_the_shape(DETAILS_FILE, f"{key}.file", f"a file of tests the judge runs at step {step}")
@@ -175,6 +180,10 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
         if not _whole_picture(of_file[test.file], test, names, build_ok, left, cli):
             raise _not_of_the_shape(DETAILS_FILE, "tests", f"a case for every test of {test.file}, each once, or "
                                                            f"the one entry the judge writes for the whole file")
+    unmeasured = [f"{c.file}::{c.name}" for c in cases if c.outcome == UNMEASURED]
+    if details.get(UNMEASURED) != unmeasured:
+        raise _not_of_the_shape(DETAILS_FILE, UNMEASURED, "the cases not judged for measuring, as file::name in the "
+                                                          "order of the cases, and an empty list where there is none")
     expected = reward_of([{"outcome": c.outcome, "kind": c.kind, "step": c.step} for c in cases], build_ok, step,
                          separated)
     if not isinstance(reward, dict) or set(reward) != set(expected):
@@ -184,7 +193,20 @@ def record_of(reward: object, details: object, tests_dir: Path, run: Sequence[Te
             raise _not_of_the_shape(REWARD_FILE, key, "a number")
         if reward[key] != value:
             raise _not_of_the_shape(REWARD_FILE, key, f"{value}, what the cases give")
-    return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward))
+    # the most each case that passed, or was not judged for measuring, can have held, where the judge
+    # worked it out: read here, so that nothing else reads the result again
+    bounds = tuple(case["memory_bound_bytes"] for case in given
+                   if isinstance(case, dict) and case.get("outcome") in ("passed", UNMEASURED)
+                   and isinstance(case.get("memory_bound_bytes"), int) and not isinstance(case["memory_bound_bytes"], bool))
+    if unmeasured:
+        # the judging is no judgement of the solution, whatever kind it was written as: a fault of measuring;
+        # the room it left is told all the same, from the bounds read here
+        fault = JudgeFault(json.dumps({"severity": "error", "file": DETAILS_FILE, "key": UNMEASURED,
+                                       "message": "cases not judged for measuring: " + "; ".join(
+                                           f"{c.file}::{c.name}, {c.message}" for c in cases if c.outcome == UNMEASURED)}))
+        fault.bounds = bounds
+        raise fault
+    return Judged(step=step, build_ok=build_ok, left_behind=left, cases=tuple(cases), reward=dict(reward), bounds=bounds)
 
 
 def _present(folder: int, name: str) -> bool:
@@ -467,6 +489,7 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                 if "adjusted" in room:
                     result["adjusted"] = room["adjusted"]
                 started = time.monotonic()
+                bounds: tuple[int, ...] = ()
                 try:
                     judged = judge_in_image(image, harbor / "tests",
                                             harbor / "steps" / step.name / "solution" / "variants" / variant.label,
@@ -474,14 +497,34 @@ def vet_in_image(task: Task, lang: str, out_dir: Path, image: str) -> list[dict]
                                             task.limits["verifier_timeout_sec"], task)
                 except JudgeFault as exc:
                     result.update(ok=False, judge_fault=True, problems=[f"the judge itself failed: {exc}"])
-                except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                    # a judging with a case not judged for measuring tells its room as well
+                    bounds = getattr(exc, "bounds", ())
+                except COULD_NOT_JUDGE as exc:
                     result.update(ok=False, problems=[f"could not judge in {image}: {exc}"])
                 else:
                     found = judgement_problems(variant.expect, variant.weakness, judged)
                     result.update(ok=not found, problems=found, reward=dict(judged.reward))
+                    bounds = judged.bounds
+                if task.cli.get("case_memory_mb"):
+                    # from what the one place read, never from a bound the judge did not work out
+                    result["room_mb"] = room_of(bounds, task.cli["case_memory_mb"])
                 result["seconds"] = round(time.monotonic() - started, 1)
                 results.append(result)
     return results
+
+
+# What the tool takes as a judging it could not run at all: the container could not be made, started or
+# read. Such a judging gives no result and tells no room.
+COULD_NOT_JUDGE = (subprocess.SubprocessError, OSError, ValueError)
+
+
+def room_of(bounds: tuple[int, ...], limit_mb: int) -> float | None:
+    """The room a judging left: the case's memory limit less the largest of `bounds`, in MB; None where
+    there is none. The bounds are those the one place read: of the cases that passed or were not judged
+    for measuring, where the judge worked them out. A case that failed is left out there: it may have
+    been ended above its limit by design. The bound counts every record of the kernel's that stands, so
+    a language whose build leaves more of them leaves less room."""
+    return round(limit_mb - max(bounds) / 2**20, 1) if bounds else None
 
 
 def vet(task: Task, lang: str, out_dir: Path | str, cache_root: Path = SCAFFOLD_CACHE,
@@ -590,6 +633,10 @@ def main(argv: list[str] | None = None) -> int:
             mark = "skip" if r.get("skipped") else ("ok" if r["ok"] else "FAIL")
             print(f"{mark:4}  {lang:10}  {r['step']:10}  {r['solution']:34}  {r.get('seconds', 0):6.1f}s  "
                   + "; ".join(r["problems"]))
+        rooms = [r["room_mb"] for r in results if r.get("room_mb") is not None]
+        if rooms:
+            # for whoever writes the task: how close the prepared solutions of this language came; it refuses nothing
+            print(f"room  {lang:10}  the smallest room between the memory bound and the limit: {min(rooms):.1f} MB")
         every += results
     unchecked = [r for r in every if r.get("skipped")]
     if unchecked:

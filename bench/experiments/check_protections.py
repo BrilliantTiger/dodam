@@ -13,6 +13,12 @@ nothing. A second line whose tests fail without it is no second line, and the ch
 
     python experiments/check_protections.py            # every protection
     python experiments/check_protections.py "memory"   # only those whose description holds the word
+    python experiments/check_protections.py --second-lines   # every second line against the judge's tests
+
+A second line is checked against more than the tests its entry names: with "--second-lines", every
+second line is taken out in turn and all the tests of the judge and of the vetting tool that need no
+image are run, in eight processes at once. A second line under which one of them fails is no second
+line: that test catches it, and its entry must name it.
 
 The tests that judge in a container need Docker and the Python language image. Where they are missing
 those tests are skipped, which the check reports as a protection it could not check, and fails.
@@ -41,6 +47,9 @@ def broken_copy(protection: dict, where: Path) -> Path:
     """A copy of the bench folder with this protection's variant in it."""
     copy = where / "bench"
     shutil.copytree(BENCH, copy, ignore=SKIP)
+    if (BENCH.parent / "docs").is_dir():
+        # the tests of the converter read the document of command-line tasks beside the bench folder
+        shutil.copytree(BENCH.parent / "docs", where / "docs", ignore=SKIP)
     path = copy / protection["file"]
     text = path.read_text(encoding="utf-8")
     for change in protection["change"]:
@@ -80,7 +89,95 @@ def check(protection: dict) -> dict:
             "tests": protection["tests"], "pytest": last}
 
 
+# The tests of the judge and of the vetting tool that need no image, those of the formats and of the converters,
+# which reach the judge's sum of time and what a task may say, and how many processes run them at once.
+JUDGE_TESTS = ["tests/test_judge.py", "tests/test_cli_judge.py", "tests/test_cli_test_code.py", "tests/test_vet.py",
+               "tests/test_cli_format.py", "tests/test_task_format.py", "tests/test_convert.py", "tests/test_cli_convert.py"]
+NO_IMAGE = "not test_vet_in_the_language_image"
+PARTS = 8
+# tests that need the judge to read many times within a fraction of a second: they have room in themselves,
+# and run on their own after the others all the same, so that no verdict rests on how busy the machine is
+ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
+
+
+def run_judge_tests(cwd: Path) -> dict:
+    """Every test of JUDGE_TESTS that needs no image, run in the folder `cwd`: in PARTS processes at once,
+    then the tests named in ALONE in one. Whether they could be listed, how each run ended, and the
+    tests that failed."""
+    listed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--collect-only", "-p", "no:cacheprovider", "-k",
+                             NO_IMAGE, *JUDGE_TESTS], cwd=cwd, capture_output=True, text=True)
+    nodes = [line for line in listed.stdout.splitlines() if "::" in line]
+    if listed.returncode != 0 or not nodes:
+        return {"listed": False, "codes": [], "failed": [], "said": [listed.stdout[-4000:] + listed.stderr[-2000:]], "tests": 0}
+    alone = [node for node in nodes if any(name in node for name in ALONE)]
+    rest = [node for node in nodes if node not in alone]
+    said, codes = [], []
+    for group in ([rest[i::PARTS] for i in range(PARTS)], [alone]):
+        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *part], cwd=cwd,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for part in group if part]
+        try:
+            said += [run.communicate(timeout=HANGS)[0] for run in runs]
+        except subprocess.TimeoutExpired:
+            for run in runs:
+                run.kill()
+            return {"listed": True, "codes": [None], "failed": [], "said": ["the tests did not end"], "tests": len(nodes)}
+        codes += [run.returncode for run in runs]
+    failed = [line.split(" ", 1)[1].split(" - ")[0] for out in said for line in out.splitlines()
+              if line.startswith(("FAILED ", "ERROR "))]
+    return {"listed": True, "codes": codes, "failed": failed, "said": said, "tests": len(nodes)}
+
+
+def verdict_of(run: dict) -> str:
+    """A second line holds only where its tests were listed, every run of them started and ended passed. A
+    run that ended otherwise than passed or failed, or no run at all, shows nothing, and holds nothing."""
+    if not run["listed"]:
+        return "the tests could not be listed"
+    if not run["codes"] or any(code not in (0, 1) for code in run["codes"]):
+        return "the tests did not run through"
+    if run["failed"] or any(code != 0 for code in run["codes"]):
+        return "NO SECOND LINE"
+    return "second line"
+
+
+def against_judge_tests(protection: dict) -> dict:
+    """One second line taken out, and the tests of JUDGE_TESTS that need no image run against it."""
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
+        run = run_judge_tests(broken_copy(protection, Path(where)))
+    verdict = verdict_of(run)
+    if verdict != "second line":
+        print("\n".join(out[-4000:] for out in run["said"]), file=sys.stderr, flush=True)
+    return {"what": protection["what"], "verdict": verdict, "seconds": round(time.monotonic() - started, 1),
+            "tests": run["tests"], "failed": run["failed"]}
+
+
+def second_lines() -> int:
+    """Every second line against the tests of JUDGE_TESTS that need no image. They are first run the same
+    way with nothing taken out: where one fails there, no second line is judged by them."""
+    chosen = [p for p in protections() if p.get("second_line")]
+    with tempfile.TemporaryDirectory(prefix="dodam-second-line-") as where:
+        whole = run_judge_tests(broken_copy({"what": "nothing taken out", "file": "experiments/protections.toml",
+                                             "change": []}, Path(where)))
+    if verdict_of(whole) != "second line":
+        print("\n".join(out[-4000:] for out in whole["said"]), file=sys.stderr, flush=True)
+        print(json.dumps({"second_lines": len(chosen), "held": 0,
+                          "not_held": [{"what": "the tests do not pass with nothing taken out",
+                                        "verdict": verdict_of(whole), "failed": whole["failed"]}]}, indent=1))
+        return 1
+    print(f"{'nothing taken out':22}  {whole['tests']} tests pass", file=sys.stderr, flush=True)
+    results = []
+    for protection in chosen:
+        result = against_judge_tests(protection)
+        results.append(result)
+        print(f"{result['verdict']:22}  {result['seconds']:6.1f}s  {result['what']}", file=sys.stderr, flush=True)
+    bad = [r for r in results if r["verdict"] != "second line"]
+    print(json.dumps({"second_lines": len(results), "held": len(results) - len(bad), "not_held": bad}, indent=1))
+    return 1 if bad or not results else 0
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--second-lines"]:
+        return second_lines()
     chosen = [p for p in protections() if not argv or any(word.lower() in p["what"].lower() for word in argv)]
     # a test that fails as the code is would seem to pin anything: first they must all pass unbroken
     named = sorted({test for p in chosen for test in p["tests"]})

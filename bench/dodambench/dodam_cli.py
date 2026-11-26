@@ -31,7 +31,9 @@ Every case has limits. In the verifier each has a line that holds whatever the p
   fails this way by how much it reads; a page of a file on neither list counts. Left out are the kernel's records of
   names and files, up to a quarter of the limit and at most 16 MB; they count beyond that, those
   of the different files a program reads too. Left out are the cases' files, which have a limit
-  of their own, and this runner's own memory. A
+  of their own, and the memory of the judge's own processes. A case passes only where the most it
+  can have held, every record that stands counted beyond that amount, lies within its limit and
+  leaves the container its room below the cap; elsewhere it is unmeasured. A
   page on the two lists that something holds is left out although the kernel cannot give it
   back. The ways of holding one that are known are closed (see the end of this entry); it is
   not shown that there is no other, and for one the container's memory cap is the only bound.
@@ -61,6 +63,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import selectors
 import signal
@@ -118,13 +121,15 @@ def _records_left_out_at_most(memory_mb: int) -> int:
     return min(memory_mb * 2**20 // 4, _judge.RECORDS_LEFT_OUT_MB * 2**20)
 
 
-def _records_grown(grown: int, last: int | None, now: int) -> int:
-    """The sum of every rise of the kernel's records since the case began, with the figure read
-    now. A fall takes nothing off it: when the kernel gives back older records, that must not make
-    room for newer ones that are held."""
-    if last is None:
-        return grown
-    return grown + max(now - last, 0)
+def _records_grown(lowest: int | None, now: int) -> tuple[int, int]:
+    """The lowest figure the kernel's records reached since the case began, with the figure read
+    now, and how far the figure now lies above it. Counted from the lowest, a fall below where the
+    case began makes no room: when the kernel gives back older records, newer ones that are held
+    count. Records that rise and fall again with what a program does, such as files it makes and
+    removes or processes it starts and waits for, are not added up: what counts is how far they
+    stand above the lowest now."""
+    lowest = now if lowest is None else min(lowest, now)
+    return lowest, now - lowest
 
 
 def _records_counted(grown: int, left_out_at_most: int) -> int:
@@ -132,20 +137,38 @@ def _records_counted(grown: int, left_out_at_most: int) -> int:
     return max(grown - left_out_at_most, 0)
 
 
-def _own_memory(status: str = "/proc/self/status") -> int:
-    """The ordinary memory of this process, the case runner, in memory and moved out to swap; 0
-    where the kernel does not say. It is taken out of every figure of a case, so that what the
-    runner itself holds from one run to the next, the input it feeds and the output it has read,
-    is no memory of the program's. Pages of files are not in it: they are left out already."""
+def _ordinary_memory(status: str) -> int:
+    """The ordinary memory of one process, in memory and moved out to swap, with its page tables; 0
+    where the kernel does not say."""
     own = 0
     try:
         with open(status, encoding="ascii", errors="replace") as f:
             for line in f:
-                if line.startswith(("RssAnon:", "VmSwap:")):
+                if line.startswith(("RssAnon:", "VmSwap:", "VmPTE:")):
                     own += int(line.split()[1]) * 1024
     except (OSError, ValueError, IndexError):
         return 0
     return own
+
+
+def _own_memory(status: str = "/proc/self/status", others: list[str] | None = None) -> int:
+    """The ordinary memory, the swap and the page tables of the judge's own processes: this one, the
+    case runner, and those the judge names in its settings, the container's first process and the
+    judge itself. It is taken out of every figure of a case, so that what the runner holds from one
+    run to the next, the input it feeds and the output it has read, is no memory of the program's,
+    and what any of them gives back during a case makes no room for the program. Pages of files are
+    not in it: they are left out already."""
+    if others is None:
+        others = (_config or {}).get("judge_statuses", [])
+    return sum(_ordinary_memory(path) for path in (status, *others))
+
+
+def _in_time(now: dict) -> bool:
+    """Whether a reading was taken in time, not cut by time. Only such a reading moves a lowest figure:
+    each of its parts is taken from the side that makes the figure no smaller, so it lies no lower than
+    what the container held, whatever moved; while a reading is cut by time a part can go and come back
+    unseen, and the reading may lie below."""
+    return not now.get("late")
 
 
 def _lowest(lowest: int | None, figure: int) -> int:
@@ -158,6 +181,10 @@ def _lowest(lowest: int | None, figure: int) -> int:
 # How often the judge looks at the program: whether it ended, and how much memory the container holds.
 TICK = 0.002
 WATCH = 0.002
+# How long the judge waits, before a case begins, for the kernel's own part of the container to stop
+# falling, and how often it looks: it has stopped when it fell by no more than TOGETHER_BYTES in a look.
+SETTLE_SECONDS = 1.0
+SETTLE_PAUSE = 0.02
 PR_SET_CHILD_SUBREAPER = 36
 
 
@@ -200,6 +227,10 @@ def need(condition: bool, what: str) -> None:
 
 _config: dict | None = None
 _spent: dict[str, float] = {}
+# for each test, how many cases it opened, and whether the note of one of them could not be written:
+# the judge's plug-in hands both on with the test's outcome, so that a lost note never reads as none
+_opened: dict[str, int] = {}
+_lost: set[str] = set()
 
 
 def config() -> dict:
@@ -283,14 +314,23 @@ class Case:
         self._cfg = cfg
         self._uid, self._gid = cfg.get("uid"), cfg.get("gid")
         self._limits = cfg["limits"]
-        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").split(" ")[0]
+        # the test as pytest names it, spaces and all: the variable is "<name> (<stage>)"
+        self._key = os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" (", 1)[0]
+        _opened[self._key] = _opened.get(self._key, 0) + 1
         self._broken: list[str] = []
         self._signals: list[int] = []      # the signals that ended the program in a run of this case
         # how the judge measured this case: how often, and the longest time between two measurements
         self.measured = {"measurements": 0, "longest_gap": 0.0}
-        # the kernel's records: the last figure read, and the sum of every rise since the case began
-        self._records_last: int | None = None
+        # whether a reading of the case could not say on which side of a line the figure lay: then the
+        # case cannot pass, and what its test decides stands only when it fails
+        self._unsettled = False
+        # the kernel's records: the lowest figure since the case began, and the most they stood above it
+        self._records_lowest: int | None = None
         self._records_grown = 0
+        # whether the case's starting reading was taken, the figure it gave, and the kernel's own part then
+        self._began = False
+        self._figure_start: int | None = None
+        self._kernel_start: int | None = None
         self._left_out_at_most = _records_left_out_at_most(self._limits["memory_mb"])
         # what the container held besides the cases' files and the runner's own memory: the lowest
         # figure since the case's first run began, from which the case's memory is counted
@@ -512,12 +552,32 @@ class Case:
         separated = self._side is not None
         killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
-        held_before = _judge.container_memory() if separated else {"taken": 0, "all": 0}
+        first_run = not self._began
+        if separated and not self._began:
+            # what the kernel kept of the previous case's processes goes after them; while it goes it
+            # would hide as much of the program's memory, so the case begins once it has stopped
+            self._began = True
+            if not self._kernel_settled():
+                self._undecided()
+        held_before = self._container() if separated else {"taken": 0, "all": 0}
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
-            # own files are written; a later run of the case is measured against it as well
-            self._lowest = _lowest(self._lowest, self._figure(held_before))
-            self._records(held_before)
+            # own files are written; a later run of the case is measured against it as well. A
+            # reading cut by time is no starting figure, and its case cannot pass; where the first run's is
+            # cut, the case has none, and a later run's reading does not become it
+            if _in_time(held_before):
+                figure = self._figure(held_before)
+                self._lowest = _lowest(self._lowest, figure)
+                if first_run:
+                    self._figure_start = figure
+                self._records(held_before)
+                # held to the most the case can have held like every later reading: a program that ends
+                # before it is measured once is judged by this reading alone
+                self._bound(held_before, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._undecided()
         started = time.monotonic()
         try:
             proc = subprocess.Popen(argv, cwd=self.work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -538,6 +598,23 @@ class Case:
                 result.limit = "left processes"
         finally:
             self._end(proc)
+        if separated:
+            # what stands when the run has ended is held to the most the case can have held as well:
+            # a run that ended before it was measured once is judged by its first and its last reading
+            held_after = self._container()
+            if _in_time(held_after):
+                figure = self._figure(held_after)
+                self._lowest = _lowest(self._lowest, figure)
+                self._records(held_after)
+                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._undecided()
+            if self._kernel_start is not None:
+                # how much the kernel's own part still fell after the wait
+                self.measured["kernel_fell_after"] = max(self.measured.get("kernel_fell_after", 0),
+                                                         self._kernel_start - _judge.kernel_part())
         if separated and _ended_by_the_kernel(killed_before, _judge.killed_for_memory()):
             result.limit, result.exit_code = "memory", None
         if signalled and result.limit != "memory":
@@ -571,7 +648,8 @@ class Case:
         record = {"case": self._key, "limit_mb": self._limits["memory_mb"], "files_mb": self._limits["disk_mb"],
                   "high_before_mb": high_before // mb, "high_mb": high_now // mb,
                   "taken_before_mb": held_before["taken"] // mb, "held_before_mb": held_before["all"] // mb,
-                  "above_the_limit_mb": above // mb}
+                  # less than 1 MB above is written down with its size, not as nothing
+                  "above_the_limit_mb": math.ceil(above * 100 / mb) / 100, "above_the_limit_bytes": above}
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
@@ -584,39 +662,102 @@ class Case:
         return result
 
     def _records(self, now: dict) -> int:
-        """Take note of the kernel's records as they are now; what of their growth since the case
-        began counts as memory."""
-        records = now.get("records", 0)
-        self._records_grown = _records_grown(self._records_grown, self._records_last, records)
-        self._records_last = records
-        return _records_counted(self._records_grown, self._left_out_at_most)
+        """Take note of the kernel's records as they are now, from a reading taken in time; what they
+        stand above their lowest figure in the case, beyond the amount left out, counts as memory."""
+        self._records_lowest, grown = _records_grown(self._records_lowest, now.get("records", 0))
+        self._records_grown = max(self._records_grown, grown)
+        return _records_counted(grown, self._left_out_at_most)
+
+    def _container(self) -> dict:
+        """One reading of the container, the cases' files read with it so that the parts belong
+        together."""
+        return _judge.container_memory(outside=lambda: _files_held(self._cfg["work_root"]))
+
+    def _kernel_settled(self) -> bool:
+        """Wait until the kernel's own part of the container stops falling: what it kept of the
+        processes of the previous case goes a while after them. False when it has not stopped
+        within SETTLE_SECONDS. The case says how many looks that took and how much it fell meanwhile."""
+        deadline = time.monotonic() + SETTLE_SECONDS
+        first = last = _judge.kernel_part()
+        looks = 0
+        while True:
+            time.sleep(SETTLE_PAUSE)
+            now = _judge.kernel_part()
+            looks += 1
+            if now >= last - _judge.TOGETHER_BYTES or time.monotonic() >= deadline:
+                self._kernel_start = now
+                self.measured.update(settle_looks=looks, settle_fell=max(first - now, 0), kernel_fell_after=0)
+                return now >= last - _judge.TOGETHER_BYTES
+            last = now
+
+    def _bound(self, now: dict, figure: int, max_memory: int) -> None:
+        """The upper bound of what the case can have held, from a reading taken in time: the figure
+        from its lowest, and every record of the kernel's that stands, less the amount left out.
+        Whatever the case holds of the records, its own or older ones, is among those that stand,
+        whether or not the kernel gave older ones back while it made its own. Where the bound lies
+        above the limit, or above the room the container has below its cap, the judge cannot show
+        that the case held no more than it may, and the case cannot pass; that ends nothing."""
+        beyond = max(now.get("records", 0) - self._left_out_at_most, 0)
+        bound = figure - self._lowest + beyond
+        self.measured["bound_highest"] = max(self.measured.get("bound_highest", 0), bound)
+        room = now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+        if bound > max_memory or (bool(now["cap"]) and now["taken"] + beyond > room):
+            self._unsettled = True
+
+    def _undecided(self) -> None:
+        """A reading could not say on which side of a line the figure lies: from now on the case cannot pass."""
+        self._unsettled = True
+        self.measured["undecided"] = self.measured.get("undecided", 0) + 1
 
     def _figure(self, now: dict) -> int:
         """The container's count, less the cases' files, which have a limit of
         their own, and less the case runner's own memory."""
-        return now["taken"] - _files_held(self._cfg["work_root"]) - _own_memory()
+        files = now["files"]
+        return now["taken"] - files - _own_memory()
 
     def _watch(self, proc: subprocess.Popen, stdin: bytes, started: float, timeout: float) -> Result:
         limits = self._limits
         max_out = limits["output_kb"] * 1024
         max_memory = limits["memory_mb"] * 1024 * 1024
 
-        def above_a_line() -> bool:
+        def above_a_line() -> str | None:
             """One measurement. The case's memory is the container's count (what
             the kernel counts for it, less the pages of files on the kernel's two lists and the
-            records it keeps), less the cases' files and the runner's own memory, counted
+            records it keeps), less the cases' files and the judge's own memory, counted
             from the lowest such figure since the case's first run began, and of the kernel's
-            records what grew beyond the amount that is left out. Above the limit the program is
-            ended. It is ended as well when the container is about to run out of memory, whatever
-            the case's limit says: that keeps the kernel from having to choose what to end."""
-            now = _judge.container_memory()
+            records what grew beyond the amount that is left out. That count is what the case held
+            at the least. Above the limit the program is ended. It is ended as well when the
+            container is about to run out of memory, whatever the case's limit says: that keeps the
+            kernel from having to choose what to end. Beside it the judge keeps the most the case can
+            have held, which counts every record that stands; where that lies above the limit, or
+            above the room below the cap, the case cannot pass, and nothing is ended for it. A reading
+            whose parts still moved apart can say only that the figure lies within what moved, and a
+            reading cut by time says nothing of either side; when such a reading cannot say on which
+            side of a line the figure lies, it ends nothing, and the case cannot pass."""
+            now = self._container()
+            # how far the parts of the reading the figure was made of moved apart, and how many were cut by time
+            self.measured["moved_most"] = max(self.measured.get("moved_most", 0), now.get("moved", 0))
+            if not _in_time(now):
+                # it says nothing of either side: it moves no lowest figure and ends nothing
+                self.measured["late"] = self.measured.get("late", 0) + 1
+                self._undecided()
+                return None
             records = self._records(now)
             figure = self._figure(now)
             self._lowest = _lowest(self._lowest, figure)
+            self._bound(now, figure, max_memory)
             taken = figure - self._lowest + records
             self.measured["memory_highest"] = max(self.measured.get("memory_highest", 0), taken)
-            runs_out = bool(now["cap"]) and now["taken"] + records > now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
-            return taken > max_memory or runs_out
+            room = now["cap"] - _judge.MEMORY_RESERVE_MB * 1024 * 1024
+            moved = now.get("moved", 0)
+            high = taken > max_memory or (bool(now["cap"]) and now["taken"] + records > room)
+            if not high:
+                return None
+            low = taken - moved > max_memory or (bool(now["cap"]) and now["taken"] - moved + records > room)
+            if low or moved <= _judge.TOGETHER_BYTES:
+                return "memory"
+            self._undecided()
+            return None
 
         chunks = {proc.stdout: [], proc.stderr: []}
         seen = 0
@@ -632,6 +773,7 @@ class Case:
         else:
             proc.stdin.close()
         deadline = started + timeout
+        # the first look measures: a program that holds much from its first moments is seen at once
         next_watch = last_watch = 0.0
         open_streams = 2
 
@@ -688,8 +830,8 @@ class Case:
                     self.measured["longest_gap"] = max(self.measured["longest_gap"], now - last_watch)
                 last_watch = now
                 self.measured["measurements"] += 1
-                if self._side is not None and above_a_line():
-                    limit = "memory"
+                if self._side is not None:
+                    limit = above_a_line()
         if limit is not None:
             self._end(proc)
         # what the program wrote before it ended is still in the pipes
@@ -739,17 +881,23 @@ class Case:
 
     def _note_records(self) -> None:
         """Hand the judge what this case did to the kernel's records: how much they grew, how much
-        of that was left out of the case's memory and how much was counted."""
+        of that was left out of the case's memory and how much was counted; whether a reading kept
+        the case from passing and how many could not decide; the most the case can have held; and
+        how far its figure fell below where the case began."""
         path = self._cfg.get("records_file")
         if not path or self._side is None:
             return
         try:
             with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"case": self._key, "grown": self._records_grown,
+                fell = max(self._figure_start - self._lowest, 0) if self._figure_start is not None else 0
+                f.write(json.dumps({"case": self._key, "unsettled": self._unsettled,
+                                    "undecided": self.measured.get("undecided", 0), "grown": self._records_grown,
+                                    "bound": self.measured.get("bound_highest"), "fell": fell,
                                     "left_out": min(self._records_grown, self._left_out_at_most),
                                     "counted": _records_counted(self._records_grown, self._left_out_at_most)}) + "\n")
         except OSError:
-            pass
+            # not kept to itself: the judge's plug-in says so with the test's outcome, and the case cannot pass
+            _lost.add(self._key)
 
     def failing(self) -> bool:
         """Whether the case fails whatever its test says."""

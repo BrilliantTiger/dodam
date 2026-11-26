@@ -320,7 +320,7 @@ def reward_of_cases(cases: list, build_ok, step, separated: bool) -> dict:
     """The reward the judge writes for these cases, worked out here on its own."""
     from dodambench.task import TEST_KINDS
     cases = [c for c in cases if isinstance(c, dict)]
-    judged = [c for c in cases if c.get("outcome") != "skipped"]
+    judged = [c for c in cases if c.get("outcome") in ("passed", "failed")]
     failed = [c for c in judged if c.get("outcome") == "failed"]
     reward = {"build_ok": 1.0 if build_ok else 0.0}
     for kind in TEST_KINDS:
@@ -330,7 +330,8 @@ def reward_of_cases(cases: list, build_ok, step, separated: bool) -> dict:
         reward[f"{kind}_pass_rate"] = round(passed / asked, 4) if asked else 1.0
         reward[f"{kind}_judged"] = float(len(of_kind))
     reward.update({
-        "unjudged": float(len(cases) - len(judged)),
+        "unjudged": float(sum(c.get("outcome") == "skipped" for c in cases)),
+        "unmeasured": float(sum(c.get("outcome") == "unmeasured" for c in cases)),
         "vulns_found": float(sum(c.get("kind") == "security" for c in failed)),
         "regression_broken": float(sum(c.get("step") != step for c in failed)),
         "reward": 1.0 if build_ok and cases and all(c.get("outcome") == "passed" for c in cases) else 0.0,
@@ -347,7 +348,7 @@ def judges_result(task, step: str, separated: bool = True) -> tuple[dict, dict]:
     cases = [{"name": name, "outcome": "passed", "message": "", "file": t.file, "kind": t.kind,
               "step": t.step, "weakness": t.weakness} for t in run for name in names_of_tests(task, t.file)]
     return (reward_of_cases(cases, True, step, separated),
-            {"step": step, "build_ok": True, "separated": separated, "tests": cases})
+            {"step": step, "build_ok": True, "separated": separated, "tests": cases, "unmeasured": []})
 
 
 def consistent(details, separated: bool):
@@ -412,6 +413,88 @@ def test_a_fault_of_the_judge_in_the_image_is_read_as_one(tmp_path, fake_docker,
     results = vet_in_image(load_task(cli_task_dir), "python", tmp_path / "out", "dodam-bench/python:dev")
     assert results and all(r["ok"] is False and r.get("judge_fault") is True for r in results), results
     assert all("the judge itself failed: made-up fault" in r["problems"][0] for r in results)
+
+
+def leave_unmeasured(leaves: Path, message: str | None = None, named: bool = True) -> str:
+    """A result of the sample's first step as the judge writes it when one case was not judged for
+    measuring; `message` and `named` change its form. The case's file::name."""
+    from dodambench.judge import NOT_JUDGED_FOR_MEASURING
+    given, details = judges_result(load_task(SAMPLE), "build")
+    first = details["tests"][0]
+    first.update(outcome="unmeasured", message=NOT_JUDGED_FOR_MEASURING if message is None else message,
+                 memory_bound_bytes=300 * 2**20)
+    name = f"{first['file']}::{first['name']}"
+    details["unmeasured"] = [name] if named else []
+    (leaves / "reward.json").write_text(json.dumps(reward_of_cases(details["tests"], True, "build", True)),
+                                        encoding="utf-8")
+    (leaves / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    return name
+
+
+def test_a_case_not_judged_for_measuring_is_a_fault_for_every_kind_of_solution(tmp_path, fake_docker, monkeypatch):
+    """A judging with a case the judge could not judge for measuring is no judgement of the solution:
+    for the right, the vulnerable and the broken solutions alike it is a fault of measuring, never a
+    success and never the failure the solution was written for."""
+    from dodambench.judge import NOT_JUDGED_FOR_MEASURING
+    from dodambench.vet import vet_in_image
+    name = leave_unmeasured(fake_docker)
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    results = [r for r in vet_in_image(load_task(SAMPLE), "python", tmp_path / "out", "dodam-bench/python:dev")
+               if r["step"] == "build"]
+    assert {r["expect"] for r in results} == {"secure", "vulnerable", "broken"}, results
+    for r in results:
+        assert r["ok"] is False and r.get("judge_fault") is True, r
+        assert NOT_JUDGED_FOR_MEASURING in r["problems"][0] and name in r["problems"][0], r
+        # the room is told for such a judging too, from what the one place read: 512 MB less the 300 MB
+        # its case can have held
+        assert r.get("room_mb") == 212.0, r
+
+
+@pytest.mark.parametrize("bound", [None, True, 300])
+def test_the_room_comes_only_from_a_bound_the_judge_worked_out(tmp_path, fake_docker, monkeypatch, bound):
+    """Through the tool's own path: a judging whose cases say nothing of the most they can have held,
+    or say it with a yes or a no, tells no room, never the whole limit; one whose case says 300 MB tells
+    212 MB of a limit of 512."""
+    from dodambench.vet import vet_in_image
+    given, details = judges_result(load_task(SAMPLE), "build")
+    if bound is not None:
+        details["tests"][0]["memory_bound_bytes"] = bound if bound is True else bound * 2**20
+    (fake_docker / "reward.json").write_text(json.dumps(given), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    results = [r for r in vet_in_image(load_task(SAMPLE), "python", tmp_path / "out", "dodam-bench/python:dev")
+               if r["step"] == "build" and r["expect"] == "secure"]
+    assert results and all(r.get("room_mb") == (212.0 if bound == 300 else None) for r in results), results
+
+def test_the_record_holds_only_bounds_that_are_numbers(tmp_path, fake_docker, monkeypatch):
+    """The one place reads the most a case can have held only where it is a number: a case that says it
+    with a yes or a no gives the record no bound, beside one that says 300 MB."""
+    given, details = judges_result(load_task(SAMPLE), "build")
+    details["tests"][0]["memory_bound_bytes"] = True
+    details["tests"][1]["memory_bound_bytes"] = 300 * 2**20
+    (fake_docker / "reward.json").write_text(json.dumps(given), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    assert judged(tmp_path, tmp_path / "out").bounds == (300 * 2**20,)
+
+@pytest.mark.parametrize("form", ["other words", "not named", "named twice"])
+def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_writes(tmp_path, fake_docker,
+                                                                                    monkeypatch, form):
+    """The tool takes the word only with the judge's own words for it and with the case named in the
+    result, once; any other form is a result of another shape."""
+    from dodambench.judge import JudgeFault
+    leave_unmeasured(fake_docker, message="passed after all" if form == "other words" else None,
+                     named=form != "not named")
+    if form == "named twice":
+        details = json.loads((fake_docker / "details.json").read_text())
+        details["unmeasured"] = details["unmeasured"] * 2
+        (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    with pytest.raises(JudgeFault) as fault:
+        judged(tmp_path, tmp_path / "out")
+    said = json.loads(str(fault.value))
+    assert "not of the shape the tool reads" in said["message"], said
+    assert said["key"] == ("tests[0].message" if form == "other words" else "unmeasured"), said
 
 
 def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch):
@@ -532,6 +615,22 @@ def test_a_fault_file_of_any_shape_is_read_as_a_fault(tmp_path, fake_docker, mon
     with pytest.raises(JudgeFault):
         judged(tmp_path, tmp_path / "out")
 
+
+
+@pytest.mark.parametrize("said", ["[]", "{\"judge_fault\": 5}"])
+def test_a_fault_file_of_another_shape_beside_a_whole_result_is_a_fault(tmp_path, fake_docker, monkeypatch, said):
+    """A judging that left the judge's account of a fault is a fault, however whole the result beside it:
+    an account of another shape too, so the tool tells no room from that result. The same result
+    without it is read."""
+    from dodambench.judge import JudgeFault
+    reward, details = judges_result(load_task(SAMPLE), "build")
+    (fake_docker / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    assert judged(tmp_path, tmp_path / "whole").build_ok
+    (fake_docker / "judge-fault.json").write_text(said, encoding="utf-8")
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, tmp_path / "out")
 
 
 @pytest.mark.parametrize("reward, details", [
@@ -668,11 +767,15 @@ def test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success(tmp_path,
 
 
 def test_every_part_the_judging_code_reads_is_tried():
-    """The record holds exactly the parts the judging code reads, and each is tried above."""
+    """The record holds exactly the parts the judging code reads, and each is tried above; beside them
+    only the most each case that passed or was not judged for measuring can have held, from which the tool tells the room, which the
+    judging code does not read."""
     from dataclasses import fields
+    import inspect
     import dodambench.vet as vetting
     tried = {(w, p) for w, p, _ in NOT_OF_IT}
-    assert {f.name for f in fields(vetting.Judged)} == {"step", "build_ok", "left_behind", "cases", "reward"}
+    assert {f.name for f in fields(vetting.Judged)} == {"step", "build_ok", "left_behind", "cases", "reward", "bounds"}
+    assert "bounds" not in inspect.getsource(vetting.judgement_problems)
     assert {("details", p) for p in ("step", "build_ok", "left_behind", "tests")} <= tried
     assert {("case", f.name) for f in fields(vetting.Case)} <= tried
     assert set(vetting.REWARD_KEYS) == set(judges_result(load_task(SAMPLE), "build")[0])
@@ -835,6 +938,12 @@ def with_left_behind(details: dict, how: str) -> dict:
     elif how == "two entries":
         details["left_behind"] = LEFT
         details["tests"] += [entry, dict(entry)]
+    elif how == "an entry of a file the judge does not run at the step":
+        details["left_behind"] = LEFT
+        details["tests"].append({**entry, "file": "bogus/test_x.py", "name": "test_x.py"})
+    elif how == "an entry with a weakness":
+        details["left_behind"] = LEFT
+        details["tests"].append({**entry, "weakness": "path-traversal"})
     elif how == "the judge's own":
         details["left_behind"] = LEFT
         details["tests"].append(entry)
@@ -845,7 +954,8 @@ def with_left_behind(details: dict, how: str) -> dict:
 @pytest.mark.parametrize("how", ["every case made an entry for what was left, passed",
                                  "the security cases made entries for what was left, passed",
                                  "an entry where the result says nothing was left", "an entry that passed",
-                                 "an entry with another reason", "two entries"])
+                                 "an entry with another reason", "two entries",
+                                 "an entry of a file the judge does not run at the step", "an entry with a weakness"])
 def test_an_entry_for_what_was_left_behind_is_only_the_one_the_judge_writes(tmp_path, monkeypatch, fake_docker,
                                                                            cli_task_dir, path, how):
     task = load_task(cli_task_dir)
@@ -1033,3 +1143,155 @@ def test_a_served_tasks_result_that_is_not_the_whole_picture_is_a_fault(tmp_path
     details = picture(judges_result(task, "change-1", path == "image")[1], how)
     results = vetted_with(tmp_path, monkeypatch, fake_docker, task, path, consistent(details, path == "image"), details)
     assert faults_for_every_solution(results), results
+
+
+# The room the tool tells for a judging, through its own path: how the judging went, and how one case of it
+# came out and what it said of the most it can have held; another case passed saying 100 MB, and the rest
+# say nothing of it.
+ROOM_BOUNDS = {"none": None, "a number": 300 * 2**20, "nought": 0, "a yes or a no": True}
+ROOM_MESSAGES = {"passed": "", "failed": "the test's own failure", "skipped": "the feature it attacks does not work"}
+
+
+# The judge's reasons for a case not judged for measuring, and the errors the tool takes as a judging that
+# could not run, written out here: the table is built from these, never from the lists it checks, so a reason
+# or an error taken out of the code's list keeps its rows and fails them.
+WRITTEN_REASONS = (
+    "not judged: the judge could not take a reading of the container's memory that says on which side of a line it lies",
+    "not judged: the notes of the memory of this file's cases could not be read",
+    "not judged: the note of this case's memory could not be written",
+    "not judged: the test has fewer notes of its cases' memory than cases of the program it opened",
+)
+WRITTEN_COULD_NOT_RUN = {"SubprocessError": subprocess.SubprocessError, "OSError": OSError, "ValueError": ValueError}
+
+
+# The rooms some rows must give, written as numbers: for every reason, a case not judged for measuring that can
+# have held 300 MB beside one that passed at 100 MB leaves 212.0 MB of a limit of 512 MB, and one that worked
+# out no bound, beside nothing, leaves no room told.
+WRITTEN_ROOMS = {
+    **{("has an unmeasured case", reason, "unmeasured", "a number", "a case of 100 MB beside"): 212.0 for reason in WRITTEN_REASONS},
+    **{("has an unmeasured case", reason, "unmeasured", "none", "nothing beside"): None for reason in WRITTEN_REASONS},
+}
+
+
+def room_rows() -> list[tuple]:
+    """(how the judging went, the reason of its unmeasured cases, one case's outcome, its bound, and whether
+    another case that passed says 100 MB beside it)."""
+    rows = [("could not run: " + name, None, None, None) for name in WRITTEN_COULD_NOT_RUN]
+    rows += [(ended, None, None, None) for ended in ("ended without a result", "the judge wrote a fault", "a result of another shape",
+                                                      "the program's side left something")]
+    for beside in ("a case of 100 MB beside", "nothing beside"):
+        for outcome in ("passed", "failed", "not run"):
+            rows += [("ran", None, outcome, bound, beside) for bound in ROOM_BOUNDS]
+        for reason in WRITTEN_REASONS:
+            for outcome in ("passed", "failed", "unmeasured", "not run"):
+                rows += [("has an unmeasured case", reason, outcome, bound, beside) for bound in ROOM_BOUNDS]
+    return [row + (None,) * (5 - len(row)) for row in rows]
+
+
+def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(tmp_path, fake_docker, monkeypatch):
+    """Every row, through the tool's own path: a judging that could not run, for every kind of error the
+    tool takes as that; one that ended without a result, in which the judge wrote a fault of its own, or
+    whose result is of another shape; one that ran, and one in which the program's side left something
+    the judge could not take back; and one that has a case not judged for measuring, for
+    every reason the judge gives that. One case of it passed, failed, was not judged for measuring or was
+    not run, saying the most it can have held with nothing, a number, nought, or a yes or a no, beside a
+    case that passed saying 100 MB, or beside nothing. The room is the limit of 512 MB less the largest
+    bound that is a number among the cases that passed or were not judged for measuring; where the judging
+    gave no result or no such bound, no room is told, never the whole limit."""
+    from dodambench import vet as tool
+    rows = room_rows()
+    assert len(rows) == 7 + 2 * (12 + 16 * 4), len(rows)
+    wrong = []
+    for n, (judging, reason, outcome, bound, beside) in enumerate(rows):
+        leaves = tmp_path / f"leaves-{n}"
+        leaves.mkdir()
+        with monkeypatch.context() as m:
+            m.setenv("FAKE_LEAVES", str(leaves))
+            m.setenv("FAKE_EXIT", "0")
+            expected = None
+            if judging.startswith("could not run"):
+                kind = WRITTEN_COULD_NOT_RUN[judging.removeprefix("could not run: ")]
+
+                def cannot(*args, kind=kind, **kwargs):
+                    raise kind("the container could not be made")
+                m.setattr(tool, "judge_in_image", cannot)
+            elif judging == "ended without a result":
+                m.setenv("FAKE_EXIT", "137")
+            elif judging == "the judge wrote a fault":
+                (leaves / "judge-fault.json").write_text(json.dumps({"judge_fault": "the judge failed"}), encoding="utf-8")
+                m.setenv("FAKE_EXIT", "3")
+            else:
+                given, details = judges_result(load_task(SAMPLE), "build")
+                if judging == "a result of another shape":
+                    for case in details["tests"]:
+                        case["memory_bound_bytes"] = 300 * 2**20
+                    given.pop("reward")
+                elif judging == "the program's side left something":
+                    details = with_left_behind(details, "the judge's own")
+                    details["tests"][2]["memory_bound_bytes"] = 100 * 2**20
+                    given, expected = consistent(details, True), 412.0
+                else:
+                    word = "skipped" if outcome == "not run" else outcome
+                    case = details["tests"][0]
+                    case.update(outcome=word, message=reason if word == "unmeasured" else ROOM_MESSAGES[word])
+                    if ROOM_BOUNDS[bound] is not None:
+                        case["memory_bound_bytes"] = ROOM_BOUNDS[bound]
+                    if judging == "has an unmeasured case":
+                        details["tests"][1].update(outcome="unmeasured", message=reason)
+                    others = [100 * 2**20] if beside == "a case of 100 MB beside" else []
+                    if others:
+                        details["tests"][2]["memory_bound_bytes"] = others[0]
+                    details["unmeasured"] = [f"{c['file']}::{c['name']}" for c in details["tests"] if c["outcome"] == "unmeasured"]
+                    given = reward_of_cases(details["tests"], True, "build", True)
+                    worked_out = (word in ("passed", "unmeasured") and isinstance(ROOM_BOUNDS[bound], int)
+                                  and not isinstance(ROOM_BOUNDS[bound], bool))
+                    bounds = others + ([ROOM_BOUNDS[bound]] if worked_out else [])
+                    expected = round(512 - max(bounds) / 2**20, 1) if bounds else None
+                (leaves / "reward.json").write_text(json.dumps(given), encoding="utf-8")
+                (leaves / "details.json").write_text(json.dumps(details), encoding="utf-8")
+            results = [r for r in tool.vet_in_image(load_task(SAMPLE), "python", tmp_path / str(n), "dodam-bench/python:dev")
+                       if r["step"] == "build"]
+        if not results or any(r.get("room_mb") != expected for r in results):
+            wrong.append(((judging, reason, outcome, bound), [r.get("room_mb") for r in results], expected))
+        written = WRITTEN_ROOMS.get((judging, reason, outcome, bound, beside), "no number written")
+        if written != "no number written" and any(r.get("room_mb") != written for r in results):
+            wrong.append(((judging, reason, outcome, bound, beside), [r.get("room_mb") for r in results], written))
+    assert not wrong, wrong
+
+
+def test_the_table_of_the_room_has_every_way_a_judging_ends_and_every_reason():
+    """The table has a row for every kind of error the tool takes as a judging it could not run, and for
+    every reason the judge gives a case not judged for measuring, both written out in this file: one the code
+    gains and the table lacks fails this test, and so does one the code loses and the table has."""
+    from dodambench.judge import UNMEASURED_REASONS
+    from dodambench.vet import COULD_NOT_JUDGE
+    rows = room_rows()
+    assert set(WRITTEN_COULD_NOT_RUN.values()) == set(COULD_NOT_JUDGE), (set(WRITTEN_COULD_NOT_RUN.values()) ^ set(COULD_NOT_JUDGE))
+    assert set(WRITTEN_REASONS) == set(UNMEASURED_REASONS), (set(WRITTEN_REASONS) ^ set(UNMEASURED_REASONS))
+    assert {j for j, *_ in rows if j and j.startswith("could not run")} == {"could not run: " + n for n in WRITTEN_COULD_NOT_RUN}
+    assert {r for _, r, *_ in rows if r} == set(WRITTEN_REASONS)
+
+
+def test_the_room_is_told_to_a_tenth_of_a_megabyte():
+    """The room is told in MB to one decimal place: a bound of 37.66 MB under a limit of 50 MB leaves 12.3."""
+    from dodambench.vet import room_of
+    assert room_of((int(37.66 * 2**20),), 50) == 12.3
+
+
+def test_the_tool_prints_for_each_language_the_smallest_room_its_prepared_solutions_left(tmp_path, monkeypatch, capsys):
+    """Whoever writes a task sees, for each language, the smallest room between the memory bound and the
+    limit that a prepared solution's judging left. It refuses nothing for it."""
+    import dodambench.vet as tool
+    rooms = {"python": [496.8, 500.1], "go": [None, 401.6], "rust": [12.0, 0.0], "java": [None, None]}
+    monkeypatch.setattr(tool, "vet", lambda task, lang, out, **kwargs: [
+        {"step": "build", "solution": f"s{n}", "ok": True, "problems": [], "seconds": 1.0, "room_mb": room}
+        for n, room in enumerate(rooms[lang])])
+    code = tool.main([str(SAMPLE), "--lang", "python", "--lang", "go", "--lang", "rust", "--lang", "java",
+                      "--out", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "room  python      the smallest room between the memory bound and the limit: 496.8 MB" in out, out
+    assert "room  go          the smallest room between the memory bound and the limit: 401.6 MB" in out, out
+    # a room of nought is a room told; a language none of whose judgings told one prints none
+    assert "room  rust        the smallest room between the memory bound and the limit: 0.0 MB" in out, out
+    assert "room  java" not in out, out

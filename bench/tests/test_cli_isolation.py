@@ -19,7 +19,7 @@ import pytest
 
 from conftest import CANARY, note_figures
 from dodambench.convert import TEST_SH
-from dodambench.judge import RECORDS_LEFT_OUT_MB
+from dodambench.judge import RECORDS_LEFT_OUT_MB, UNMEASURED
 from dodambench.task import load_task
 from dodambench.vet import VetError, vet
 
@@ -116,10 +116,11 @@ def waiting_to_be_written():
     return int(stat.get("file_dirty", 0)) + int(stat.get("file_writeback", 0))
 
 
-def reading():
+def reading(answer):
     # The judged container stands still while it is read. A program that reads a file again and
     # again would otherwise bring back, during the reading, the pages the kernel has just given
-    # back, and they would read as held although nothing keeps them.
+    # back, and they would read as held although nothing keeps them. The answer is written before
+    # the container goes on, so that the test waiting for it can go on with it at once.
     with open(f"{held}/cgroup.freeze", "w") as f:
         f.write("1")
     try:
@@ -128,7 +129,11 @@ def reading():
                 if "frozen 1" in f.read():
                     break
             time.sleep(0.001)
-        return standing_still()
+        # when the container stood still, on the clock every container of this machine shares
+        froze_at = time.monotonic()
+        with open(f"{asked}/answer.tmp", "w") as f:
+            json.dump({**standing_still(), "froze_at": froze_at}, f)
+        os.rename(f"{asked}/answer.tmp", answer)
     finally:
         with open(f"{held}/cgroup.freeze", "w") as f:
             f.write("0")
@@ -156,9 +161,10 @@ def standing_still():
     except OSError:
         dropped = False
     give_back(first)
-    # what the kernel lets go of it frees a moment later: the figure is read once it has stood still
-    last, still = charged(), 0
-    while still < 6 and time.monotonic() - started < 3:
+    # what the kernel lets go of it frees a moment later: the figure is read once it has stood still,
+    # with a time of its own, however long writing the waiting pages took
+    last, still, settling = charged(), 0, time.monotonic()
+    while still < 6 and time.monotonic() - settling < 3:
         time.sleep(0.005)
         now = charged()
         still = still + 1 if now > last - 65536 else 0
@@ -175,9 +181,7 @@ def standing_still():
 while True:
     for name in os.listdir(asked):
         if name.startswith("ask-") and not os.path.exists(f"{asked}/answer-{name[4:]}"):
-            with open(f"{asked}/answer.tmp", "w") as f:
-                json.dump(reading(), f)
-            os.rename(f"{asked}/answer.tmp", f"{asked}/answer-{name[4:]}")
+            reading(f"{asked}/answer-{name[4:]}")
     time.sleep(0.002)
 """
 
@@ -192,12 +196,12 @@ def reading(label):
     with open("/logs/reading/ask.tmp", "w") as f:
         f.write(label)
     os.rename("/logs/reading/ask.tmp", "/logs/reading/ask-" + label)
-    for _ in range(6000):
+    for _ in range(30000):
         try:
             with open("/logs/reading/answer-" + label) as f:
                 return json.load(f)
         except (OSError, ValueError):
-            time.sleep(0.005)
+            time.sleep(0.001)
     raise AssertionError("no reading came from outside the container")
 
 
@@ -243,12 +247,17 @@ def attempt(name, args, files=None):
 """
 # the program's part of it
 HELD = r"""
+ASKED = []
+
+
 def held_until_read():
+    # said before the file goes: from then on the reading from outside may come at any moment
+    ASKED.append(True)
     os.unlink("holding-not-yet")
-    for _ in range(12000):
+    for _ in range(60000):
         if not os.path.exists("not-read-yet"):
             return
-        time.sleep(0.005)
+        time.sleep(0.001)
 """
 
 
@@ -1574,12 +1583,153 @@ def test_every_python_solution_of_the_sample_gets_its_judgement_in_the_image(tmp
                 details = json.loads((tmp_path / "out" / step / r["solution"] / "details.json").read_text())
                 caught |= {t["name"] for t in details["tests"] if t["kind"] == "security" and t["outcome"] == "failed"}
         assert own and own - caught == set(), (step, own - caught)
+    every = [json.loads((tmp_path / "out" / r["step"] / r["solution"] / "details.json").read_text()) for r in results]
+    for details in every:
+        # the step's count of readings that could not decide is the sum of its cases' counts
+        assert details["memory"]["undecided_readings"] == sum(t.get("undecided_readings", 0) for t in details["tests"]), (
+            details["memory"])
+    undecided = sum(details["memory"]["undecided_readings"] for details in every)
+    note_figures("the sample's Python solutions: readings that could not be decided", count=undecided)
+    assert all(r.get("room_mb") is not None for r in results), [r.get("room_mb") for r in results]
+    note_figures("the sample's Python solutions: the smallest room between the memory bound and the limit",
+                 room=min(r["room_mb"] for r in results))
+    note_figures("the sample's Python solutions: the most a case's figure fell below where it began",
+                 fell=max(t.get("fell_below_start_bytes", 0) for details in every for t in details["tests"]) / 2**20)
     by_label = {(r["step"], r["solution"]): r["reward"] for r in results}
     assert by_label[("change-1", "secure")]["reward"] == 1.0
     assert by_label[("change-1", "broken-crlf-kept-in-field")]["regression_broken"] >= 1.0
     assert by_label[("build", "vulnerable-no-size-limit")]["vulns_found"] >= 1.0
     assert json.loads((tmp_path / "out/build/secure/details.json").read_text()).get("caps", {}).get("files_mb") == 64
 
+
+def test_the_case_runner_is_told_which_processes_are_the_judges_own(tmp_path):
+    """Where the program is separated from the judge, the case runner is told the judge's own
+    processes besides itself, the container's first process and the judge, so that it takes their
+    memory out of every figure."""
+    tests = {"functional/test_pids.py": """
+def test_pids():
+    settings = json.load(open(os.environ["DODAM_CLI_CONFIG"]))
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump({"judge_statuses": settings.get("judge_statuses"), "parent": os.getppid()}, f)
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    assert seen["judge_statuses"] == ["/proc/1/status", f"/proc/{seen['parent']}/status"], seen
+    assert outcomes(result) == {"test_pids": "passed"}, lost(result, tmp_path / "out")
+
+def test_the_result_says_for_each_case_and_the_step_what_the_readings_of_its_memory_gave(tmp_path):
+    """Each case of a judging says how many of its readings could not decide and the most it can have
+    held; the step's count of readings that could not decide is the sum of its cases' counts."""
+    tests = {"functional/test_says.py": """
+def test_one():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_two():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    cases = result["report"]["tests"]
+    assert [c["outcome"] for c in cases] == ["passed", "passed"], lost(result, tmp_path / "out")
+    for c in cases:
+        assert isinstance(c.get("undecided_readings"), int) and isinstance(c.get("memory_bound_bytes"), int), c
+    assert result["report"]["memory"]["undecided_readings"] == sum(c["undecided_readings"] for c in cases), (
+        result["report"]["memory"])
+
+# A program that leaves much in the kernel's own part of the container when it ends: eight processes
+# each make 60,000 small mappings that cannot be merged, one process at a time, and stand with them until
+# all 480,000 stand together; then they end, one at a time. What the kernel kept of them goes a while after.
+# One process maps or ends at a time, so the program never takes more than one of the container's two
+# processors, and the judge's readings beside it are never held back by the container's share of them.
+LEAVES_KERNEL = r"""
+if sys.argv[1:] == ["maps"]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    children = []
+    for _ in range(8):
+        ready_r, ready_w = os.pipe()
+        go_r, go_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(ready_r)
+            os.close(go_w)
+            for n in range(60000):
+                libc.mmap(None, 4096, n % 2, 0x22, -1, 0)
+            os.write(ready_w, b"x")
+            os.read(go_r, 1)        # stands with its mappings until it is let go
+            os._exit(0)
+        os.close(ready_w)
+        os.close(go_r)
+        assert os.read(ready_r, 1) == b"x"
+        os.close(ready_r)
+        children.append((pid, go_w))
+    for pid, go_w in children:
+        # a byte, not the end of the pipe: the children after it hold its writing end too
+        os.write(go_w, b"x")
+        os.waitpid(pid, 0)
+    print("mapped")
+    sys.exit(0)
+"""
+
+LEAVES_KERNEL_TESTS = """
+def test_leaves():
+    with case() as c:
+        r = c.run(["maps"])
+        with open("/logs/verifier/leaves.json", "w") as f:
+            json.dump({"measured": c.measured}, f)
+        assert r.out == "mapped\\n", r
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"measured": c.measured}, f)
+"""
+
+
+def test_the_case_after_one_that_made_many_mappings_passes_and_says_what_its_wait_saw(tmp_path):
+    """A case makes 480,000 small mappings in eight processes. The kernel's own part of the container
+    rises while they run and goes with them, before the run returns: nothing of it stands when the case
+    ends. The case after it passes and says how many looks its wait took, how much the kernel's part
+    fell meanwhile and how much more during the case; the figures are noted, not judged."""
+    # one process maps at a time: the case is given the time that takes, well beyond the 5 s it gets otherwise
+    result = judge_attack(tmp_path, PLAIN + LEAVES_KERNEL, {"functional/test_kernel.py": LEAVES_KERNEL_TESTS},
+                          CASE_MEMORY_MB="512", CASE_PROCESSES="16", CASE_TIMEOUT_SEC="30")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_leaves": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
+    measured = found_by(tmp_path / "out", "attack.json")["measured"]
+    for name in ("settle_looks", "settle_fell", "kernel_fell_after"):
+        assert isinstance(measured.get(name), (int, float)), measured
+    assert measured["settle_looks"] >= 1, measured
+    note_figures("the case after one that left 480,000 mappings: the wait for the kernel's own part",
+                 looks=measured["settle_looks"], fell_while_waiting=measured["settle_fell"] / 2**20,
+                 fell_after=measured["kernel_fell_after"] / 2**20)
+
+def test_a_case_whose_note_is_gone_cannot_pass_and_a_test_that_opened_none_can(tmp_path):
+    """Where the program is separated, the note of a case that ran it is gone by the time the judge
+    reads the notes: the case, whose test passed, is unmeasured. A test of the same file that opened
+    no case ran no program, has no note and nothing to measure, and passes."""
+    tests = {"functional/test_gone.py": """
+def test_note_gone():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+    os.remove(c._cfg["records_file"])
+
+
+def test_no_case():
+    assert os.environ.get("DODAM_CLI_CONFIG")
+"""}
+    result = judge_attack(tmp_path, PLAIN, tests)
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    assert outcomes(result) == {"test_note_gone": UNMEASURED, "test_no_case": "passed"}, lost(result, tmp_path / "out")
 
 def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, tmp_path):
     seen = []
@@ -1591,6 +1741,9 @@ def test_judging_the_same_solutions_again_gives_the_same_results(cli_task_dir, t
             view.append((r["step"], r["solution"], r["ok"], r["reward"],
                          [(t["file"], t["name"], t["outcome"]) for t in details["tests"]]))
         seen.append(view)
+        note_figures(f"the small task's solutions, judging {attempt + 1}: readings that could not be decided",
+                     count=sum(json.loads((tmp_path / f"out-{attempt}" / r["step"] / r["solution"] / "details.json")
+                                          .read_text())["memory"]["undecided_readings"] for r in results))
     assert len(seen[0]) == 5
     assert seen[0] == seen[1] == seen[2]
 
@@ -1719,6 +1872,41 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
         assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
 
 
+# The judge out of the way while the hidden test takes the container's memory: the kernel can end the judge
+# itself at that moment, a fault this change does not mend (the documents name it), and this test is about
+# what the judge does once the case runner is gone. A child of the case runner holds the judge still, waits
+# for the runner to be gone without asking for memory, and lets the judge go on once the container's memory
+# has come back, or after five seconds, whatever happens.
+JUDGE_HELD_STILL = '''
+    import ctypes, signal
+    libc = ctypes.CDLL(None, use_errno=True)
+    judge = os.getppid()
+    cap = int(open("/sys/fs/cgroup/memory.max").read())
+    current = os.open("/sys/fs/cgroup/memory.current", os.O_RDONLY)
+    held_r, held_w = os.pipe()
+    gone_r, gone_w = os.pipe()
+    if os.fork() == 0:
+        os.close(held_r)
+        os.close(gone_w)
+        buf = ctypes.create_string_buffer(32)
+        try:
+            os.kill(judge, signal.SIGSTOP)
+            os.write(held_w, b"x")
+            libc.read(gone_r, buf, 1)
+            for _ in range(1000):
+                n = libc.pread(current, buf, 31, 0)
+                if n > 0 and int(buf.raw[:n]) < cap - 64 * 2**20:
+                    break
+                time.sleep(0.005)
+        finally:
+            os.kill(judge, signal.SIGCONT)
+            os._exit(0)
+    os.close(held_w)
+    os.close(gone_r)
+    assert os.read(held_r, 1) == b"x"
+'''
+
+
 def test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running(tmp_path):
     """Really out of memory, five times over: a hidden test takes the memory itself, so the kernel
     ends the case runner and not a program."""
@@ -1729,6 +1917,7 @@ def test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running(tmp_
 def test_the_one_that_is_ended():
     with case() as c:
         assert c.run(["plain"]).out == "plain\\n"
+''' + JUDGE_HELD_STILL.replace("\n    ", "\n        ") + '''
         blocks = []
         while True:
             blocks.append(bytearray(b"x") * (16 * 2**20))
@@ -2000,6 +2189,215 @@ time.sleep(0.2)
     assert failed.get("records_counted_bytes", 0) > 0 and failed["records_left_out_bytes"] == 16 * 2**20, failed
 
 
+# Honest programs that do ordinary things again and again for a while: they hold little beyond what
+# they had when the case began, and must never fail for memory.
+KEEPS_DOING = r"""
+import signal, subprocess
+end = time.monotonic() + float(sys.argv[2])
+cycles = 0
+if sys.argv[1] == "makes and removes small files":
+    # 5,000 small files with long names are made and removed, over and over, in the working folder
+    while time.monotonic() < end:
+        for n in range(5000):
+            with open(f"{n:05d}-" + "w" * 100, "w") as f:
+                f.write("x")
+        for n in range(5000):
+            os.unlink(f"{n:05d}-" + "w" * 100)
+        cycles += 1
+elif sys.argv[1] == "starts and reaps short processes":
+    while time.monotonic() < end:
+        running = [subprocess.Popen(["/bin/sh", "-c", "cat /proc/self/status > /dev/null"]) for _ in range(8)]
+        for p in running:
+            p.wait()
+        cycles += 1
+print("done", cycles)
+"""
+
+KEEPS_DOING_TESTS = """
+def keeps(how):
+    with case() as c:
+        r = c.run([how, "8"])
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[how] = {"limit": r.limit, "out": r.out[-200:], "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.limit is None and r.out.startswith("done"), r
+
+
+def test_makes_and_removes_small_files():
+    keeps("makes and removes small files")
+
+
+def test_starts_and_reaps_short_processes():
+    keeps("starts and reaps short processes")
+"""
+
+
+def test_a_program_that_keeps_making_and_removing_files_or_processes_is_not_ended_for_memory(tmp_path):
+    """A program that, for eight seconds, makes 5,000 small files and removes them again, over and
+    over, holds at the end what it held at the start; so does one that starts short-lived processes
+    and waits for them. The kernel's records rise and fall with what they do. Only what they have
+    grown by beyond the lowest figure they reached counts, so neither is ended for memory under a
+    limit of 64 MB."""
+    result = judge_attack(tmp_path, PLAIN + KEEPS_DOING, {"functional/test_keeps.py": KEEPS_DOING_TESTS},
+                          CASE_MEMORY_MB="64", CASE_TIMEOUT_SEC="30", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    for how, said in seen.items():
+        note_figures(f"keeps doing: {how}", records_grown=said["measured"].get("records_grown", 0) / 2**20,
+                     counted=said["measured"].get("memory_highest", 0) / 2**20)
+    assert outcomes(result) == {"test_makes_and_removes_small_files": "passed", "test_starts_and_reaps_short_processes": "passed"}, (
+        lost(result, tmp_path / "out"))
+
+
+# Records that stood before a case are counted nowhere: a program can hold those of the files its build
+# left, through descriptors that many of its processes share, and then take memory in all of them
+# until the container stands at its cap. Ending one process gives back little; the kernel ends one
+# process of the program after another, and never the case runner, while any of them is left.
+HOLDS_IN_MANY = r"""
+import resource
+if sys.argv[1:] == ["leave"]:
+    os.makedirs("/app/left", exist_ok=True)
+    for n in range(int(sys.argv[2]) if len(sys.argv) > 2 else 200000):
+        with open(f"/app/left/{n:06d}-" + "n" * 200, "w") as f:
+            f.write("x")
+    sys.exit(0)
+most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+held = []
+for name in sorted(os.listdir("/app/left")):
+    try:
+        held.append(os.open("/app/left/" + name, os.O_RDONLY))
+    except OSError:
+        break
+for _ in range(31):
+    if os.fork() == 0:
+        break
+taken = []
+while True:
+    block = bytearray(4 * MB)
+    touch(block)
+    taken.append(block)
+    time.sleep(0.02)
+"""
+
+HOLDS_IN_MANY_TESTS = """
+def test_before():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_holds_in_many():
+    with case() as c:
+        r = c.run(["holds"])
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"limit": r.limit, "signal": r.signal, "measured": c.measured}, f)
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+def test_records_many_processes_hold_at_the_cap_end_the_program_and_never_the_case_runner(tmp_path):
+    """In the sample's smallest container (a case's limit of 512 MB and 64 MB of files, and 256 MB
+    for the judge: 832 MB), the build leaves 200,000 files; a program holds every one of them open,
+    starts 31 more processes that share what it holds, and takes memory in all 32 until the
+    container stands at its cap or its count ends it. The case fails for memory, the judging ends in
+    a result and not in a fault of the judge, and the kernel ends no case runner. The cases before
+    and after it are never failed: while the records of the build's files stand, no case can show
+    that it held no more than its limit, so they are unmeasured where they would have passed. On the measuring computer the kernel ended all 32 processes of the program
+    at the cap; on the machine of the automatic check the count ended the program first."""
+    result = judge_attack(tmp_path, PLAIN + HOLDS_IN_MANY, {"functional/test_holds.py": HOLDS_IN_MANY_TESTS},
+                          {"memory_mb": 832, "seconds": 400}, CASE_MEMORY_MB="512", CASE_DISK_MB="64",
+                          CASE_TIMEOUT_SEC="60", CASE_PROCESSES="64", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None and result["fault"] is None, lost(result, tmp_path / "out")
+    seen = outcomes(result)
+    assert seen["test_holds_in_many"] == "failed" and {seen["test_before"], seen["test_after"]} <= {"passed", UNMEASURED}, (
+        lost(result, tmp_path / "out"))
+    assert "memory" in message(result, "test_holds_in_many"), lost(result, tmp_path / "out")
+    assert not result["report"].get("runner_ended"), f"the kernel ended a case runner: {lost(result, tmp_path / 'out')}"
+    ended = result["report"].get("memory", {}).get("ended_by_the_kernel", 0)
+    # where the kernel's records of a file are smaller, the count ends the program before the cap
+    note_figures("records many processes hold at the cap", kernel_ended=ended)
+
+
+# Programs that make the figures the judge reads move while it reads them: they read a file of 200 MB
+# again and again, dropping it from the cache before every pass, or write files of 12 MB into their
+# folder and remove them, in two processes at once, so that both processors are busy and the judge
+# is often stopped in the middle of a measurement.
+CHURNS = r"""
+import mmap
+how, aim, limit_mb, seconds = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+held = (limit_mb + 24 if aim == "above" else limit_mb - 32) * MB
+block = mmap.mmap(-1, held, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+touch(block)
+end = time.monotonic() + seconds
+children = []
+for worker in range(2):
+    pid = os.fork()
+    if pid == 0:
+        if how == "reads":
+            fd = os.open("/app/large.bin", os.O_RDONLY)
+            while time.monotonic() < end:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                os.lseek(fd, 0, 0)
+                while os.read(fd, MB):
+                    pass
+        else:
+            chunk = b"y" * MB
+            while time.monotonic() < end:
+                with open(f"churn-{worker}", "wb") as f:
+                    for _ in range(12):
+                        f.write(chunk)
+                os.unlink(f"churn-{worker}")
+        os._exit(0)
+    children.append(pid)
+for pid in children:
+    os.waitpid(pid, 0)
+print("done")
+"""
+
+CHURN_TESTS = """
+def churn(how, aim, turn):
+    with case() as c:
+        r = c.run([how, aim, LIMIT_MB, "3"])
+        seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+        seen[f"{how} {aim} {turn}"] = {"limit": r.limit, "out": r.out[-200:], "err": r.err[-300:], "measured": c.measured}
+        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump(seen, f)
+        assert r.limit is None and r.out == "done\\n", r
+
+"""
+
+
+@pytest.mark.parametrize("aim", ["below", "above"])
+def test_what_a_program_does_while_the_judge_measures_neither_fails_it_nor_hides_its_memory(tmp_path, aim):
+    """A program that holds 32 MB less than its limit of 128 MB and reads a large file over and
+    over, or writes and removes files in its folder, in two processes, moves the figures the judge
+    reads while it reads them. It never fails for memory: three cases of each, three seconds each.
+    The same program holding 24 MB more than its limit fails for memory in every one of them: what
+    it does between two readings hides nothing."""
+    tests = CHURN_TESTS.replace("LIMIT_MB", repr("128")) + "".join(
+        f"\ndef test_{how}_{turn}():\n    churn({how!r}, {aim!r}, {turn})\n\n" for how in ("reads", "writes") for turn in range(3))
+    result = judge_attack(tmp_path, PLAIN + CHURNS, {"functional/test_churn.py": tests},
+                          {"before": "dd if=/dev/zero of=/app/large.bin bs=1M count=200 status=none"},
+                          CASE_MEMORY_MB="128", CASE_TIMEOUT_SEC="20", CASE_PROCESSES="16")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    for name, said in seen.items():
+        note_figures(f"while the judge measures: {name}", counted=said["measured"].get("memory_highest", 0) / 2**20,
+                     longest_gap_ms=said["measured"].get("longest_gap", 0) * 1000,
+                     readings_moved=said["measured"].get("moved_most", 0) / 2**20,
+                     readings_undecided=said["measured"].get("undecided", 0),
+                     readings_cut_by_time=said["measured"].get("late", 0))
+    expected = "passed" if aim == "below" else "failed"
+    assert set(outcomes(result).values()) == {expected} and len(outcomes(result)) == 6, lost(result, tmp_path / "out")
+    if aim == "above":
+        assert all(said["limit"] == "memory" for said in seen.values()), seen
+
+
 READS = r"""
 if sys.argv[1] == "holds":
     block = bytearray(b"x") * (100 * MB)
@@ -2008,18 +2406,54 @@ elif sys.argv[1] == "only reads":
         while f.read(MB):
             pass
 elif sys.argv[1] == "reads again and again":
-    import mmap, threading
+    import json, mmap, threading
     large = os.open("/app/large.bin", os.O_RDONLY)
     view = memoryview(mmap.mmap(large, 0, mmap.MAP_SHARED, mmap.PROT_READ))
+    stood = {}
+    # the two threads have taken their first time before the program goes on
+    begun = threading.Barrier(3)
 
-    def again():
+    def again(first):
+        # Each thread rests a little after every 4 MB, so that the two never take all of the container's
+        # two processors, while each still reads the whole file in well under a tenth of a second. Once the
+        # program holds what it holds, each thread notes every time it stood still for more than 25 ms (the
+        # container is read standing still for at least 30), and it stops once the test has had the reading
+        # and taken away the file that keeps the program going: a machine that holds the program back
+        # before the reading does not stop it, and after the reading it brings back almost nothing.
+        pieces = range(0, len(view), 65536)              # small pieces: the copy is no memory to speak of
+        mine = stood.setdefault(str(first), [])
+        last, n = time.monotonic(), 0
+        begun.wait()
         while True:
-            for at in range(0, len(view), 65536):       # small pieces: the copy is no memory to speak of
+            for at in [*pieces[first:], *pieces[:first]]:
                 bytes(view[at:at + 65536])
+                n += 1
+                if n % 64 == 0:
+                    time.sleep(0.0005)
+                now = time.monotonic()
+                if ASKED:
+                    if now - last > 0.025:
+                        mine.append((last, now))
+                    if not os.path.exists("not-read-yet"):
+                        # the time of the look itself is noted as well: the container may have stood still in it
+                        end = time.monotonic()
+                        if end - now > 0.025:
+                            mine.append((now, end))
+                        return
+                last = now
 
-    for _ in range(2):
-        threading.Thread(target=again, daemon=True).start()
+    # the two begin 100 MB apart
+    threads = [threading.Thread(target=again, args=(first,), daemon=True) for first in (0, 100 * MB // 65536)]
+    for thread in threads:
+        thread.start()
+    begun.wait()
     time.sleep(0.5)
+    held_until_read()
+    for thread in threads:
+        thread.join(5)
+    print("stood still " + json.dumps(stood), file=sys.stderr)
+    print("done")
+    sys.exit(0)
 held_until_read()
 print("done")
 """
@@ -2038,7 +2472,14 @@ def test_only_reads():
 
 
 def test_reads_again_and_again():
-    assert attempt("reads again", ["reads again and again"]).out == "done\\n"
+    r = attempt("reads again", ["reads again and again"])
+    assert r.out == "done\\n"
+    # both threads read until the container stood still to be read: each stood still for more than 25 ms
+    # over the moment the reading from outside found it standing still, whatever else held them back
+    stood = json.loads(r.err.split("stood still ", 1)[1].splitlines()[0])
+    froze_at = json.load(open("/logs/verifier/attack.json"))["reads again"]["held"]["froze_at"]
+    assert len(stood) == 2 and all(any(t1 - t0 > 0.025 and t0 <= froze_at < t1 for t0, t1 in spans)
+                                   for spans in stood.values()), (stood, froze_at, r.err)
 
 
 def test_the_judged_container_cannot_ask_the_kernel_itself():
@@ -2189,7 +2630,15 @@ def far_apart_pages_in_the_case_folder():
         yield
 
 
+def the_files_its_build_left_held_open():
+    most = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    resource.setrlimit(resource.RLIMIT_NOFILE, (most, most))
+    for name in sorted(os.listdir("/app/left")):
+        yield os.open("/app/left/" + name, os.O_RDONLY)
+
+
 ways = {"open files": open_files, "memory files, mapped and closed": memory_files_mapped_and_closed,
+        "the files its build left, held open": the_files_its_build_left_held_open,
         "shared mappings without a file": shared_mappings_without_a_file,
         "the image's files, mapped": the_images_files_mapped,
         "far-apart pages in the case folder": far_apart_pages_in_the_case_folder}
@@ -2284,6 +2733,171 @@ def test_what_a_case_holds_beyond_what_the_judge_counts_stays_within_the_amount_
     cases = {c["name"]: c for c in result["report"]["tests"]}
     assert cases["test_within"].get("records_left_out_bytes") == within["measured"]["records_left_out"], cases["test_within"]
     assert cases["test_beyond"].get("records_counted_bytes", 0) >= 0 and "records_left_out_bytes" in cases["test_beyond"], cases["test_beyond"]
+
+
+# The same, in a case that begins after earlier activity that nothing gave back: the build left 60,000
+# files and a file of 300 MB, and an earlier case, after the reading from outside that every bound
+# test takes first, read that file into the cache, looked at every one of those files and asked for
+# 300,000 names that are not there.
+LEFT_BEFORE = r"""
+if sys.argv[1:2] == ["leave"]:
+    os.makedirs("/app/left", exist_ok=True)
+    for n in range(60000):
+        with open(f"/app/left/{n:06d}", "w") as f:
+            f.write("x")
+    with open("/app/large.bin", "wb") as f:
+        for _ in range(300):
+            f.write(b"\0" * MB)
+    sys.exit(0)
+if sys.argv[1:2] == ["asks"]:
+    # the cache of the file the build left, the records of its files, and records of names that are not there
+    with open("/app/large.bin", "rb") as f:
+        while f.read(MB):
+            pass
+    for name in os.listdir("/app/left"):
+        os.lstat("/app/left/" + name)
+    for n in range(300000):
+        try:
+            os.lstat(f"/usr/lib/not-there-{n}")
+        except OSError:
+            pass
+    print("asked")
+    sys.exit(0)
+"""
+
+LEFT_BEFORE_TESTS = READING + """
+def keep(name, value):
+    seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
+    seen[name] = value
+    with open("/logs/verifier/attack.json", "w") as f:
+        json.dump(seen, f)
+
+
+def test_start():
+    with case() as c:
+        keep("start", reading("start"))
+        assert c.run(["plain"]).out == "plain\\n"
+
+
+def test_asks():
+    with case() as c:
+        r = c.run(["asks"])
+        keep("asks", {"limit": r.limit, "out": r.out, "measured": c.measured})
+
+
+def hold(aim):
+    with case() as c:
+        while_held = {}
+        after_the_run = read_while_held(c, aim + "-held", while_held)
+        r = c.run(["hold", WAY, aim, LIMIT_MB, LEFT_OUT_MB, FILES_MB])
+        after_the_run()
+        keep(aim, {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
+                   "held": while_held, "measured": c.measured})
+        assert r.exit_code == 0, r
+
+
+def test_within():
+    hold("within")
+
+
+def test_beyond():
+    hold("beyond")
+
+
+def test_after():
+    with case() as c:
+        assert c.run(["plain"]).out == "plain\\n"
+"""
+
+
+@pytest.mark.parametrize("way", ["memory files, mapped and closed", "the files its build left, held open"])
+def test_records_a_case_makes_count_beyond_the_bound_also_after_what_earlier_activity_left(tmp_path, way):
+    """Here the build left 60,000 files and 300 MB of cache, and an earlier case asked for 300,000 names
+    that are not there and looked at every one of those files, and nothing gave the records back. A
+    program then makes and holds memory files, mapped and closed, or holds the files its build left
+    open, up to its limit and the amount left out: it does not pass while what it really held, read
+    from outside, lies above its limit, that amount and the tolerance. A program that holds clearly
+    more fails for memory, as before. While records stand beyond the amount left out no case can show
+    that it held no more than its limit, so the case within it and a later case that only prints are
+    unmeasured, never failed: what an earlier case leaves can turn a later case from passed, or from
+    failed for memory, into unmeasured, and never into passed."""
+    limit_mb = 256
+    tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
+        .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + HELD + HOLDS, {"functional/test_hold.py": tests}, {"reading": True},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    within, beyond = seen["within"], seen["beyond"]
+    within["start"] = beyond["start"] = seen["start"]
+    note_figures("what the earlier case left", records_grown=seen["asks"]["measured"].get("records_grown", 0) / 2**20)
+    assert within["limit"] is None and within["exit_code"] == 0, f"the attempt did not run as written: {within}"
+    no_pass_beyond_the_line(within, outcomes(result)["test_within"], limit_mb, f"after earlier activity: {way}, limit {limit_mb} MB")
+    assert beyond["limit"] == "memory", f"a program that held more than its limit and the amount left out was to fail for memory: {beyond}"
+    assert outcomes(result)["test_beyond"] == "failed", lost(result, tmp_path / "out")
+    assert outcomes(result)["test_after"] in ("passed", UNMEASURED), lost(result, tmp_path / "out")
+
+
+# The same under pressure: while the case under test makes and holds memory files, a process of it
+# reads a file of 700 MB again and again, dropping it from the cache before every pass, so that the
+# container stands at its cap and the kernel takes back old records while new ones are made.
+PRESSES = r"""
+if sys.argv[1:2] == ["hold"]:
+    import atexit, signal
+    pressing = os.fork()
+    if pressing == 0:
+        fd = os.open("/app/press.bin", os.O_RDONLY)
+        while True:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            os.lseek(fd, 0, 0)
+            while os.read(fd, MB):
+                pass
+
+    def stop_pressing():
+        os.kill(pressing, signal.SIGKILL)
+        os.waitpid(pressing, 0)
+    atexit.register(stop_pressing)
+"""
+
+
+def test_records_a_case_makes_while_the_kernel_takes_old_ones_back_count_beyond_the_bound(tmp_path):
+    """After an earlier case left the records of 300,000 names that are not there, a case keeps its
+    container at its cap by reading a large file over and over, so that the kernel takes the old
+    records back, and while it does it makes and holds memory files, mapped and closed: what takes the
+    place of what goes does not raise the figure. The case does not pass while what it really held,
+    read from outside, lies above its limit, the amount left out and the tolerance."""
+    way, limit_mb = "memory files, mapped and closed", 512
+    tests = LEFT_BEFORE_TESTS.replace("WAY", repr(way)).replace("LIMIT_MB", repr(str(limit_mb))) \
+        .replace("LEFT_OUT_MB", repr(str(int(left_out_mb(limit_mb))))).replace("FILES_MB", repr(LIMITS["CASE_DISK_MB"]))
+    result = judge_attack(tmp_path, PLAIN + LEFT_BEFORE + PRESSES + HELD + HOLDS, {"functional/test_hold.py": tests},
+                          {"reading": True, "before": "dd if=/dev/zero of=/app/press.bin bs=1M count=700 status=none"},
+                          CASE_MEMORY_MB=str(limit_mb), CASE_TIMEOUT_SEC="60", CASE_PROCESSES="16", BUILD_CMD="python3 main.py leave")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
+    seen = found_by(tmp_path / "out", "attack.json")
+    within = seen["within"]
+    within["start"] = seen["start"]
+    note_figures(f"under pressure, limit {limit_mb} MB: what the earlier case left",
+                 records_grown=seen["asks"]["measured"].get("records_grown", 0) / 2**20,
+                 times_at_cap=result["report"].get("memory", {}).get("times_at_cap", 0))
+    if within["limit"] != "memory":
+        assert within["exit_code"] == 0, f"the attempt did not run as written: {within}"
+    no_pass_beyond_the_line(within, outcomes(result)["test_within"], limit_mb, f"under pressure: {way}, limit {limit_mb} MB")
+
+
+def no_pass_beyond_the_line(seen: dict, outcome: str, limit_mb: int, what: str) -> None:
+    """The line every case is held to whatever stood when it began: a case that passes held no more,
+    read from outside, than its limit, the amount left out and the tolerance."""
+    if outcome != "passed":
+        note_figures(f"{what}, {outcome}", counted=seen["measured"].get("memory_highest", 0) / 2**20,
+                     bound=seen["measured"].get("bound_highest", 0) / 2**20)
+        return
+    assert seen["limit"] is None and seen["exit_code"] == 0, f"{what}: the attempt did not run as written: {seen}"
+    really = really_mb(seen)
+    note_figures(f"{what}, {outcome}", really=really, counted=seen["measured"]["memory_highest"] / 2**20,
+                 bound=seen["measured"].get("bound_highest", 0) / 2**20)
+    assert really <= limit_mb + left_out_mb(limit_mb) + TOLERANCE_MB, (
+        f"{what}: the case passed while the container really held {really:.1f} MB more than when the case "
+        f"began, above its limit of {limit_mb} MB, the amount left out and the tolerance: {seen}")
 
 
 def within_the_bound(seen: dict, limit_mb: int, what: str) -> None:
