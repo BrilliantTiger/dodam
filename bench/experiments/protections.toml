@@ -1170,24 +1170,28 @@ tests = ["tests/test_cli_judge.py::test_a_case_with_a_reading_that_cannot_be_tak
 find = '''            if _in_time(held_before):
                 figure = self._figure(held_before)
                 self._lowest = _lowest(self._lowest, figure)
-                if self._figure_start is None:
+                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 # held to the most the case can have held like every later reading: a program that ends
                 # before it is measured once is judged by this reading alone
                 self._bound(held_before, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()'''
 put = '''            if True:
                 figure = self._figure(held_before)
                 self._lowest = _lowest(self._lowest, figure)
-                if self._figure_start is None:
+                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 # held to the most the case can have held like every later reading: a program that ends
                 # before it is measured once is judged by this reading alone
                 self._bound(held_before, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()'''
 
 [[protection]]
@@ -1274,8 +1278,10 @@ what = "A case counts its readings cut by time exactly"
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly"]
 [[protection.change]]
-find = '''                self.measured["late"] = self.measured.get("late", 0) + 1'''
-put = '''                self.measured["late"] = self.measured.get("late", 0) + 2'''
+find = '''                # it says nothing of either side: it moves no lowest figure and ends nothing
+                self.measured["late"] = self.measured.get("late", 0) + 1'''
+put = '''                # it says nothing of either side: it moves no lowest figure and ends nothing
+                self.measured["late"] = self.measured.get("late", 0) + 2'''
 
 [[protection]]
 what = "A case counts its readings that could not decide exactly"
@@ -1546,10 +1552,13 @@ tests = ["tests/test_cli_judge.py::test_a_reading_cut_by_time_when_a_run_has_end
 [[protection.change]]
 find = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()'''
 put = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
             else:
-                pass'''
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1'''
 
 [[protection]]
 what = "A case is named as pytest names its test, spaces and all"
@@ -1676,14 +1685,13 @@ what = "The reading a later run begins with is held to the most the case can hav
 file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_what_stands_when_a_later_run_begins_is_held_to_the_most_the_case_can_have_held"]
 [[protection.change]]
-find = '''                if self._figure_start is None:
+find = '''                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 # held to the most the case can have held like every later reading: a program that ends
                 # before it is measured once is judged by this reading alone
                 self._bound(held_before, figure, limits["memory_mb"] * 2**20)'''
-put = '''                first_run = self._figure_start is None
-                if self._figure_start is None:
+put = '''                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 if first_run:
@@ -1877,6 +1885,7 @@ tests = ["tests/test_cli_judge.py::test_a_run_reads_its_starting_values_before_t
 [[protection.change]]
 find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         high_before = _judge.highest_memory() if separated else 0
+        first_run = not self._began
         if separated and not self._began:
             # what the kernel kept of the previous case's processes goes after them; while it goes it
             # would hide as much of the program's memory, so the case begins once it has stopped
@@ -1887,17 +1896,20 @@ find = '''        killed_before = _judge.killed_for_memory() if separated else 0
         if separated:
             # one starting figure for the whole case, read before its first run, when the test's
             # own files are written; a later run of the case is measured against it as well. A
-            # reading cut by time is no starting figure, and its case cannot pass
+            # reading cut by time is no starting figure, and its case cannot pass; where the first run's is
+            # cut, the case has none, and a later run's reading does not become it
             if _in_time(held_before):
                 figure = self._figure(held_before)
                 self._lowest = _lowest(self._lowest, figure)
-                if self._figure_start is None:
+                if first_run:
                     self._figure_start = figure
                 self._records(held_before)
                 # held to the most the case can have held like every later reading: a program that ends
                 # before it is measured once is judged by this reading alone
                 self._bound(held_before, figure, limits["memory_mb"] * 2**20)
             else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1
                 self._undecided()
         started = time.monotonic()
 '''
@@ -3140,9 +3152,9 @@ file = "dodambench/dodam_cli.py"
 tests = ["tests/test_cli_judge.py::test_a_case_is_counted_from_one_starting_figure_and_from_the_lowest_it_reached", "tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it"]
 [[protection.change]]
 find = '''                self._lowest = _lowest(self._lowest, figure)
-                if self._figure_start is None:'''
+                if first_run:'''
 put = '''                self._lowest = figure
-                if self._figure_start is None:'''
+                if first_run:'''
 
 [[protection]]
 what = "A case is counted from the lowest figure it reached"
