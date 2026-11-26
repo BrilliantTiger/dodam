@@ -557,8 +557,7 @@ put = '''        if False:
 [[protection]]
 what = "Every case of a judging names a file of tests the judge runs at the step judged"
 file = "dodambench/vet.py"
-tests = ["tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
-second_line = "without it, a case of a file the step does not run finds no file of the step to be compared with, which is an error inside the one place and so a fault of the judge; and the files the step runs no longer hold the whole picture"
+tests = ["tests/test_vet.py::test_an_entry_for_what_was_left_behind_is_only_the_one_the_judge_writes", "tests/test_vet.py::test_a_result_with_a_part_not_of_it_is_a_fault_and_never_a_success"]
 [[protection.change]]
 find = '''        if own is None:
 '''
