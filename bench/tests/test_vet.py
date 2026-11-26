@@ -617,6 +617,22 @@ def test_a_fault_file_of_any_shape_is_read_as_a_fault(tmp_path, fake_docker, mon
 
 
 
+@pytest.mark.parametrize("said", ["[]", "{\"judge_fault\": 5}"])
+def test_a_fault_file_of_another_shape_beside_a_whole_result_is_a_fault(tmp_path, fake_docker, monkeypatch, said):
+    """A judging that left the judge's account of a fault is a fault, however whole the result beside it:
+    an account of another shape too, so the tool tells no room from that result. The same result
+    without it is read."""
+    from dodambench.judge import JudgeFault
+    reward, details = judges_result(load_task(SAMPLE), "build")
+    (fake_docker / "reward.json").write_text(json.dumps(reward), encoding="utf-8")
+    (fake_docker / "details.json").write_text(json.dumps(details), encoding="utf-8")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    assert judged(tmp_path, tmp_path / "whole").build_ok
+    (fake_docker / "judge-fault.json").write_text(said, encoding="utf-8")
+    with pytest.raises(JudgeFault):
+        judged(tmp_path, tmp_path / "out")
+
+
 @pytest.mark.parametrize("reward, details", [
     ("[]", '{"build_ok": true, "step": "build", "tests": []}'),
     ('{"reward": "high"}', '{"build_ok": true, "step": "build", "tests": []}'),

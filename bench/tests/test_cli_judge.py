@@ -3183,7 +3183,9 @@ def number(name):
 def test_a_run_whose_new_high_lies_above_the_line_is_written_down_and_one_without_is_not(tmp_path):
     """The case runner writes down a run whose new high of the container's memory lies above what the case
     may take in memory and files together, counted from the container's count when the run began, to the
-    byte: here half a megabyte above. A later run that makes no new high writes nothing."""
+    byte: here half a megabyte above, with the case's limits, the high before and after the run and what the
+    container held when it began. A later run that makes no new high writes nothing. How the judge puts what
+    is written into the result is the test of the ten largest."""
     seen = tmp_path / "seen.json"
     tests = {"functional/test_high.py": '''
 import json
@@ -3225,12 +3227,17 @@ def test_highs():
     except OSError:
         written = []
     with open(SEEN, "w") as f:
-        json.dump(written, f)
+        json.dump({"written": written, "case": c._key, "limits": c._limits}, f)
 '''.replace("SEEN", repr(str(seen)))}
     result = judge_program(tmp_path, "print('fine')\n", tests)
     assert seen.is_file(), message(result, "test_highs")
-    written = json.loads(seen.read_text())
-    assert [(w["above_the_limit_bytes"], w["above_the_limit_mb"]) for w in written] == [(2**19, 0.5)], written
+    said = json.loads(seen.read_text())
+    limits, mb = said["limits"], 2**20
+    allowed = (limits["memory_mb"] + limits["disk_mb"]) * mb
+    assert said["written"] == [{"case": said["case"], "limit_mb": limits["memory_mb"], "files_mb": limits["disk_mb"],
+                                "high_before_mb": 100, "high_mb": (100 * mb + allowed + mb // 2) // mb,
+                                "taken_before_mb": 100, "held_before_mb": 100,
+                                "above_the_limit_mb": 0.5, "above_the_limit_bytes": 2**19}], said
 
 
 def test_a_run_reads_its_starting_values_before_the_program_is_started(tmp_path):

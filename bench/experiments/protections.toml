@@ -1275,11 +1275,31 @@ put = '''    return len(parts) > 1 and parts[-1] == case["name"]'''
 [[protection]]
 what = "A case counts its readings cut by time exactly"
 file = "dodambench/dodam_cli.py"
-tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly"]
+tests = ["tests/test_cli_judge.py::test_the_readings_that_could_not_decide_are_counted_exactly", "tests/test_cli_judge.py::test_a_reading_cut_by_time_around_a_run_is_counted_as_late"]
 [[protection.change]]
 find = '''                # it says nothing of either side: it moves no lowest figure and ends nothing
                 self.measured["late"] = self.measured.get("late", 0) + 1'''
 put = '''                # it says nothing of either side: it moves no lowest figure and ends nothing
+                self.measured["late"] = self.measured.get("late", 0) + 2'''
+
+[[protection.change]]
+find = '''                self._bound(held_before, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1'''
+put = '''                self._bound(held_before, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 2'''
+
+[[protection.change]]
+find = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
+                self.measured["late"] = self.measured.get("late", 0) + 1'''
+put = '''                self._bound(held_after, figure, limits["memory_mb"] * 2**20)
+            else:
+                # cut by time: late, as a reading during the run is
                 self.measured["late"] = self.measured.get("late", 0) + 2'''
 
 [[protection]]

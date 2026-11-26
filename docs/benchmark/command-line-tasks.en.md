@@ -847,7 +847,7 @@ For every protection there is one variant of the code without it (`bench/experim
 | Notes of the judge's that cannot be read at all leave no case of their file passed or unjudged | the notes of a file cannot be read |
 | The judge's notes are removed on every path | the notes of a file end in a torn line |
 | A note belongs to a case by its file and its name | a note marks a case of the same name in another file |
-| A case counts its readings cut by time exactly | stand-in figures give a case two readings cut by time and one whose every try moved across its limit |
+| A case counts its readings cut by time exactly | stand-in figures give a case two readings cut by time and one whose every try moved across its limit; and a case whose reading at a run's start, or the one when it has ended, is cut by time |
 | A case counts its readings that could not decide exactly | the same |
 | The result says for each case how many of its readings could not decide | the same |
 | The result says for the step how many readings could not decide | a program that only prints is judged inside the image in two cases, and the step's count is the sum of its cases' |
@@ -877,9 +877,9 @@ For every protection there is one variant of the code without it (`bench/experim
 | What the case runner said of a lost note reaches the judge's reading of its notes | the same |
 | A case whose note could not be written cannot pass | the same |
 | What stands when a run has ended is held to the most the case can have held | stand-in figures: runs that end before they are measured once leave 300 MB of records, or 100 MB in each of three short runs |
-| A case says how long it waited for the kernel's own part and how much that part fell | stand-in figures of the kernel's own part: still and falling once a run has ended, falling 1.5 MB once, falling 10 MB a look; and in a judging inside the image, a case after one that made 480,000 small mappings |
+| A case says how long it waited for the kernel's own part and how much that part fell | stand-in figures of the kernel's own part: still and falling once a run has ended, falling 1.5 MB once, falling 10 MB a look, rising once a run has ended, falling after the first of two runs and rising after the second; and in a judging inside the image, a case after one that made 480,000 small mappings |
 | The judge measures a run at its first look | stand-in figures: a run takes 300 MB and is over before a second look |
-| A case has one starting figure, read before its first run | stand-in figures: 60 MB of what stood goes between two runs, and the case says it fell 60 MB below where it began |
+| A case has one starting figure, read before its first run | stand-in figures: 60 MB of what stood goes between two runs, and the case says it fell 60 MB below where it began; and a case whose first run's reading was cut by time, where 40 MB go during that run and come back before the next, says it fell by nothing |
 | The reading a later run begins with lowers the lowest figure the case is counted from | stand-in figures: 60 MB of what stood goes between two runs, and the second run takes 290 MB under a limit of 256 MB |
 | The reading when a run has ended lowers the lowest figure the case is counted from | stand-in figures: a run leaves 280 MB of records while 50 MB of what stood goes |
 | The reading when a run has ended notes the kernel's records | stand-in figures: a run that ends before it is measured once leaves 300 MB of records |
