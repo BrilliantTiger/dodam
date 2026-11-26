@@ -2316,6 +2316,26 @@ def test_a_case_outside_a_container_does_not_wait_for_the_kernels_own_part(tmp_p
     assert the_case(result)["outcome"] == "passed", the_case(result)
 
 
+@pytest.mark.parametrize("lose_note", [False, True], ids=["a note could be written", "a note could not be written"])
+def test_a_case_outside_a_container_writes_no_note(tmp_path, lose_note):
+    """Outside a container the judge measures nothing of a case and its case runner writes no note of it,
+    also where one could not be written: the case carries none of a note's numbers, and its test alone
+    judges it."""
+    result, seen = judge_measured(tmp_path, WAYS["settled"], separated=False, lose_note=lose_note)
+    case = the_case(result)
+    assert case["outcome"] == "passed", case
+    assert not set(case) & {"undecided_readings", "fell_below_start_bytes", "records_left_out_bytes", "memory_bound_bytes"}, case
+
+
+def test_a_case_whose_records_did_not_grow_left_nothing_of_them_out(tmp_path):
+    """Of the kernel's records a case's note says how much of their growth was left out of its memory and
+    how much was counted: no more than they grew. A case whose records never grew above the lowest they
+    reached left nothing out and counted nothing."""
+    result, seen = judge_measured(tmp_path, WAYS["settled"])
+    case = the_case(result)
+    assert (case["records_left_out_bytes"], case["records_counted_bytes"]) == (0, 0), case
+
+
 def test_the_judges_own_processes_are_taken_out_of_every_figure(tmp_path):
     """The ordinary memory, the swap and the page tables of the case runner and of the judge's other
     processes are taken out of every figure, so that what any of them gives back during a case makes
@@ -2780,6 +2800,73 @@ def decided_case(tmp_path: Path, monkeypatch, row: dict) -> dict:
                 undecided=cli.undecided)
 
 
+P = "test_paths.py::"
+LISTED = {"listed": [P + "test_a", P + "test_x"]}
+
+
+def passed(name: str) -> dict:
+    return {"case": P + name, "outcome": "passed", "message": "", "opened": 0, "lost": False}
+
+
+# Runners of one file of two tests started one after another: what each writes, and how it ends.
+RUNNER_PATHS = {
+    # left undecided by the first runner, ended while it ran in the second: it fails, and the third never runs
+    "left undecided, then ended while it ran again": (
+        [([LISTED, {"started": P + "test_x"}, {"undecided": P + "test_x", "why": LEFT}], 0),
+         ([{"started": P + "test_a"}, passed("test_a"), {"started": P + "test_x"}], -9),
+         ([{"started": P + "test_x"}, passed("test_x")], 0)], {"test_a": "passed", "test_x": "failed"}),
+    "one passed and the other left undecided, then ended while it ran again": (
+        [([LISTED, {"started": P + "test_a"}, passed("test_a"), {"started": P + "test_x"},
+           {"undecided": P + "test_x", "why": LEFT}], 0),
+         ([{"started": P + "test_x"}], -9),
+         ([{"started": P + "test_x"}, passed("test_x")], 0)], {"test_a": "passed", "test_x": "failed"}),
+    # a runner that decided a case and then ended, and the next ended before the case after it: that case
+    # was before an ended runner once, not twice, and the third runner judges it
+    "ended after deciding one, then once before the other": (
+        [([LISTED, {"started": P + "test_a"}, passed("test_a")], -9), ([], -9),
+         ([{"started": P + "test_x"}, passed("test_x")], 0)], {"test_a": "passed", "test_x": "passed"}),
+}
+
+
+@pytest.mark.parametrize("path", RUNNER_PATHS)
+def test_who_decides_a_case_after_its_runners_ended_is_told_from_this_runners_own_records(tmp_path, monkeypatch, path):
+    """Where a runner ended while a case ran, that case fails, though an earlier runner left it undecided:
+    what that runner wrote of it is not this run's. A case after an ended runner fails for runners ended
+    before it only where two ended before it in a row with nothing decided between them."""
+    runners, outcomes_of = RUNNER_PATHS[path]
+    calls = []
+
+    def runner(test_path, env, timeout, out):
+        records, ends_with = runners[len(calls)]
+        with open(out, "a", encoding="utf-8") as f:
+            f.write("what the runner said\n")
+        with open(env[judge_module.PROGRESS_ENV], "a", encoding="utf-8") as f:
+            for record in records:
+                f.write(json.dumps(record) + "\n")
+        calls.append(1)
+        return ends_with
+
+    monkeypatch.setattr(judge_module, "run_pytest", runner)
+    monkeypatch.setattr(judge_module, "killed_for_memory", lambda *args, **kwargs: 0)
+    cases = judge_module.run_cases(tmp_path / "test_paths.py", {}, 10.0, give_back=lambda: None, ended=[])
+    assert {c["name"]: c["outcome"] for c in cases} == outcomes_of, (path, cases)
+
+
+def test_the_steps_highest_growth_of_the_records_is_the_largest_over_its_files(tmp_path):
+    """The step says the most the kernel's records grew in any one case: the largest over every file of
+    tests, not the growth of the last file read."""
+    mb = 2**20
+    cli = object.__new__(judge_module.CliRun)
+    cli.records_file, cli.records_highest, cli.undecided = tmp_path / "records.jsonl", 0, 0
+    cli.run_as = "someone"
+    for name, grown in (("test_first.py", 40), ("test_second.py", 0)):
+        note = {"case": f"{name}::test_x", "unsettled": False, "undecided": 0, "grown": grown * mb, "bound": 50 * mb,
+                "fell": 0, "left_out": min(grown, 16) * mb, "counted": max(grown - 16, 0) * mb}
+        cli.records_file.write_text(json.dumps(note) + "\n")
+        cli.note_records(tmp_path / name, [{"name": "test_x", "outcome": "passed", "message": "", "opened": 1, "lost": False}])
+    assert cli.records_highest == 40 * mb, cli.records_highest
+
+
 class NotesFile:
     """A file of notes that cannot be read at all, or that can be read and cannot be removed."""
 
@@ -3091,6 +3178,59 @@ def number(name):
         helper.wait()
     assert answer["seconds"] > 3, f"writing the waiting pages took {answer['seconds']:.2f} s, not more than 3"
     assert answer["charged"] == mb, f"the figure was read before it stood still: {answer['charged'] / mb:.2f} MB, after {answer['seconds']:.2f} s"
+
+
+def test_a_run_whose_new_high_lies_above_the_line_is_written_down_and_one_without_is_not(tmp_path):
+    """The case runner writes down a run whose new high of the container's memory lies above what the case
+    may take in memory and files together, counted from the container's count when the run began, to the
+    byte: here half a megabyte above. A later run that makes no new high writes nothing."""
+    seen = tmp_path / "seen.json"
+    tests = {"functional/test_high.py": '''
+import json
+import dodam_cli
+
+
+class Side:
+    def entering(self, limits):
+        return lambda: None
+
+    def alive(self):
+        return []
+
+    def end(self):
+        return True
+
+
+def test_highs():
+    tool, mb = dodam_cli._judge, 2**20
+    kept = tool.killed_for_memory, tool.highest_memory, tool.container_memory
+    highs_file = SEEN + ".highs"
+    with case() as c:
+        c._side = Side()
+        c._cfg = {**c._cfg, "highs_file": highs_file}
+        allowed = (c._limits["memory_mb"] + c._limits["disk_mb"]) * mb
+        # before and after the first run, a new high half a megabyte above the line; the second run none
+        highs = [100 * mb, 100 * mb + allowed + mb // 2]
+        tool.killed_for_memory = lambda *args, **kwargs: 0
+        tool.highest_memory = lambda *args, **kwargs: highs.pop(0) if len(highs) > 1 else highs[0]
+        tool.container_memory = lambda *args, **kwargs: {"taken": 100 * mb, "all": 100 * mb, "cap": 0, "files": 0}
+        try:
+            c.run([])
+            c.run([])
+        finally:
+            tool.killed_for_memory, tool.highest_memory, tool.container_memory = kept
+    try:
+        with open(highs_file) as f:
+            written = [json.loads(line) for line in f if line.strip()]
+    except OSError:
+        written = []
+    with open(SEEN, "w") as f:
+        json.dump(written, f)
+'''.replace("SEEN", repr(str(seen)))}
+    result = judge_program(tmp_path, "print('fine')\n", tests)
+    assert seen.is_file(), message(result, "test_highs")
+    written = json.loads(seen.read_text())
+    assert [(w["above_the_limit_bytes"], w["above_the_limit_mb"]) for w in written] == [(2**19, 0.5)], written
 
 
 def test_a_run_reads_its_starting_values_before_the_program_is_started(tmp_path):

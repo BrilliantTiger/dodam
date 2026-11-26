@@ -922,6 +922,12 @@ def with_left_behind(details: dict, how: str) -> dict:
     elif how == "two entries":
         details["left_behind"] = LEFT
         details["tests"] += [entry, dict(entry)]
+    elif how == "an entry of a file the judge does not run at the step":
+        details["left_behind"] = LEFT
+        details["tests"].append({**entry, "file": "bogus/test_x.py", "name": "test_x.py"})
+    elif how == "an entry with a weakness":
+        details["left_behind"] = LEFT
+        details["tests"].append({**entry, "weakness": "path-traversal"})
     elif how == "the judge's own":
         details["left_behind"] = LEFT
         details["tests"].append(entry)
@@ -932,7 +938,8 @@ def with_left_behind(details: dict, how: str) -> dict:
 @pytest.mark.parametrize("how", ["every case made an entry for what was left, passed",
                                  "the security cases made entries for what was left, passed",
                                  "an entry where the result says nothing was left", "an entry that passed",
-                                 "an entry with another reason", "two entries"])
+                                 "an entry with another reason", "two entries",
+                                 "an entry of a file the judge does not run at the step", "an entry with a weakness"])
 def test_an_entry_for_what_was_left_behind_is_only_the_one_the_judge_writes(tmp_path, monkeypatch, fake_docker,
                                                                            cli_task_dir, path, how):
     task = load_task(cli_task_dir)
