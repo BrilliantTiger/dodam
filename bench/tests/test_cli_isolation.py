@@ -1698,8 +1698,9 @@ def test_the_case_after_one_that_made_many_mappings_passes_and_says_what_its_wai
     rises while they run and goes with them, before the run returns: nothing of it stands when the case
     ends. The case after it passes and says how many looks its wait took, how much the kernel's part
     fell meanwhile and how much more during the case; the figures are noted, not judged."""
+    # one process maps at a time: the case is given the time that takes, well beyond the 5 s it gets otherwise
     result = judge_attack(tmp_path, PLAIN + LEAVES_KERNEL, {"functional/test_kernel.py": LEAVES_KERNEL_TESTS},
-                          CASE_MEMORY_MB="512", CASE_PROCESSES="16")
+                          CASE_MEMORY_MB="512", CASE_PROCESSES="16", CASE_TIMEOUT_SEC="30")
     assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, tmp_path / "out")
     assert outcomes(result) == {"test_leaves": "passed", "test_after": "passed"}, lost(result, tmp_path / "out")
     measured = found_by(tmp_path / "out", "attack.json")["measured"]
