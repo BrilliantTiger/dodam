@@ -1,5 +1,4 @@
-"""At the head d808ba7: the two honest cases of the attacks job ten times over in each of 20 jobs (keys
-"two-n"), and the whole attacks job once in each of 45 jobs (keys "whole-n").
+"""At the head adfa943: the whole attacks job once in each of 45 jobs (keys "whole-n").
 
     python repeat.py keys          every key
     python repeat.py ref KEY       the commit of the key
@@ -13,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-HEAD = "d808ba7d500a15653dedd4e5f5cb8c16d6be83ce"
+HEAD = "adfa943c7bf87bb9d1eded031e76005b822e23d6"
 TWO = ("tests/test_cli_isolation.py::test_the_case_after_one_that_made_many_mappings_passes_and_says_what_its_wait_saw",
        "tests/test_cli_isolation.py::test_the_reading_from_outside_shows_what_a_program_holds_and_nothing_the_kernel_can_give_back[1]")
 # the command of the job attacks in ci.yml at the head
@@ -26,7 +25,7 @@ def failed_in(said):
 
 def main(argv):
     if argv[0] == "keys":
-        keys = [f"two-{n}" for n in range(1, 21)] + [f"whole-{n}" for n in range(1, 46)]
+        keys = [f"whole-{n}" for n in range(1, 46)]
         print("keys=" + json.dumps(keys))
         return 0
     if argv[0] == "ref":
