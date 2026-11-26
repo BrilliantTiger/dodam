@@ -116,10 +116,11 @@ def waiting_to_be_written():
     return int(stat.get("file_dirty", 0)) + int(stat.get("file_writeback", 0))
 
 
-def reading():
+def reading(answer):
     # The judged container stands still while it is read. A program that reads a file again and
     # again would otherwise bring back, during the reading, the pages the kernel has just given
-    # back, and they would read as held although nothing keeps them.
+    # back, and they would read as held although nothing keeps them. The answer is written before
+    # the container goes on, so that the test waiting for it can go on with it at once.
     with open(f"{held}/cgroup.freeze", "w") as f:
         f.write("1")
     try:
@@ -128,7 +129,11 @@ def reading():
                 if "frozen 1" in f.read():
                     break
             time.sleep(0.001)
-        return standing_still()
+        # when the container stood still, on the clock every container of this machine shares
+        froze_at = time.monotonic()
+        with open(f"{asked}/answer.tmp", "w") as f:
+            json.dump({**standing_still(), "froze_at": froze_at}, f)
+        os.rename(f"{asked}/answer.tmp", answer)
     finally:
         with open(f"{held}/cgroup.freeze", "w") as f:
             f.write("0")
@@ -176,9 +181,7 @@ def standing_still():
 while True:
     for name in os.listdir(asked):
         if name.startswith("ask-") and not os.path.exists(f"{asked}/answer-{name[4:]}"):
-            with open(f"{asked}/answer.tmp", "w") as f:
-                json.dump(reading(), f)
-            os.rename(f"{asked}/answer.tmp", f"{asked}/answer-{name[4:]}")
+            reading(f"{asked}/answer-{name[4:]}")
     time.sleep(0.002)
 """
 
@@ -244,8 +247,12 @@ def attempt(name, args, files=None):
 """
 # the program's part of it
 HELD = r"""
+ASKED = []
+
+
 def held_until_read():
     os.unlink("holding-not-yet")
+    ASKED.append(True)
     for _ in range(12000):
         if not os.path.exists("not-read-yet"):
             return
@@ -1635,8 +1642,10 @@ def test_two():
         result["report"]["memory"])
 
 # A program that leaves much in the kernel's own part of the container when it ends: eight processes
-# each make 60,000 small mappings that cannot be merged, and end. What the kernel kept of them goes a
-# while after.
+# each make 60,000 small mappings that cannot be merged, one process at a time, and stand with them until
+# all 480,000 stand together; then they end, one at a time. What the kernel kept of them goes a while after.
+# One process maps or ends at a time, so the program never takes more than one of the container's two
+# processors, and the judge's readings beside it are never held back by the container's share of them.
 LEAVES_KERNEL = r"""
 if sys.argv[1:] == ["maps"]:
     libc = ctypes.CDLL(None, use_errno=True)
@@ -1644,13 +1653,24 @@ if sys.argv[1:] == ["maps"]:
     libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
     children = []
     for _ in range(8):
+        ready_r, ready_w = os.pipe()
+        go_r, go_w = os.pipe()
         pid = os.fork()
         if pid == 0:
+            os.close(ready_r)
+            os.close(go_w)
             for n in range(60000):
                 libc.mmap(None, 4096, n % 2, 0x22, -1, 0)
+            os.write(ready_w, b"x")
+            os.read(go_r, 1)        # stands with its mappings until it is let go
             os._exit(0)
-        children.append(pid)
-    for pid in children:
+        os.close(ready_w)
+        os.close(go_r)
+        assert os.read(ready_r, 1) == b"x"
+        os.close(ready_r)
+        children.append((pid, go_w))
+    for pid, go_w in children:
+        os.close(go_w)
         os.waitpid(pid, 0)
     print("mapped")
     sys.exit(0)
@@ -2347,18 +2367,42 @@ elif sys.argv[1] == "only reads":
         while f.read(MB):
             pass
 elif sys.argv[1] == "reads again and again":
-    import mmap, threading
+    import json, mmap, threading
     large = os.open("/app/large.bin", os.O_RDONLY)
     view = memoryview(mmap.mmap(large, 0, mmap.MAP_SHARED, mmap.PROT_READ))
+    stood = []
 
-    def again():
+    def again(first):
+        # Each thread rests a little after every 4 MB, so that the two never take all of the container's
+        # two processors and nothing but the container standing still holds them back for long, while
+        # each still reads the whole file in well under a tenth of a second. Once the program holds what it
+        # holds, a thread that stood still for more than 25 ms (the container is read standing still for at
+        # least 30) stops: it brings back nothing of what the kernel gave back, and says when it stood.
+        pieces = range(0, len(view), 65536)              # small pieces: the copy is no memory to speak of
+        last, n = time.monotonic(), 0
         while True:
-            for at in range(0, len(view), 65536):       # small pieces: the copy is no memory to speak of
+            for at in [*pieces[first:], *pieces[:first]]:
                 bytes(view[at:at + 65536])
+                n += 1
+                if n % 64 == 0:
+                    time.sleep(0.0005)
+                now = time.monotonic()
+                if ASKED and now - last > 0.025:
+                    stood.append((last, now))
+                    return
+                last = now
 
-    for _ in range(2):
-        threading.Thread(target=again, daemon=True).start()
+    # the two begin 100 MB apart
+    threads = [threading.Thread(target=again, args=(first,), daemon=True) for first in (0, 100 * MB // 65536)]
+    for thread in threads:
+        thread.start()
     time.sleep(0.5)
+    held_until_read()
+    for thread in threads:
+        thread.join(5)
+    print("stood still " + json.dumps(stood), file=sys.stderr)
+    print("done")
+    sys.exit(0)
 held_until_read()
 print("done")
 """
@@ -2377,7 +2421,13 @@ def test_only_reads():
 
 
 def test_reads_again_and_again():
-    assert attempt("reads again", ["reads again and again"]).out == "done\\n"
+    r = attempt("reads again", ["reads again and again"])
+    assert r.out == "done\\n"
+    # both threads read until the container stood still to be read: each stood still for more than 25 ms
+    # over the moment the reading from outside found it standing still
+    stood = json.loads(r.err.split("stood still ", 1)[1].splitlines()[0])
+    froze_at = json.load(open("/logs/verifier/attack.json"))["reads again"]["held"]["froze_at"]
+    assert len(stood) == 2 and all(t1 - t0 > 0.025 and t0 <= froze_at < t1 for t0, t1 in stood), (stood, froze_at, r.err)
 
 
 def test_the_judged_container_cannot_ask_the_kernel_itself():
