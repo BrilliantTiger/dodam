@@ -1670,7 +1670,8 @@ if sys.argv[1:] == ["maps"]:
         os.close(ready_r)
         children.append((pid, go_w))
     for pid, go_w in children:
-        os.close(go_w)
+        # a byte, not the end of the pipe: the children after it hold its writing end too
+        os.write(go_w, b"x")
         os.waitpid(pid, 0)
     print("mapped")
     sys.exit(0)
