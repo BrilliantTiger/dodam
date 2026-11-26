@@ -1,5 +1,5 @@
-# The two honest cases of the attacks job, ten times over in each job, at the mended head and at the head
-# before it, in turn. It lives on a branch of its own that is never merged. See repeats/repeat.py.
+# The two honest cases of the attacks job ten times over, and the whole attacks job, at the head d808ba7;
+# it lives on a branch of its own that is never merged. See repeats/repeat.py.
 name: repeats
 
 on:
@@ -30,7 +30,7 @@ jobs:
     needs: keys
     name: ${{ matrix.key }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -38,6 +38,7 @@ jobs:
         key: ${{ fromJSON(needs.keys.outputs.keys) }}
     env:
       KEY: ${{ matrix.key }}
+      DODAM_PILOT_VARIANTS: skip   # as the workflow ci sets it for every job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,5 +61,5 @@ jobs:
       - name: Build the Python language image
         working-directory: repo/bench/images
         run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
-      - name: Run the two tests ten times
-        run: python side/repeats/repeat.py run repo
+      - name: Run the tests of the key
+        run: python side/repeats/repeat.py run "$KEY" repo
