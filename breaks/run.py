@@ -36,15 +36,16 @@ NO_IMAGE = "not test_vet_in_the_language_image"
 PARTS = 8
 ALONE = ("test_a_figure_is_made_of_readings_that_belong_together",)
 LIMIT = 420
-PER_TEST = 150
+PER_TEST = 150   # the processes' own watch; each test has a limit of the same size of its own (pertest.py)
 OUTCOMES = (" PASSED", " FAILED", " ERROR", " SKIPPED", " XFAIL", " XPASS")
 
 
 def item_of(key: str) -> dict:
+    """The break of a key; a key "KEY~k/n" is the k-th of n shares of KEY's tests."""
     for line in (HERE / "breaks.jsonl").read_text(encoding="utf-8").splitlines():
         item = json.loads(line)
         if item["key"] == key:
-            return item
+            return {**item, "share": key.partition("~")[2] or None}
     raise SystemExit(f"no break with the key {key}")
 
 
@@ -84,6 +85,17 @@ def unfinished(part: list[str], said: str) -> str | None:
     return None
 
 
+def timed_out(group, files) -> set[str]:
+    """The tests that failed by their own time limit, as their processes wrote it."""
+    found = set()
+    for file in files:
+        said = file.read_text(errors="replace") if file.exists() else ""
+        for line in said.splitlines():
+            if line.startswith("FAILED ") and "DoesNotEnd" in line:
+                found.add(line.split(" ", 1)[1].split(" - ")[0])
+    return found
+
+
 def failures(said: str, code: int | None) -> list[str]:
     """The tests a process names as failed or in error: in its summary, as the job of the second lines reads
     them, or, for a process that was ended, on the line of each test as it finished."""
@@ -93,21 +105,24 @@ def failures(said: str, code: int | None) -> list[str]:
     return list(dict.fromkeys(named)) or ([f"a run that ended with exit code {code}"] if code not in (0, None) else [])
 
 
-def run_tests(repo: Path) -> dict:
+def run_tests(repo: Path, share: str | None = None) -> dict:
     # one test a line: a test's name may hold spaces
     nodes = [line for line in listed_file(repo).read_text(encoding="utf-8").splitlines() if line]
+    if share:
+        k, n = (int(v) for v in share.split("/"))
+        nodes = nodes[k - 1::n]
     alone = [node for node in nodes if any(name in node for name in ALONE)]
     rest = [node for node in nodes if node not in alone]
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(HERE)}
     outs = repo.parent / "outs"
     outs.mkdir(exist_ok=True)
     deadline = time.monotonic() + LIMIT
-    failed, codes = [], []
+    failed, codes, no_end = [], [], []
     collected = collection_errors = 0
     for g, group in enumerate(([rest[i::PARTS] for i in range(PARTS)], [alone])):
         group = [part for part in group if part]
         files = [outs / f"{g}-{i}.txt" for i in range(len(group))]
-        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-v", "-p", "no:cacheprovider", *part], cwd=repo / "bench",
+        runs = [subprocess.Popen([sys.executable, "-m", "pytest", "-v", "-p", "no:cacheprovider", "-p", "pertest", *part], cwd=repo / "bench",
                                  env=env, stdout=open(file, "w"), stderr=subprocess.STDOUT) for part, file in zip(group, files)]
         # a process whose output has not grown for PER_TEST seconds is in a test that does not end
         sizes, moved = [0] * len(runs), [time.monotonic()] * len(runs)
@@ -117,7 +132,7 @@ def run_tests(repo: Path) -> dict:
                 size = file.stat().st_size if file.exists() else 0
                 if size != sizes[k]:
                     sizes[k], moved[k] = size, time.monotonic()
-                elif run.poll() is None and time.monotonic() - moved[k] > PER_TEST:
+                elif run.poll() is None and time.monotonic() - moved[k] > PER_TEST + 60:
                     run.kill()
                     run.wait()
         hung = []
@@ -138,13 +153,17 @@ def run_tests(repo: Path) -> dict:
             failed += failures(said, run.returncode)
             if run.returncode != 0:
                 print(said[-6000:])
+        # a test ended by its own time limit is a test that does not end, not a failing test
+        no_end += [t for t in failed if t in timed_out(group, files)]
+        failed = [t for t in failed if t not in no_end]
         if hung:
-            # a test that failed in a process that ended comes first; the tests that did not end are named too
+            # a process was ended here: the tests after it in that process never ran
             return {"how": "a failing test" if failed else "a test that does not end", "tests": failed or hung,
-                    "did_not_end": hung, "codes": codes, "listed": len(nodes), "collected": collected,
-                    "collection_errors": collection_errors}
-    return {"how": "a failing test" if failed else None, "tests": failed, "codes": codes, "listed": len(nodes),
-            "collected": collected, "collection_errors": collection_errors}
+                    "did_not_end": hung + no_end, "process_ended": True, "codes": codes, "listed": len(nodes),
+                    "collected": collected, "collection_errors": collection_errors}
+    how = "a failing test" if failed else "a test that does not end" if no_end else None
+    return {"how": how, "tests": failed or no_end, "did_not_end": no_end, "process_ended": False, "codes": codes,
+            "listed": len(nodes), "collected": collected, "collection_errors": collection_errors}
 
 
 def main(argv: list[str]) -> int:
@@ -165,7 +184,7 @@ def main(argv: list[str]) -> int:
         make_break(item, repo)
         return 0
     started = time.monotonic()
-    record = run_tests(repo)
+    record = run_tests(repo, item.get("share"))
     record = {"key": item["key"], **record, "seconds": round(time.monotonic() - started, 1)}
     line = "RECORD " + json.dumps(record)
     print(line)
