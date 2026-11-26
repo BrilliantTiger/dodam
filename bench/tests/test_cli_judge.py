@@ -2681,6 +2681,18 @@ def notes_of(row: dict) -> list[dict]:
     return (earlier if row["path"][0].startswith("left undecided") else []) + own
 
 
+# The judge's reasons for a case not judged for measuring, written out here: the table expects these words,
+# and its test of completeness holds them equal to the judge's list both ways.
+WRITTEN_REASONS = {
+    "a reading could not decide": "not judged: the judge could not take a reading of the container's memory that says on "
+                                  "which side of a line it lies",
+    "the notes could not be read": "not judged: the notes of the memory of this file's cases could not be read",
+    "its note could not be written": "not judged: the note of this case's memory could not be written",
+    "fewer notes than cases opened": "not judged: the test has fewer notes of its cases' memory than cases of the program "
+                                     "it opened",
+}
+
+
 def expected_of(row: dict) -> tuple[str, str]:
     """The outcome and the reason the judge gives a case of this row; a fault of the judge where it gives none."""
     (go, end), which = row["path"], row["which"]
@@ -2703,13 +2715,13 @@ def expected_of(row: dict) -> tuple[str, str]:
         return "failed", OWN_MESSAGE["failed"]
     notes = notes_of(row)
     if row["unreadable"] != "read whole":
-        return judge_module.UNMEASURED, judge_module.NOTES_UNREADABLE
+        return "unmeasured", WRITTEN_REASONS["the notes could not be read"]
     if row["lost"]:
-        return judge_module.UNMEASURED, judge_module.NOTE_LOST
+        return "unmeasured", WRITTEN_REASONS["its note could not be written"]
     if row["separated"] and (row["opened"] is None or len(notes) < row["opened"]):
-        return judge_module.UNMEASURED, judge_module.NOTE_MISSING
+        return "unmeasured", WRITTEN_REASONS["fewer notes than cases opened"]
     if any(n["unsettled"] for n in notes):
-        return judge_module.UNMEASURED, judge_module.NOT_JUDGED_FOR_MEASURING
+        return "unmeasured", WRITTEN_REASONS["a reading could not decide"]
     return row["outcome"], OWN_MESSAGE[row["outcome"]]
 
 
@@ -2897,8 +2909,10 @@ def test_the_table_of_who_decided_a_case_has_every_way_a_runner_ends_and_every_r
     reason it gives a case not judged for measuring: a way or a reason the judge gains and the table
     lacks fails this test."""
     assert set(ENDINGS) == set(judge_module.RUNNER_ENDS), (set(ENDINGS) ^ set(judge_module.RUNNER_ENDS))
-    reasons = {expected_of(row)[1] for row in decided_rows()}
-    assert set(judge_module.UNMEASURED_REASONS) <= reasons, set(judge_module.UNMEASURED_REASONS) - reasons
+    reasons = {message for outcome, message in (expected_of(row) for row in decided_rows()) if outcome == "unmeasured"}
+    assert reasons == set(WRITTEN_REASONS.values()), reasons ^ set(WRITTEN_REASONS.values())
+    assert set(WRITTEN_REASONS.values()) == set(judge_module.UNMEASURED_REASONS), (
+        set(WRITTEN_REASONS.values()) ^ set(judge_module.UNMEASURED_REASONS))
     assert {end for _, end in PATHS if end} == set(judge_module.RUNNER_ENDS)
 
 

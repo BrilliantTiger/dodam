@@ -1152,18 +1152,37 @@ ROOM_BOUNDS = {"none": None, "a number": 300 * 2**20, "nought": 0, "a yes or a n
 ROOM_MESSAGES = {"passed": "", "failed": "the test's own failure", "skipped": "the feature it attacks does not work"}
 
 
+# The judge's reasons for a case not judged for measuring, and the errors the tool takes as a judging that
+# could not run, written out here: the table is built from these, never from the lists it checks, so a reason
+# or an error taken out of the code's list keeps its rows and fails them.
+WRITTEN_REASONS = (
+    "not judged: the judge could not take a reading of the container's memory that says on which side of a line it lies",
+    "not judged: the notes of the memory of this file's cases could not be read",
+    "not judged: the note of this case's memory could not be written",
+    "not judged: the test has fewer notes of its cases' memory than cases of the program it opened",
+)
+WRITTEN_COULD_NOT_RUN = {"SubprocessError": subprocess.SubprocessError, "OSError": OSError, "ValueError": ValueError}
+
+
+# The rooms some rows must give, written as numbers: for every reason, a case not judged for measuring that can
+# have held 300 MB beside one that passed at 100 MB leaves 212.0 MB of a limit of 512 MB, and one that worked
+# out no bound, beside nothing, leaves no room told.
+WRITTEN_ROOMS = {
+    **{("has an unmeasured case", reason, "unmeasured", "a number", "a case of 100 MB beside"): 212.0 for reason in WRITTEN_REASONS},
+    **{("has an unmeasured case", reason, "unmeasured", "none", "nothing beside"): None for reason in WRITTEN_REASONS},
+}
+
+
 def room_rows() -> list[tuple]:
     """(how the judging went, the reason of its unmeasured cases, one case's outcome, its bound, and whether
     another case that passed says 100 MB beside it)."""
-    from dodambench.judge import UNMEASURED_REASONS
-    from dodambench.vet import COULD_NOT_JUDGE
-    rows = [("could not run: " + kind.__name__, None, None, None) for kind in COULD_NOT_JUDGE]
+    rows = [("could not run: " + name, None, None, None) for name in WRITTEN_COULD_NOT_RUN]
     rows += [(ended, None, None, None) for ended in ("ended without a result", "the judge wrote a fault", "a result of another shape",
                                                       "the program's side left something")]
     for beside in ("a case of 100 MB beside", "nothing beside"):
         for outcome in ("passed", "failed", "not run"):
             rows += [("ran", None, outcome, bound, beside) for bound in ROOM_BOUNDS]
-        for reason in UNMEASURED_REASONS:
+        for reason in WRITTEN_REASONS:
             for outcome in ("passed", "failed", "unmeasured", "not run"):
                 rows += [("has an unmeasured case", reason, outcome, bound, beside) for bound in ROOM_BOUNDS]
     return [row + (None,) * (5 - len(row)) for row in rows]
@@ -1180,9 +1199,8 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
     bound that is a number among the cases that passed or were not judged for measuring; where the judging
     gave no result or no such bound, no room is told, never the whole limit."""
     from dodambench import vet as tool
-    from dodambench.judge import UNMEASURED_REASONS
     rows = room_rows()
-    assert len(rows) == 7 + 2 * (12 + 16 * len(UNMEASURED_REASONS)), len(rows)
+    assert len(rows) == 7 + 2 * (12 + 16 * 4), len(rows)
     wrong = []
     for n, (judging, reason, outcome, bound, beside) in enumerate(rows):
         leaves = tmp_path / f"leaves-{n}"
@@ -1192,7 +1210,7 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
             m.setenv("FAKE_EXIT", "0")
             expected = None
             if judging.startswith("could not run"):
-                kind = next(k for k in tool.COULD_NOT_JUDGE if judging.endswith(k.__name__))
+                kind = WRITTEN_COULD_NOT_RUN[judging.removeprefix("could not run: ")]
 
                 def cannot(*args, kind=kind, **kwargs):
                     raise kind("the container could not be made")
@@ -1235,18 +1253,23 @@ def test_the_room_a_judging_leaves_is_told_from_the_bounds_the_judge_worked_out(
                        if r["step"] == "build"]
         if not results or any(r.get("room_mb") != expected for r in results):
             wrong.append(((judging, reason, outcome, bound), [r.get("room_mb") for r in results], expected))
+        written = WRITTEN_ROOMS.get((judging, reason, outcome, bound, beside), "no number written")
+        if written != "no number written" and any(r.get("room_mb") != written for r in results):
+            wrong.append(((judging, reason, outcome, bound, beside), [r.get("room_mb") for r in results], written))
     assert not wrong, wrong
 
 
 def test_the_table_of_the_room_has_every_way_a_judging_ends_and_every_reason():
     """The table has a row for every kind of error the tool takes as a judging it could not run, and for
-    every reason the judge gives a case not judged for measuring: one the code gains and the table lacks
-    fails this test."""
+    every reason the judge gives a case not judged for measuring, both written out in this file: one the code
+    gains and the table lacks fails this test, and so does one the code loses and the table has."""
     from dodambench.judge import UNMEASURED_REASONS
     from dodambench.vet import COULD_NOT_JUDGE
     rows = room_rows()
-    assert {j for j, *_ in rows if j and j.startswith("could not run")} == {"could not run: " + k.__name__ for k in COULD_NOT_JUDGE}
-    assert {r for _, r, *_ in rows if r} == set(UNMEASURED_REASONS)
+    assert set(WRITTEN_COULD_NOT_RUN.values()) == set(COULD_NOT_JUDGE), (set(WRITTEN_COULD_NOT_RUN.values()) ^ set(COULD_NOT_JUDGE))
+    assert set(WRITTEN_REASONS) == set(UNMEASURED_REASONS), (set(WRITTEN_REASONS) ^ set(UNMEASURED_REASONS))
+    assert {j for j, *_ in rows if j and j.startswith("could not run")} == {"could not run: " + n for n in WRITTEN_COULD_NOT_RUN}
+    assert {r for _, r, *_ in rows if r} == set(WRITTEN_REASONS)
 
 
 def test_the_room_is_told_to_a_tenth_of_a_megabyte():
