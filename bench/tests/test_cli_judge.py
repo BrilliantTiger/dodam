@@ -1515,15 +1515,17 @@ def test_measured():
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
-SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 0.6\n"
+SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 1.5\n"
              "    while time.monotonic() < end:\n        print('x', flush=True)\n        time.sleep(0.0002)\n"
              # a patient program runs until the judge has read the container ENOUGH times since the case's
              # run before it ended, however busy the machine is, and no longer than 8 seconds
-             "elif sys.argv[1] == 'patient':\n    end = time.monotonic() + 8\n"
+             # a patient program behaves as the solution named after "patient-" (as the right one without a name)
+             "elif sys.argv[1].startswith('patient'):\n    end = time.monotonic() + 8\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    while not os.path.exists(f'enough-{run}') and time.monotonic() < end:\n        time.sleep(0.01)\n"
-             "else:\n    time.sleep(0.6)\nprint('wrong' if sys.argv[1] == 'broken' else 'fine')\n"
-             "if sys.argv[1] == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
+             "else:\n    time.sleep(0.6)\nkind = sys.argv[1].partition('patient-')[2] or sys.argv[1]\n"
+             "print('wrong' if kind == 'broken' else 'fine')\n"
+             "if kind == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
 CHECKS = {"ordinary": "assert r.out == 'fine\\n', r.out", "security": "assert 'leak' not in r.err, r.err",
           "chatty": "assert r.out.endswith('fine\\n'), r.out[-20:]",
@@ -1644,7 +1646,7 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     needs that many readings in a run does not depend on how busy the machine is. A case that is not
     separated runs as it does outside a container: with no confined side."""
     if patient:
-        solution = "patient"
+        solution = "patient" if solution == "right" else f"patient-{solution}"
     seen = tmp_path / "seen.json"
     # the way first, so that it may name the stand-in's own folder and figures as the rest does
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
@@ -1661,7 +1663,7 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     # each run of the solution sleeps 0.6 seconds: a case of several runs gets 2 seconds for each, so that
     # starting its runs on a busy machine does not end it for time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
-                           CASE_TIMEOUT_SEC=str((12 if patient else 2) * runs))
+                           CASE_TIMEOUT_SEC=str((12 if patient or solution == "chatty" else 2) * runs))
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
 
@@ -1755,7 +1757,7 @@ def test_what_the_test_decided_stands_and_only_a_case_that_would_pass_or_be_unju
     whatever kind of solution it judged, and every other judging as a record of what its tests decided."""
     from dodambench.vet import judgement_problems
     solution, test = kinds.split("-")
-    result, seen = judge_measured(tmp_path, WAYS["every try moved"], solution, test)
+    result, seen = judge_measured(tmp_path, WAYS["every try moved"], solution, test, patient=True)
     assert seen["limit"] is None, seen
     case = the_case(result)
     name = f"{FILES_OF[test]}::test_measured"
@@ -2024,12 +2026,13 @@ def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_dec
 
 
 def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
-    """A program that writes a line every fifth of a thousandth of a second for 0.6 seconds wakes the
-    judge at almost every line; the judge still measures at most once in 0.002 seconds, about 300 times
-    in such a run, not at every line."""
+    """A program that writes a line every fifth of a thousandth of a second for a second and a half wakes
+    the judge at almost every line; the judge still measures at most once in 0.002 seconds, about 750
+    times in such a run, not at every line. At least twenty measurements, one in 75 thousandths of a
+    second, hold on a busy machine as well."""
     result, seen = judge_measured(tmp_path, way(), solution="chatty", test="chatty")
     assert the_case(result)["outcome"] == "passed", the_case(result)
-    assert 20 <= seen["measurements"] <= 0.6 / 0.002 * 1.5 + 50, seen
+    assert 20 <= seen["measurements"] <= 1.5 / 0.002 * 1.5 + 50, seen
 
 
 def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
@@ -2192,7 +2195,7 @@ def test_a_case_whose_test_name_holds_spaces_keeps_its_notes(tmp_path):
     """The case runner names a case as pytest names its test, spaces and all, so that its note belongs
     to it: a case of a test whose name holds spaces, with a reading whose every try moved across its
     limit, is unmeasured."""
-    result, seen = judge_measured(tmp_path, WAYS["every try moved"], spaced=True)
+    result, seen = judge_measured(tmp_path, WAYS["every try moved"], spaced=True, patient=True)
     assert seen["limit"] is None, seen
     case = the_case(result)
     assert case["name"] == "test_measured[with spaces in it]" and case["outcome"] == judge_module.UNMEASURED, case
