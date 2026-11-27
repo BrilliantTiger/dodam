@@ -173,9 +173,9 @@ class Checker:
     def name_passes(self, name, address):
         """A name passes when it names no AI and does not match the private pattern; the login inside its own
         no-reply address is spared the private pattern only, because GitHub shows it in the address anyway."""
-        if AI_NAME_RE.search(normalise(name, words=True)):
+        if AI_NAME_RE.search(normalise(name, words=True)) or AI_NAME_RE.search(normalise(name)):
             return False
-        login = NO_REPLY_RE.match(address or "")
+        login = NO_REPLY_RE.match(address)
         return bool(login and name == login.group(2)) or not self.private_hit(name)
 
     def prose(self, who, text, where_line):
@@ -218,7 +218,7 @@ class Checker:
 
     def branch(self, who, name, where):
         self.place(who, name, where)
-        if BRANCH_TOOL_RE.search(normalise(name, words=True)):
+        if BRANCH_TOOL_RE.search(normalise(name)):
             self.add(who, "AI name", where)
 
     def added_line(self, who, file_number, line_number, line):
@@ -239,20 +239,20 @@ class Checker:
         while index < len(lines):
             line = lines[index]
             index += 1
-            if line.startswith("diff --git ") or line.startswith("diff --cc ") or line.startswith("diff --combined "):
+            if line.startswith("diff --git ") or line.startswith("diff --cc "):
                 file_number += 1
                 continue
             hunk = re.match(r"^(@@+) ((?:-\d+(?:,\d+)? )+)\+(\d+)(?:,(\d+))? @@+", line)
             if not hunk:
                 continue  # a header line of the file
             parents = len(hunk.group(1)) - 1
-            old = [int(part.split(",")[1]) if "," in part else 1 for part in hunk.group(2).split()]
-            new_start = int(hunk.group(3))
-            new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
-            if len(old) != parents:
+            if len(hunk.group(2).split()) != parents:
                 raise Problem("a difference cannot be read")
-            number = new_start
-            while new_left > 0 or any(count > 0 for count in old):
+            number = int(hunk.group(3))
+            new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
+            # The hunk ends after the lines of the result its header counts; a removed line after the last of them
+            # begins with "-" or " " and is no header.
+            while new_left > 0:
                 if index >= len(lines):
                     raise Problem("a difference cannot be read")
                 body = lines[index]
@@ -262,22 +262,16 @@ class Checker:
                 prefix, content = body[:parents], body[parents:]
                 if len(prefix) != parents or set(prefix) - {"+", "-", " "}:
                     raise Problem("a difference cannot be read")
-                if "-" not in prefix:
-                    new_left -= 1
-                    if set(prefix) == {"+"}:
-                        self.added_line(who, file_number, number, content)
-                    number += 1
-                # A removed line is in the parents marked "-"; a line of the result is in the parents marked " ".
-                in_parent = "-" if "-" in prefix else " "
-                for position, mark in enumerate(prefix):
-                    if mark == in_parent:
-                        old[position] -= 1
-                if new_left < 0 or any(count < 0 for count in old):
-                    raise Problem("a difference cannot be read")
+                if "-" in prefix:
+                    continue  # a removed line
+                new_left -= 1
+                if set(prefix) == {"+"}:
+                    self.added_line(who, file_number, number, content)
+                number += 1
 
 
 def parse_commit(raw):
-    header, separator, message = raw.partition("\n\n")
+    header, _, message = raw.partition("\n\n")
     people = {}
     for line in header.split("\n"):
         for role in ("author", "committer"):
@@ -288,8 +282,7 @@ def parse_commit(raw):
                 people[role] = (found.group(1), found.group(2))
     if set(people) != {"author", "committer"}:
         raise Problem("a commit has no author or no committer")
-    parents = [line.split()[1] for line in header.split("\n") if line.startswith("parent ")]
-    return people, message, parents
+    return people, message
 
 
 DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "-M"]
@@ -318,13 +311,12 @@ def check_paths(checker, who, fields):
 
 def check_commit(repo, sha, checker):
     who = f"commit {sha[:12]}"
-    people, message, parents = parse_commit(git(repo, "cat-file", "commit", sha))
+    people, message = parse_commit(git(repo, "cat-file", "commit", sha))
     by_github = people["committer"][1] == GITHUB_ADDRESS
-    github_signed = by_github and checker.verifier(sha)
     for role in ("author", "committer"):
         name, address = people[role]
         if role == "committer" and by_github:
-            if not github_signed:
+            if not checker.verifier(sha):
                 checker.add(who, "committer address", "GitHub's address without GitHub's verified signature")
             elif name != "GitHub":
                 checker.add(who, "committer name", "a commit GitHub signed carries the name GitHub")
@@ -334,12 +326,10 @@ def check_commit(repo, sha, checker):
         if not checker.name_passes(name, address):
             checker.add(who, f"{role} name", "neither the login of its address nor a plain name")
     checker.prose(who, message, lambda n: f"message line {n}")
-    if len(parents) > 1:
-        checker.patch(who, git(repo, "diff-tree", "--cc", "--format=", *DIFF_OPTIONS, sha))
-        fields = git(repo, "diff-tree", "-r", "-c", "--no-commit-id", "--name-status", "-z", "-M", sha)
-    else:
-        checker.patch(who, git(repo, "diff-tree", "-p", "--root", "--format=", *DIFF_OPTIONS, sha))
-        fields = git(repo, "diff-tree", "-r", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
+    # The combined forms: for a commit of one parent (and for the first commit) they give what the plain forms give;
+    # for a merge, only what it brings beyond all of its parents.
+    checker.patch(who, git(repo, "diff-tree", "--cc", "--root", "--format=", *DIFF_OPTIONS, sha))
+    fields = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
     check_paths(checker, who, fields.split("\0"))
 
 

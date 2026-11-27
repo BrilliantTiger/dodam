@@ -1059,5 +1059,417 @@ class ForkPathsTest(unittest.TestCase):
         self.assertNotIn(MARKER, out)
 
 
+def load(name):
+    """A module of the check, loaded in this process for tests that call it directly."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name.replace(".py", ""), HERE / name)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(HERE))
+    spec.loader.exec_module(module)
+    return module
+
+
+class RowsTest(RepoTestCase):
+    """One row for every part of every rule, written out, each in a line of its own of one description."""
+
+    def described(self, rows, pattern=None):
+        body = "\n".join(text for text, _ in rows)
+        event = self.dir / "rows.json"
+        event.write_text(json.dumps({"pull_request": {"number": 1, "title": "Plain", "body": body}}))
+        env = clean_env({"COMMIT_CHECK_PRIVATE_PATTERN": pattern} if pattern else None)
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--settings", str(self.settings()), "--context", "own",
+                               "--text-only", "--event", str(event)], capture_output=True, text=True, env=env,
+                              timeout=120, cwd=self.dir)
+        out = done.stdout + done.stderr
+        for number, (text, prop) in enumerate(rows, 1):
+            with self.subTest(text=text):
+                if prop is None:
+                    self.assertNotIn(f"(pull request description line {number})", out)
+                else:
+                    self.assertIn(f"pull request: {prop} (pull request description line {number})", out)
+
+    def test_every_tool_s_name_as_a_co_author(self):
+        names = ["Cl" "aude", "Anthrop" "ic", "Open" "AI", "Chat" "GPT", "GPT-4", "Co" "dex", "Gem" "ini", "Ba" "rd",
+                 "Co" "pilot", "Cur" "sor", "Dev" "in", "Anti" "gravity", "Ll" "ama", "Mis" "tral", "Deep" "Seek",
+                 "Gr" "ok", "Wind" "surf", "Ai" "der", "Cl" "ine", "Qw" "en", "Tab" "nine", "Code" "ium",
+                 "Code" "Whisperer", "Ju" "les", "Perple" "xity", "o" "1", "o" "3", "o4-mini", "helper-b" "ot"]
+        rows = [("Co-" "authored-" f"by: {name} <{OWN}>", "attribution line") for name in names]
+        self.described(rows + [("Co-" "authored-" f"by: A Person <{OWN}>", None)])
+
+    def test_every_word_of_attribution_as_a_key(self):
+        words = ["Author", "Authors", "Committer", "Agent", "Model", "Models", "Tool", "Tools", "Assistant", "Assistants",
+                 "Bot", "Bots", "AI", "LLM", "Generator", "Generated", "Assisted", "Credit", "Credits", "Via", "Coauthor",
+                 "Coauthors"]
+        self.described([(f"{word}: something", "attribution line") for word in words]
+                       + [("Contact: a" "@" "b.example", "attribution line"), ("Note: something", None)])
+
+    def test_every_way_of_saying_how_a_text_was_made(self):
+        rows = [("Co-auth" "ored with " + C, "attribution line"), ("Coauth" "ored by " + C, "attribution line"),
+                ("Assi" "sted by " + C, "attribution line"), ("Auth" "ored by " + C, "attribution line"),
+                ("Writ" "ten with " + C, "attribution line"), ("Draf" "ted with " + C, "attribution line"),
+                ("Produ" "ced using " + C, "attribution line"), ("Gener" "ated via " + C, "attribution line"),
+                ("Gener" "ated through " + C, "attribution line"), ("Gener" "ated by " + C, "attribution line"),
+                ("\N{ROBOT FACE} done", "attribution line"), ("Change id: I0123", "attribution line"),
+                ("Co-" "authored-" "by: A Person", "attribution line"), ("Written for the owner's eyes", None)]
+        self.described(rows)
+
+    def test_every_id_of_the_sessions_tooling(self):
+        rows = [("te" "rm_0123abcd", "tooling id"), ("ta" "sk_0123abcd", "tooling id"), ("c" "tx_0123abcd", "tooling id"),
+                ("dis" "patch_0123abcd", "tooling id"), ("ms" "g_0123abcd", "tooling id"), ("w" "f_0123abcd", "tooling id"),
+                ("conver" "sation://x", "tooling id"), ("terms_and_conditions", None)]
+        self.described(rows)
+
+    def test_every_part_of_a_path_of_the_sessions_computer(self):
+        rows = [("/Us" "ers/x/y", "local path"), (".cla" "ude/plans/x.md", "local path"), (".gem" "ini/x/y", "local path"),
+                ("or" "ca/work" "spaces/x", "local path"), ("or" "ca/proj" "ects/x", "local path"),
+                ("cla" "ude-501/x", "local path"), ("/va" "r/folders/ab/x", "local path"),
+                ("-us" "ers-x-or" "ca-", "local path"), ("/Users/Shared/x", None)]
+        self.described(rows)
+
+    def test_every_form_of_a_dash_and_a_space_is_brought_to_one_form(self):
+        rows = [(T + "\t12", "tracker code"), (T + " 12", "tracker code"), (T + "−12", "tracker code"),
+                (T + "⁃12", "tracker code"), (T + "–12", "tracker code")]
+        self.described(rows)
+
+    def test_the_private_pattern_is_matched_on_the_text_as_written_too(self):
+        self.described([("Thanks to Zorb" "latt", "private pattern"), ("thanks to zorb" "latt", None)],
+                       pattern="Zorb" "latt")
+
+    def test_a_tool_s_name_after_generated_with_in_an_added_line(self):
+        sha = self.repo.commit("A change", files={"a.md": "co-auth" "ored by " + C + "\ngener" "ated with Gem" "ini\n"
+                                                         "written by a person\n"})
+        code, out = self.run_check(self.base)
+        self.assert_fails((code, out), sha, "attribution line (file 1, line 1)")
+        self.assert_fails((code, out), sha, "attribution line (file 1, line 2)")
+        self.assertNotIn("(file 1, line 3)", out)
+
+
+class EdgeTest(RepoTestCase):
+    """What the check refuses when its input is not as git, GitHub or a workflow gives it."""
+
+    def call(self, *args, env=None):
+        done = subprocess.run([sys.executable, "-I", str(CHECK), *args], capture_output=True, text=True,
+                              env=clean_env(env), timeout=120, cwd=self.dir)
+        return done.returncode, done.stdout + done.stderr
+
+    def basic(self, *more):
+        return ["--repo", str(self.repo.root), "--settings", str(self.settings()), "--context", "own",
+                "--from", self.base, "--head", "HEAD", "--compare-settings", self.base, *more]
+
+    def crafted(self, header_lines):
+        """A commit object written by hand, which git itself would not make."""
+        tree = self.repo.git("rev-parse", "HEAD^{tree}")
+        text = "\n".join([f"tree {tree}", f"parent {self.base}", *header_lines, "", "A message", ""])
+        path = self.dir / "object.txt"
+        path.write_text(text)
+        return self.repo.git("hash-object", "-t", "commit", "-w", "--literally", str(path))
+
+    def test_a_commit_without_an_author_or_with_two_or_with_one_that_cannot_be_read_is_refused(self):
+        stamp = "1700000000 +0000"
+        cases = [([f"committer {OWN_LOGIN} <{OWN}> {stamp}"], "a commit has no author or no committer"),
+                 ([f"author {OWN_LOGIN} {OWN} {stamp}", f"committer {OWN_LOGIN} <{OWN}> {stamp}"],
+                  "the author line of a commit cannot be read"),
+                 ([f"author {OWN_LOGIN} <{OWN}> {stamp}", f"author {OWN_LOGIN} <{OWN}> {stamp}",
+                   f"committer {OWN_LOGIN} <{OWN}> {stamp}"], "the author line of a commit cannot be read")]
+        for lines, message in cases:
+            with self.subTest(message=message):
+                sha = self.crafted(lines)
+                code, out = self.call("--repo", str(self.repo.root), "--settings", str(self.settings()), "--context",
+                                      "own", "--from", self.base, "--head", sha, "--compare-settings", self.base)
+                self.assertEqual(code, 1, out)
+                self.assertIn(message, out)
+
+    def test_a_difference_that_does_not_keep_its_own_lengths_is_refused(self):
+        check = load("check.py")
+        for patch in ("diff --git a/x b/x\n@@ -1 -1 +1 @@\n+a\n", "diff --git a/x b/x\n@@ -0,0 +1,2 @@\n+a\n",
+                      "diff --git a/x b/x\n@@ -0,0 +1,1 @@\nXa\n", "diff --cc x\n@@@ -1,1 -1,1 +1,1 @@@\n*+a\n"):
+            with self.subTest(patch=patch):
+                with self.assertRaises(check.Problem):
+                    check.Checker(None, lambda sha: False).patch("x", patch)
+
+    def test_a_list_of_paths_that_does_not_keep_its_shape_is_refused(self):
+        check = load("check.py")
+        for fields in (["R100", "a"], ["M"], ["A"]):
+            with self.subTest(fields=fields):
+                with self.assertRaises(check.Problem):
+                    check.check_paths(check.Checker(None, lambda sha: False), "x", fields)
+
+    def test_git_s_variables_of_the_calling_process_do_not_steer_the_check(self):
+        self.repo.commit("A change")
+        code, out = self.call(*self.basic("--verified-shas", os.devnull),
+                              env={"GIT_DIR": str(self.dir / "elsewhere"), "GIT_WORK_TREE": str(self.dir),
+                                   "GIT_OBJECT_DIRECTORY": str(self.dir / "nowhere")})
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 commits checked", out)
+
+    def test_settings_of_every_wrong_kind_are_refused_by_name(self):
+        good = {"exempt_through": self.base, "private_pattern_expected": False, "fork_way_open": False,
+                "outside_runs_held_since": None}
+        for change in ({"exempt_through": 123}, {"fork_way_open": "no"}, {"outside_runs_held_since": 5},
+                       {"outside_runs_held_since": "yesterday"}, {"private_pattern_expected": None}):
+            with self.subTest(change=change):
+                path = self.dir / "wrong.json"
+                path.write_text(json.dumps({**good, **change}))
+                code, out = self.call("--repo", str(self.repo.root), "--settings", str(path), "--context", "own",
+                                      "--from", self.base, "--head", "HEAD", "--compare-settings", self.base)
+                self.assertEqual(code, 1, out)
+                self.assertIn("::error::settings.json does not hold", out)
+
+    def test_settings_on_the_range_s_start_that_cannot_be_read_are_refused(self):
+        for text in ("not json", "[]"):
+            with self.subTest(text=text):
+                path = self.repo.root / ".github" / "commit-check" / "settings.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                self.repo.git("add", "-f", "--", str(path))
+                start = self.repo.commit("Odd settings", files={})
+                self.repo.commit("A change")
+                code, out = self.call("--repo", str(self.repo.root), "--settings", str(self.settings()), "--context",
+                                      "own", "--from", start, "--head", "HEAD", "--compare-settings", start,
+                                      "--verified-shas", os.devnull)
+                self.assertEqual(code, 1, out)
+                self.assertIn("settings: the settings on the range's start cannot be read", out)
+
+    def test_settings_that_stay_as_they_were_pass_whichever_they_are(self):
+        for expected in (False, True):
+            with self.subTest(expected=expected):
+                path = self.repo.root / ".github" / "commit-check" / "settings.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                value = {"exempt_through": self.base, "private_pattern_expected": expected, "fork_way_open": False,
+                         "outside_runs_held_since": None}
+                path.write_text(json.dumps(value))
+                self.repo.git("add", "-f", "--", str(path))
+                start = self.repo.commit("Settings", files={})
+                self.repo.commit("A change")
+                local = self.dir / "same.json"
+                local.write_text(json.dumps(value))
+                code, out = self.call("--repo", str(self.repo.root), "--settings", str(local), "--context", "own",
+                                      "--from", start, "--head", "HEAD", "--compare-settings", start,
+                                      "--verified-shas", os.devnull,
+                                      env={"COMMIT_CHECK_PRIVATE_PATTERN": PRIVATE_PATTERN})
+                self.assertEqual(code, 0, out)
+
+    def test_an_event_that_cannot_be_read_is_refused_by_name(self):
+        self.repo.commit("A change")
+        cases = [(None, "the event cannot be read"), ("not json", "the event cannot be read"),
+                 (json.dumps({"issue": {}}), "the event names no pull request"),
+                 (json.dumps({"pull_request": {"title": "x", "head": {"ref": 5}}}), "the event's pull request cannot be read")]
+        for text, message in cases:
+            with self.subTest(message=message):
+                path = self.dir / "event-case.json"
+                if path.exists():
+                    path.unlink()
+                if text is not None:
+                    path.write_text(text)
+                code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
+                self.assertEqual(code, 1, out)
+                self.assertIn(message, out)
+
+    def test_a_pull_request_without_a_description_passes(self):
+        self.repo.commit("A change")
+        path = self.dir / "event-none.json"
+        path.write_text(json.dumps({"pull_request": {"number": 7, "title": "Fix the notes", "body": None,
+                                                     "head": {"ref": "notes"}}}))
+        code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
+        self.assertEqual(code, 0, out)
+
+    def test_the_count_of_problems_is_printed(self):
+        self.repo.commit(f"One ({TRACKER_CODE})")
+        self.repo.commit("Two", author=("someone", PERSONAL), committer=("someone", PERSONAL))
+        code, out = self.call(*self.basic("--verified-shas", os.devnull))
+        self.assertEqual(code, 1, out)
+        self.assertIn("\n3 problems\n", out)
+
+    def test_a_wrong_call_prints_a_fixed_message(self):
+        code, out = self.call("--settings", str(self.settings()), "--context", "fork")
+        self.assertEqual(code, 2, out)
+        self.assertIn("::error::the check was not called as its workflows call it", out)
+
+    def test_something_the_check_does_not_know_stops_it_with_a_fixed_message(self):
+        check = load("check.py")
+
+        def odd(args):
+            raise RuntimeError("made up " + MARKER)
+
+        import contextlib
+        import io
+        printed = io.StringIO()
+        real = check.run
+        check.run = odd
+        try:
+            with contextlib.redirect_stdout(printed):
+                code = check.main(["--settings", "x", "--context", "own"])
+        finally:
+            check.run = real
+        self.assertEqual(code, 1)
+        self.assertIn("::error::the check stopped on something it does not know", printed.getvalue())
+        self.assertNotIn(MARKER, printed.getvalue())
+
+    def test_a_list_of_signed_commits_that_cannot_be_read_is_refused(self):
+        code, out = self.call(*self.basic("--verified-shas", str(self.dir)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("the list of signed commits cannot be read", out)
+
+    def test_the_text_check_needs_an_event(self):
+        code, out = self.call("--settings", str(self.settings()), "--context", "own", "--text-only")
+        self.assertEqual(code, 1, out)
+        self.assertIn("--text-only needs --event", out)
+
+    def test_a_check_of_commits_needs_its_start_and_its_head(self):
+        for drop in ("--from", "--head"):
+            with self.subTest(drop=drop):
+                args = self.basic()
+                index = args.index(drop)
+                del args[index:index + 2]
+                code, out = self.call(*args)
+                self.assertEqual(code, 1, out)
+                self.assertIn("the check needs --from, --head and --compare-settings", out)
+
+    def test_the_way_for_forks_is_asked_about_only_on_main_s_push(self):
+        self.repo.commit("A change")
+        fake = self.fake({})
+        code, out = self.run_check(self.base, open_way=True, held=None, env_extra=fake.env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.asked, [])
+
+    def test_a_push_of_a_branch_with_no_new_commit_passes(self):
+        code, out = self.run_check(self.base, self.base)
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 commits checked", out)
+
+
+class ApiTest(unittest.TestCase):
+    """How the check asks GitHub: with the token when there is one, again after a failed answer, not again after an
+    answer that says no."""
+
+    def ask(self, answers, token="made-up"):
+        check = load("check.py")
+        fake = FakeGitHub({})
+        self.addCleanup(fake.close)
+        sequence = list(answers)
+        headers = []
+
+        class Handler(fake.server.RequestHandlerClass):
+            def do_GET(self):
+                headers.append(self.headers.get("Authorization"))
+                answer = sequence.pop(0) if len(sequence) > 1 else sequence[0]
+                if isinstance(answer, int):
+                    self.send_error(answer)
+                    return
+                body = json.dumps(answer).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        fake.server.RequestHandlerClass = Handler
+        saved = {key: os.environ.get(key) for key in fake.env}
+        os.environ.update({**fake.env, "GITHUB_TOKEN": token})
+        try:
+            return check.api_get("x"), headers
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_the_token_is_sent_when_there_is_one_and_not_otherwise(self):
+        self.assertEqual(self.ask([{"a": 1}])[1], ["Bearer made-up"])
+        self.assertEqual(self.ask([{"a": 1}], token="")[1], [None])
+
+    def test_an_answer_that_says_no_is_not_asked_again(self):
+        for code in (403, 404):
+            with self.subTest(code=code):
+                answer, asked = self.ask([code])
+                self.assertIsNone(answer)
+                self.assertEqual(len(asked), 1)
+
+    def test_a_failed_answer_is_asked_again(self):
+        for code in (500, 502, 429):
+            with self.subTest(code=code):
+                answer, asked = self.ask([code, {"a": 1}])
+                self.assertEqual(answer, {"a": 1})
+                self.assertEqual(len(asked), 2)
+
+    def test_an_environment_is_believed_to_wait_only_for_a_named_reviewer(self):
+        check = load("check.py")
+        cases = [({"protection_rules": ["x"]}, False),
+                 ({"protection_rules": [{"type": "required_reviewers", "reviewers": "someone"}]}, False),
+                 ({"protection_rules": [{"type": "branch_policy", "reviewers": [{"type": "User"}]}]}, False),
+                 ({"protection_rules": "x"}, False), (REVIEWED, True)]
+        for answer, expected in cases:
+            with self.subTest(answer=answer):
+                real = check.api_get
+                check.api_get = lambda path: answer
+                try:
+                    self.assertEqual(check.environment_waits_for_a_named_reviewer(), expected)
+                finally:
+                    check.api_get = real
+
+
+class ForkPathsEdgeTest(ForkPathsTest):
+    """The check of a fork's paths refuses what it cannot read completely, and says so."""
+
+    def test_a_wrong_call_is_refused(self):
+        for args in (["--number", "x", "--base-sha", "a" * 40], ["--number", "7", "--base-sha", "z"], ["--number", "7"]):
+            with self.subTest(args=args):
+                done = subprocess.run([sys.executable, "-I", str(FORK_PATHS), *args], capture_output=True, text=True,
+                                      env=clean_env(), timeout=120)
+                self.assertEqual(done.returncode, 2, done.stdout)
+                self.assertIn("::error::the check of a fork's paths was not called as its workflow calls it", done.stdout)
+
+    def test_a_listing_or_a_page_that_cannot_be_read_is_refused_by_name(self):
+        for answers in ({"/repos/made-up/repo/contents/bench/tests?ref=main": 404},
+                        {"/repos/made-up/repo/pulls/7/files?per_page=100&page=1": 500},
+                        {"/repos/made-up/repo/contents/bench/tasks?ref=main": 404}):
+            with self.subTest(answers=answers):
+                code, out = self.run_paths([self.entry("README.md")], extra_answers=answers)
+                self.assertEqual(code, 1, out)
+                self.assertIn("could not be read completely", out)
+
+    def test_a_pull_request_that_touches_no_closed_path_is_told_so(self):
+        code, out = self.run_paths([self.entry("README.md")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("touches no path that the working rules close", out)
+
+    def test_every_page_of_the_list_of_paths_is_read(self):
+        first = [self.entry(f"docs/n{index:03}.md") for index in range(100)]
+        pull = {"number": 7, "changed_files": 101, "draft": False, "base": {"ref": "main"}}
+        code, out = self.run_paths(first, pull=pull, extra_answers={
+            "/repos/made-up/repo/pulls/7/files?per_page=100&page=2": [self.entry(".github/x.yml")]})
+        self.assertEqual(code, 1, out)
+        self.assertIn(".github/", out)
+
+    def test_a_new_task_folder_is_known_by_the_folders_of_the_listing_only(self):
+        added = [self.entry("bench/tasks/brand-new-task/task.toml", "added")]
+        listing = [{"name": "brand-new-task", "type": "file"}, "junk"]
+        code, out = self.run_paths(added, tasks=listing)
+        self.assertEqual(code, 0, out)
+        full = [{"name": "brand-new-task", "type": "file"}] + [{"name": f"t{index}", "type": "dir"} for index in range(999)]
+        code, out = self.run_paths(added, tasks=full)
+        self.assertEqual(code, 1, out)
+
+    def test_something_it_does_not_know_stops_it_with_a_fixed_message(self):
+        paths = load("fork_paths.py")
+        real = paths.judge
+
+        def odd(number, base):
+            raise RuntimeError("made up " + MARKER)
+
+        import contextlib
+        import io
+        printed = io.StringIO()
+        paths.judge = odd
+        try:
+            with contextlib.redirect_stdout(printed):
+                code = paths.main(["--number", "7", "--base-sha", "a" * 40])
+        finally:
+            paths.judge = real
+        self.assertEqual(code, 1)
+        self.assertIn("::error::the check of a fork's paths stopped on something it does not know", printed.getvalue())
+        self.assertNotIn(MARKER, printed.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
