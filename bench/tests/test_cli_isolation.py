@@ -3293,9 +3293,11 @@ elif what.startswith("deletes the test's files"):
         if name.startswith("given-"):
             os.unlink(name)
     if "waits" in what:
-        # the judge must measure once while the files are gone and before the memory is taken; a program in a
-        # real container cannot be told of the judge's look, so the wait leaves room for it: three seconds for a
-        # look the judge takes every 0.002 seconds, two of them to spare after a start held up 0.64 seconds
+        # the judge must measure once while the files are gone and before the memory is taken. A program in a
+        # real container cannot be told of the judge's look: reading the container's own memory files leaves no
+        # trace in them, and what the case runner does is not readable by the program's user. So the wait leaves
+        # room for the look: three seconds for a look the judge takes every 0.002 seconds, two of them to spare
+        # after a start held up 0.64 seconds
         time.sleep(3.0)
     block = bytearray(b"x") * ((limit_mb + 2) * MB)
 touch(block)
