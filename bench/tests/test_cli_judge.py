@@ -1131,7 +1131,8 @@ def test_the_figures():
     assert second == 30 * MB, f"what the first run left was taken for the second run's start: {second}"
     assert third == 40 * MB, f"a fall below the start made room: {third}"
 '''}
-    result = judge_program(tmp_path, "import time\ntime.sleep(0.3)\nprint('fine')\n", tests)
+    # three runs of 0.3 seconds each in one case: the case's time is not what this test is about, so it is ample
+    result = judge_program(tmp_path, "import time\ntime.sleep(0.3)\nprint('fine')\n", tests, CASE_TIMEOUT_SEC="10")
     assert outcomes(result) == {"test_the_figures": "passed"}, message(result, "test_the_figures")
 
 
@@ -3613,17 +3614,29 @@ def test_walking_and_removing_what_the_program_left_share_one_time_in_a_step(tmp
     much = judge_module.TooMuchLeft
     first, second = many_files(tmp_path / "first", 20), many_files(tmp_path / "second", 40)
     third = many_files(tmp_path / "third", 5)
-    unlink = os.unlink
+    unlink, real = os.unlink, judge_module.time
+
+    class Ahead:
+        """The judge's clock, which each removal of a file moves on by 0.2 seconds instead of taking them."""
+        seconds = 0.0
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def monotonic(self):
+            return real.monotonic() + self.seconds
+    ahead = Ahead()
 
     def slow(*args, **kwargs):
-        time.sleep(0.02)
+        ahead.seconds += 0.2
         return unlink(*args, **kwargs)
-    monkeypatch.setattr(clock, "left", 1.0)
+    monkeypatch.setattr(clock, "left", 10.0)
+    monkeypatch.setattr(judge_module, "time", ahead)
     monkeypatch.setattr(judge_module.os, "unlink", slow)
-    judge_module.remove_tree(first)                 # about 0.4 of the 1.0 seconds
+    judge_module.remove_tree(first)                 # 4 of the 10 seconds
     assert not first.exists()
     with pytest.raises(much, match="seconds"):
-        judge_module.remove_tree(second)            # needs about 0.8 seconds; about 0.6 are left
+        judge_module.remove_tree(second)            # needs 8 seconds, 6 are left; alone it would have had 10
     with pytest.raises(much, match="seconds"):
         judge_module.walk_tree(third, lambda folder, name, info: None)
 
@@ -3708,10 +3721,28 @@ def test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result(
 
 # a program that leaves twenty files in its working folder
 LEAVES_IN_ITS_FOLDER = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('ok')\n"
-# a file of tests in whose case runner every file is removed slowly, about 0.6 seconds for what that program leaves
+# a file of tests in whose case runner every file is removed slowly, really: the time it takes is the time this test
+# is about
 SLOW_REMOVAL = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
                 "def _slowly(*args, **kwargs):\n    time.sleep(0.03)\n    return _unlink(*args, **kwargs)\n\n\n"
                 "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+
+
+def removal_moves_the_clock(seconds: float) -> str:
+    """Test code for a case runner in which every file the judge removes moves the judge's clock on by `seconds`
+    instead of taking them. How much of the step's time for walking and removing a removal uses is then that,
+    however busy the machine is; only the few milliseconds of real work come on top. The notes the runner leaves
+    the judge keep the real time at which a removal began, so that the judge, which reads them on its own clock
+    while the runner removes, never sees a removal that began later than now."""
+    return ("import dodam_cli\n_judge = dodam_cli._judge\n_unlink, _real, _note = _judge.os.unlink, _judge.time, "
+            "_judge._note_progress\n\n\n"
+            "class _Ahead:\n    seconds = 0.0\n\n    def __getattr__(self, name):\n        return getattr(_real, name)\n\n"
+            "    def monotonic(self):\n        return _real.monotonic() + self.seconds\n\n\n"
+            "_clock = _Ahead()\n\n\n"
+            f"def _slowly(*args, **kwargs):\n    _clock.seconds += {seconds!r}\n    return _unlink(*args, **kwargs)\n\n\n"
+            "def _noted(record):\n    if 'at' in record:\n        record = {**record, 'at': record['at'] - _clock.seconds}\n"
+            "    return _note(record)\n\n\n"
+            "_judge.time, _judge.os.unlink, _judge._note_progress = _clock, _slowly, _noted\n\n\n")
 
 
 def said_of(result: dict) -> dict[str, tuple[str, str]]:
@@ -3736,11 +3767,13 @@ def test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_remo
 
 def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatch):
     """Each case runner is given what is left of the step's time for walking and removing, and what it
-    used is taken back. Here the step gives one second, and removing what one case left takes about
-    0.6 of it: the case of the first file passes, and the case of the second finds too little left."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
-    tests = {"functional/test_a.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
-             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
+    used is taken back. Here the step gives six seconds, and removing what one case left takes four of
+    them, on the judge's clock: the case of the first file passes with two to spare, and the case of the
+    second finds two left where it needs four. A judge that took nothing back would give it six."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 6, raising=False)
+    slow = removal_moves_the_clock(0.2)
+    tests = {"functional/test_a.py": slow + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
+             "functional/test_b.py": slow + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
     said = said_of(result)
     assert said["test_in_the_first_file"] == ("passed", ""), said
@@ -3749,12 +3782,13 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
 
 def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_the_steps_time(tmp_path, monkeypatch):
     """A case runner notes what is left of the step's time for walking and removing after every
-    removal as well as before it. Here the step gives one second; the first file's runner removes
-    little and then waits more than a second; the second file's case needs about 0.6 seconds."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
-    waits = "def test_waits_after_it():\n    time.sleep(1.2)\n"
+    removal as well as before it. Here the step gives three seconds; the first file's runner removes
+    little and then waits four and a half, longer than the whole time; the second file's case needs one
+    second of it, on the judge's clock. A judge that counted the wait would leave it nothing."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 3, raising=False)
+    waits = "def test_waits_after_it():\n    time.sleep(4.5)\n"
     tests = {"functional/test_a.py": RUNS_OK.replace("test_ok", "test_removes_little") + "\n\n" + waits,
-             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_needs_some")}
+             "functional/test_b.py": removal_moves_the_clock(0.05) + RUNS_OK.replace("test_ok", "test_needs_some")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
     said = said_of(result)
     assert said["test_removes_little"] == ("passed", "") and said["test_waits_after_it"] == ("passed", ""), said
@@ -3764,16 +3798,17 @@ def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_
 def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
     """What a case runner spends removing what the program left is drawn from the step's time for
     walking and removing, not from the time of its file of tests, also for the runner started after
-    it. Here the file has six seconds, removing what its first case left takes about ten, and the
-    runner is ended after it, so a second runner judges the last case."""
+    it. Here the file has twelve seconds, removing what its first case left takes twenty, really, and
+    the runner is ended after it, so a second runner judges the last case. A judge that drew the removal
+    from the file's time would end the runner eight seconds before the removal is done."""
     monkeypatch.setattr(judge_module, "FILE_SECONDS", 0.5, raising=False)
     monkeypatch.setattr(judge_module, "CASE_SECONDS", 0, raising=False)
     program = ("import sys\nif sys.argv[1:] == ['leave']:\n    for n in range(100):\n"
                "        open(f'left-{n}', 'w').close()\nprint('ok')\n")
-    slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.1)")
+    slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.2)")
     tests = slow + ("def test_leaves():\n    with case() as c:\n        assert c.run(['leave']).out == 'ok\\n'\n\n\n"
                     "def test_ends_its_runner():\n    os.kill(os.getpid(), 9)\n\n\n") + RUNS_OK
-    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": tests}, CASE_TIMEOUT_SEC="1")
+    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": tests}, CASE_TIMEOUT_SEC="3")
     assert code == 0 and (out / "reward.json").is_file(), capsys.readouterr()
     report = json.loads((out / "details.json").read_text())
     assert [(t["name"], t["outcome"]) for t in report["tests"]] == [

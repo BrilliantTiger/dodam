@@ -1289,9 +1289,18 @@ def test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read
 
 # The step's one time for walking and removing, with separation: the judge gives three seconds, and the
 # case runner removes each file slowly, about two seconds for what the program leaves in one case.
-SLOW_IN_THE_RUNNER = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
-                      "def _slowly(*args, **kwargs):\n    time.sleep(0.1)\n    return _unlink(*args, **kwargs)\n\n\n"
-                      "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+# Every file the judge removes in the case runner moves the judge's clock on by two seconds instead of taking them,
+# so that what a removal uses of the step's time does not depend on how busy the machine is; the notes the runner
+# leaves the judge keep the real time at which a removal began.
+SLOW_IN_THE_RUNNER = ("import dodam_cli\n_judge = dodam_cli._judge\n_unlink, _real, _note = _judge.os.unlink, _judge.time, "
+                      "_judge._note_progress\n\n\n"
+                      "class _Ahead:\n    seconds = 0.0\n\n    def __getattr__(self, name):\n        return getattr(_real, name)\n\n"
+                      "    def monotonic(self):\n        return _real.monotonic() + self.seconds\n\n\n"
+                      "_clock = _Ahead()\n\n\n"
+                      "def _slowly(*args, **kwargs):\n    _clock.seconds += 2.0\n    return _unlink(*args, **kwargs)\n\n\n"
+                      "def _noted(record):\n    if 'at' in record:\n        record = {**record, 'at': record['at'] - _clock.seconds}\n"
+                      "    return _note(record)\n\n\n"
+                      "_judge.time, _judge.os.unlink, _judge._note_progress = _clock, _slowly, _noted\n\n\n")
 LEAVES_TWENTY = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('plain')\n"
 ONE_CASE = "def test_NAME():\n    with case() as c:\n        assert c.run([]).out == 'plain\\n'\n"
 
@@ -1300,7 +1309,8 @@ def test_with_separation_the_case_runners_remove_on_the_steps_one_time(tmp_path)
     result = judge_attack(tmp_path, LEAVES_TWENTY, {
         "functional/test_a.py": SLOW_IN_THE_RUNNER + ONE_CASE.replace("NAME", "first") + "\n\n" + ONE_CASE.replace("NAME", "second"),
         "functional/test_b.py": ONE_CASE.replace("NAME", "later")},
-        room={"changed": (("dodam_judge.py", "TREE_SECONDS = 120 ", "TREE_SECONDS = 3 "),)})
+        # the step gives sixty seconds; removing what one case left takes forty of them on the judge's clock
+        room={"changed": (("dodam_judge.py", "TREE_SECONDS = 120 ", "TREE_SECONDS = 60 "),)})
     out = tmp_path / "out"
     assert result["exit_code"] == 0 and result["fault"] is None and result["reward"] is not None, lost(result, out)
     said = {t["name"]: (t["outcome"], t["message"]) for t in result["report"]["tests"]}
