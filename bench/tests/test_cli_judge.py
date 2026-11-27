@@ -3212,8 +3212,13 @@ def number(name):
     helper = subprocess.Popen([sys.executable, str(tmp_path / "helper.py")], cwd=tmp_path, stderr=subprocess.PIPE)
     try:
         put(asked / "ask-one", "one")
-        # the waiting pages take 3.5 seconds to be written
-        time.sleep(3.5)
+        # the helper's time starts when it has the question and holds the container still, which a busy machine may
+        # make later than the question: the waiting pages take four and a half seconds from then
+        deadline = time.monotonic() + 60
+        while (held / freeze).read_text().strip() != "1" and time.monotonic() < deadline and helper.poll() is None:
+            time.sleep(0.01)
+        assert (held / freeze).read_text().strip() == "1", "the helper never held the container still"
+        time.sleep(4.5)
         put(held / "memory.stat", "anon 4096\nfile 0\nfile_dirty 0\n")
         deadline = time.monotonic() + 60
         while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
