@@ -231,9 +231,19 @@ def read_while_held(c, label, into):
     return after_the_run
 
 
-def attempt(name, args, files=None):
-    # one case: a reading when it begins, the program run once, a reading while it holds
+def attempt(name, args, files=None, looked=False):
+    # one case: a reading when it begins, the program run once, a reading while it holds; with `looked`, the
+    # case runner's first reading after the program wrote "files-gone" leaves the mark the program waits for
     with case(files=files) as c:
+        if looked:
+            reading_of = c._container
+
+            def marked():
+                figure = reading_of()
+                if os.path.exists(c.work / "files-gone") and not os.path.exists(c.work / "looked-after-gone"):
+                    c.write("looked-after-gone", "")
+                return figure
+            c._container = marked
         start, while_held = reading(name + "-start"), {}
         after_the_run = read_while_held(c, name + "-held", while_held)
         r = c.run(args)
@@ -3293,12 +3303,14 @@ elif what.startswith("deletes the test's files"):
         if name.startswith("given-"):
             os.unlink(name)
     if "waits" in what:
-        # the judge must measure once while the files are gone and before the memory is taken. A program in a
-        # real container cannot be told of the judge's look: reading the container's own memory files leaves no
-        # trace in them, and what the case runner does is not readable by the program's user. So the wait leaves
-        # room for the look: three seconds for a look the judge takes every 0.002 seconds, two of them to spare
-        # after a start held up 0.64 seconds
-        time.sleep(3.0)
+        # the judge must measure once while the files are gone and before the memory is taken: the test marks
+        # the case runner's first reading after the program says the files are gone, and the program waits for
+        # that mark, at most eight seconds
+        open("files-gone", "w").close()
+        for _ in range(8000):
+            if os.path.exists("looked-after-gone"):
+                break
+            time.sleep(0.001)
     block = bytearray(b"x") * ((limit_mb + 2) * MB)
 touch(block)
 held_until_read()
@@ -3334,7 +3346,8 @@ def test_removed():
 
 
 def test_the_tests_own_files():
-    attempt("given", ["runs", "deletes the test's files, waits and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)})
+    attempt("given", ["runs", "deletes the test's files, waits and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)},
+            looked=True)
 
 
 def test_the_tests_own_files_at_once():
