@@ -1436,6 +1436,11 @@ CASE_DIR = [None]
 # the run whose program the judge has started and not yet waited for, and the judge's looks in each run
 SPAWNED = [None]
 LOOKS_IN_RUN = {}
+# for the runs whose first look is held to how soon it comes: the run whose first reading has not yet come, and
+# what the case runner asked to wait (its sleeps and the timeouts of its waits for output) since it started the
+# program of each run
+BEFORE_FIRST_LOOK = [None]
+ASKED_WAIT = {}
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
@@ -1512,6 +1517,7 @@ def test_measured():
 
     def container_memory(*args, **kwargs):
         here = CASE_DIR[0]
+        BEFORE_FIRST_LOOK[0] = None
         if SPAWNED[0] is not None and here is not None:
             # a reading after the judge started the program and before it waits for the program's end is a look
             # in its run, however the run ends; the first leaves the mark a program looked at once ends on
@@ -1541,17 +1547,49 @@ def test_measured():
         proc = real_popen(*args, **kwargs)
         here = CASE_DIR[0]
         SPAWNED[0] = (len(real_open(here / "ended").read()) if here is not None and (here / "ended").exists() else 0)
+        if TRACK_WAIT:
+            BEFORE_FIRST_LOOK[0] = SPAWNED[0]
+            ASKED_WAIT[SPAWNED[0]] = 0.0
         waiting = proc.wait
 
         def wait(*a, **k):
-            SPAWNED[0] = None
+            SPAWNED[0] = BEFORE_FIRST_LOOK[0] = None
             return waiting(*a, **k)
 
         proc.wait = wait
         return proc
 
+    def asked(seconds):
+        if BEFORE_FIRST_LOOK[0] is not None:
+            ASKED_WAIT[BEFORE_FIRST_LOOK[0]] += float("inf") if seconds is None else max(seconds, 0.0)
+
+    class AskedTime:
+        """The case runner's time, which adds up what it asks to sleep before a run's first reading."""
+        def __getattr__(self, name):
+            return getattr(real_time_module, name)
+
+        @staticmethod
+        def sleep(seconds):
+            asked(seconds)
+            real_time_module.sleep(seconds)
+
+    class AskedSelector:
+        """The case runner's wait for output, which adds up the timeouts it asks for before a run's first reading."""
+        def __init__(self):
+            self._real = real_selector()
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def select(self, timeout=None):
+            asked(timeout)
+            return self._real.select(timeout)
+
+    real_time_module, real_selector = dodam_cli.time, dodam_cli.selectors.DefaultSelector
     builtins.open = io.open = opening
     dodam_cli.subprocess.Popen = starting
+    if TRACK_WAIT:
+        dodam_cli.time, dodam_cli.selectors.DefaultSelector = AskedTime(), AskedSelector
     tool.container_memory = container_memory
     tool.kernel_part = lambda *args, **kwargs: kernel_part(held)
     dodam_cli._files_held = files_held
@@ -1575,6 +1613,8 @@ def test_measured():
                            "late": c.measured.get("late"), "run_seconds": run_seconds,
                            "in_run": reads.get("in_run_of", {}).get(RUNS - 1, 0),
                            "looks": [LOOKS_IN_RUN.get(run, 0) for run in range(RUNS)],
+                           "asked_wait": [ASKED_WAIT.get(run) for run in range(RUNS)],
+                           "gave_up": os.path.exists(CASE_DIR[0] / "gave-up"),
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
             CHECK
@@ -1582,18 +1622,21 @@ def test_measured():
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
         tool.kernel_part = kept_kernel
         dodam_cli.subprocess.Popen = real_popen
+        dodam_cli.time, dodam_cli.selectors.DefaultSelector = real_time_module, real_selector
 '''
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
 # A chatty program writes one byte every 0.3 thousandths of a second, waking the judge again and again, from a
 # mark of starting until the judge has measured 300 times while it writes (at most eight seconds), and then says how
-# long it wrote; a byte at a time keeps even eight seconds of writing far below the case's limit on output.
-SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
+# long it wrote; a byte at a time keeps even eight seconds of writing far below the case's limit on output. A silent
+# program does the same and writes nothing until then: only the judge's own waking measures it.
+SOLUTIONS = ("import os, sys, time\nif sys.argv[1] in ('chatty', 'silent'):\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    began = time.monotonic()\n    open(f'started-{run}', 'w').close()\n"
              "    while not os.path.exists(f'plenty-{run}') and time.monotonic() < began + 8:\n"
-             "        sys.stdout.write('x')\n        sys.stdout.flush()\n        time.sleep(0.0003)\n"
+             "        if sys.argv[1] == 'chatty':\n            sys.stdout.write('x')\n            sys.stdout.flush()\n"
+             "            time.sleep(0.0003)\n        else:\n            time.sleep(0.005)\n"
              "    open(f'stopped-{run}', 'w').close()\n    print(f'\\nspan={time.monotonic() - began}')\n"
              # a patient program runs until the judge has read the container ENOUGH times since the case's
              # run before it ended, however busy the machine is, and no longer than 8 seconds
@@ -1604,6 +1647,7 @@ SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    end = time.monotonic() + 8\n"
              "    while not os.path.exists(f'looked-{run}') and time.monotonic() < end:\n        time.sleep(0.005)\n"
+             "    if not os.path.exists(f'looked-{run}'):\n        open('gave-up', 'w').close()\n"
              "    time.sleep(0.6)\n"
              "elif sys.argv[1].startswith('patient'):\n    end = time.monotonic() + 8\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
@@ -1615,9 +1659,11 @@ SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
 CHECKS = {"ordinary": "assert r.out == 'fine\\n', r.out", "security": "assert 'leak' not in r.err, r.err",
           "chatty": "assert r.out.endswith('fine\\n'), r.out[-20:]",
+          "silent": "assert r.out.endswith('fine\\n'), r.out[-20:]",
           # a security test that leaves its case unjudged: the feature it attacks does not work
           "unjudged": "need(r.out == 'nothing\\n', 'the feature it attacks')"}
 FILES_OF = {"ordinary": "functional/test_measured.py", "security": "security/test_measured.py", "chatty": "functional/test_measured.py",
+            "silent": "functional/test_measured.py",
             "unjudged": "security/test_measured.py"}
 
 
@@ -1733,12 +1779,14 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     separated runs as it does outside a container: with no confined side."""
     if patient is None:
         # a case that is watched during its run lasts until the judge has read it often enough: a fixed run would
-        # leave a held-up case runner no look at all. A test whose subject is a run with one look or none says so.
-        patient = watch < 1 and separated and solution != "chatty"
+        # leave a held-up case runner no look at all
+        patient = watch < 1 and separated and solution not in ("chatty", "silent")
     if patient:
         solution = "patient" if solution == "right" else f"patient-{solution}"
     if once is None:
         once = not patient and watch >= 1 and separated
+    # the runs whose first look is held to how soon it comes: the one-look runs and the silent program's
+    track_wait = once or solution == "silent"
     if once:
         # with a long watch the judge's only look in the run is its first, taken only while the program runs: the
         # program lasts until that look (at most eight seconds) and 0.6 s more, in which a right judge does not look
@@ -1748,7 +1796,7 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
               .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
               .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)).replace("WATCH_S", repr(watch))
-              .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)))
+              .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)).replace("TRACK_WAIT", repr(track_wait)))
     if spaced:
         # a test whose name, as pytest gives it, holds spaces
         source = source.replace("def test_measured():", "@pytest.mark.parametrize('label', ['with spaces in it'])\n"
@@ -1756,14 +1804,21 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     if not separated:
         source = source.replace("            c._side = Side()\n", "")
         assert "c._side" not in source
-    # a patient run gives up at eight seconds: it gets twelve; a short run (0.6 seconds) gets six, so that starting
-    # it on a busy machine does not end it for time; no test of this helper is about the case's time
+    # a patient, one-look, chatty or silent run gives up at eight seconds (a one-look run lives 0.6 s more): it gets
+    # twelve; a short run (0.6 seconds) gets six, so that starting it on a busy machine does not end it for time; no
+    # test of this helper is about the case's time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
-                           CASE_TIMEOUT_SEC=str((12 if patient or once or solution == "chatty" else 6) * runs))
+                           CASE_TIMEOUT_SEC=str((12 if patient or once or solution in ("chatty", "silent") else 6) * runs))
     assert seen.is_file(), message(result, "test_measured")
     said = json.loads(seen.read_text())
     if once:
         assert said["looks"] == [1] * runs, f"a run looked at once had another number of looks: {said['looks']}"
+        assert not said["gave_up"], "a run looked at once gave up waiting for the judge's first look"
+    if track_wait:
+        # what the case runner asks to wait between starting the program and its first reading in the run: one wait
+        # for output of at most two thousandths of a second, or less in parts; however long the runner is held up
+        assert all(w is not None and round(w, 9) <= 0.002 for w in said["asked_wait"]), \
+            f"the case runner asked to wait longer before a run's first reading: {said['asked_wait']}"
     if not separated:
         assert said["looks"] == [0] * runs and said["tries"] == 0, \
             f"a case without separation was measured: {said['looks']}, {said['tries']} tries"
@@ -2130,12 +2185,20 @@ def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_dec
 
 
 def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
-    """A program that writes a byte every 0.3 thousandths of a second wakes the judge at almost every byte; the
-    judge still measures at most once in 0.002 seconds, not at every byte, and at least once in 0.03 seconds, as
-    the span the program really wrote for and the span the run really took show. The program writes until the
-    judge has measured 300 times while it writes, so that a late start or a stall changes the spans, not what
-    the bounds ask."""
-    result, seen = judge_measured(tmp_path, way(), solution="chatty", test="chatty")
+    """A program that writes nothing wakes the judge never: the judge still measures it at least once in 0.03
+    seconds, by its own waking, and asks to wait no longer than 0.002 seconds before the first measurement. A
+    program that writes a byte every 0.3 thousandths of a second wakes the judge at almost every byte; the judge
+    still measures it at most once in 0.002 seconds, not at every byte. Both run until the judge has measured them
+    300 times (at most eight seconds), and the spans each really ran for and the span of the run give the bounds,
+    so that a late start or a stall changes the spans, not what the bounds ask: the silent program is measured at
+    least once in 0.03 seconds, the writing one too, and at most once in 0.002 seconds."""
+    for name in ("silent", "chatty"):
+        (tmp_path / name).mkdir()
+    silent, quiet = judge_measured(tmp_path / "silent", way(), solution="silent", test="silent")
+    assert the_case(silent)["outcome"] == "passed", the_case(silent)
+    span = float(re.search(r"span=([0-9.e-]+)", quiet["out"]).group(1))
+    assert quiet["in_run"] >= span / 0.030, (span, quiet["in_run"])
+    result, seen = judge_measured(tmp_path / "chatty", way(), solution="chatty", test="chatty")
     assert the_case(result)["outcome"] == "passed", the_case(result)
     span = float(re.search(r"span=([0-9.e-]+)", seen["out"]).group(1))
     assert seen["in_run"] >= span / 0.030, (span, seen["in_run"])
@@ -4141,25 +4204,55 @@ def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_resu
 
 def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some(tmp_path, monkeypatch):
     """The search is given its time whether or not what it found so far waits to be read: one that
-    still finds places when its time is up gives up all the same. Here it has two seconds, and the search, a
-    stand-in, finds places without a pause for six, which always wait to be read. A search that takes two and a
-    half times its time fails, as on main; one that keeps its time has three seconds to spare."""
+    still finds places when its time is up gives up all the same, at its time and not later, and ends
+    the search's process. Here it has one second on a clock the test moves, and the search, a real
+    program standing in, finds places without a pause for six seconds of real time. A search that ends
+    later than its time by one step of that clock, or any more, fails; so does one that never ends or
+    leaves the search's process running, on an assertion, once the program has ended by itself."""
     much = judge_module.TooMuchLeft
-    monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 2)
+    monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 1)
     monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 10**12)
-    start = subprocess.Popen
-    finds = ("import sys, time\nend = time.monotonic() + 6\nwhile time.monotonic() < end:\n"
-             "    sys.stdout.buffer.write(b'/nowhere\\0' * 1000)\n")
-    monkeypatch.setattr(judge_module.subprocess, "Popen", lambda args, **kwargs: start([sys.executable, "-c", finds], **kwargs))
-    # what the search found waits to be read whenever the judge asks, however fast this machine reads
-    monkeypatch.setattr(judge_module.select, "select", lambda read, write, special, timeout=None: (list(read), [], []))
+    start, real_select = subprocess.Popen, judge_module.select.select
+    finds = ("import os, time\nos.set_blocking(1, False)\nend = time.monotonic() + 6\n"
+             "while time.monotonic() < end:\n    try:\n        os.write(1, b'/nowhere\\0' * 1000)\n"
+             "    except BlockingIOError:\n        time.sleep(0.005)\n")
+    started = []
+
+    def search(args, **kwargs):
+        started.append(start([sys.executable, "-c", finds], **kwargs))
+        return started[-1]
+
+    class Clock:
+        # the judge's clock: it moves only by one step at each wait for what the search found (by the timeout
+        # asked for, when nothing came), so that no runner's speed reaches it; the search program and the waits
+        # themselves run on real time
+        now = 100.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+    asked = []
+
+    def wait_for_output(read, write, special, timeout=None):
+        asked.append(timeout)
+        ready = real_select(read, write, special, 5.0)
+        Clock.now = round(Clock.now + (0.05 if ready[0] else max(timeout or 0.05, 0.05)), 6)
+        return ready
+
+    monkeypatch.setattr(judge_module.subprocess, "Popen", search)
+    monkeypatch.setattr(judge_module, "time", Clock)
+    monkeypatch.setattr(judge_module.select, "select", wait_for_output)
     mounts = tmp_path / "mounts"
     mounts.write_text(f"none {tmp_path} tmpfs rw 0 0\n")
-    began = time.monotonic()
+    found = 0
     with pytest.raises(much):
         for _ in judge_module.writable_by_others(mounts):
-            pass
-    assert time.monotonic() - began < 5, "the search went on past its time"
+            found += 1
+    assert found > 0 and Clock.now == 101.0, f"the search ended at {Clock.now - 100.0} s of its one second"
+    assert all(t is not None and 0 <= t <= 1.0 for t in asked), f"a wait asked for more than the search's time: {asked}"
+    assert len(started) == 1 and started[0].returncode is not None and started[0].returncode < 0, \
+        "the search's process was not ended"
 
 
 def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):

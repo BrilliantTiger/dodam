@@ -232,16 +232,28 @@ def read_while_held(c, label, into):
 
 
 def attempt(name, args, files=None, looked=False):
-    # one case: a reading when it begins, the program run once, a reading while it holds; with `looked`, the
-    # case runner's first reading after the program wrote "files-gone" leaves the mark the program waits for
+    # one case: a reading when it begins, the program run once, a reading while it holds. With `looked`, the mark
+    # the program waits for after deleting the test's files is left by a reading of the case runner that began after
+    # the program wrote "files-gone" and shows the kernel's memory of those files gone and no longer falling: its own
+    # part and its records together, some 18 MB for 19,000 files, which the program's own memory does not move
     with case(files=files) as c:
         if looked:
-            reading_of = c._container
+            import dodam_cli
+            reading_of, before, after = c._container, [], []
 
             def marked():
+                gone = os.path.exists(c.work / "files-gone")
                 figure = reading_of()
-                if os.path.exists(c.work / "files-gone") and not os.path.exists(c.work / "looked-after-gone"):
-                    c.write("looked-after-gone", "")
+                if figure.get("late"):
+                    return figure
+                kernel = dodam_cli._judge.kernel_part() + figure["records"]
+                if not before:
+                    # the first reading in time, before the program started: the files all stand
+                    before.append(kernel)
+                elif gone and not os.path.exists(c.work / "looked-after-gone"):
+                    if before[0] - kernel >= 8 * 2**20 and after and kernel >= after[-1] - 2**20:
+                        c.write("looked-after-gone", "")
+                    after.append(kernel)
                 return figure
             c._container = marked
         start, while_held = reading(name + "-start"), {}
@@ -3304,13 +3316,15 @@ elif what.startswith("deletes the test's files"):
             os.unlink(name)
     if "waits" in what:
         # the judge must measure once while the files are gone and before the memory is taken: the test marks
-        # the case runner's first reading after the program says the files are gone, and the program waits for
-        # that mark, at most eight seconds
+        # the case runner's reading that shows them gone, and the program waits for that mark, at most eight
+        # seconds; without it the program takes no memory, and the test fails
         open("files-gone", "w").close()
         for _ in range(8000):
             if os.path.exists("looked-after-gone"):
                 break
             time.sleep(0.001)
+        else:
+            sys.exit("no mark after deleting the test's files")
     block = bytearray(b"x") * ((limit_mb + 2) * MB)
 touch(block)
 held_until_read()
