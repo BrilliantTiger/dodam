@@ -81,9 +81,12 @@ ATTRIBUTION_WORDS = ("author", "authors", "committer", "agent", "model", "models
                      "assistants", "bot", "bots", "ai", "llm", "generator", "generated", "assisted", "credit", "credits",
                      "via", "coauthor", "coauthors")
 ADDRESS_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+")
-MADE_VERBS = ("gener" "ated", "co-?auth" "ored", "assi" "sted", "auth" "ored", "writ" "ten", "draf" "ted", "produ" "ced")
+MADE_VERBS = ("gener" "ated", "co-?auth" "ored", "assi" "sted", "auth" "ored", "writ" "ten", "draf" "ted", "produ" "ced",
+              "ma" "de", "crea" "ted", "bu" "ilt", "prepa" "red", "implemen" "ted")
 MADE_LINKS = ("with", "by", "using", "via", "through")
-MADE_FORM_RE = re.compile(r"^\W*" + any_of(MADE_VERBS) + r"(?:\s+|-)" + any_of(MADE_LINKS) + r"(?![a-z])")
+MADE_PHRASES = ("with (?:the )?help (?:of|from)", "ai-gener" "ated", "ai-assi" "sted")
+MADE_FORM_RE = re.compile(r"^\W*(?:" + any_of(MADE_VERBS) + r"(?:\s+|-)" + any_of(MADE_LINKS) + "|" + any_of(MADE_PHRASES)
+                          + r")(?![a-z])")
 ROBOT = "\N{ROBOT FACE}"
 
 # Every place: messages, titles, descriptions, branch names, added lines, paths. Matched on the normalised text.
@@ -93,8 +96,11 @@ TOOLING_IDS = ("te" "rm_[0-9a-f]{8,}", "ta" "sk_[0-9a-f]{8,}", "c" "tx_[0-9a-f]{
                "ms" "g_[0-9a-f]{8,}", "w" "f_[0-9a-f]{8,}", "conver" "sation://")
 LOCAL_PATHS = (
     r"[\\/]us" r"ers[\\/]+(?!shared[\\/])[^\\/\s]+[\\/]",                       # a home folder of macOS or Windows
-    r"(?<![a-z0-9])\.cla" r"ude[\\/]+(?:[\w.-]+[\\/]+[\w.-]|[\w-]*\.[\w.-]+)",  # inside the sessions' folders
-    r"(?<![a-z0-9])\.gem" r"ini[\\/]+(?:[\w.-]+[\\/]+[\w.-]|[\w-]*\.[\w.-]+)",
+    r"(?<![a-z0-9])\.cla" r"ude[\\/]+[\w.-]",                                  # an entry in a tool's own folder
+    r"(?<![a-z0-9])\.co" r"dex[\\/]+[\w.-]",
+    r"(?<![a-z0-9])\.gem" r"ini[\\/]+[\w.-]",
+    r"(?<![a-z0-9])\.or" r"ca[\\/]+[\w.-]",
+    r"(?<![a-z0-9])\.cla" r"ude\.json",                                         # the settings file beside it
     r"or" r"ca[\\/]+work" r"spaces[\\/]",                                          # the sessions' working folders
     r"or" r"ca[\\/]+proj" r"ects[\\/]",
     r"(?<![a-z0-9])cla" r"ude-\d+[\\/]",                                           # the sessions' temporary folders
@@ -107,31 +113,49 @@ PLACE_RULES = [
     ("tooling id", re.compile(any_of(TOOLING_IDS))),
     ("local path", re.compile(any_of(LOCAL_PATHS))),
 ]
-DASHES = {"−", "⁃", "﹣", "－"}
 
 
 class Problem(Exception):
     """A reason the check cannot run, in fixed words of its own."""
 
 
+# The classes of characters that the copy for matching takes out: marks set on or around another character, format,
+# control, surrogate, private use and unassigned. Line breaks and spaces are set aside before them.
+REMOVED_CATEGORIES = ("Mn", "Me", "Cf", "Cc", "Cs", "Co", "Cn")
+
+
+def lines_of(text):
+    """The lines of a text: every line or paragraph break that the language's own line splitting knows ends one."""
+    return text.splitlines() or [""]
+
+
 def normalise(text, words=False):
-    """One form of a text: the forms of a character, no characters without width, one dash, one space, no letter
-    case; for a name (words) also its parts apart: camel case and underscores."""
-    if words:
-        text = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", text).replace("_", " ")
-    text = unicodedata.normalize("NFKC", text)
+    """The copy of one line that the rules are matched on, made by classes of characters, in this order: taken apart by
+    compatibility; every space one space, and runs of them one; the classes above taken out, and every letter whose
+    name holds FILLER; every dash of the category Pd, and every mathematical sign whose name holds MINUS but not
+    SET, one dash; put together again; for a name or a branch (words), a word split where a small letter meets a
+    capital and where capitals meet a capital followed by a small letter, and at an underscore; letter case folded.
+    FILLER, MINUS and SET are whole words of a character's name.
+    An accent is folded away with its mark."""
     out = []
-    for ch in text:
+    for ch in unicodedata.normalize("NFKD", text):
         category = unicodedata.category(ch)
-        if category == "Cf":
+        if ch.isspace():
+            if not out or out[-1] != " ":
+                out.append(" ")
+        elif category in REMOVED_CATEGORIES:
             continue
-        if category == "Pd" or ch in DASHES:
+        elif category == "Lo" and "FILLER" in unicodedata.name(ch, "").split():
+            continue
+        elif category == "Pd" or (category == "Sm" and "MINUS" in unicodedata.name(ch, "").split()
+                                  and "SET" not in unicodedata.name(ch, "").split()):
             out.append("-")
-        elif category == "Zs" or ch == "\t":
-            out.append(" ")
         else:
             out.append(ch)
-    return "".join(out).casefold()
+    copy = unicodedata.normalize("NFC", "".join(out))
+    if words:
+        copy = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", copy).replace("_", " ")
+    return copy.casefold()
 
 
 def git(repo, *args):
@@ -162,25 +186,32 @@ class Checker:
                                              or self.private.search(normalise(text)) is not None)
 
     def place(self, who, text, where):
-        """The rules of every place."""
-        plain = normalise(text)
-        for prop, pattern in PLACE_RULES:
-            if pattern.search(plain):
+        """The rules of every place, on every line of the text."""
+        found = set()
+        for line in lines_of(text):
+            plain = normalise(line)
+            for prop, pattern in PLACE_RULES:
+                if pattern.search(plain):
+                    found.add(prop)
+            if self.private_hit(line):
+                found.add("private pattern")
+        for prop, _ in PLACE_RULES + [("private pattern", None)]:
+            if prop in found:
                 self.add(who, prop, where)
-        if self.private_hit(text):
-            self.add(who, "private pattern", where)
 
     def name_passes(self, name, address):
-        """A name passes when it names no AI and does not match the private pattern; the login inside its own
-        no-reply address is spared the private pattern only, because GitHub shows it in the address anyway."""
+        """A name passes when it names no AI and does not match the private pattern; a name that is the whole login
+        inside its own no-reply address, but for letter case, is spared the private pattern only, because GitHub shows
+        that login in the address anyway (and writes the account's displayed name, which may differ from it in case
+        only, on the merge commits it makes)."""
         if AI_NAME_RE.search(normalise(name, words=True)) or AI_NAME_RE.search(normalise(name)):
             return False
         login = NO_REPLY_RE.match(address)
-        return bool(login and name == login.group(2)) or not self.private_hit(name)
+        return bool(login and name.casefold() == login.group(2).casefold()) or not self.private_hit(name)
 
     def prose(self, who, text, where_line):
         """A message, a title, a description: the rules of every place, and attribution closed by its form."""
-        lines = text.split("\n")
+        lines = lines_of(text)
         last = len(lines)
         while last > 0 and not lines[last - 1].strip():
             last -= 1
@@ -224,8 +255,20 @@ class Checker:
     def added_line(self, who, file_number, line_number, line):
         where = f"file {file_number}, line {line_number}"
         self.place(who, line, where)
-        if GENERATED_IN_FILE_RE.search(normalise(line)):
+        if any(GENERATED_IN_FILE_RE.search(normalise(part)) for part in lines_of(line)):
             self.add(who, "attribution line", where)
+
+    def read_as(self, who, number, label, text):
+        """A content read in another encoding: every rule of an added line, each property named once."""
+        seen = set()
+        for line_number, line in enumerate(lines_of(text), 1):
+            trial = Checker(self.private, self.verifier)
+            trial.added_line(who, number, line_number, line)
+            for finding in trial.findings:
+                prop = finding.split(": ", 1)[1].split(" (", 1)[0]
+                if prop not in seen:
+                    seen.add(prop)
+                    self.add(who, prop, f"path {number}, read as {label}, line {line_number}")
 
     def path(self, who, number, path):
         self.place(who, path, f"path {number}")
@@ -309,6 +352,78 @@ def check_paths(checker, who, fields):
             index += 2
 
 
+READINGS = [(f"UTF-{bits}{order} from byte {start}", f"utf-{bits}-{order.lower()}", start)
+            for bits, width in ((16, 2), (32, 4)) for order in ("LE", "BE") for start in range(width)]
+
+
+def new_blobs(fields):
+    """The new contents of the paths of a raw list made with -z, numbered as check_paths numbers them; a deleted path
+    is counted and has none."""
+    fields = [field for field in fields if field != ""]
+    found = []
+    index = 0
+    number = 0
+    while index < len(fields):
+        header = fields[index]
+        if not header.startswith(":"):
+            raise Problem("a list of paths cannot be read")
+        parts = header.lstrip(":").split()
+        parents = len(header) - len(header.lstrip(":"))
+        if len(parts) < 2 * (parents + 1) + 1:
+            raise Problem("a list of paths cannot be read")
+        status = parts[-1]
+        new = parts[-2]
+        number += 1
+        names = 2 if status[:1] in ("R", "C") and parents == 1 else 1
+        if index + names >= len(fields):
+            raise Problem("a list of paths cannot be read")
+        if not status.startswith("D") and re.fullmatch(r"[0-9a-f]{40}", new) and new != "0" * 40:
+            found.append((number, new))
+        index += 1 + names
+    return found
+
+
+def blob_contents(repo, shas):
+    """The contents of blobs, read in one call of git."""
+    if not shas:
+        return {}
+    done = subprocess.run(["git", "-C", repo, "cat-file", "--batch"], input="".join(f"{sha}\n" for sha in shas).encode(),
+                          capture_output=True, env=git_env())
+    if done.returncode != 0:
+        raise Problem("git could not read the history")
+    data = done.stdout
+    contents = {}
+    position = 0
+    for sha in shas:
+        end = data.index(b"\n", position)
+        header = data[position:end].decode("ascii", "replace").split()
+        if len(header) != 3 or header[1] != "blob":
+            raise Problem("git could not read the history")
+        size = int(header[2])
+        contents[sha] = data[end + 1:end + 1 + size]
+        position = end + 1 + size + 1
+    return contents
+
+
+def check_other_encodings(checker, who, repo, fields):
+    """A new content that is not text in UTF-8, or holds a zero byte, is read once more in each encoding of READINGS,
+    passing over the bytes that are not valid there, and once more as UTF-8 with its zero bytes taken out."""
+    blobs = new_blobs(fields)
+    contents = blob_contents(repo, sorted({sha for _, sha in blobs}))
+    for number, sha in blobs:
+        data = contents[sha]
+        try:
+            data.decode("utf-8")
+            if b"\0" not in data:
+                continue
+        except UnicodeDecodeError:
+            pass
+        readings = [(label, data[start:].decode(codec, "ignore")) for label, codec, start in READINGS]
+        readings.append(("UTF-8 without its zero bytes", data.replace(b"\0", b"").decode("utf-8", "ignore")))
+        for label, text in readings:
+            checker.read_as(who, number, label, text)
+
+
 def check_commit(repo, sha, checker):
     who = f"commit {sha[:12]}"
     people, message = parse_commit(git(repo, "cat-file", "commit", sha))
@@ -331,10 +446,13 @@ def check_commit(repo, sha, checker):
     checker.patch(who, git(repo, "diff-tree", "--cc", "--root", "--format=", *DIFF_OPTIONS, sha))
     fields = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
     check_paths(checker, who, fields.split("\0"))
+    raw = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--raw", "-z", "-M", sha)
+    check_other_encodings(checker, who, repo, raw.split("\0"))
 
 
-def api_get(path):
-    """One answer of GitHub's API, asked up to three times when it fails to answer; None when no answer came."""
+def api_get(path, outside_repository=False):
+    """One answer of GitHub's API, asked up to five times when it fails to answer (waits of 2, 5, 10 and 20 seconds
+    between the tries, nothing when the first try answers); None when no answer came."""
     token = os.environ.get("GITHUB_TOKEN", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -343,8 +461,9 @@ def api_get(path):
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(f"{api}/repos/{repository}/{path}", headers=headers)
-    for wait in (1, 3, None):
+    url = f"{api}/{path}" if outside_repository else f"{api}/repos/{repository}/{path}"
+    request = urllib.request.Request(url, headers=headers)
+    for wait in (2, 5, 10, 20, None):
         try:
             with urllib.request.urlopen(request, timeout=20) as answer:
                 return json.load(answer)
@@ -427,10 +546,49 @@ def read_event(path):
     if not isinstance(pull, dict):
         raise Problem("the event names no pull request")
     head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
-    texts = {"title": pull.get("title") or "", "body": pull.get("body") or "", "branch": head.get("ref") or ""}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    head_owner = head_repo.get("owner") if isinstance(head_repo.get("owner"), dict) else {}
+    repository = event.get("repository") if isinstance(event.get("repository"), dict) else {}
+    base_owner = repository.get("owner") if isinstance(repository.get("owner"), dict) else {}
+    texts = {"title": pull.get("title") or "", "body": pull.get("body") or "", "branch": head.get("ref") or "",
+             "head_owner": head_owner.get("login") or "", "base_owner": base_owner.get("login") or ""}
     if not all(isinstance(value, str) for value in texts.values()):
         raise Problem("the event's pull request cannot be read")
     return texts
+
+
+LOGIN_RE = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}")
+
+
+def merging_logins(repo, start, context):
+    """The accounts whose displayed name GitHub will write as the author of the merge commit: the one that made the
+    last merge GitHub signed on the range's start (read from that commit's no-reply address, so no name stands in a
+    file), and on the project's own branches the account that pushed, when it is another. On a fork's run the account
+    that pushed is the outside contributor, who never makes the merge commit, so it is not read."""
+    logins = []
+    log = git(repo, "log", "--merges", "-n", "50", "--format=%ae%x00%ce", start)
+    for line in log.split("\n"):
+        author, _, committer = line.partition("\0")
+        found = NO_REPLY_RE.match(author)
+        if committer == GITHUB_ADDRESS and found:
+            logins.append(found.group(2))
+            break
+    actor = os.environ.get("GITHUB_ACTOR", "")
+    if context == "own" and LOGIN_RE.fullmatch(actor) and actor.casefold() not in {login.casefold() for login in logins}:
+        logins.append(actor)
+    return logins
+
+
+def check_merge_author(checker, repo, start, context):
+    for login in merging_logins(repo, start, context):
+        data = api_get(f"users/{login}", outside_repository=True)
+        if not isinstance(data, dict) or not isinstance(data.get("name") or "", str):
+            checker.add("merge commit", "author name", "the displayed name of the account that merges cannot be read")
+            continue
+        name = data.get("name") or ""  # with no displayed name GitHub writes the login
+        if name and (name.casefold() != login.casefold()
+                     or not checker.name_passes(name, f"{login}@users.noreply.github.com")):
+            checker.add("merge commit", "author name", "the displayed name GitHub writes on a merge commit breaks a rule")
 
 
 def check_pull_request_text(checker, texts):
@@ -438,6 +596,10 @@ def check_pull_request_text(checker, texts):
     checker.prose("pull request", texts["body"], lambda n: f"pull request description line {n}")
     # GitHub writes the branch's name into the message of the merge commit it makes on main.
     checker.branch("pull request", texts["branch"], "pull request branch name")
+    # And the name of the repository the branch is in: "Merge pull request #N from <owner>/<branch>". A fork's owner is
+    # held to the rules of a message there; this repository's own owner is not, because it is in every merge already.
+    if texts["head_owner"] and texts["head_owner"].casefold() != texts["base_owner"].casefold():
+        checker.prose("pull request", f"{texts['head_owner']}/{texts['branch']}", lambda n: "merge message's first line")
 
 
 def report(commits, findings, failures):
@@ -482,10 +644,13 @@ def main(argv=None):
     parser.add_argument("--event", action=Once, help="the event's file, for the pull request's title, description and branch")
     parser.add_argument("--branch", action=Once, help="the name of the branch a push went to")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
-    parser.add_argument("--merge-author", action="store_true", help="not built yet")
-    parser.add_argument("--fork-way-gate", action="store_true", help="not built yet")
+    parser.add_argument("--merge-author", action="store_true",
+                        help="read ahead the displayed name GitHub will write as the author of the merge commit")
     parser.add_argument("--check-fork-way", action="store_true",
                         help="on main: when the way for forks is open, ask GitHub whether everything it needs is set")
+    parser.add_argument("--fork-way-gate", action="store_true",
+                        help="the first job of a fork's run: fail unless the way for forks is open and the environment "
+                             "names a reviewer; then say open=true to the job's outputs")
     parser.add_argument("--text-only", action="store_true",
                         help="check only the pull request's text in --event, before it is published; no git")
     parser.add_argument("--verified-shas", action=Once, help="a file of commits GitHub signed, in place of asking GitHub")
@@ -516,11 +681,38 @@ def private_pattern(args, settings, failures):
         raise Problem("the private pattern given in the secret is not a regular expression") from None
 
 
+SHUT = "The way for pull requests from forks is not open yet: nothing of this pull request was judged."
+
+
+def fork_way_gate(settings):
+    """The first job of a fork's run, which names no environment and no secret."""
+    if not settings["fork_way_open"] or settings["outside_runs_held_since"] is None:
+        print(f"::error::{SHUT}")
+        return 1
+    if not environment_waits_for_a_named_reviewer():
+        print("::error::the environment private-check does not wait for a named reviewer, so nothing of this pull "
+              "request is judged")
+        return 1
+    outputs = os.environ.get("GITHUB_OUTPUT", "")
+    if outputs:
+        try:
+            with open(outputs, "a", encoding="utf-8") as handle:
+                handle.write("open=true\n")
+        except OSError:
+            raise Problem("the job's outputs cannot be written") from None
+    print("The way for pull requests from forks is open and the environment names a reviewer.")
+    return 0
+
+
 def run(args):
     settings = read_settings(args.settings)
+    if args.fork_way_gate:
+        if args.context != "fork-approved":
+            raise Problem("--fork-way-gate is for a fork's run")
+        return fork_way_gate(settings)
     if args.context == "fork-approved" and (not settings["fork_way_open"] or settings["outside_runs_held_since"] is None):
         # The way for pull requests from forks is shut: nothing of the pull request is read.
-        print("::error::The way for pull requests from forks is not open yet: nothing of this pull request was judged.")
+        print(f"::error::{SHUT}")
         return 1
     failures = []
     if args.context == "fork-approved" and not environment_waits_for_a_named_reviewer():
@@ -554,6 +746,10 @@ def run(args):
     start = git(repo, "rev-parse", "--verify", args.start + "^{commit}").strip()
     head = git(repo, "rev-parse", "--verify", args.head + "^{commit}").strip()
     failures += loosened_settings(repo, args.compare_settings, settings)
+    if args.check_fork_way and os.environ.get("FORK_SECRET_AT_REPOSITORY_LEVEL", "") == "true":
+        # Asked whether the way is open or shut: a secret of the fork's name at the repository's level would reach
+        # every fork's job.
+        failures.append("the fork's secret is a secret of the whole repository, where every fork's job could read it")
     if args.check_fork_way and settings["fork_way_open"]:
         if settings["outside_runs_held_since"] is None:
             failures.append("the way for forks is open, but settings.json holds no date since when GitHub holds every "
@@ -561,8 +757,6 @@ def run(args):
         if not environment_waits_for_a_named_reviewer():
             failures.append("the way for forks is open, but the environment private-check does not wait for a named "
                             "reviewer")
-        if os.environ.get("FORK_SECRET_AT_REPOSITORY_LEVEL", ""):
-            failures.append("the way for forks is open, and the fork's secret is also a secret of the whole repository")
 
     commits = git(repo, "rev-list", "--topo-order", "--reverse", head, "^" + start, "^" + exempt).split()
     for sha in commits:
@@ -570,8 +764,12 @@ def run(args):
     if commits:
         checker.patch("the range", git(repo, "diff", *DIFF_OPTIONS, f"{start}...{head}"))
         check_paths(checker, "the range", git(repo, "diff", "--name-status", "-z", "-M", f"{start}...{head}").split("\0"))
+        check_other_encodings(checker, "the range", repo,
+                              git(repo, "diff", "--raw", "-z", "-M", "--abbrev=40", f"{start}...{head}").split("\0"))
     if args.branch is not None:
         checker.branch("push", args.branch, "branch name")
+    if args.merge_author:
+        check_merge_author(checker, repo, start, args.context)
     if args.event:
         check_pull_request_text(checker, read_event(args.event))
         if not commits:

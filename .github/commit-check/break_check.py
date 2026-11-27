@@ -1,17 +1,16 @@
 """Breaks the check by machine and runs its tests against every break.
 
 The rule, fixed before any run: in check.py and fork_paths.py
-- every statement that refuses or reports is taken out (a call that adds a finding, appends or adds to a list of
-  failures, prints; a raise; a return of a refusal or of the exit code 1);
+- every statement that refuses or reports is taken out (a raise, a return of a refusal or of the exit codes 1 and 2,
+  an addition to a list of failures), and so is every call made as a statement, whatever it runs;
 - every condition that decides is turned round (the test of an if, an elif, a while, a conditional expression,
   an assert and a comprehension's condition, and the value of a return that is a comparison or a boolean expression);
 - every operand of an "or" is made False and every operand of an "and" is made True, one at a time;
-- every element of a module's tuple of rule parts is taken out, one at a time, by putting in its place a part that
-  never matches.
-Each break must make a test fail. A break ends in one of four classes: caught (the tests ran and at least one failed),
-caught at loading (the broken file does not load), not settled (the run met its time limit), or not caught (every test
-passed). Only "caught" and "caught at loading" count as caught; a break that does not settle is run again once with
-twice the time before it is reported.
+- every element of a list, a set or a tuple at the module's level, and of a literal that a loop or a comprehension runs
+  over (the waits between the tries among them), is taken out, one at a time.
+A break is caught only when a test fails on an assertion. A break ends in one of three classes: caught; not settled
+(the tests met their time limit twice, or ended in an error with no test failing on an assertion, or did not load);
+not caught (every test passed). A break that does not settle is listed; one that is not caught fails the run.
 
 It runs in the automatic check on a side branch, never on the project's computer. It first runs the tests once with
 nothing broken and stops when they do not all pass or when no test runs.
@@ -34,7 +33,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TARGETS = ("check.py", "fork_paths.py")
-REFUSING_CALLS = {"add", "append", "print", "extend"}
 TIME_LIMIT = 240
 WORKFLOWS = HERE.parent / "workflows"
 
@@ -68,11 +66,8 @@ class Breaks(ast.NodeVisitor):
                            "extra": extra})
 
     def visit_Expr(self, node):
-        call = node.value
-        if isinstance(call, ast.Call):
-            name = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", None)
-            if name in REFUSING_CALLS:
-                self.add("take out", node)
+        if isinstance(node.value, ast.Call):
+            self.add("take out", node)  # every call made for what it does: refusing, reporting, or running a part
         self.generic_visit(node)
 
     def visit_AugAssign(self, node):
@@ -105,22 +100,32 @@ class Breaks(ast.NodeVisitor):
     visit_IfExp = visit_If
     visit_Assert = visit_If
 
-    def visit_comprehension(self, node):
-        for index in range(len(node.ifs)):
-            self.found.append({"kind": "turn round comprehension", "where": list(self.path), "line": node.ifs[index].lineno,
-                               "column": node.ifs[index].col_offset, "extra": index})
-        self.generic_visit(node)
-
     def visit_BoolOp(self, node):
         for index in range(len(node.values)):
             self.add("operand", node, index)
         self.generic_visit(node)
 
+    def collection(self, node, attribute):
+        value = getattr(node, attribute)
+        if isinstance(value, (ast.Tuple, ast.List, ast.Set)) and value.elts:
+            for index in range(len(value.elts)):
+                self.found.append({"kind": "element out", "where": list(self.path), "line": value.elts[index].lineno,
+                                   "column": value.elts[index].col_offset, "extra": [attribute, index]})
+
     def visit_Assign(self, node):
-        if self.path and len(self.path) == 1 and isinstance(node.value, ast.Tuple) \
-                and node.value.elts and all(isinstance(e, (ast.Constant, ast.JoinedStr)) for e in node.value.elts):
-            for index in range(len(node.value.elts)):
-                self.add("tuple element", node, index)
+        if len(self.path) == 1:  # a list, a set or a tuple at the module's level, which a rule or git reads
+            self.collection(node, "value")
+        self.generic_visit(node)
+
+    def visit_For(self, node):
+        self.collection(node, "iter")  # a literal a loop runs over, such as the waits between tries
+        self.generic_visit(node)
+
+    def visit_comprehension(self, node):
+        self.collection(node, "iter")
+        for index in range(len(node.ifs)):
+            self.found.append({"kind": "turn round comprehension", "where": list(self.path), "line": node.ifs[index].lineno,
+                               "column": node.ifs[index].col_offset, "extra": index})
         self.generic_visit(node)
 
 
@@ -183,33 +188,48 @@ def apply(source, tree, brk):
     elif kind == "operand":
         start, end, _ = segment(node.values[brk["extra"]])
         text = "True" if isinstance(node.op, ast.And) else "False"
-    elif kind == "tuple element":
-        start, end, _ = segment(node.value.elts[brk["extra"]])
-        text = '"(?!x)x"'
+    elif kind == "element out":
+        attribute, index = brk["extra"]
+        collection = getattr(node, attribute)
+        elements = collection.elts
+        if len(elements) == 1:
+            start, end, _ = segment(collection)
+            text = {"Tuple": "()", "List": "[]", "Set": "set()"}[type(collection).__name__]
+        elif index < len(elements) - 1:
+            start, _ = span(source, elements[index])
+            end, _ = span(source, elements[index + 1])
+            text = ""
+        else:
+            _, start = span(source, elements[index - 1])
+            _, end = span(source, elements[index])
+            text = ""
     else:
         raise ValueError(kind)
     return (data[:start] + text.encode("utf-8") + data[end:]).decode("utf-8")
 
 
-def run_tests(folder, limit):
+def run_tests(folder, limit, failfast=True):
     """Runs the check's tests in a copy; returns (class, number of tests run, names that failed)."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "FORK_"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        done = subprocess.run([sys.executable, "-I", "-m", "unittest", "discover", "-f", "-s", str(folder),
-                               "-p", "test_check.py"], capture_output=True, text=True, timeout=limit, env=env,
+        done = subprocess.run([sys.executable, "-I", "-m", "unittest", "discover", *(["-f"] if failfast else []),
+                               "-s", str(folder), "-p", "test_check.py"], capture_output=True, text=True, timeout=limit, env=env,
                               cwd=folder)
     except subprocess.TimeoutExpired:
         return "not settled", 0, []
     out = done.stdout + done.stderr
     ran = re.search(r"^Ran (\d+) tests?", out, re.M)
     count = int(ran.group(1)) if ran else 0
-    failed = re.findall(r"^(?:FAIL|ERROR): (\S+)", out, re.M)
+    failed = re.findall(r"^FAIL: (\S+)", out, re.M)
+    errors = re.findall(r"^ERROR: (\S+)", out, re.M)
     if done.returncode == 0 and count > 0:
         return "not caught", count, []
-    if failed and any("_FailedTest" in name or "loader" in name for name in failed) or count == 0:
-        return "caught at loading", count, failed
-    return ("caught" if failed else "not settled"), count, failed
+    if failed:
+        return "caught", count, failed  # a test failed on an assertion
+    if errors and failfast:
+        return run_tests(folder, limit, failfast=False)  # an error stopped the run first: look for an assertion
+    return "not settled", count, errors  # an error, or nothing ran: no test failed on an assertion
 
 
 def prepare(base, sources, target, broken, workflows):
@@ -266,7 +286,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     workflow_folder = str(Path(args.workflows) if args.workflows else WORKFLOWS)
     part, parts = (int(x) for x in args.shard.split("/"))
-    sources = {path.name: path.read_text() for path in HERE.iterdir() if path.suffix in (".py", ".json")}
+    sources = {path.name: path.read_text() for path in HERE.iterdir() if path.suffix in (".py", ".json", ".md")}
     jobs = []
     base = Path(tempfile.mkdtemp(prefix="breaks-"))
     for target in TARGETS:
@@ -297,7 +317,8 @@ def main(argv=None):
         if entry["result"] in ("not caught", "not settled"):
             print(f"{entry['result']}: {entry['file']} line {entry['line']} column {entry['column']}, {entry['kind']}"
                   + (f", part {entry['part']}" if entry["part"] is not None else ""))
-    return 0 if all(entry["result"].startswith("caught") for entry in results) else 1
+    # A break that no test catches fails the run; one that does not settle (an error, a time limit) is listed.
+    return 1 if any(entry["result"] == "not caught" for entry in results) else 0
 
 
 if __name__ == "__main__":
