@@ -1,10 +1,10 @@
-"""Tests of the check on every commit of a pull request or a push.
+"""Tests of the check on every commit of a pull request or a push, and of the check of a fork's paths.
 
-Each test builds a small history in a temporary repository, runs check.py on it as the workflow does,
-and reads its exit code and what it prints. The made-up offending texts are put together from parts, so
-that this file does not trip the check itself.
+Each test builds a small history in a temporary repository, runs check.py on it as the workflows do, and reads
+its exit code and what it prints. The made-up offending texts are put together from parts, so that this file
+does not trip the check itself.
 
-Run: python -m unittest discover -s .github/commit-check
+Run: python3 -I -m unittest discover -s .github/commit-check
 """
 
 import http.server
@@ -14,37 +14,40 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
-CHECK = Path(__file__).resolve().parent / "check.py"
+HERE = Path(__file__).resolve().parent
+CHECK = HERE / "check.py"
+FORK_PATHS = HERE / "fork_paths.py"
 
-# The project's kind of address, and the address GitHub uses for the merge commits it makes.
+# The project's kind of address, and the address GitHub uses for the commits it makes.
 OWN_LOGIN = "someone-made-up"
 OWN = f"1234567+{OWN_LOGIN}@users.noreply.github.com"
 OLD_STYLE = "another-made-up@users.noreply.github.com"
-GITHUB = "noreply@github.com"
+GITHUB = "noreply" + "@" + "github.com"
 PERSONAL = "someone" + "@" + "example.org"
 
 # Offending texts, from parts.
-TRACKER_CODE = "D" + "OD-" + "17"
-TRACKER_CODE_LOWER = "d" + "od-" + "4"
-TRACKER_ADDRESS = "https://" + "linear" + ".app/made-up/issue/x"
-HOME_PATH = "/" + "Users/" + "somebody-local/work/notes.md"
-TOOL_PATH = "/" + "private/tmp/" + "claude-" + "501/x/scratchpad/notes.txt"
-PROJECT_SLUG = "~/." + "claude/" + "projects/-" + "Users-somebody-orca-projects-x/memory"
-WORKSPACE_PATH = "x/" + "orca/" + "workspaces/" + "dodam/commit-check"
-TOOLING_ID = "term" + "_" + "69feae12-f296-4431"
-TASK_ID = "task" + "_" + "a96f649fe6a9"
-AI_COAUTHOR = "Co-" + "Authored-" + "By: " + "Cl" + "aude <noreply@" + "anthropic.com>"
-AI_COAUTHOR_LOWER = "co-" + "authored-" + "by: " + "Some Codex <someone@example.org>"
+C = "Cl" + "aude"
+T = "D" + "OD"
+TRACKER_CODE = T + "-" + "17"
+TRACKER_CODE_LOWER = T.lower() + "-" + "4"
+TRACKER_ADDRESS = "https://" + "lin" + "ear" + ".app/made-up/issue/x"
+HOME_PATH = "/" + "Us" + "ers/" + "somebody-local/work/notes.md"
+TOOL_PATH = "/" + "private/tmp/" + "cla" + "ude-" + "501/x/scratchpad/notes.txt"
+PROJECT_SLUG = "~/." + "cla" + "ude/" + "projects/-" + "Us" + "ers-somebody-or" + "ca-projects-x/memory"
+WORKSPACE_PATH = "x/" + "or" + "ca/" + "work" + "spaces/" + "dodam/commit-check"
+TOOLING_ID = "te" + "rm" + "_" + "69feae12-f296-4431"
+TASK_ID = "ta" + "sk" + "_" + "a96f649fe6a9"
+AI_COAUTHOR = "Co-" + "Authored-" + "By: " + C + " <noreply@" + "anthrop" + "ic.com>"
 HUMAN_COAUTHOR_PERSONAL = "Co-" + "authored-" + "by: A Person <" + PERSONAL + ">"
 HUMAN_COAUTHOR_NOREPLY = "Co-" + "authored-" + "by: A Person <" + OWN + ">"
-GENERATED = "\N{ROBOT FACE} " + "Gener" + "ated with " + "[Cl" + "aude Code](https://example.org)"
-GENERATED_PLAIN = "Gener" + "ated by " + "Chat" + "GPT"
+GENERATED = "\N{ROBOT FACE} " + "Gener" + "ated with " + "[" + C + " Code](https://example.org)"
 PRIVATE_WORD = "Zorb" + "latt"  # stands for a name kept out of public text
 PRIVATE_PATTERN = "(?i)zorbl" + "att|quix" + "otl"
+FORK_WORD = "Quix" + "otl"
+MARKER = "Mq" + "7xVr" + "Kp"  # a made-up word that the check must never print
 
 
 class Repo:
@@ -57,30 +60,27 @@ class Repo:
         self.git("config", "commit.gpgsign", "false")
         self.counter = 0
 
-    def git(self, *args, env=None, input_text=None):
-        full = dict(os.environ)
-        for key in list(full):
-            if key.startswith("GIT_"):
-                del full[key]
+    def git(self, *args, env=None):
+        full = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
         full.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
-        if env:
-            full.update(env)
-        done = subprocess.run(["git", *args], cwd=self.root, env=full, capture_output=True, text=True,
-                              input=input_text)
+        full.update(env or {})
+        done = subprocess.run(["git", *args], cwd=self.root, env=full, capture_output=True)
         if done.returncode != 0:
-            raise AssertionError(f"git {args} failed: {done.stderr}")
-        return done.stdout.strip()
+            raise AssertionError(f"git {args} failed: {done.stderr!r}")
+        return done.stdout.decode("utf-8", "replace").strip()
 
-    def commit(self, message="Add a file", files=None, author=(OWN_LOGIN, OWN), committer=None,
-               remove=()):
+    def commit(self, message="Add a file", files=None, author=(OWN_LOGIN, OWN), committer=None, remove=()):
         self.counter += 1
         if files is None:
             files = {f"file{self.counter}.txt": f"line {self.counter}\n"}
-        for name, text in files.items():
+        for name, content in files.items():
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-            self.git("add", "--", name)
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                path.write_text(content)
+            self.git("add", "-f", "--", name)
         for name in remove:
             self.git("rm", "-q", "--", name)
         committer = committer or author
@@ -93,6 +93,55 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
 
+class FakeGitHub:
+    """GitHub's API for the paths a test names: each answer is JSON, or a number for an HTTP error."""
+
+    def __init__(self, answers):
+        self.answers = dict(answers)
+        self.asked = []
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                fake.asked.append(self.path)
+                answer = fake.answers.get(self.path, 404)
+                if isinstance(answer, int):
+                    self.send_error(answer)
+                    return
+                body = json.dumps(answer).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.env = {"GITHUB_API_URL": f"http://127.0.0.1:{self.server.server_address[1]}",
+                    "GITHUB_REPOSITORY": "made-up/repo", "GITHUB_TOKEN": "made-up"}
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+REVIEWED = {"name": "private-check", "protection_rules": [{"type": "required_reviewers", "reviewers": [
+    {"type": "User", "reviewer": {"login": "made-up"}}]}]}
+NOBODY = {"name": "private-check", "protection_rules": [{"type": "required_reviewers", "reviewers": []}]}
+UNREVIEWED = {"name": "private-check", "protection_rules": [{"type": "branch_policy"}]}
+ENVIRONMENT_PATH = "/repos/made-up/repo/environments/private-check"
+
+
+def clean_env(extra=None):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "FORK_", "GIT_"))}
+    env.update(extra or {})
+    return env
+
+
 class RepoTestCase(unittest.TestCase):
     """A temporary repository and the check run on it as the workflows run it."""
 
@@ -101,21 +150,21 @@ class RepoTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
         self.repo = Repo(self.dir / "repo")
-        # The commit before which everything is exempt.
         self.base = self.repo.commit("The base commit")
 
-    def settings(self, expected=False, base=None):
+    def settings(self, expected=False, base=None, open_way=False, held="2026-11-27"):
         path = self.dir / "settings.json"
-        path.write_text(json.dumps({"exempt_through": base or self.base,
-                                    "private_pattern_expected": expected}))
+        path.write_text(json.dumps({"exempt_through": base or self.base, "private_pattern_expected": expected,
+                                    "fork_way_open": open_way, "outside_runs_held_since": held}))
         return path
 
-    def run_check(self, start, head=None, *, context="own", pattern=None, expected=False, event=None,
-                  verified=(), extra=(), env_extra=None):
+    def run_check(self, start, head=None, *, context="own", pattern=None, fork_pattern=None, expected=False,
+                  event=None, verified=(), extra=(), env_extra=None, open_way=False, held="2026-11-27",
+                  compare=None):
         head = head or self.repo.head()
-        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", start,
-                "--head", head, "--settings", str(self.settings(expected))]
-        args += ["--context", context]
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", start, "--head", head,
+                "--settings", str(self.settings(expected, open_way=open_way, held=held)), "--context", context,
+                "--compare-settings", compare or start]
         if event is not None:
             event_path = self.dir / "event.json"
             event_path.write_text(json.dumps(event))
@@ -123,13 +172,18 @@ class RepoTestCase(unittest.TestCase):
         verified_path = self.dir / "verified.txt"
         verified_path.write_text("".join(f"{sha}\n" for sha in verified))
         args += ["--verified-shas", str(verified_path), *extra]
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "GIT_"))}
+        env = clean_env(env_extra)
         if pattern is not None:
             env["COMMIT_CHECK_PRIVATE_PATTERN"] = pattern
-        env.update(env_extra or {})
-        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+        if fork_pattern is not None:
+            env["FORK_CHECK_PRIVATE_PATTERN"] = fork_pattern
+        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
         return done.returncode, done.stdout + done.stderr
+
+    def fake(self, answers):
+        fake = FakeGitHub(answers)
+        self.addCleanup(fake.close)
+        return fake
 
     def assert_fails(self, result, sha, prop, hidden=()):
         code, out = result
@@ -145,8 +199,6 @@ class RepoTestCase(unittest.TestCase):
 
 class CheckTest(RepoTestCase):
 
-    # A clean history passes, and the count of commits checked is printed.
-
     def test_a_clean_history_passes_and_says_how_many_commits_it_checked(self):
         self.repo.commit("First change")
         self.repo.commit("Second change", author=("another-made-up", OLD_STYLE))
@@ -157,8 +209,7 @@ class CheckTest(RepoTestCase):
     # Addresses.
 
     def test_a_personal_author_address_fails(self):
-        sha = self.repo.commit("A change", author=("someone", PERSONAL),
-                               committer=(OWN_LOGIN, OWN))
+        sha = self.repo.commit("A change", author=("someone", PERSONAL), committer=(OWN_LOGIN, OWN))
         self.assert_fails(self.run_check(self.base), sha, "author address", hidden=[PERSONAL])
 
     def test_a_personal_committer_address_fails(self):
@@ -168,6 +219,11 @@ class CheckTest(RepoTestCase):
     def test_an_address_that_only_ends_like_the_no_reply_address_fails(self):
         address = "1+x@users.noreply.github.com.example.org"
         sha = self.repo.commit("A change", author=("x", address), committer=("x", address))
+        self.assert_fails(self.run_check(self.base), sha, "author address")
+
+    def test_a_bot_s_no_reply_address_fails(self):
+        address = "158243242+some-agent[bot]@users.noreply.github.com"
+        sha = self.repo.commit("A change", author=("some-agent[bot]", address), committer=(OWN_LOGIN, OWN))
         self.assert_fails(self.run_check(self.base), sha, "author address")
 
     def test_github_as_author_fails(self):
@@ -180,14 +236,29 @@ class CheckTest(RepoTestCase):
 
     def test_github_as_committer_fails_when_github_s_api_cannot_be_asked(self):
         sha = self.repo.commit("Merge a change", committer=("GitHub", GITHUB))
-        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base,
-                "--head", sha, "--settings", str(self.settings()), "--context", "own"]
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "GIT_"))}
-        env.update({"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo",
-                    "GITHUB_API_URL": "http://127.0.0.1:9"})
-        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base, "--head", sha,
+                "--settings", str(self.settings()), "--context", "own", "--compare-settings", self.base]
+        env = clean_env({"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo",
+                         "GITHUB_API_URL": "http://127.0.0.1:9"})
+        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
         self.assert_fails((done.returncode, done.stdout + done.stderr), sha, "committer address")
+
+    def test_github_as_committer_is_believed_only_on_what_github_s_api_says(self):
+        sha = self.repo.commit("Merge a change", author=("Display Name", OWN), committer=("GitHub", GITHUB))
+        cases = [({"sha": sha, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}}, 0),
+                 ({"sha": sha, "commit": {"verification": {"verified": False}, "committer": {"email": GITHUB}}}, 1),
+                 ({"sha": sha, "commit": {"verification": {"verified": True}, "committer": {"email": PERSONAL}}}, 1),
+                 ({"sha": "0" * 40, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}}, 1),
+                 ({"sha": sha, "commit": {"verification": "yes", "committer": {"email": GITHUB}}}, 1)]
+        for answer, expected in cases:
+            with self.subTest(answer=answer):
+                fake = FakeGitHub({f"/repos/made-up/repo/commits/{sha}": answer})
+                args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base,
+                        "--head", sha, "--settings", str(self.settings()), "--context", "own",
+                        "--compare-settings", self.base]
+                done = subprocess.run(args, capture_output=True, text=True, env=clean_env(fake.env), timeout=120)
+                fake.close()
+                self.assertEqual(done.returncode, expected, done.stdout)
 
     def test_github_as_committer_with_github_s_verified_signature_passes(self):
         sha = self.repo.commit("Merge a change", author=("Display Name", OWN), committer=("GitHub", GITHUB))
@@ -195,8 +266,15 @@ class CheckTest(RepoTestCase):
 
     # Names.
 
-    def test_a_name_that_is_not_the_login_of_its_no_reply_address_and_names_an_ai_fails(self):
-        sha = self.repo.commit("A change", author=("Cl" + "aude", OWN), committer=(OWN_LOGIN, OWN))
+    def test_a_name_that_names_an_ai_fails(self):
+        for name in (C, C.lower() + "_code", C + "Bot", "GPT-4o", "Some " + C + "와", "a-helper-b" + "ot"):
+            with self.subTest(name=name):
+                sha = self.repo.commit("A change", author=(name, OWN), committer=(OWN_LOGIN, OWN))
+                self.assert_fails(self.run_check(sha + "~1"), sha, "author name")
+
+    def test_a_login_that_names_an_ai_is_not_spared(self):
+        address = "175728472+Co" + "pilot@users.noreply.github.com"
+        sha = self.repo.commit("A change", author=("Co" + "pilot", address), committer=(OWN_LOGIN, OWN))
         self.assert_fails(self.run_check(self.base), sha, "author name")
 
     def test_a_committer_name_that_matches_the_private_pattern_fails_without_showing_it(self):
@@ -208,27 +286,26 @@ class CheckTest(RepoTestCase):
         self.repo.commit("A change", author=(OWN_LOGIN, OWN))
         self.assert_passes(self.run_check(self.base, pattern="(?i)someone-made-" + "up"))
 
-    def test_the_author_name_github_puts_in_its_own_verified_commit_is_left_alone(self):
-        sha = self.repo.commit("Merge a change", author=(PRIVATE_WORD, OWN), committer=("GitHub", GITHUB))
-        self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN, verified=[sha]))
+    def test_the_author_name_github_puts_on_a_commit_it_signed_is_held_to_the_rules_for_names(self):
+        for name, pattern in ((PRIVATE_WORD, PRIVATE_PATTERN), (C + " Code", None)):
+            with self.subTest(name=name):
+                sha = self.repo.commit("Merge a change", author=(name, OWN), committer=("GitHub", GITHUB))
+                self.assert_fails(self.run_check(sha + "~1", pattern=pattern, verified=[sha]), sha, "author name",
+                                  hidden=[PRIVATE_WORD])
 
     def test_a_commit_github_signed_must_carry_the_committer_name_github(self):
         sha = self.repo.commit("Merge a change", author=(OWN_LOGIN, OWN), committer=("Not GitHub", GITHUB))
         self.assert_fails(self.run_check(self.base, verified=[sha]), sha, "committer name")
 
-    # Lines about an AI in the message.
+    # Attribution in the message.
 
     def test_an_ai_co_author_line_fails(self):
         sha = self.repo.commit("A change\n\n" + AI_COAUTHOR)
-        self.assert_fails(self.run_check(self.base), sha, "AI co-author line", hidden=[AI_COAUTHOR])
-
-    def test_an_ai_co_author_line_in_lower_case_fails(self):
-        sha = self.repo.commit("A change\n\n" + AI_COAUTHOR_LOWER)
-        self.assert_fails(self.run_check(self.base), sha, "AI co-author line")
+        self.assert_fails(self.run_check(self.base), sha, "attribution line (message line 3)", hidden=[AI_COAUTHOR])
 
     def test_a_human_co_author_with_a_personal_address_fails(self):
         sha = self.repo.commit("A change\n\n" + HUMAN_COAUTHOR_PERSONAL)
-        self.assert_fails(self.run_check(self.base), sha, "co-author address", hidden=[PERSONAL])
+        self.assert_fails(self.run_check(self.base), sha, "attribution line (message line 3)", hidden=[PERSONAL])
 
     def test_a_human_co_author_with_a_no_reply_address_passes(self):
         self.repo.commit("A change\n\n" + HUMAN_COAUTHOR_NOREPLY)
@@ -236,51 +313,56 @@ class CheckTest(RepoTestCase):
 
     def test_a_generated_with_line_fails(self):
         sha = self.repo.commit("A change\n\n" + GENERATED)
-        self.assert_fails(self.run_check(self.base), sha, "generated-with line")
+        self.assert_fails(self.run_check(self.base), sha, "attribution line (message line 3)")
 
-    def test_a_generated_by_line_naming_an_ai_fails(self):
-        sha = self.repo.commit("A change\n\n" + GENERATED_PLAIN)
-        self.assert_fails(self.run_check(self.base), sha, "generated-with line")
-
-    def test_generated_by_a_tool_that_is_not_an_ai_passes(self):
+    def test_generated_by_a_tool_inside_a_sentence_passes(self):
         self.repo.commit("Declare it once, with the code generated by the compiler")
         self.assert_passes(self.run_check(self.base))
+
+    def test_a_heading_of_two_words_passes_and_a_trailer_with_a_hyphen_at_the_end_fails(self):
+        self.repo.commit("Case runner: the steps keep their order\n\nSecond-lines: one more test here\n\nMore words.")
+        sha = self.repo.commit("A change\n\nMore words.\n\nTested-" + "with: a laptop")
+        code, out = self.run_check(self.base)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"commit {sha[:12]}: attribution line (message line 5)", out)
+        self.assertEqual(out.count("attribution line"), 1, out)
 
     # Work item numbers, the tracker's address, paths of this computer, ids of the sessions' tooling.
 
     def test_a_tracker_code_in_the_message_fails(self):
         sha = self.repo.commit(f"Keep the list short ({TRACKER_CODE})")
-        self.assert_fails(self.run_check(self.base), sha, "tracker code", hidden=[TRACKER_CODE])
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (message line 1)", hidden=[TRACKER_CODE])
 
-    def test_a_tracker_code_in_lower_case_in_an_added_line_fails(self):
+    def test_a_tracker_code_in_an_added_line_fails(self):
         sha = self.repo.commit("A change", files={"notes.md": f"one\nsee {TRACKER_CODE_LOWER}\n"})
-        self.assert_fails(self.run_check(self.base), sha, "tracker code (file notes.md line 2)")
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 1, line 2)")
 
-    def test_the_tracker_s_address_in_the_message_fails(self):
-        sha = self.repo.commit(f"A change\n\nSee {TRACKER_ADDRESS}")
-        self.assert_fails(self.run_check(self.base), sha, "tracker address (message line 3)")
-
-    def test_the_tracker_s_address_in_an_added_line_fails(self):
-        sha = self.repo.commit("A change", files={"a.py": f"URL = '{TRACKER_ADDRESS}'\n"})
-        self.assert_fails(self.run_check(self.base), sha, "tracker address (file a.py line 1)")
+    def test_the_tracker_s_address_in_the_message_and_in_an_added_line_fails(self):
+        first = self.repo.commit(f"A change\n\nSee {TRACKER_ADDRESS}")
+        second = self.repo.commit("A change", files={"a.py": f"URL = '{TRACKER_ADDRESS}'\n"})
+        code, out = self.run_check(self.base)
+        self.assert_fails((code, out), first, "tracker address (message line 3)")
+        self.assert_fails((code, out), second, "tracker address (file 1, line 1)")
 
     def test_a_home_folder_path_in_the_message_fails(self):
         sha = self.repo.commit(f"A change\n\nThe notes are in {HOME_PATH}")
-        self.assert_fails(self.run_check(self.base), sha, "local path", hidden=[HOME_PATH])
+        self.assert_fails(self.run_check(self.base), sha, "local path (message line 3)", hidden=[HOME_PATH])
 
     def test_a_folder_the_project_names_under_the_home_folder_passes_in_the_message(self):
         self.repo.commit("Keep the guard's file in ~/.dodam, one per user")
         self.assert_passes(self.run_check(self.base))
 
-    def test_a_path_the_session_tools_leave_fails_in_an_added_line(self):
+    def test_a_path_the_session_tools_leave_fails_in_an_added_line_and_in_the_message(self):
         for text in (TOOL_PATH, PROJECT_SLUG, WORKSPACE_PATH):
             with self.subTest(text=text):
-                sha = self.repo.commit("A change", files={"b.md": f"see {text}\n"})
-                self.assert_fails(self.run_check(sha + "~1"), sha, "local path (file b.md line 1)",
-                                  hidden=[text])
+                sha = self.repo.commit(f"Seen at {text}", files={"b.md": f"see {text}\n"})
+                code, out = self.run_check(sha + "~1")
+                self.assert_fails((code, out), sha, "local path (file 1, line 1)", hidden=[text])
+                self.assert_fails((code, out), sha, "local path (message line 1)", hidden=[text])
 
-    def test_a_temporary_folder_in_an_added_line_of_a_test_passes(self):
-        self.repo.commit("A change", files={"test_x.py": "ROOT = '/tmp/x'\nHOME = '/home/user'\n"})
+    def test_a_temporary_folder_and_a_container_s_home_in_an_added_line_of_a_test_pass(self):
+        self.repo.commit("A change", files={"test_x.py": "ROOT = '/tmp/x'\nHOME = '/home/agent'\nIGNORE = '.cla"
+                                            "ude/worktrees/'\n"})
         self.assert_passes(self.run_check(self.base))
 
     def test_an_id_of_the_session_tooling_fails_in_the_message_and_in_an_added_line(self):
@@ -288,18 +370,22 @@ class CheckTest(RepoTestCase):
         second = self.repo.commit("A change", files={"c.txt": f"{TASK_ID}\n"})
         code, out = self.run_check(self.base)
         self.assert_fails((code, out), first, "tooling id (message line 1)")
-        self.assert_fails((code, out), second, "tooling id (file c.txt line 1)")
+        self.assert_fails((code, out), second, "tooling id (file 1, line 1)")
 
-    def test_a_tracker_code_in_the_path_of_an_empty_new_file_fails(self):
-        sha = self.repo.commit("A change", files={f"notes/{TRACKER_CODE}.md": ""})
-        self.assert_fails(self.run_check(self.base), sha, "tracker code (file path)", hidden=[TRACKER_CODE])
+    def test_each_rule_holds_in_the_path_of_an_empty_new_file(self):
+        names = {f"notes/{TRACKER_CODE}.md": "tracker code", f"lin" "ear.app-notes/x.md": "tracker address",
+                 f"x/{TASK_ID}.md": "tooling id", f"or" "ca/work" "spaces/x/y.md": "local path"}
+        for name, prop in names.items():
+            with self.subTest(prop=prop):
+                sha = self.repo.commit("A change", files={name: ""})
+                self.assert_fails(self.run_check(sha + "~1"), sha, f"{prop} (path 1)", hidden=[TRACKER_CODE, TASK_ID])
 
     def test_a_tracker_code_in_the_new_path_of_a_renamed_file_fails(self):
         self.repo.commit("A change", files={"plain.md": "some text that stays the same\n"})
         start = self.repo.head()
         self.repo.git("mv", "plain.md", f"{TRACKER_CODE}.md")
         sha = self.repo.commit("Rename", files={})
-        self.assert_fails(self.run_check(start), sha, "tracker code (file path)")
+        self.assert_fails(self.run_check(start), sha, "tracker code (path 1)")
 
     # The private pattern.
 
@@ -308,22 +394,24 @@ class CheckTest(RepoTestCase):
         self.assert_fails(self.run_check(self.base, pattern=PRIVATE_PATTERN), sha,
                           "private pattern (message line 1)", hidden=[PRIVATE_WORD, PRIVATE_PATTERN])
 
-    def test_the_private_pattern_in_an_added_line_fails_without_showing_the_file(self):
-        sha = self.repo.commit("A change", files={"docs/where.md": f"text\n{PRIVATE_WORD.lower()}\n"})
-        self.assert_fails(self.run_check(self.base, pattern=PRIVATE_PATTERN), sha,
-                          "private pattern (an added line)", hidden=[PRIVATE_WORD.lower(), "where.md"])
+    def test_the_private_pattern_in_an_added_line_and_in_a_path_fails_without_showing_either(self):
+        sha = self.repo.commit("A change", files={"docs/where.md": f"text\n{PRIVATE_WORD.lower()}\n",
+                                                  f"{PRIVATE_WORD}-notes.md": f"{TRACKER_CODE}\n"})
+        code, out = self.run_check(self.base, pattern=PRIVATE_PATTERN)
+        self.assert_fails((code, out), sha, "private pattern (file 2, line 2)",
+                          hidden=[PRIVATE_WORD, PRIVATE_WORD.lower(), "where.md", TRACKER_CODE])
+        self.assert_fails((code, out), sha, "private pattern (path 1)")
+        self.assert_fails((code, out), sha, "tracker code (file 1, line 1)")
 
-    def test_the_private_pattern_in_a_file_path_fails_without_showing_the_path(self):
-        sha = self.repo.commit("A change", files={f"{PRIVATE_WORD}.md": ""})
-        self.assert_fails(self.run_check(self.base, pattern=PRIVATE_PATTERN), sha,
-                          "private pattern (a file path)", hidden=[PRIVATE_WORD])
+    def test_the_private_pattern_is_also_matched_on_the_text_brought_to_one_form(self):
+        sha = self.repo.commit("Thanks to Zorb\u200blatt")
+        self.assert_fails(self.run_check(self.base, pattern=PRIVATE_PATTERN), sha, "private pattern (message line 1)")
 
     def test_without_the_secret_and_while_it_is_not_expected_the_check_passes_with_a_notice(self):
         self.repo.commit("A change")
         code, out = self.run_check(self.base, pattern=None, expected=False)
         self.assertEqual(code, 0, out)
         self.assertIn("::notice", out)
-        self.assertIn("private pattern", out)
 
     def test_without_the_secret_once_it_is_expected_the_check_fails_on_the_project_s_own_branches(self):
         self.repo.commit("A change")
@@ -331,23 +419,10 @@ class CheckTest(RepoTestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("private pattern", out)
 
-    def test_while_the_secret_is_not_expected_a_fork_s_pull_request_passes_with_a_notice(self):
-        self.repo.commit(f"Thanks to {PRIVATE_WORD}")
-        code, out = self.run_check(self.base, pattern=None, expected=False, context="fork")
-        self.assertEqual(code, 0, out)
-        self.assertIn("::notice", out)
-
-    def test_once_the_secret_is_expected_a_fork_s_public_run_still_passes_and_leaves_the_private_part_to_its_own_job(self):
-        # The private part runs in a job of its own that waits for the project's approval; the public run never fails
-        # for it, because a failed run stays on the head and the owner's gate refuses every head that carries one.
-        self.repo.commit(f"Thanks to {PRIVATE_WORD}")
-        code, out = self.run_check(self.base, pattern=PRIVATE_PATTERN, expected=True, context="fork")
-        self.assertEqual(code, 0, out)
-        self.assertIn("::notice", out)
-
-    def test_a_fork_s_pull_request_is_never_held_to_the_private_pattern_outside_the_approved_run(self):
-        self.repo.commit(f"Thanks to {PRIVATE_WORD}")
-        self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN, expected=False, context="fork"))
+    def test_the_fork_s_secret_is_not_the_project_s_secret(self):
+        # A run of the project's own branch reads its own secret only; the fork's secret has a name of its own.
+        sha = self.repo.commit(f"Thanks to {PRIVATE_WORD}")
+        self.assert_passes(self.run_check(sha + "~1", pattern=None, fork_pattern=PRIVATE_PATTERN))
 
     def test_a_private_pattern_that_is_no_regular_expression_fails_without_showing_it(self):
         self.repo.commit("A change")
@@ -356,122 +431,22 @@ class CheckTest(RepoTestCase):
         self.assertEqual(code, 1, out)
         self.assertNotIn("secretpart", out)
 
-    # Merges, the exempt history and the range as a whole.
-
-    def test_a_line_that_a_merge_adds_beyond_both_parents_fails(self):
-        start = self.repo.head()
-        self.repo.git("checkout", "-q", "-b", "side")
-        self.repo.commit("Side", files={"s.txt": "side\n"})
-        self.repo.git("checkout", "-q", "main")
-        self.repo.commit("Main", files={"m.txt": "main\n"})
-        env = {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN,
-               "GIT_COMMITTER_NAME": OWN_LOGIN, "GIT_COMMITTER_EMAIL": OWN}
-        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "side", env=env)
-        (self.repo.root / "m.txt").write_text(f"main\n{TRACKER_CODE}\n")
-        self.repo.git("add", "m.txt")
-        self.repo.git("commit", "-q", "-m", "Merge side", env=env)
-        merge = self.repo.head()
-        self.assert_fails(self.run_check(start), merge, "tracker code (file m.txt line 2)")
-
-    def test_a_merge_that_brings_back_an_offending_line_from_the_exempt_history_fails(self):
-        old = self.repo.commit("Old", files={"old.txt": f"{TRACKER_CODE}\n"})
-        self.repo.commit("Take the old line out", files={}, remove=["old.txt"])
-        base = self.repo.head()
-        env = {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN,
-               "GIT_COMMITTER_NAME": OWN_LOGIN, "GIT_COMMITTER_EMAIL": OWN}
-        self.repo.git("checkout", "-q", "-b", "old-side", old)
-        self.repo.git("checkout", "-q", "main")
-        # A merge that keeps the old side's file: no line is new to both parents.
-        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "-s", "ours", "old-side", env=env)
-        self.repo.git("checkout", "old-side", "--", "old.txt")
-        self.repo.git("commit", "-q", "-m", "Merge the old side", env=env)
-        merge = self.repo.head()
-        path = self.dir / "settings2.json"
-        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", base,
-                "--head", merge, "--settings", str(path), "--own", "--verified-shas", os.devnull]
-        path.write_text(json.dumps({"exempt_through": base, "private_pattern_expected": False}))
-        done = subprocess.run(args, capture_output=True, text=True, timeout=60)
-        out = done.stdout + done.stderr
-        self.assertEqual(done.returncode, 1, out)
-        self.assertIn("tracker code (the range's difference, file old.txt line 1)", out)
-
-    def github_merge(self, branch, title):
-        """A merge commit in the shape GitHub makes it on main: the merger's no-reply address and display
-        name as author, GitHub as committer, the pull request's number, branch and title in the message."""
-        self.repo.git("checkout", "-q", "-b", branch)
-        self.repo.commit(title)
-        self.repo.git("checkout", "-q", "main")
-        self.repo.commit("Meanwhile on main")
-        before = self.repo.head()
-        env = {"GIT_AUTHOR_NAME": "Some Display Name", "GIT_AUTHOR_EMAIL": OWN,
-               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
-        self.repo.git("merge", "-q", "--no-ff", "-m", f"Merge pull request #41 from SomeOrg/{branch}\n\n{title}",
-                      branch, env=env)
-        return before, self.repo.head()
-
-    def test_main_s_run_on_a_merge_github_made_passes(self):
-        before, merge = self.github_merge("commit-check", "Check every commit of a pull request")
-        code, out = self.run_check(before, merge, verified=[merge], extra=["--require-commits"])
-        self.assertEqual(code, 0, out)
-        self.assertIn("2 commits checked", out)
-
-    def test_main_s_run_on_a_merge_whose_branch_name_carries_a_tracker_code_fails(self):
-        before, merge = self.github_merge(f"{TRACKER_CODE_LOWER}-notes", "Notes")
-        self.assert_fails(self.run_check(before, merge, verified=[merge], extra=["--require-commits"]), merge,
-                          "tracker code (message line 1)")
-
-    def test_main_s_run_on_a_merge_github_did_not_sign_fails(self):
-        before, merge = self.github_merge("commit-check", "Check every commit of a pull request")
-        self.assert_fails(self.run_check(before, merge, verified=[], extra=["--require-commits"]), merge,
-                          "committer address")
-
-    def test_main_s_run_with_nothing_in_its_range_fails(self):
-        self.repo.commit("A change")
-        code, out = self.run_check(self.repo.head(), extra=["--require-commits"])
-        self.assertEqual(code, 1, out)
-        self.assertIn("no commit", out)
-
-    def test_an_offending_commit_up_to_the_exempt_commit_is_not_checked(self):
-        self.repo.commit(f"Old work ({TRACKER_CODE})", author=("someone", PERSONAL))
-        exempt = self.repo.head()
-        self.repo.commit("New work")
-        args_settings = self.dir / "settings3.json"
-        args_settings.write_text(json.dumps({"exempt_through": exempt, "private_pattern_expected": False}))
-        done = subprocess.run([sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root),
-                               "--from", self.base, "--head", self.repo.head(),
-                               "--settings", str(args_settings), "--own", "--verified-shas", os.devnull],
-                              capture_output=True, text=True, timeout=60)
-        out = done.stdout + done.stderr
-        self.assertEqual(done.returncode, 0, out)
-        self.assertIn("1 commits checked", out)
-
-    def test_an_exempt_commit_that_is_not_in_the_history_fails(self):
-        self.repo.commit("A change")
-        path = self.dir / "settings4.json"
-        path.write_text(json.dumps({"exempt_through": "0" * 40, "private_pattern_expected": False}))
-        done = subprocess.run([sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root),
-                               "--from", self.base, "--head", self.repo.head(), "--settings", str(path),
-                               "--own", "--verified-shas", os.devnull],
-                              capture_output=True, text=True, timeout=60)
-        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-
     # A branch judged by its own copy cannot loosen the settings it is judged by.
 
     def committed_settings(self, expected, exempt=None):
         path = self.repo.root / ".github" / "commit-check" / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"exempt_through": exempt or self.base, "private_pattern_expected": expected}))
+        path.write_text(json.dumps({"exempt_through": exempt or self.base, "private_pattern_expected": expected,
+                                    "fork_way_open": False, "outside_runs_held_since": None}))
         self.repo.git("add", "--", str(path))
         return self.repo.commit("Settings", files={}), path
 
-    def run_with_settings(self, start, settings, pattern=PRIVATE_PATTERN):
+    def run_with_settings(self, start, settings):
         args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", start,
                 "--head", self.repo.head(), "--settings", str(settings), "--context", "own",
                 "--compare-settings", start, "--verified-shas", os.devnull]
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "GIT_"))}
-        env["COMMIT_CHECK_PRIVATE_PATTERN"] = pattern
-        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+        done = subprocess.run(args, capture_output=True, text=True,
+                              env=clean_env({"COMMIT_CHECK_PRIVATE_PATTERN": PRIVATE_PATTERN}), timeout=120)
         return done.returncode, done.stdout + done.stderr
 
     def test_a_branch_that_says_the_secret_is_no_longer_expected_fails(self):
@@ -499,17 +474,138 @@ class CheckTest(RepoTestCase):
         _, path = self.committed_settings(False)
         self.assert_passes(self.run_with_settings(start, path))
 
-    # The pull request's title and description.
+    def test_settings_of_the_wrong_shape_fail_with_a_fixed_message(self):
+        self.repo.commit("A change")
+        shapes = ["[]", "{}", '{"exempt_through": "x", "private_pattern_expected": false, "fork_way_open": false, '
+                  '"outside_runs_held_since": null}', json.dumps({"exempt_through": self.base,
+                  "private_pattern_expected": "no", "fork_way_open": False, "outside_runs_held_since": None}),
+                  json.dumps({"exempt_through": self.base, "private_pattern_expected": False, "fork_way_open": False,
+                              "outside_runs_held_since": None, "more": 1}), "not json", ""]
+        for shape in shapes:
+            with self.subTest(shape=shape):
+                path = self.dir / "odd.json"
+                path.write_text(shape)
+                args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base,
+                        "--head", "HEAD", "--settings", str(path), "--context", "own", "--compare-settings", self.base]
+                done = subprocess.run(args, capture_output=True, text=True, env=clean_env(), timeout=120)
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertIn("::error::settings.json", done.stdout)
+                self.assertNotIn("Traceback", done.stdout + done.stderr)
 
-    def test_the_pull_request_s_title_and_description_are_checked(self):
+    # Merges, the exempt history and the range as a whole.
+
+    def as_owner(self):
+        return {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
+                "GIT_COMMITTER_EMAIL": OWN}
+
+    def test_a_line_that_a_merge_adds_beyond_both_parents_fails(self):
+        start = self.repo.head()
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.commit("Side", files={"s.txt": "side\n"})
+        self.repo.git("checkout", "-q", "main")
+        self.repo.commit("Main", files={"m.txt": "main\n"})
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "side", env=self.as_owner())
+        (self.repo.root / "m.txt").write_text(f"main\n{TRACKER_CODE}\n")
+        self.repo.git("add", "m.txt")
+        self.repo.git("commit", "-q", "-m", "Merge side", env=self.as_owner())
+        merge = self.repo.head()
+        self.assert_fails(self.run_check(start), merge, "tracker code (file 1, line 2)")
+
+    def test_a_merge_that_brings_back_a_line_or_a_path_from_the_exempt_history_fails(self):
+        old = self.repo.commit("Old", files={"old.txt": f"{TRACKER_CODE}\n", f"notes/{TRACKER_CODE}.md": ""})
+        self.repo.commit("Take the old things out", files={}, remove=["old.txt", f"notes/{TRACKER_CODE}.md"])
+        base = self.repo.head()
+        self.repo.git("checkout", "-q", "-b", "old-side", old)
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "-s", "ours", "old-side", env=self.as_owner())
+        self.repo.git("checkout", "old-side", "--", "old.txt", f"notes/{TRACKER_CODE}.md")
+        self.repo.git("commit", "-q", "-m", "Merge the old side", env=self.as_owner())
+        merge = self.repo.head()
+        path = self.dir / "settings2.json"
+        path.write_text(json.dumps({"exempt_through": base, "private_pattern_expected": False, "fork_way_open": False,
+                                    "outside_runs_held_since": None}))
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", base, "--head", merge,
+                "--settings", str(path), "--context", "own", "--compare-settings", base, "--verified-shas", os.devnull]
+        done = subprocess.run(args, capture_output=True, text=True, env=clean_env(), timeout=120)
+        out = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 1, out)
+        self.assertIn("the range: tracker code (file 2, line 1)", out)
+        self.assertIn("the range: tracker code (path 1)", out)
+
+    def test_an_offending_commit_up_to_the_exempt_commit_is_not_checked(self):
+        self.repo.commit(f"Old work ({TRACKER_CODE})", author=("someone", PERSONAL))
+        exempt = self.repo.head()
+        self.repo.commit("New work")
+        path = self.dir / "settings3.json"
+        path.write_text(json.dumps({"exempt_through": exempt, "private_pattern_expected": False,
+                                    "fork_way_open": False, "outside_runs_held_since": None}))
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base, "--head",
+                self.repo.head(), "--settings", str(path), "--context", "own", "--compare-settings", self.base,
+                "--verified-shas", os.devnull]
+        done = subprocess.run(args, capture_output=True, text=True, env=clean_env(), timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("1 commits checked", done.stdout)
+
+    def test_an_exempt_commit_that_is_not_in_the_history_fails(self):
+        self.repo.commit("A change")
+        path = self.dir / "settings4.json"
+        path.write_text(json.dumps({"exempt_through": "0" * 40, "private_pattern_expected": False,
+                                    "fork_way_open": False, "outside_runs_held_since": None}))
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base, "--head",
+                self.repo.head(), "--settings", str(path), "--context", "own", "--compare-settings", self.base]
+        done = subprocess.run(args, capture_output=True, text=True, env=clean_env(), timeout=120)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("the exempt commit named in settings.json is not in this history", done.stdout)
+
+    def github_merge(self, branch, title):
+        """A merge commit in the shape GitHub makes it on main: the merger's no-reply address and display name as
+        author, GitHub as committer, the pull request's number, branch and title in the message."""
+        self.repo.git("checkout", "-q", "-b", branch)
+        self.repo.commit(title)
+        self.repo.git("checkout", "-q", "main")
+        self.repo.commit("Meanwhile on main")
+        before = self.repo.head()
+        env = {"GIT_AUTHOR_NAME": "Some Display Name", "GIT_AUTHOR_EMAIL": OWN,
+               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
+        self.repo.git("merge", "-q", "--no-ff", "-m", f"Merge pull request #41 from SomeOrg/{branch}\n\n{title}",
+                      branch, env=env)
+        return before, self.repo.head()
+
+    def test_main_s_run_on_a_merge_github_made_passes(self):
+        before, merge = self.github_merge("commit-check", "Check every commit of a pull request")
+        code, out = self.run_check(before, merge, verified=[merge], extra=["--require-commits"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 commits checked", out)
+
+    def test_main_s_run_on_a_merge_whose_branch_name_carries_a_tracker_code_fails(self):
+        before, merge = self.github_merge(f"{TRACKER_CODE_LOWER}-notes", "Notes")
+        self.assert_fails(self.run_check(before, merge, verified=[merge], extra=["--require-commits"]), merge,
+                          "tracker code (message line 1)")
+
+    def test_main_s_run_with_nothing_in_its_range_fails(self):
+        self.repo.commit("A change")
+        code, out = self.run_check(self.repo.head(), extra=["--require-commits"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no commit", out)
+
+    def test_the_name_of_the_branch_a_push_went_to_is_checked(self):
+        self.repo.commit("A change")
+        code, out = self.run_check(self.base, extra=["--branch", f"{TRACKER_CODE_LOWER}-notes"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("push: tracker code (branch name)", out)
+        code, out = self.run_check(self.base, extra=["--branch", C.lower() + "/fix-the-notes"])
+        self.assertIn("push: AI name (branch name)", out)
+
+    # The pull request's title, description and branch name.
+
+    def test_the_pull_request_s_title_description_and_branch_name_are_checked(self):
         self.repo.commit("A change")
         cases = [({"title": f"Fix ({TRACKER_CODE})", "body": ""}, "tracker code (pull request title)"),
                  ({"title": "Fix", "body": f"one\n{HOME_PATH}"}, "local path (pull request description line 2)"),
-                 ({"title": "Fix", "body": GENERATED}, "generated-with line (pull request description line 1)"),
+                 ({"title": "Fix", "body": GENERATED}, "attribution line (pull request description line 1)"),
                  ({"title": "Fix", "body": TRACKER_ADDRESS}, "tracker address (pull request description line 1)"),
                  ({"title": "Fix", "body": TASK_ID}, "tooling id (pull request description line 1)"),
                  ({"title": PRIVATE_WORD, "body": None}, "private pattern (pull request title)"),
-                 # GitHub writes the branch's name into the message of the merge commit it makes on main.
                  ({"title": "Fix", "body": "", "head": {"ref": f"{TRACKER_CODE_LOWER}-notes"}},
                   "tracker code (pull request branch name)")]
         for pull, expected in cases:
@@ -520,9 +616,16 @@ class CheckTest(RepoTestCase):
                 self.assertIn(f"pull request: {expected}", out)
                 self.assertNotIn(PRIVATE_WORD, out)
 
+    def test_a_text_that_breaks_a_rule_fails_its_run_at_once(self):
+        # No clock: nothing waits, nothing is read again. The way back is a new head.
+        self.repo.commit("A change")
+        code, out = self.run_check(self.base, event={"pull_request": {"number": 7, "title": f"Fix {TRACKER_CODE}",
+                                                                      "body": ""}})
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("waiting", out)
+
     def test_a_pull_request_with_no_commit_to_check_fails(self):
-        code, out = self.run_check(self.base, self.base, event={"pull_request": {"number": 7, "title": "x",
-                                                                                 "body": ""}})
+        code, out = self.run_check(self.base, self.base, event={"pull_request": {"number": 7, "title": "x", "body": ""}})
         self.assertEqual(code, 1, out)
         self.assertIn("no commit", out)
 
@@ -535,219 +638,425 @@ class CheckTest(RepoTestCase):
         self.assertIn(f"commit {second[:12]}: author address", out)
         self.assertIn(f"commit {second[:12]}: committer address", out)
 
-    # The check's own files do not trip it.
-
     def test_the_check_s_own_files_added_in_a_commit_do_not_trip_it(self):
-        here = Path(__file__).resolve().parent
-        files = {f"x/{path.name}": path.read_text() for path in sorted(here.iterdir())
-                 if path.suffix in (".py", ".json")}
+        files = {f"x/{path.name}": path.read_text() for path in sorted(HERE.iterdir())
+                 if path.suffix in (".py", ".json", ".md")}
         for name in ("pull-requests.yml", "commits.yml"):
-            files[f"x/{name}"] = (here.parent / "workflows" / name).read_text()
+            files[f"x/{name}"] = (HERE.parent / "workflows" / name).read_text()
         self.repo.commit("Add the check", files=files)
         self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN))
 
 
-class FakeGitHub:
-    """GitHub's API for one pull request, answering from a list: each answer once, the last one for good.
-    An answer is a pull request's fields, or a number for an HTTP error."""
+class OutputTest(RepoTestCase):
+    """What is printed is made by the check alone: never a text of its input."""
 
-    def __init__(self, answers, environment=None):
-        self.answers = list(answers)
-        self.asked = 0
-        fake = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == "/repos/made-up/repo/environments/private-check" and environment is not None:
-                    self.send_json(environment)
-                    return
-                if self.path != "/repos/made-up/repo/pulls/7":
-                    self.send_error(404)
-                    return
-                answer = fake.answers[min(fake.asked, len(fake.answers) - 1)]
-                fake.asked += 1
-                if isinstance(answer, int):
-                    self.send_error(answer)
-                    return
-                self.send_json({"number": 7, **answer})
-
-            def send_json(self, data):
-                body = json.dumps(data).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *args):
-                pass
-
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.env = {"GITHUB_API_URL": f"http://127.0.0.1:{self.server.server_address[1]}",
-                    "GITHUB_REPOSITORY": "made-up/repo", "GITHUB_TOKEN": "made-up"}
-
-    def close(self):
-        self.server.shutdown()
-        self.server.server_close()
-
-
-CLEAN = {"title": "Fix the notes", "body": "Plain words.", "head": {"ref": "notes"}}
-BAD_TITLE = {"title": f"Fix the notes ({TRACKER_CODE})", "body": "Plain words.", "head": {"ref": "notes"}}
-BAD_BODY = {"title": "Fix the notes", "body": f"See {HOME_PATH}", "head": {"ref": "notes"}}
-BAD_BRANCH = {"title": "Fix the notes", "body": "", "head": {"ref": f"{TRACKER_CODE_LOWER}-notes"}}
-
-
-class TextWaitTest(RepoTestCase):
-    """A pull request's title and description can be mended without a new commit, and a failed run stays on
-    the head for good: the owner's gate refuses every head that carries one. So a check of the text never fails
-    while the text can still be mended; it waits, reading the text again, and the run stays unfinished, which the
-    gate refuses as well. A run ends in failure only on what cannot be mended on that head."""
-
-    def waiting_run(self, answers, *, commit_message="A change", wait="3", context="own"):
-        self.repo.commit(commit_message)
-        fake = FakeGitHub(answers, environment=self.REVIEWED)
-        self.addCleanup(fake.close)
-        started = time.monotonic()
-        code, out = self.run_check(self.base, context=context, event={"pull_request": {"number": 7, **CLEAN}},
-                                   extra=["--wait-for-text", wait, "--poll", "0.2"], env_extra=fake.env)
-        return code, out, time.monotonic() - started, fake
-
-    def test_a_title_mended_while_the_run_waits_ends_the_run_in_success(self):
-        code, out, _, fake = self.waiting_run([BAD_TITLE, BAD_TITLE, CLEAN])
-        self.assertEqual(code, 0, out)
-        self.assertIn("pull request: tracker code (pull request title)", out)
-        self.assertIn("waiting for the pull request's text to be mended", out)
-        self.assertGreaterEqual(fake.asked, 3)
-        self.assertNotIn(TRACKER_CODE, out)
-
-    def test_a_description_mended_while_the_run_waits_ends_the_run_in_success(self):
-        code, out, _, _ = self.waiting_run([BAD_BODY, CLEAN])
-        self.assertEqual(code, 0, out)
-        self.assertIn("pull request: local path (pull request description line 1)", out)
-
-    def test_a_text_that_is_never_mended_fails_when_the_wait_is_over(self):
-        code, out, elapsed, _ = self.waiting_run([BAD_TITLE], wait="1.5")
+    def test_a_marker_in_every_field_of_the_input_is_never_printed(self):
+        branch = f"{MARKER}-{TRACKER_CODE_LOWER}"
+        self.repo.git("checkout", "-q", "-b", branch)
+        sha = self.repo.commit(
+            f"{MARKER} {TRACKER_CODE}\n\n{MARKER} {GENERATED}\n\nCo-" "authored-" f"by: {MARKER} <{PERSONAL}>",
+            files={f"{MARKER}/{TRACKER_CODE}-{MARKER}.md": f"{MARKER} {TRACKER_CODE} {HOME_PATH} {MARKER}\n",
+                   f"{MARKER}-{PRIVATE_WORD}.txt": f"{PRIVATE_WORD} {MARKER}\n+++ {MARKER} {TRACKER_CODE}\n"},
+            author=(f"{MARKER} {C}", f"{MARKER}@example.org"), committer=(f"{MARKER}", f"{MARKER}@example.org"))
+        event = {"pull_request": {"number": 7, "title": f"{MARKER} {TRACKER_CODE}",
+                                  "body": f"{MARKER}\n{HOME_PATH}{MARKER}\n{GENERATED}", "head": {"ref": branch}}}
+        code, out = self.run_check(self.base, sha, pattern=PRIVATE_PATTERN, event=event,
+                                   extra=["--branch", branch])
         self.assertEqual(code, 1, out)
-        self.assertGreaterEqual(elapsed, 1.5)
-        self.assertIn("not mended", out)
-        self.assertIn("pull request: tracker code (pull request title)", out)
+        self.assertGreater(out.count("\n"), 15, out)  # it did report, and at length
+        for text in (MARKER, MARKER.lower(), PRIVATE_WORD, TRACKER_CODE, HOME_PATH, PERSONAL):
+            self.assertNotIn(text, out)
 
-    def test_the_text_is_read_from_the_api_and_not_from_the_event_s_copy(self):
-        # The event's copy is clean; the pull request's text now is not.
-        code, out, _, _ = self.waiting_run([BAD_TITLE], wait="0.6")
-        self.assertEqual(code, 1, out)
-
-    def test_a_clean_text_ends_the_run_at_once(self):
-        code, out, elapsed, fake = self.waiting_run([CLEAN], wait="30")
-        self.assertEqual(code, 0, out)
-        self.assertLess(elapsed, 15)
-        self.assertEqual(fake.asked, 1)
-
-    def test_a_branch_name_cannot_be_mended_so_it_fails_at_once(self):
-        code, out, elapsed, _ = self.waiting_run([BAD_BRANCH], wait="30")
-        self.assertEqual(code, 1, out)
-        self.assertLess(elapsed, 15)
-        self.assertIn("pull request: tracker code (pull request branch name)", out)
-
-    def test_an_offending_commit_fails_at_once_without_waiting_for_the_text(self):
-        code, out, elapsed, fake = self.waiting_run([BAD_TITLE], commit_message=f"A change ({TRACKER_CODE})", wait="30")
-        self.assertEqual(code, 1, out)
-        self.assertLess(elapsed, 15)
-        self.assertIn("tracker code (message line 1)", out)
-
-    def test_an_answer_the_api_could_not_give_is_asked_again(self):
-        code, out, _, fake = self.waiting_run([502, 500, CLEAN])
-        self.assertEqual(code, 0, out)
-        self.assertEqual(fake.asked, 3)
-
-    def test_an_api_that_never_answers_fails_when_the_wait_is_over(self):
-        code, out, _, _ = self.waiting_run([503], wait="1")
-        self.assertEqual(code, 1, out)
-
-    def test_a_fork_s_run_does_not_wait_for_its_text(self):
-        # A waiting run of a fork would hold a runner for every pull request anyone opens, and in the approved run
-        # it would let the fork try its text against the private pattern again and again.
-        code, out, elapsed, fake = self.waiting_run([BAD_TITLE, CLEAN], context="fork-approved", wait="30")
-        self.assertEqual(code, 1, out)
-        self.assertLess(elapsed, 15)
-        self.assertNotIn("waiting for the pull request's text", out)
-
-    # The fork's run in the environment private-check uses the private pattern only when that environment really
-    # waits for a reviewer; otherwise a fork could try its text against the pattern as often as it likes.
-
-    REVIEWED = {"name": "private-check", "protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}]}
-    UNREVIEWED = {"name": "private-check", "protection_rules": [{"type": "branch_policy"}]}
-
-    def approved_run(self, environment, *, message, expected=True):
-        self.repo.commit(message)
-        fake = FakeGitHub([CLEAN], environment=environment)
-        self.addCleanup(fake.close)
-        return self.run_check(self.base, context="fork-approved", pattern=PRIVATE_PATTERN, expected=expected,
-                              event={"pull_request": {"number": 7, **CLEAN}},
-                              env_extra=fake.env)
-
-    def test_an_environment_that_waits_for_a_reviewer_lets_the_private_pattern_be_used(self):
-        code, out = self.approved_run(self.REVIEWED, message=f"Thanks to {PRIVATE_WORD}")
-        self.assertEqual(code, 1, out)
-        self.assertIn("private pattern (message line 1)", out)
-        self.assertNotIn(PRIVATE_WORD, out)
-
-    def test_in_the_approved_run_a_missing_secret_fails_once_it_is_expected(self):
+    def test_a_marker_in_the_settings_or_in_an_argument_is_never_printed_and_nothing_is_traced_back(self):
         self.repo.commit("A change")
-        fake = FakeGitHub([CLEAN], environment=self.REVIEWED)
-        self.addCleanup(fake.close)
-        code, out = self.run_check(self.base, context="fork-approved", pattern=None, expected=True,
-                                   event={"pull_request": {"number": 7, **CLEAN}}, env_extra=fake.env)
+        odd_settings = self.dir / f"{MARKER}.json"
+        odd_settings.write_text(json.dumps({"exempt_through": MARKER, "private_pattern_expected": False,
+                                            "fork_way_open": False, "outside_runs_held_since": None}))
+        calls = [["--settings", str(odd_settings), "--from", self.base, "--head", "HEAD", "--context", "own",
+                  "--compare-settings", self.base],
+                 ["--settings", str(self.dir / MARKER / "none.json"), "--from", self.base, "--head", "HEAD",
+                  "--context", "own", "--compare-settings", self.base],
+                 ["--settings", str(self.settings()), "--from", MARKER, "--head", "HEAD", "--context", "own",
+                  "--compare-settings", self.base],
+                 ["--settings", str(self.settings()), "--from", self.base, "--head", "HEAD", "--context", MARKER,
+                  "--compare-settings", self.base],
+                 ["--settings", str(self.settings()), "--from", self.base, "--head", "HEAD", "--context", "own",
+                  "--compare-settings", MARKER],
+                 ["--settings", str(self.settings()), "--from", self.base, "--head", "HEAD", "--context", "own",
+                  "--compare-settings", self.base, f"--{MARKER}"],
+                 ["--settings", str(self.settings()), "--from", self.base, "--head", "HEAD", "--context", "own",
+                  "--compare-settings", self.base, "--event", str(self.dir / f"{MARKER}.event")]]
+        (self.dir / f"{MARKER}.event").write_text(json.dumps({"pull_request": {"title": [MARKER]}}))
+        for call in calls:
+            with self.subTest(call=call):
+                done = subprocess.run([sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), *call],
+                                      capture_output=True, text=True, env=clean_env(), timeout=120)
+                out = done.stdout + done.stderr
+                self.assertNotEqual(done.returncode, 0, out)
+                self.assertNotIn(MARKER, out)
+                self.assertNotIn("Traceback", out)
+
+
+class StructureTest(RepoTestCase):
+    """The difference is read by its structure, and every line it adds is read as text."""
+
+    def test_an_added_line_that_begins_like_a_header_of_the_format_is_still_checked(self):
+        for start in ("+++ ", "++ ", "--- ", "-- ", "@@ -1 +1 @@ ", "@@@ -1 -1 +1 @@@ ", "diff --git a/x b/x ",
+                      "index 0000000..1111111 ", "\\ No newline ", "new file mode 100644 ", "rename to "):
+            with self.subTest(start=start):
+                sha = self.repo.commit("A change", files={"a.txt": f"plain\n{start}{TRACKER_CODE}\n"})
+                self.assert_fails(self.run_check(sha + "~1"), sha, "tracker code (file 1, line 2)")
+
+    def test_a_file_an_attributes_file_keeps_from_comparison_is_read_all_the_same(self):
+        sha = self.repo.commit("A change", files={".gitattributes": "* -diff\n*.txt binary\n",
+                                                  "z.txt": f"one\n{TRACKER_CODE}\n"})
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 2, line 2)")
+
+    def test_a_file_with_a_zero_byte_is_read_all_the_same(self):
+        sha = self.repo.commit("A change", files={"cache.pyc": b"\x00\x0d\x0a" + TRACKER_CODE.encode() + b"\n"})
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 1, line 2)")
+
+    def test_a_line_without_a_newline_at_the_end_is_checked(self):
+        sha = self.repo.commit("A change", files={"a.txt": f"one\n{TRACKER_CODE}"})
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 1, line 2)")
+
+    def test_lines_are_counted_by_the_hunks_lengths_across_several_hunks(self):
+        self.repo.commit("A change", files={"a.txt": "".join(f"line {n}\n" for n in range(1, 21))})
+        start = self.repo.head()
+        text = "".join(f"line {n}\n" for n in range(1, 21)).replace("line 3\n", "line three\n")
+        text = text.replace("line 15\n", f"{TRACKER_CODE}\nline 15\n")
+        sha = self.repo.commit("Another change", files={"a.txt": text})
+        self.assert_fails(self.run_check(start), sha, "tracker code (file 1, line 15)")
+
+
+class SampleTest(RepoTestCase):
+    """The inputs of the two looks at the first version, each with its result written out. One set of rules holds
+    for every place; where a row passes, the reason is written beside it."""
+
+    PROSE = [
+        # (text, property or None)
+        ("Co-Authored-By: " + C + " Opus 5.5 <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Co-Authored-By:" + C + " <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Co-authored-by : " + C + " <x@y.z>", "attribution line"),
+        ("Co-authored by: " + C + " <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Co\u2013authored\u2013by: " + C + " <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Co-Authored-By\uff1a " + C + " <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Co-authored-by: Co" "pilot <175728472+Co" "pilot@users.noreply.github.com>", "attribution line"),
+        ("Co-authored-by: some-ai-agent[bot] <158243242+some-ai-agent[bot]@users.noreply.github.com>", "attribution line"),
+        ("Co-authored-by: " + C + "Bot <1+" + C.lower() + "bot@users.noreply.github.com>", "attribution line"),
+        ("Co-" "authored-" "by: GPT-4o <" + OWN + ">", "attribution line"),
+        ("Co-authored-by: " + C.lower() + "_code <" + OWN + ">", "attribution line"),
+        ("Co-authored-by: " + C + "와 <" + OWN + ">", "attribution line"),
+        ("Assisted-by: " + C + " <noreply@anthrop" "ic.com>", "attribution line"),
+        ("Signed-off-by: A Person <" + OWN + ">", "attribution line"),
+        ("Reviewed by: A Person", "attribution line"),
+        ("Change-Id: I0123456789abcdef", "attribution line"),
+        ("Model: some model", "attribution line"),
+        ("Contact: a@b.example", "attribution line"),
+        (GENERATED, "attribution line"),
+        ("Gener" "ated with " + C + " Code", "attribution line"),
+        ("Gener" "ated with GitHub Co" "pilot", "attribution line"),
+        ("Gener" "ated with [**" + C + " Code**](https://x)", "attribution line"),
+        ("Gener" "ated using " + C, "attribution line"),
+        ("Gener" "ated-with: " + C + " Code", "attribution line"),
+        ("Gener" "ated with the help of " + C, "attribution line"),
+        ("Gener" "ated by an AI assistant", "attribution line"),
+        ("Gener" "ated with Google Gem" "ini", "attribution line"),
+        ("Gener" "ated with Google Anti" "gravity", "attribution line"),
+        ("Gener" "ated by o3", "attribution line"),
+        ("Gener" "ated with Wind" "surf", "attribution line"),
+        (T + "-12", "tracker code"), (T.lower() + "-12", "tracker code"), ("Do" "d-12", "tracker code"),
+        (T + " 12", "tracker code"), (T + "_12", "tracker code"), (T + "12", "tracker code"),
+        ("[" + T + "-12]", "tracker code"), (T + "\u201112", "tracker code"), ("\uff24\uff2f\uff24-12", "tracker code"),
+        ("fix_" + T.lower() + "-12", "tracker code"),
+        ("https://lin" "ear.app/dodam/issue/x", "tracker address"), ("LIN" "EAR.APP/x", "tracker address"),
+        ("/Us" "ers/someone/notes.md", "local path"),
+        ("~/or" "ca/workspaces/dodam/review-x", "local path"),
+        ("~/.cla" "ude/projects/-Us" "ers-someone-or" "ca-projects-dodam/memory/x.md", "local path"),
+        ("~/.cla" "ude/plans/x.md", "local path"),
+        ("~/.gem" "ini/antigravity-cli/brain/e255af7d/notes.md", "local path"),
+        ("/priv" "ate/tmp/cla" "ude-501/x/scratchpad/a.txt", "local path"),
+        ("/tm" "p/cla" "ude-501/x/a.txt", "local path"),
+        ("$HOME/or" "ca/workspaces/dodam/x", "local path"),
+        ("/va" "r/folders/ab/xyz123/T/tmp.txt", "local path"),
+        ("C:\\Us" "ers\\someone\\x", "local path"),
+        ("file:///Us" "ers/someone/x", "local path"),
+        ("/mnt/c/Us" "ers/alice/dodam/README.md", "local path"),
+        ("te" "rm_69feae12-f296-4431-8a08-fb5168b4978d", "tooling id"),
+        ("ta" "sk_803e541ba577", "tooling id"), ("dispatch:c" "tx_0febe70c6bd9", "tooling id"),
+        ("TA" "SK_803E541BA577", "tooling id"), ("w" "f_abc123def456", "tooling id"),
+        ("my_ta" "sk_803e541ba577", "tooling id"),
+        ("See conver" "sation://e255af7d-f4b3-47c3-be96-2e5d38a5f8c0", "tooling id"),
+        # Passing rows, with their reasons.
+        ("Case runner: the steps keep their order", None),  # a heading of two words is no trailer
+        ("Declare it once, with the code generated by the compiler", None),  # not at the head of a line
+        ("Keep the guard's file in ~/.dodam, one per user", None),  # a folder the project names
+        ("058979d9-1b93-4869-a023-a6d75f6e35bf", None),  # a bare id: 30 lines of main's tests are made-up ids
+        (C.lower() + "/fix-the-thing", None),  # in prose; as a branch's name it is refused (below)
+    ]
+    LINES = [
+        ("see " + T + "_17", "tracker code"),
+        ("/Us" "ers/somebody/.gem" "ini/antigravity-cli/brain/abc/x.md", "local path"),
+        ("/Us" "ers/somebody/work/dodam/notes.md", "local path"),
+        (".cla" "ude/worktrees/feat-1/notes.md", "local path"),
+        ("Gener" "ated with " + C + " Code", "attribution line"),
+        ("/home/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
+        ("/tmp/x/y", None),  # 91 lines of main's isolation tests
+        (".cla" "ude/worktrees/", None),  # the repository's .gitignore names the folder alone
+        ("Code written by " + C + " is reviewed by another company's model", None),  # the charter's words
+    ]
+    PATHS = [
+        ("or" "ca/workspaces/dodam/notes.md", "local path"),
+        ("private/tmp/cla" "ude-501/notes.md", "local path"),
+        (".cla" "ude/settings.local.json", "local path"),
+        (".cla" "ude/worktrees/x/a.txt", "local path"),
+        (".gem" "ini/antigravity-cli/x.md", "local path"),
+        ("docs/" + T + "-12.md", "tracker code"),
+        ("docs/ta" "sk_803e541ba577.md", "tooling id"),
+        ("docs/notes.md", None),
+    ]
+    BRANCHES = [
+        (C.lower() + "/fix-the-thing", "AI name"),
+        ("co" "dex/try-it", "AI name"),
+        ("someone/" + T.lower() + "-12-fix-the-thing", "tracker code"),
+        ("gem" "ini-on-orca", None),  # a branch about the project's own Gemini session, as on main
+        ("commit-check", None),
+    ]
+
+    def text_only(self, texts, pattern=None):
+        event = self.dir / "text.json"
+        event.write_text(json.dumps({"pull_request": {"number": 1, **texts}}))
+        env = clean_env({"COMMIT_CHECK_PRIVATE_PATTERN": pattern} if pattern else None)
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--settings", str(self.settings()), "--context", "own",
+                               "--text-only", "--event", str(event)], capture_output=True, text=True, env=env,
+                              timeout=120, cwd=self.dir)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_every_prose_row_in_a_description(self):
+        for text, prop in self.PROSE:
+            with self.subTest(text=text):
+                code, out = self.text_only({"title": "Plain", "body": f"Some words.\n\n{text}"})
+                if prop is None:
+                    self.assertEqual(code, 0, out)
+                else:
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f"pull request: {prop} (pull request description line 3)", out)
+
+    def test_every_prose_row_in_a_commit_message(self):
+        expected = {}
+        for text, prop in self.PROSE:
+            expected[self.repo.commit(f"A plain subject\n\n{text}")] = prop
+        code, out = self.run_check(self.base)
+        for sha, prop in expected.items():
+            with self.subTest(prop=prop, sha=sha):
+                if prop is None:
+                    self.assertNotIn(f"commit {sha[:12]}:", out)
+                else:
+                    self.assertIn(f"commit {sha[:12]}: {prop} (message line 3)", out)
+
+    def test_every_line_row_in_an_added_line_and_every_path_row_in_a_path(self):
+        lines = {f"f{index:02}.txt": f"see {text}\n" for index, (text, _) in enumerate(self.LINES)}
+        sha = self.repo.commit("Lines", files=lines)
+        code, out = self.run_check(self.base)
+        for index, (text, prop) in enumerate(self.LINES):
+            with self.subTest(text=text):
+                if prop is None:
+                    self.assertNotIn(f"(file {index + 1}, line 1)", out)
+                else:
+                    self.assertIn(f"commit {sha[:12]}: {prop} (file {index + 1}, line 1)", out)
+        for text, prop in self.PATHS:
+            with self.subTest(path=text):
+                sha = self.repo.commit("A path", files={text: ""})
+                code, out = self.run_check(sha + "~1")
+                if prop is None:
+                    self.assertEqual(code, 0, out)
+                else:
+                    self.assertIn(f"commit {sha[:12]}: {prop} (path 1)", out)
+
+    def test_every_branch_row(self):
+        for name, prop in self.BRANCHES:
+            with self.subTest(name=name):
+                code, out = self.text_only({"title": "Plain", "body": "", "head": {"ref": name}})
+                if prop is None:
+                    self.assertEqual(code, 0, out)
+                else:
+                    self.assertIn(f"pull request: {prop} (pull request branch name)", out)
+
+    def test_the_text_check_before_publishing_needs_no_repository_and_holds_the_private_pattern(self):
+        code, out = self.text_only({"title": f"Thanks to {PRIVATE_WORD}", "body": ""}, pattern=PRIVATE_PATTERN)
+        self.assertEqual(code, 1, out)
+        self.assertIn("pull request: private pattern (pull request title)", out)
+        self.assertNotIn(PRIVATE_WORD, out)
+        self.assertEqual(self.text_only({"title": "A plain title", "body": "Plain words."})[0], 0)
+
+
+class ArgumentsTest(RepoTestCase):
+    """No default decides: the context and the comparison of the settings are always given, and given once."""
+
+    def call(self, *args):
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), *args],
+                              capture_output=True, text=True, env=clean_env(), timeout=120)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_without_a_context_the_check_refuses_to_run(self):
+        code, out = self.call("--settings", str(self.settings()), "--from", self.base, "--head", "HEAD",
+                              "--compare-settings", self.base)
+        self.assertEqual(code, 2, out)
+
+    def test_a_context_that_no_workflow_has_is_refused(self):
+        for context in ("fork", "fork-labeled", "", "OWN"):
+            with self.subTest(context=context):
+                code, out = self.call("--settings", str(self.settings()), "--from", self.base, "--head", "HEAD",
+                                      "--context", context, "--compare-settings", self.base)
+                self.assertEqual(code, 2, out)
+
+    def test_without_the_comparison_of_the_settings_the_check_refuses_to_run(self):
+        code, out = self.call("--settings", str(self.settings()), "--from", self.base, "--head", "HEAD",
+                              "--context", "own")
+        self.assertEqual(code, 1, out)
+        self.assertIn("--compare-settings", out)
+
+    def test_a_second_comparison_of_the_settings_is_refused(self):
+        code, out = self.call("--settings", str(self.settings()), "--from", self.base, "--head", "HEAD",
+                              "--context", "own", "--compare-settings", self.base, "--compare-settings", "HEAD")
+        self.assertEqual(code, 2, out)
+
+    def test_no_argument_makes_a_run_wait(self):
+        for argument in ("--wait-for-text", "--poll"):
+            with self.subTest(argument=argument):
+                code, out = self.call("--settings", str(self.settings()), "--from", self.base, "--head", "HEAD",
+                                      "--context", "own", "--compare-settings", self.base, argument, "5")
+                self.assertEqual(code, 2, out)
+
+
+class ForkWayTest(RepoTestCase):
+    """The way for pull requests from forks is shut until settings.json opens it, after the owner has set the
+    environment with a named reviewer, its own secret, and GitHub's setting that holds outside contributors' runs."""
+
+    def fork_run(self, *, open_way, held="2026-11-27", environment=REVIEWED, message="A change", fork_pattern=None,
+                 expected=False, pattern=None):
+        sha = self.repo.commit(message)
+        fake = self.fake({ENVIRONMENT_PATH: environment} if environment is not None else {})
+        code, out = self.run_check(self.base, context="fork-approved", open_way=open_way, held=held,
+                                   fork_pattern=fork_pattern, pattern=pattern, expected=expected,
+                                   event={"pull_request": {"number": 7, "title": "Fix", "body": ""}},
+                                   env_extra=fake.env)
+        return sha, code, out, fake
+
+    def test_while_the_way_is_shut_a_fork_s_run_is_told_so_judges_nothing_and_fails(self):
+        sha, code, out, fake = self.fork_run(open_way=False, message=f"A change {TRACKER_CODE}")
+        self.assertEqual(code, 1, out)
+        self.assertIn("The way for pull requests from forks is not open yet", out)
+        self.assertNotIn("commits checked", out)
+        self.assertNotIn(sha[:12], out)
+        self.assertEqual(fake.asked, [])
+
+    def test_without_the_date_since_when_outside_runs_are_held_the_way_stays_shut(self):
+        _, code, out, _ = self.fork_run(open_way=True, held=None)
+        self.assertEqual(code, 1, out)
+        self.assertIn("The way for pull requests from forks is not open yet", out)
+
+    def test_an_open_way_with_an_environment_that_names_no_reviewer_judges_nothing(self):
+        for environment in (UNREVIEWED, NOBODY, None):
+            with self.subTest(environment=environment):
+                sha, code, out, _ = self.fork_run(open_way=True, environment=environment,
+                                                  message=f"A change {TRACKER_CODE}")
+                self.assertEqual(code, 1, out)
+                self.assertIn("does not wait for a named reviewer", out)
+                self.assertNotIn(sha[:12], out)
+
+    def test_an_open_way_judges_with_the_fork_s_own_secret_only(self):
+        sha, code, out, _ = self.fork_run(open_way=True, message=f"Thanks to {FORK_WORD}",
+                                          fork_pattern="(?i)quix" "otl", pattern="(?i)nothing-like-it")
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"commit {sha[:12]}: private pattern (message line 1)", out)
+        self.assertNotIn(FORK_WORD, out)
+        sha, code, out, _ = self.fork_run(open_way=True, message=f"Thanks to {FORK_WORD}",
+                                          fork_pattern=None, pattern="(?i)quix" "otl")
+        self.assertEqual(code, 0, out)
+
+    def test_an_open_way_fails_without_the_fork_s_secret_once_it_is_expected(self):
+        _, code, out, _ = self.fork_run(open_way=True, expected=True, pattern=PRIVATE_PATTERN)
         self.assertEqual(code, 1, out)
         self.assertIn("private pattern", out)
 
-    def test_in_the_approved_run_a_missing_secret_passes_with_a_notice_while_it_is_not_expected(self):
+    def main_push(self, *, open_way, held="2026-11-27", environment=REVIEWED, repository_secret=""):
         self.repo.commit("A change")
-        fake = FakeGitHub([CLEAN], environment=self.REVIEWED)
-        self.addCleanup(fake.close)
-        code, out = self.run_check(self.base, context="fork-approved", pattern=None, expected=False,
-                                   event={"pull_request": {"number": 7, **CLEAN}}, env_extra=fake.env)
-        self.assertEqual(code, 0, out)
-        self.assertIn("::notice", out)
+        before = self.base
+        fake = self.fake({ENVIRONMENT_PATH: environment} if environment is not None else {})
+        return self.run_check(before, open_way=open_way, held=held, extra=["--require-commits", "--check-fork-way"],
+                              env_extra={**fake.env, "FORK_SECRET_AT_REPOSITORY_LEVEL": repository_secret})
 
-    def test_an_environment_without_a_reviewer_keeps_the_private_pattern_back(self):
-        code, out = self.approved_run(self.UNREVIEWED, message=f"Thanks to {PRIVATE_WORD}", expected=False)
-        self.assertEqual(code, 0, out)
-        self.assertIn("does not wait for a reviewer", out)
+    def test_main_s_push_passes_while_the_way_is_shut(self):
+        self.assert_passes(self.main_push(open_way=False, environment=None))
 
-    def test_an_environment_without_a_reviewer_fails_once_the_private_pattern_is_expected(self):
-        code, out = self.approved_run(self.UNREVIEWED, message="A change", expected=True)
-        self.assertEqual(code, 1, out)
-        self.assertIn("does not wait for a reviewer", out)
+    def test_main_s_push_passes_when_the_way_is_open_and_everything_a_token_can_read_is_set(self):
+        self.assert_passes(self.main_push(open_way=True))
 
-    def test_an_environment_that_cannot_be_read_keeps_the_private_pattern_back(self):
-        code, out = self.approved_run(None, message=f"Thanks to {PRIVATE_WORD}", expected=False)
-        self.assertEqual(code, 0, out)
-        self.assertIn("does not wait for a reviewer", out)
-
-    def test_a_run_ends_in_failure_only_on_what_cannot_be_mended_on_its_head(self):
-        # Every kind of input this check meets on one head, and how its run ends. A failure is allowed only where
-        # the head itself carries the fault (a commit, a branch name) or where the text was not mended in time.
-        table = [
-            ("everything clean", [CLEAN], "A change", 0),
-            ("a title mended in time", [BAD_TITLE, CLEAN], "A change", 0),
-            ("a description mended in time", [BAD_BODY, CLEAN], "A change", 0),
-            ("the API failing for a while", [500, CLEAN], "A change", 0),
-            ("a title never mended", [BAD_TITLE], "A change", 1),
-            ("a branch name", [BAD_BRANCH], "A change", 1),
-            ("an offending commit", [CLEAN], f"A change ({TRACKER_CODE})", 1),
-        ]
-        for name, answers, message, expected in table:
-            with self.subTest(name=name):
+    def test_main_s_push_turns_red_when_the_way_is_open_and_something_is_missing(self):
+        cases = [dict(environment=None), dict(environment=UNREVIEWED), dict(environment=NOBODY),
+                 dict(repository_secret="made-up"), dict(held=None)]
+        for case in cases:
+            with self.subTest(case=case):
                 self.tearDown_repo()
-                code, out, _, _ = self.waiting_run(answers, commit_message=message, wait="1")
-                self.assertEqual(code, expected, f"{name}: {out}")
+                code, out = self.main_push(open_way=True, **case)
+                self.assertEqual(code, 1, out)
+                self.assertIn("the way for forks is open", out)
 
     def tearDown_repo(self):
         self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
         self.base = self.repo.commit("The base commit")
+
+
+class ForkPathsTest(unittest.TestCase):
+    """The job of main's copy that fails a fork's pull request at once when it touches a closed path. The closed
+    paths are the desk's tool's; these tests only show that the job asks it and acts on its verdict."""
+
+    def run_paths(self, files, *, pull=None, tasks=None, extra_answers=None):
+        pull = pull or {"number": 7, "changed_files": len(files), "draft": False, "base": {"ref": "main"}}
+        answers = {"/repos/made-up/repo/pulls/7": pull,
+                   "/repos/made-up/repo/pulls/7/files?per_page=100&page=1": files,
+                   "/repos/made-up/repo/contents/bench/tasks?ref=" + "a" * 40: tasks or [],
+                   "/repos/made-up/repo/contents/bench/tasks?ref=main": tasks or [],
+                   "/repos/made-up/repo/contents/bench/tests?ref=main": [{"name": "test_judge.py", "type": "file"}]}
+        answers.update(extra_answers or {})
+        fake = FakeGitHub(answers)
+        self.addCleanup(fake.close)
+        done = subprocess.run([sys.executable, "-I", str(FORK_PATHS), "--number", "7", "--base-sha", "a" * 40],
+                              capture_output=True, text=True, env=clean_env(fake.env), timeout=120)
+        return done.returncode, done.stdout + done.stderr
+
+    def entry(self, name, status="modified"):
+        return {"filename": name, "status": status}
+
+    def test_a_change_of_a_workflow_fails_at_once(self):
+        code, out = self.run_paths([self.entry(".github/workflows/ci.yml")])
+        self.assertEqual(code, 1, out)
+        self.assertIn(".github/", out)
+
+    def test_a_change_of_an_existing_test_fails(self):
+        code, out = self.run_paths([self.entry("bench/tests/test_judge.py")])
+        self.assertEqual(code, 1, out)
+
+    def test_a_change_of_the_page_s_text_only_passes(self):
+        code, out = self.run_paths([self.entry("tools/site/strings/en.json")])
+        self.assertEqual(code, 0, out)
+
+    def test_a_new_test_passes(self):
+        code, out = self.run_paths([self.entry("bench/tests/test_" + "brand_new.py", "added")])
+        self.assertEqual(code, 0, out)
+
+    def test_a_list_of_paths_that_cannot_be_read_completely_fails(self):
+        code, out = self.run_paths([self.entry("README.md")],
+                                   pull={"number": 7, "changed_files": 5, "draft": False, "base": {"ref": "main"}})
+        self.assertEqual(code, 1, out)
+        code, out = self.run_paths([], extra_answers={"/repos/made-up/repo/pulls/7": 502})
+        self.assertEqual(code, 1, out)
+
+    def test_it_prints_no_path_of_the_pull_request(self):
+        code, out = self.run_paths([self.entry(f".github/{MARKER}.yml"), self.entry(f"{MARKER}.md")])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(MARKER, out)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,62 @@
+# Only on the side branch commit-check-breaks: the check broken by machine, every break against its tests, and one
+# question to GitHub that shows what a job's token can read. The other workflows are not on this branch.
+name: breaks
+
+on:
+  push:
+    branches: [commit-check-breaks]
+
+permissions:
+  contents: read
+
+jobs:
+  token:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Ask with a token of contents only
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for path in actions/permissions/fork-pr-contributor-approval environments/private-check environments/github-pages; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/$path")
+            echo "contents read only: $path -> HTTP $code"
+          done
+  token-with-actions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Ask with a token of contents and actions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for path in actions/permissions/fork-pr-contributor-approval environments/private-check environments/github-pages; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/$path")
+            echo "contents and actions read: $path -> HTTP $code"
+          done
+  breaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Break the check and run its tests against every break
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          python3 -I .github/commit-check/break_check.py --shard "$SHARD" --workers 4 --report "$RUNNER_TEMP/breaks.json" \
+            --workflows .github/breaks-workflows
+          code=$?
+          cat "$RUNNER_TEMP/breaks.json"
+          exit $code
