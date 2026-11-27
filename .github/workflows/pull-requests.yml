@@ -21,8 +21,11 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
+# Reading the repository and the pull request needs contents; reading whether the environment waits for a
+# reviewer needs actions. Both only to read.
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # A pull request from the project's own branches: judged by the job commits of the workflow commits.

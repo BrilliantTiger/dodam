@@ -170,7 +170,7 @@
   "rule7_h": "Relajar una regla o debilitar una garantía requiere la aprobación del propietario",
   "rule7_p": "Con una justificación por escrito y una comparación del benchmark que muestre que la seguridad no empeora.",
   "rule8_h": "Se revisa cada commit",
-  "rule8_p": "El autor y quien hace el commit usan una dirección no-reply de GitHub. Los mensajes, títulos y descripciones no nombran a una IA como autora ni llevan números de tareas ni rutas de un ordenador. En una pull request desde un fork, una parte de la revisión se ejecuta cuando la cuenta del proyecto la inicia.",
+  "rule8_p": "El autor y quien hace el commit usan una dirección no-reply de GitHub. Los mensajes, títulos y descripciones no nombran a una IA como autora ni llevan números de tareas ni rutas de un ordenador. En una pull request desde un fork, la revisión se ejecuta cuando la cuenta del proyecto la aprueba.",
   "faq_k": "Preguntas",
   "faq_h": "Respuestas breves.",
   "q1": "¿Qué es Dodam?",

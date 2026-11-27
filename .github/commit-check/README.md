@@ -29,26 +29,42 @@ pattern it does not name the file either.
 
 ## Where it runs
 
+The owner's gate refuses a pull request whose head carries any run that was cancelled or failed, not only the
+latest one. So no run of the check is cancelled (neither workflow has a concurrency group), and a run fails only
+on what cannot be mended on its head: a commit, or the branch's name. A title or a description that breaks a rule
+can be mended without a new commit, so it never makes a run fail while it can still be mended.
+
 - **Pushes and the project's own pull requests** are judged in the workflow `commits` by the branch's own
   copy of the check, with the private pattern. A push from one of the project's branches runs that
   branch's workflows with the repository's secrets anyway, so this opens nothing new, and a broken copy on
   main cannot block the pull request that mends it. A branch cannot loosen the settings it is judged by:
   it fails when it stops expecting the private pattern or moves the exempt commit, compared with main.
+  When a pull request's title or description breaks a rule, its run waits up to 15 minutes, reading them
+  again every 15 seconds; once they are mended, every waiting run on that head ends in success. A run that
+  waits is not finished, and the gate refuses that as well.
 - **Pull requests from forks** are judged in the workflow `pull-requests` by main's copy, under
-  `pull_request_target`. Nothing of the pull request runs there: its commits are fetched into a ref and
-  read as data. A fork's pull request is held to the private pattern only in the run that the label
-  `private-check` starts, which only the project's account can put on; every later push, edit or removal
-  of the label turns that check red again until the label is put on anew, so nobody outside can find
-  the pattern by trying.
+  `pull_request_target`, in one job that runs in the environment `private-check`. Nothing of the pull
+  request runs there: its commits are fetched into a ref and read as data. The job waits for the project's
+  approval, which the coordinating session gives after both reviews, for every waiting run of that head at
+  once; a waiting job uses no runner. Every new push or edit starts a run that waits again, so the private
+  part never turns green by being skipped. Once approved, the job reads the title and the description as they
+  are then, uses the private pattern, and gives its judgement at once: it does not wait for a mend, so a fork
+  cannot hold runners or try its text against the pattern again and again. The private pattern is used only
+  when GitHub's API says that the environment waits for a reviewer.
 - **Main** is checked on every push from the push's "before" commit, so that the range is never empty.
 
-## The private pattern
+## Setting up the private pattern
 
-One regular expression in the repository's secret `COMMIT_CHECK_PRIVATE_PATTERN` holds what may not appear
-in public text and is not written in any file: names, and a few numbers the project keeps to itself.
-While `private_pattern_expected` in `settings.json` is `false`, a missing secret passes with a notice.
-Once it is `true`, a missing secret fails on the project's own branches, and a fork's pull request
-waits for the label.
+One regular expression holds what may not appear in public text and is not written in any file: names, and
+a few numbers the project keeps to itself. The owner sets it once:
+
+1. The repository's secret `COMMIT_CHECK_PRIVATE_PATTERN`, for the project's own branches.
+2. The environment `private-check`, with the project's account as its required reviewer, "Prevent self-review"
+   off, and the same secret `COMMIT_CHECK_PRIVATE_PATTERN` as a secret of the environment.
+3. Then a small pull request turns `private_pattern_expected` in `settings.json` to `true`.
+
+While `private_pattern_expected` is `false`, a missing secret passes with a notice. Once it is `true`, a missing
+secret fails, and so does a fork's run in an environment that does not wait for a reviewer.
 
 ## When main turns red
 

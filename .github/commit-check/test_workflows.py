@@ -93,7 +93,7 @@ def job_names(text):
     return set(re.findall(r"^  ([\w-]+):\s*$", text.split("\njobs:", 1)[-1], re.M))
 
 
-def common_problems(code, found):
+def common_problems(code, found, permissions_wanted=("contents: read",)):
     blocks = run_blocks(code)
     if not blocks or any("${{" in block for block in blocks):
         found.add("expression in a shell line")
@@ -101,7 +101,7 @@ def common_problems(code, found):
     if not uses or any(not re.fullmatch(r"actions/checkout@[0-9a-f]{40}", ref) for ref in uses):
         found.add("unpinned action")
     permissions = top_level_block(code, "permissions")
-    if permissions is None or [line.strip() for line in permissions] != ["permissions:", "contents: read"] \
+    if permissions is None or [line.strip() for line in permissions] != ["permissions:", *permissions_wanted] \
             or code.count("permissions:") != 1 or re.search(r"\bwrite(-all)?\b", code):
         found.add("permissions")
     if "secrets: inherit" in code or len(re.findall(r"secrets\.", code)) != code.count(SECRET):
@@ -138,7 +138,7 @@ def gate_problems(text, others=()):
     on = top_level_block(code, "on")
     if on is None or [line.strip() for line in on[1:]] != ["pull_request_target:", "types: [opened, synchronize, reopened, edited]"]:
         found.add("trigger")
-    blocks = common_problems(code, found)
+    blocks = common_problems(code, found, ("contents: read", "actions: read"))
     # Nothing of the pull request runs: main's checkout, no other ref checked out, nothing installed, nothing run
     # but main's own check, the head fetched into a ref only.
     if re.search(r"^\s*(?:ref|repository|path):", code, re.M) or any(FORBIDDEN_IN_RUN.search(block) for block in blocks):
@@ -253,7 +253,10 @@ class WorkflowTest(unittest.TestCase):
                     "permissions")
 
     def test_missing_permissions_are_noticed(self):
-        self.broken("permissions:\n  contents: read\n", "", "permissions")
+        self.broken("permissions:\n  contents: read\n  actions: read\n", "", "permissions")
+
+    def test_a_write_permission_for_actions_is_noticed(self):
+        self.broken("  actions: read\n", "  actions: write\n", "permissions")
 
     def test_an_expression_in_a_shell_line_is_noticed(self):
         self.broken('--head "$HEAD_SHA"', '--head "${{ github.event.pull_request.head.sha }}"',
@@ -313,7 +316,7 @@ class WorkflowTest(unittest.TestCase):
         self.broken('        run: echo "This pull request', '        run: echo "$(cat x)" "This pull request', "own branches")
 
     def test_a_concurrency_group_is_noticed(self):
-        self.broken("permissions:\n  contents: read\n", "permissions:\n  contents: read\n\nconcurrency:\n  group: x\n"
+        self.broken("permissions:\n  contents: read\n  actions: read\n", "permissions:\n  contents: read\n  actions: read\n\nconcurrency:\n  group: x\n"
                     "  cancel-in-progress: true\n", "concurrency")
 
     def test_a_fork_s_run_that_waits_for_its_text_is_noticed(self):

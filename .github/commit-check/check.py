@@ -15,6 +15,10 @@ For each commit after the exempt commit named in settings.json:
 Lines that a merge commit adds beyond all of its parents are checked as its own; the difference of the
 whole range is checked as well, so that a merge cannot bring back a line from the exempt history.
 
+A run fails only on what cannot be mended on its head (a commit, the branch's name): the owner's gate refuses a
+head that carries a failed run for good. A title or description that breaks a rule is read again from GitHub's
+API until it is mended or the wait is over, on the project's own branches; a fork's run reads it once.
+
 What it prints names the commit and the property, never the offending text; for the private pattern it
 does not name the file either. The patterns are put together from parts, so that this file does not
 trip the check itself. It uses the standard library only, and it never runs anything from the commits
@@ -291,15 +295,17 @@ def main(argv=None):
                         help="the commit the range starts after (the pull request's base, main, or the push's before)")
     parser.add_argument("--head", required=True)
     parser.add_argument("--settings", required=True)
-    parser.add_argument("--context", choices=("own", "fork", "fork-labeled", "fork-approved"), default=None,
-                        help="own: the project's own branch; fork: a pull request from a fork; fork-labeled: the "
-                             "run the project's account started on a fork's pull request by its label")
+    parser.add_argument("--context", choices=("own", "fork", "fork-approved"), default=None,
+                        help="own: the project's own branch; fork: a pull request from a fork; fork-approved: a fork's "
+                             "run that waited in the environment private-check for the project's approval")
     parser.add_argument("--own", action="store_const", const="own", dest="context")
     parser.add_argument("--event", help="the event's file, for the pull request's title and description")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
     parser.add_argument("--verified-shas", help="a file of commits GitHub signed, in place of asking GitHub's API")
-    parser.add_argument("--wait-for-text", type=float, default=0, metavar="SECONDS")
-    parser.add_argument("--poll", type=float, default=30, metavar="SECONDS")
+    parser.add_argument("--wait-for-text", type=float, default=0, metavar="SECONDS",
+                        help="on a pull request of the project's own branches, how long a title or description that "
+                             "breaks a rule is waited for and read again before the run fails")
+    parser.add_argument("--poll", type=float, default=30, metavar="SECONDS", help="how often it is read again")
     parser.add_argument("--compare-settings", metavar="COMMIT",
                         help="the commit whose settings.json this branch may not loosen (main, or the push's before)")
     args = parser.parse_args(argv)
@@ -308,6 +314,65 @@ def main(argv=None):
     except Problem as problem:
         print(f"::error::{problem}")
         return 1
+
+
+def api_get(path):
+    """One answer of GitHub's API, asked up to three times; None when no answer came."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository):
+        return None
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{api}/repos/{repository}/{path}", headers=headers)
+    for wait in (1, 2, None):
+        try:
+            with urllib.request.urlopen(request, timeout=20) as answer:
+                return json.load(answer)
+        except Exception:
+            if wait is None:
+                return None
+            time.sleep(wait)
+    return None
+
+
+def environment_waits_for_a_reviewer():
+    """Whether the environment this run is in makes every run wait for a reviewer's approval. Only then may a fork's
+    run use the private pattern: without it a fork could try its text against the pattern as often as it likes."""
+    name = os.environ.get("COMMIT_CHECK_ENVIRONMENT", "private-check")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        return False
+    data = api_get(f"environments/{name}")
+    rules = (data or {}).get("protection_rules") or []
+    return any(isinstance(rule, dict) and rule.get("type") == "required_reviewers" for rule in rules)
+
+
+def text_findings(private, pull):
+    """What breaks a rule in a pull request's title and description (which can be mended) and in its branch's name
+    (which cannot)."""
+    mendable = Checker(private, lambda sha: False)
+    mendable.text("pull request", pull.get("title") or "", lambda n: "pull request title", prose=True)
+    mendable.text("pull request", pull.get("body") or "", lambda n: f"pull request description line {n}", prose=True)
+    fixed = Checker(private, lambda sha: False)
+    # GitHub writes the branch's name into the message of the merge commit it makes on main.
+    fixed.text("pull request", (pull.get("head") or {}).get("ref") or "", lambda n: "pull request branch name",
+               prose=True)
+    return mendable.findings, fixed.findings
+
+
+def report(commits, findings, failures):
+    print(f"{len(commits)} commits checked")
+    for finding in findings:
+        print(finding)
+    for failure in failures:
+        print(f"::error::{failure}")
+    if findings or failures:
+        print(f"{len(findings) + len(failures)} problems; the properties are listed at the top of "
+              ".github/commit-check/check.py")
+        return 1
+    return 0
 
 
 def run(args):
@@ -331,12 +396,19 @@ def run(args):
         failures += loosened_settings(repo, args.compare_settings, exempt, expected)
     private = None
     pattern = os.environ.get("COMMIT_CHECK_PRIVATE_PATTERN", "")
-    if context == "fork":
+    if context == "fork-approved" and not environment_waits_for_a_reviewer():
+        # The secret may have reached this run without anyone approving it: it is not used.
+        pattern = ""
+        message = ("the environment private-check does not wait for a reviewer, so the private pattern is not used "
+                   "for a pull request from a fork")
         if expected:
-            failures.append("private pattern: a pull request from a fork is held to it only in the run that the "
-                            "project's label starts; this run was not started by it, so this head is not checked")
+            failures.append(f"private pattern: {message}")
         else:
-            print("::notice::The private pattern is not applied to a pull request from a fork.")
+            print(f"::notice::The {message}.")
+        context = "fork"
+    if context == "fork":
+        if not failures:
+            print("::notice::The private pattern is not applied in this run of a pull request from a fork.")
     elif pattern:
         try:
             private = re.compile(pattern)
@@ -361,30 +433,54 @@ def run(args):
         diff_options = ["--no-color", "--no-ext-diff", "--no-textconv", "-U0", "-M"]
         checker.patch("the range", git(repo, "diff", *diff_options, f"{start}...{head}"),
                       label="the range's difference, ")
-
-    if args.event:
-        with open(args.event, encoding="utf-8") as handle:
-            event = json.load(handle)
-        pull = event.get("pull_request") or {}
-        checker.text("pull request", pull.get("title") or "", lambda n: "pull request title", prose=True)
-        # GitHub writes the branch's name into the message of the merge commit it makes on main.
-        checker.text("pull request", (pull.get("head") or {}).get("ref") or "", lambda n: "pull request branch name",
-                     prose=True)
-        checker.text("pull request", pull.get("body") or "",
-                     lambda n: f"pull request description line {n}", prose=True)
-        if not commits:
-            failures.append("the pull request has no commit to check after the exempt commit")
-    elif args.require_commits and not commits:
+    if args.event and not commits:
+        failures.append("the pull request has no commit to check after the exempt commit")
+    elif not args.event and args.require_commits and not commits:
         failures.append("no commit to check in this range")
+    if not args.event or checker.findings or failures:
+        # What is wrong here cannot be mended on this head: the run ends now.
+        return report(commits, checker.findings, failures)
 
-    print(f"{len(commits)} commits checked")
-    for finding in checker.findings + failures:
-        print(f"::error::{finding}" if finding in failures else finding)
-    if checker.findings or failures:
-        print(f"{len(checker.findings) + len(failures)} problems; the properties are listed at the top of "
-              ".github/commit-check/check.py")
-        return 1
-    return 0
+    with open(args.event, encoding="utf-8") as handle:
+        event = json.load(handle)
+    pull = event.get("pull_request") or {}
+    number = pull.get("number")
+    live = args.wait_for_text > 0 or context != "own"
+    if not live:
+        mendable, fixed = text_findings(private, pull)
+        return report(commits, mendable + fixed, failures)
+    if not isinstance(number, int):
+        return report(commits, [], ["the event names no pull request"])
+
+    # The title and the description are read as they are now, not from the event's copy: every run on this head
+    # then sees the same text. A run of the project's own branch waits for them to be mended; a fork's run does not
+    # wait, so that it holds no runner and cannot try its text against the private pattern again and again.
+    deadline = time.monotonic() + args.wait_for_text
+    shown = None
+    while True:
+        now = api_get(f"pulls/{number}")
+        if now is None:
+            current, problem = [], "the pull request could not be read from GitHub's API"
+        else:
+            mendable, fixed = text_findings(private, now)
+            if fixed:
+                return report(commits, fixed + mendable, failures)
+            if not mendable:
+                return report(commits, [], failures)
+            current, problem = mendable, None
+        if time.monotonic() >= deadline or context != "own":
+            ending = [problem] if problem else []
+            if args.wait_for_text > 0 and context == "own":
+                ending.append(f"the pull request's text was not mended within {args.wait_for_text:g} seconds")
+            return report(commits, current, failures + ending)
+        if (current, problem) != shown:
+            for finding in current:
+                print(finding)
+            if problem:
+                print(f"::warning::{problem}")
+            print(f"waiting for the pull request's text to be mended: it is read again every {args.poll:g} seconds")
+            shown = (current, problem)
+        time.sleep(min(args.poll, max(0.0, deadline - time.monotonic())))
 
 
 if __name__ == "__main__":
