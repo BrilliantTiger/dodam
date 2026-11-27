@@ -20,7 +20,6 @@ OTHERS = [WORKFLOWS / "ci.yml", WORKFLOWS / "site.yml", WORKFLOWS / "pages.yml"]
 
 OWN_REPO = "github.event.pull_request.head.repo.id == github.repository_id"
 FORK = "github.event.pull_request.head.repo.id != github.repository_id"
-LABELLED = "github.event.action == 'labeled' && github.event.label.name == 'private-check'"
 SECRET = "secrets.COMMIT_CHECK_PRIVATE_PATTERN"
 FORBIDDEN_IN_RUN = re.compile(
     r"\bgit\s+(?:checkout|switch|worktree|reset|merge|pull|restore|am|apply|cherry-pick|rebase|submodule|stash)\b"
@@ -110,14 +109,34 @@ def common_problems(code, found):
     return blocks
 
 
+def jobs(text):
+    """Each job's name and text."""
+    body = text.split("\njobs:\n", 1)[-1]
+    found = {}
+    name = None
+    for line in body.splitlines():
+        head = re.match(r"^  ([\w-]+):\s*$", line)
+        if head:
+            name = head.group(1)
+            found[name] = []
+        elif name is not None and (line.startswith("    ") or not line.strip()):
+            found[name].append(line)
+        elif line.strip():
+            name = None
+    return {key: "\n".join(value) for key, value in found.items()}
+
+
+def job_if(job):
+    found = re.search(r"^    if: (.*)$", job, re.M)
+    return found.group(1).strip() if found else None
+
+
 def gate_problems(text, others=()):
     """The lines of the gate on pull requests from forks."""
     found = set()
     code = uncommented(text)
     on = top_level_block(code, "on")
-    kinds = ("opened", "synchronize", "reopened", "edited", "labeled", "unlabeled")
-    if on is None or len(on) != 3 or on[1].strip() != "pull_request_target:" or not on[2].strip().startswith("types:") \
-            or not all(re.search(r"\b" + kind + r"\b", on[2]) for kind in kinds):
+    if on is None or [line.strip() for line in on[1:]] != ["pull_request_target:", "types: [opened, synchronize, reopened, edited]"]:
         found.add("trigger")
     blocks = common_problems(code, found)
     # Nothing of the pull request runs: main's checkout, no other ref checked out, nothing installed, nothing run
@@ -129,25 +148,35 @@ def gate_problems(text, others=()):
             if re.search(r"\bpython", line) and not re.match(
                     r"^\s*python3 -I (?:-m unittest discover -s )?\.github/commit-check(?:/check\.py)?\b", line):
                 found.add("runs something of the pull request")
-            if "git fetch" in line and not re.search(r":refs/remotes/pull/head\"?\s*$", line):
+            if "git fetch" in line and not re.search(r"\"\+\$HEAD_SHA:refs/remotes/pull/head\"\s*$", line):
                 found.add("runs something of the pull request")
-    # The project's own branches: one step that only prints; every other step runs for a fork only.
-    job_steps = steps(code)
-    own = [step for step in job_steps if step_if(step) == OWN_REPO]
-    if len(own) != 1 or not re.search(r"^        run: echo \"[^\"$`\\]*\"$", own[0], re.M) or "uses:" in own[0] \
-            or "env:" in own[0] or any(step_if(step) != FORK for step in job_steps if step not in own):
+    # Every job is for the project's own branches or for forks. The one for the project's own branches only prints;
+    # each job for forks waits in the environment private-check, which alone gets the secret.
+    all_jobs = jobs(code)
+    own = {name: job for name, job in all_jobs.items() if job_if(job) == OWN_REPO}
+    fork = {name: job for name, job in all_jobs.items() if job_if(job) == FORK}
+    if len(own) != 1 or len(own) + len(fork) != len(all_jobs) or not fork:
         found.add("own branches")
-    # The secret only in the run the project's label starts.
+    for job in own.values():
+        if "uses:" in job or "env:" in job or "environment:" in job or not re.search(r"^        run: echo \"[^\"$`\\]*\"$", job, re.M) \
+                or len(re.findall(r"^        run:", job, re.M)) != 1:
+            found.add("own branches")
+    for job in fork.values():
+        if not re.search(r"^    environment: private-check$", job, re.M):
+            found.add("secret")
     secret_lines = [line for line in code.splitlines() if SECRET in line]
-    if len(secret_lines) != 1 or not re.fullmatch(
-            r"\s*COMMIT_CHECK_PRIVATE_PATTERN: \$\{\{ \(" + re.escape(LABELLED) + r"\) && " + re.escape(SECRET) + r" \|\| '' \}\}",
-            secret_lines[0]):
+    if len(secret_lines) != 1 or not re.fullmatch(r"\s*COMMIT_CHECK_PRIVATE_PATTERN: \$\{\{ " + re.escape(SECRET) + r" \}\}",
+                                                  secret_lines[0]) \
+            or not any(SECRET in job and "environment: private-check" in job for job in fork.values()):
         found.add("secret")
-    if not re.search(r"^\s*CONTEXT: \$\{\{ \(" + re.escape(LABELLED) + r"\) && 'fork-labeled' \|\| 'fork' \}\}$", code, re.M):
+    if "--context fork-approved" not in code or re.search(r"--context (?!fork-approved)", code):
         found.add("secret")
-    concurrency = "\n".join(top_level_block(code, "concurrency") or [])
-    if "github.event.pull_request.number" not in concurrency or "cancel-in-progress: true" not in concurrency:
+    # Nothing is cancelled and no run of a fork waits: a waiting run holds a runner, and in the approved run it would let
+    # the fork try its text again and again.
+    if top_level_block(code, "concurrency") is not None or "concurrency:" in code:
         found.add("concurrency")
+    if "--wait-for-text" in code:
+        found.add("waits")
     names = job_names(code)
     if not names or any(names & job_names(other) for other in others):
         found.add("job name")
@@ -172,6 +201,13 @@ def commits_problems(text, others=()):
             found.add("secret")
     if not any(SECRET in step for step in steps(code)):
         found.add("secret")
+    if "concurrency:" in code:
+        found.add("concurrency")
+    for step in steps(code):
+        if "--wait-for-text" in step and step_if(step) != f"github.event_name == 'pull_request' && {OWN_REPO}":
+            found.add("waits")
+    if not any("--wait-for-text 900 --poll 15" in step for step in steps(code)):
+        found.add("waits")
     names = job_names(code)
     if not names or any(names & job_names(other) for other in others):
         found.add("job name")
@@ -206,14 +242,14 @@ class WorkflowTest(unittest.TestCase):
     def test_a_second_trigger_is_noticed(self):
         self.broken("on:\n  pull_request_target:", "on:\n  pull_request:\n  pull_request_target:", "trigger")
 
-    def test_a_missing_unlabeled_trigger_is_noticed(self):
-        self.broken(", unlabeled]", "]", "trigger")
+    def test_a_label_trigger_is_noticed(self):
+        self.broken(", edited]", ", edited, labeled]", "trigger")
 
     def test_a_write_permission_is_noticed(self):
         self.broken("contents: read", "contents: write", "permissions")
 
     def test_permissions_given_to_a_job_are_noticed(self):
-        self.broken("    runs-on: ubuntu-24.04", "    permissions:\n      pull-requests: read\n    runs-on: ubuntu-24.04",
+        self.broken("    environment: private-check\n", "    environment: private-check\n    permissions:\n      pull-requests: read\n",
                     "permissions")
 
     def test_missing_permissions_are_noticed(self):
@@ -232,8 +268,8 @@ class WorkflowTest(unittest.TestCase):
                     "runs something of the pull request")
 
     def test_switching_to_the_fetched_head_is_noticed(self):
-        self.broken("          if [ \"$(git rev-parse", "          git checkout --quiet refs/remotes/pull/head\n"
-                    "          if [ \"$(git rev-parse", "runs something of the pull request")
+        self.broken('refs/remotes/pull/head"\n', 'refs/remotes/pull/head"\n          git checkout --quiet refs/remotes/pull/head\n',
+                    "runs something of the pull request")
 
     def test_fetching_the_head_into_a_branch_is_noticed(self):
         self.broken(":refs/remotes/pull/head\"", ":refs/heads/main\"", "runs something of the pull request")
@@ -245,7 +281,7 @@ class WorkflowTest(unittest.TestCase):
     def test_setting_up_python_is_noticed(self):
         self.broken("      - name: Fetch the pull request's commits as data",
                     "      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
-                    "        if: " + FORK + "\n      - name: Fetch the pull request's commits as data", "unpinned action")
+                    "      - name: Fetch the pull request's commits as data", "unpinned action")
 
     def test_running_a_script_of_the_pull_request_is_noticed(self):
         self.broken("        run: python3 -I -m unittest discover -s .github/commit-check",
@@ -255,34 +291,33 @@ class WorkflowTest(unittest.TestCase):
         self.broken("python3 -I .github/commit-check/check.py", "python3 .github/commit-check/check.py",
                     "runs something of the pull request")
 
-    def test_the_secret_for_every_pull_request_is_noticed(self):
-        self.broken(") && secrets.COMMIT_CHECK_PRIVATE_PATTERN || '' }}", " || true) && secrets.COMMIT_CHECK_PRIVATE_PATTERN || '' }}",
-                    "secret")
+    def test_the_fork_s_job_outside_the_environment_is_noticed(self):
+        self.broken("    environment: private-check\n", "", "secret")
+
+    def test_the_secret_in_the_job_for_the_project_s_own_branches_is_noticed(self):
+        self.broken("      - name: A pull request from the project's own branches is judged by its branch's own copy\n",
+                    "      - name: A pull request from the project's own branches is judged by its branch's own copy\n"
+                    "        env:\n          X: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}\n", "secret")
 
     def test_the_secret_by_another_name_is_noticed(self):
         self.broken("          GITHUB_TOKEN: ${{ github.token }}\n",
                     "          GITHUB_TOKEN: ${{ github.token }}\n          OTHER: ${{ secrets.OTHER }}\n", "secret")
 
-    def test_a_label_of_another_name_is_noticed(self):
-        self.broken("github.event.label.name == 'private-check'", "github.event.label.name != 'private-check'",
-                    "secret", count=2)
+    def test_a_fork_judged_as_one_of_the_project_s_own_branches_is_noticed(self):
+        self.broken("--context fork-approved", "--context own", "secret")
 
-    def test_a_fork_judged_as_labelled_without_the_label_is_noticed(self):
-        self.broken(") && 'fork-labeled' ||", " || true) && 'fork-labeled' ||", "secret")
+    def test_a_fork_s_job_that_is_skipped_for_some_forks_is_noticed(self):
+        self.broken("    if: " + FORK + "\n", "    if: " + FORK + " && github.event.action != 'edited'\n", "own branches")
 
-    def test_a_check_step_that_runs_also_for_the_project_s_own_branches_is_noticed(self):
-        self.broken("      - name: Check the commits and the text\n        if: " + FORK + "\n",
-                    "      - name: Check the commits and the text\n", "own branches")
-
-    def test_a_check_step_that_runs_only_for_the_project_s_own_branches_is_noticed(self):
-        self.broken("      - name: Check the commits and the text\n        if: " + FORK + "\n",
-                    "      - name: Check the commits and the text\n        if: " + OWN_REPO + "\n", "own branches")
-
-    def test_the_own_branches_step_running_more_than_a_message_is_noticed(self):
+    def test_a_job_for_the_project_s_own_branches_that_runs_the_check_is_noticed(self):
         self.broken('        run: echo "This pull request', '        run: echo "$(cat x)" "This pull request', "own branches")
 
-    def test_a_run_that_is_not_cancelled_by_a_later_event_is_noticed(self):
-        self.broken("cancel-in-progress: true", "cancel-in-progress: false", "concurrency")
+    def test_a_concurrency_group_is_noticed(self):
+        self.broken("permissions:\n  contents: read\n", "permissions:\n  contents: read\n\nconcurrency:\n  group: x\n"
+                    "  cancel-in-progress: true\n", "concurrency")
+
+    def test_a_fork_s_run_that_waits_for_its_text_is_noticed(self):
+        self.broken('--event "$GITHUB_EVENT_PATH"', '--event "$GITHUB_EVENT_PATH" --wait-for-text 900', "waits")
 
     def test_a_job_named_like_one_of_another_workflow_is_noticed(self):
         self.broken("  pull-request-commits:\n", "  commits:\n", "job name")
@@ -307,6 +342,17 @@ class WorkflowTest(unittest.TestCase):
 
     def test_a_write_permission_in_the_workflow_commits_is_noticed(self):
         self.broken_commits("contents: read", "contents: write", "permissions")
+
+    def test_a_concurrency_group_in_the_workflow_commits_is_noticed(self):
+        self.broken_commits("permissions:\n  contents: read\n", "permissions:\n  contents: read\n\nconcurrency:\n  group: x\n",
+                            "concurrency")
+
+    def test_waiting_for_the_text_outside_the_project_s_own_pull_requests_is_noticed(self):
+        self.broken_commits('--context own --compare-settings origin/main', '--context own --compare-settings origin/main --wait-for-text 900',
+                            "waits")
+
+    def test_a_longer_wait_for_the_text_is_noticed(self):
+        self.broken_commits("--wait-for-text 900", "--wait-for-text 21000", "waits")
 
     def test_a_job_of_the_workflow_commits_named_like_one_of_ci_is_noticed(self):
         self.broken_commits("  commits:\n    runs-on", "  bench:\n    runs-on", "job name")

@@ -7,11 +7,14 @@ that this file does not trip the check itself.
 Run: python -m unittest discover -s .github/commit-check
 """
 
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -90,7 +93,8 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
 
-class CheckTest(unittest.TestCase):
+class RepoTestCase(unittest.TestCase):
+    """A temporary repository and the check run on it as the workflows run it."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -107,7 +111,7 @@ class CheckTest(unittest.TestCase):
         return path
 
     def run_check(self, start, head=None, *, context="own", pattern=None, expected=False, event=None,
-                  verified=(), extra=()):
+                  verified=(), extra=(), env_extra=None):
         head = head or self.repo.head()
         args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", start,
                 "--head", head, "--settings", str(self.settings(expected))]
@@ -123,6 +127,7 @@ class CheckTest(unittest.TestCase):
                if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "GIT_"))}
         if pattern is not None:
             env["COMMIT_CHECK_PRIVATE_PATTERN"] = pattern
+        env.update(env_extra or {})
         done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
         return done.returncode, done.stdout + done.stderr
 
@@ -136,6 +141,9 @@ class CheckTest(unittest.TestCase):
     def assert_passes(self, result):
         code, out = result
         self.assertEqual(code, 0, out)
+
+
+class CheckTest(RepoTestCase):
 
     # A clean history passes, and the count of commits checked is printed.
 
@@ -329,25 +337,17 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("::notice", out)
 
-    def test_once_the_secret_is_expected_a_fork_s_pull_request_fails_in_a_run_its_label_did_not_start(self):
-        self.repo.commit("A change")
+    def test_once_the_secret_is_expected_a_fork_s_public_run_still_passes_and_leaves_the_private_part_to_its_own_job(self):
+        # The private part runs in a job of its own that waits for the project's approval; the public run never fails
+        # for it, because a failed run stays on the head and the owner's gate refuses every head that carries one.
+        self.repo.commit(f"Thanks to {PRIVATE_WORD}")
         code, out = self.run_check(self.base, pattern=PRIVATE_PATTERN, expected=True, context="fork")
-        self.assertEqual(code, 1, out)
-        self.assertIn("private pattern", out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("::notice", out)
 
-    def test_a_fork_s_pull_request_is_never_held_to_the_private_pattern_outside_the_labelled_run(self):
+    def test_a_fork_s_pull_request_is_never_held_to_the_private_pattern_outside_the_approved_run(self):
         self.repo.commit(f"Thanks to {PRIVATE_WORD}")
         self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN, expected=False, context="fork"))
-
-    def test_in_the_run_the_project_s_label_started_a_fork_s_pull_request_is_held_to_the_private_pattern(self):
-        sha = self.repo.commit(f"Thanks to {PRIVATE_WORD}")
-        self.assert_fails(self.run_check(self.base, pattern=PRIVATE_PATTERN, expected=True, context="fork-labeled"),
-                          sha, "private pattern (message line 1)", hidden=[PRIVATE_WORD])
-
-    def test_in_the_labelled_run_a_missing_secret_fails_once_it_is_expected(self):
-        self.repo.commit("A change")
-        code, out = self.run_check(self.base, pattern=None, expected=True, context="fork-labeled")
-        self.assertEqual(code, 1, out)
 
     def test_a_private_pattern_that_is_no_regular_expression_fails_without_showing_it(self):
         self.repo.commit("A change")
@@ -545,6 +545,209 @@ class CheckTest(unittest.TestCase):
             files[f"x/{name}"] = (here.parent / "workflows" / name).read_text()
         self.repo.commit("Add the check", files=files)
         self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN))
+
+
+class FakeGitHub:
+    """GitHub's API for one pull request, answering from a list: each answer once, the last one for good.
+    An answer is a pull request's fields, or a number for an HTTP error."""
+
+    def __init__(self, answers, environment=None):
+        self.answers = list(answers)
+        self.asked = 0
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/repos/made-up/repo/environments/private-check" and environment is not None:
+                    self.send_json(environment)
+                    return
+                if self.path != "/repos/made-up/repo/pulls/7":
+                    self.send_error(404)
+                    return
+                answer = fake.answers[min(fake.asked, len(fake.answers) - 1)]
+                fake.asked += 1
+                if isinstance(answer, int):
+                    self.send_error(answer)
+                    return
+                self.send_json({"number": 7, **answer})
+
+            def send_json(self, data):
+                body = json.dumps(data).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.env = {"GITHUB_API_URL": f"http://127.0.0.1:{self.server.server_address[1]}",
+                    "GITHUB_REPOSITORY": "made-up/repo", "GITHUB_TOKEN": "made-up"}
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+CLEAN = {"title": "Fix the notes", "body": "Plain words.", "head": {"ref": "notes"}}
+BAD_TITLE = {"title": f"Fix the notes ({TRACKER_CODE})", "body": "Plain words.", "head": {"ref": "notes"}}
+BAD_BODY = {"title": "Fix the notes", "body": f"See {HOME_PATH}", "head": {"ref": "notes"}}
+BAD_BRANCH = {"title": "Fix the notes", "body": "", "head": {"ref": f"{TRACKER_CODE_LOWER}-notes"}}
+
+
+class TextWaitTest(RepoTestCase):
+    """A pull request's title and description can be mended without a new commit, and a failed run stays on
+    the head for good: the owner's gate refuses every head that carries one. So a check of the text never fails
+    while the text can still be mended; it waits, reading the text again, and the run stays unfinished, which the
+    gate refuses as well. A run ends in failure only on what cannot be mended on that head."""
+
+    def waiting_run(self, answers, *, commit_message="A change", wait="3", context="own"):
+        self.repo.commit(commit_message)
+        fake = FakeGitHub(answers, environment=self.REVIEWED)
+        self.addCleanup(fake.close)
+        started = time.monotonic()
+        code, out = self.run_check(self.base, context=context, event={"pull_request": {"number": 7, **CLEAN}},
+                                   extra=["--wait-for-text", wait, "--poll", "0.2"], env_extra=fake.env)
+        return code, out, time.monotonic() - started, fake
+
+    def test_a_title_mended_while_the_run_waits_ends_the_run_in_success(self):
+        code, out, _, fake = self.waiting_run([BAD_TITLE, BAD_TITLE, CLEAN])
+        self.assertEqual(code, 0, out)
+        self.assertIn("pull request: tracker code (pull request title)", out)
+        self.assertIn("waiting for the pull request's text to be mended", out)
+        self.assertGreaterEqual(fake.asked, 3)
+        self.assertNotIn(TRACKER_CODE, out)
+
+    def test_a_description_mended_while_the_run_waits_ends_the_run_in_success(self):
+        code, out, _, _ = self.waiting_run([BAD_BODY, CLEAN])
+        self.assertEqual(code, 0, out)
+        self.assertIn("pull request: local path (pull request description line 1)", out)
+
+    def test_a_text_that_is_never_mended_fails_when_the_wait_is_over(self):
+        code, out, elapsed, _ = self.waiting_run([BAD_TITLE], wait="1.5")
+        self.assertEqual(code, 1, out)
+        self.assertGreaterEqual(elapsed, 1.5)
+        self.assertIn("not mended", out)
+        self.assertIn("pull request: tracker code (pull request title)", out)
+
+    def test_the_text_is_read_from_the_api_and_not_from_the_event_s_copy(self):
+        # The event's copy is clean; the pull request's text now is not.
+        code, out, _, _ = self.waiting_run([BAD_TITLE], wait="0.6")
+        self.assertEqual(code, 1, out)
+
+    def test_a_clean_text_ends_the_run_at_once(self):
+        code, out, elapsed, fake = self.waiting_run([CLEAN], wait="30")
+        self.assertEqual(code, 0, out)
+        self.assertLess(elapsed, 15)
+        self.assertEqual(fake.asked, 1)
+
+    def test_a_branch_name_cannot_be_mended_so_it_fails_at_once(self):
+        code, out, elapsed, _ = self.waiting_run([BAD_BRANCH], wait="30")
+        self.assertEqual(code, 1, out)
+        self.assertLess(elapsed, 15)
+        self.assertIn("pull request: tracker code (pull request branch name)", out)
+
+    def test_an_offending_commit_fails_at_once_without_waiting_for_the_text(self):
+        code, out, elapsed, fake = self.waiting_run([BAD_TITLE], commit_message=f"A change ({TRACKER_CODE})", wait="30")
+        self.assertEqual(code, 1, out)
+        self.assertLess(elapsed, 15)
+        self.assertIn("tracker code (message line 1)", out)
+
+    def test_an_answer_the_api_could_not_give_is_asked_again(self):
+        code, out, _, fake = self.waiting_run([502, 500, CLEAN])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.asked, 3)
+
+    def test_an_api_that_never_answers_fails_when_the_wait_is_over(self):
+        code, out, _, _ = self.waiting_run([503], wait="1")
+        self.assertEqual(code, 1, out)
+
+    def test_a_fork_s_run_does_not_wait_for_its_text(self):
+        # A waiting run of a fork would hold a runner for every pull request anyone opens, and in the approved run
+        # it would let the fork try its text against the private pattern again and again.
+        code, out, elapsed, fake = self.waiting_run([BAD_TITLE, CLEAN], context="fork-approved", wait="30")
+        self.assertEqual(code, 1, out)
+        self.assertLess(elapsed, 15)
+        self.assertNotIn("waiting for the pull request's text", out)
+
+    # The fork's run in the environment private-check uses the private pattern only when that environment really
+    # waits for a reviewer; otherwise a fork could try its text against the pattern as often as it likes.
+
+    REVIEWED = {"name": "private-check", "protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User"}]}]}
+    UNREVIEWED = {"name": "private-check", "protection_rules": [{"type": "branch_policy"}]}
+
+    def approved_run(self, environment, *, message, expected=True):
+        self.repo.commit(message)
+        fake = FakeGitHub([CLEAN], environment=environment)
+        self.addCleanup(fake.close)
+        return self.run_check(self.base, context="fork-approved", pattern=PRIVATE_PATTERN, expected=expected,
+                              event={"pull_request": {"number": 7, **CLEAN}},
+                              env_extra=fake.env)
+
+    def test_an_environment_that_waits_for_a_reviewer_lets_the_private_pattern_be_used(self):
+        code, out = self.approved_run(self.REVIEWED, message=f"Thanks to {PRIVATE_WORD}")
+        self.assertEqual(code, 1, out)
+        self.assertIn("private pattern (message line 1)", out)
+        self.assertNotIn(PRIVATE_WORD, out)
+
+    def test_in_the_approved_run_a_missing_secret_fails_once_it_is_expected(self):
+        self.repo.commit("A change")
+        fake = FakeGitHub([CLEAN], environment=self.REVIEWED)
+        self.addCleanup(fake.close)
+        code, out = self.run_check(self.base, context="fork-approved", pattern=None, expected=True,
+                                   event={"pull_request": {"number": 7, **CLEAN}}, env_extra=fake.env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("private pattern", out)
+
+    def test_in_the_approved_run_a_missing_secret_passes_with_a_notice_while_it_is_not_expected(self):
+        self.repo.commit("A change")
+        fake = FakeGitHub([CLEAN], environment=self.REVIEWED)
+        self.addCleanup(fake.close)
+        code, out = self.run_check(self.base, context="fork-approved", pattern=None, expected=False,
+                                   event={"pull_request": {"number": 7, **CLEAN}}, env_extra=fake.env)
+        self.assertEqual(code, 0, out)
+        self.assertIn("::notice", out)
+
+    def test_an_environment_without_a_reviewer_keeps_the_private_pattern_back(self):
+        code, out = self.approved_run(self.UNREVIEWED, message=f"Thanks to {PRIVATE_WORD}", expected=False)
+        self.assertEqual(code, 0, out)
+        self.assertIn("does not wait for a reviewer", out)
+
+    def test_an_environment_without_a_reviewer_fails_once_the_private_pattern_is_expected(self):
+        code, out = self.approved_run(self.UNREVIEWED, message="A change", expected=True)
+        self.assertEqual(code, 1, out)
+        self.assertIn("does not wait for a reviewer", out)
+
+    def test_an_environment_that_cannot_be_read_keeps_the_private_pattern_back(self):
+        code, out = self.approved_run(None, message=f"Thanks to {PRIVATE_WORD}", expected=False)
+        self.assertEqual(code, 0, out)
+        self.assertIn("does not wait for a reviewer", out)
+
+    def test_a_run_ends_in_failure_only_on_what_cannot_be_mended_on_its_head(self):
+        # Every kind of input this check meets on one head, and how its run ends. A failure is allowed only where
+        # the head itself carries the fault (a commit, a branch name) or where the text was not mended in time.
+        table = [
+            ("everything clean", [CLEAN], "A change", 0),
+            ("a title mended in time", [BAD_TITLE, CLEAN], "A change", 0),
+            ("a description mended in time", [BAD_BODY, CLEAN], "A change", 0),
+            ("the API failing for a while", [500, CLEAN], "A change", 0),
+            ("a title never mended", [BAD_TITLE], "A change", 1),
+            ("a branch name", [BAD_BRANCH], "A change", 1),
+            ("an offending commit", [CLEAN], f"A change ({TRACKER_CODE})", 1),
+        ]
+        for name, answers, message, expected in table:
+            with self.subTest(name=name):
+                self.tearDown_repo()
+                code, out, _, _ = self.waiting_run(answers, commit_message=message, wait="1")
+                self.assertEqual(code, expected, f"{name}: {out}")
+
+    def tearDown_repo(self):
+        self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
+        self.base = self.repo.commit("The base commit")
 
 
 if __name__ == "__main__":

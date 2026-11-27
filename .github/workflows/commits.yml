@@ -10,7 +10,12 @@
 # the pull request, so on main this detects and does not prevent: a red main stops the next merge at the
 # owner's gate. The way back is written in .github/commit-check/README.md.
 #
-# It needs no package and ends in well under a minute.
+# The owner's gate refuses a head on which any run ended otherwise than in success, so no run here is cancelled
+# (there is no concurrency group) and none fails on what can still be mended on its head: when the title or the
+# description of a pull request breaks a rule, the run waits up to 15 minutes, reading them again, and ends in
+# success once they are mended; a waiting run is not finished, and the gate refuses that too.
+#
+# It needs no package and ends in well under a minute when nothing waits.
 name: commits
 
 on:
@@ -21,14 +26,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: commits-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   commits:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,4 +64,4 @@ jobs:
         run: |
           python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
             --settings .github/commit-check/settings.json --context own --event "$GITHUB_EVENT_PATH" \
-            --compare-settings "$BASE_SHA"
+            --compare-settings "$BASE_SHA" --wait-for-text 900 --poll 15

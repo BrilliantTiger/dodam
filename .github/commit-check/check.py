@@ -291,13 +291,15 @@ def main(argv=None):
                         help="the commit the range starts after (the pull request's base, main, or the push's before)")
     parser.add_argument("--head", required=True)
     parser.add_argument("--settings", required=True)
-    parser.add_argument("--context", choices=("own", "fork", "fork-labeled"), default=None,
+    parser.add_argument("--context", choices=("own", "fork", "fork-labeled", "fork-approved"), default=None,
                         help="own: the project's own branch; fork: a pull request from a fork; fork-labeled: the "
                              "run the project's account started on a fork's pull request by its label")
     parser.add_argument("--own", action="store_const", const="own", dest="context")
     parser.add_argument("--event", help="the event's file, for the pull request's title and description")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
     parser.add_argument("--verified-shas", help="a file of commits GitHub signed, in place of asking GitHub's API")
+    parser.add_argument("--wait-for-text", type=float, default=0, metavar="SECONDS")
+    parser.add_argument("--poll", type=float, default=30, metavar="SECONDS")
     parser.add_argument("--compare-settings", metavar="COMMIT",
                         help="the commit whose settings.json this branch may not loosen (main, or the push's before)")
     args = parser.parse_args(argv)
