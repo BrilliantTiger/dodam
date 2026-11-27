@@ -1287,8 +1287,8 @@ def test_the_judge_refuses_a_file_system_where_every_read_moves_when_it_was_read
     assert not (tmp_path / "out/ground.json").exists()
 
 
-# The step's one time for walking and removing, with separation: the judge gives three seconds, and the
-# case runner removes each file slowly, about two seconds for what the program leaves in one case.
+# The step's one time for walking and removing, with separation: the judge gives sixty seconds, and removing
+# what the program leaves in one case takes forty of them on the judge's clock.
 # Every file the judge removes in the case runner moves the judge's clock on by two seconds instead of taking them,
 # so that what a removal uses of the step's time does not depend on how busy the machine is; the notes the runner
 # leaves the judge keep the real time at which a removal began.

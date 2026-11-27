@@ -1105,8 +1105,10 @@ def test_the_figures():
     held = {"figures": [100]}
 
     def container_memory(*args, **kwargs):
-        # the figures of one run in turn; the last one stays
+        # the figures of one run in turn; the last one stays. Each reading adds a mark that the program waits for
         figure = held["figures"].pop(0) if len(held["figures"]) > 1 else held["figures"][0]
+        with open(LOOKED, "a") as marks:
+            marks.write("x")
         return {"taken": figure * MB, "all": figure * MB, "cap": 0, "records": 0, "files": 0}
 
     kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
@@ -1131,8 +1133,16 @@ def test_the_figures():
     assert second == 30 * MB, f"what the first run left was taken for the second run's start: {second}"
     assert third == 40 * MB, f"a fall below the start made room: {third}"
 '''}
-    # three runs of 0.3 seconds each in one case: the case's time is not what this test is about, so it is ample
-    result = judge_program(tmp_path, "import time\ntime.sleep(0.3)\nprint('fine')\n", tests, CASE_TIMEOUT_SEC="10")
+    # each run lasts until the judge has read the container three times while it runs (at most eight seconds),
+    # however late a busy machine lets it read: the third run's figures come in three readings. The case's time is
+    # not what this test is about, so it is ample.
+    looked = tmp_path / "looked"
+    tests = {name: source.replace("LOOKED", repr(str(looked))) for name, source in tests.items()}
+    program = ("import os, time\nlooked = " + repr(str(looked)) + "\n"
+               "def marks():\n    return os.path.getsize(looked) if os.path.exists(looked) else 0\n"
+               "start, end = marks(), time.monotonic() + 8\n"
+               "while marks() < start + 3 and time.monotonic() < end:\n    time.sleep(0.005)\nprint('fine')\n")
+    result = judge_program(tmp_path, program, tests, CASE_TIMEOUT_SEC="30")
     assert outcomes(result) == {"test_the_figures": "passed"}, message(result, "test_the_figures")
 
 
@@ -1172,7 +1182,11 @@ def grown(records):
     figures = [{"taken": 100 * MB, "all": 100 * MB, "cap": 0, "records": r * MB, "files": 0} for r in records]
 
     def container_memory(*args, **kwargs):
-        return figures.pop(0) if len(figures) > 1 else figures[0]
+        figure = figures.pop(0) if len(figures) > 1 else figures[0]
+        if len(figures) == 1:
+            with open(READ_ALL, "a") as marks:  # every figure was read: the program may end
+                marks.write("x")
+        return figure
 
     kept = tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
     tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = container_memory, lambda folder: 0, lambda: 0
@@ -1202,8 +1216,14 @@ def test_the_records():
     }
     with open(SEEN, "w") as f:
         json.dump(seen, f)
-'''.replace("SEEN", repr(str(tmp_path / "seen.json")))}
-    result = judge_program(tmp_path, "import time\ntime.sleep(0.4)\n", tests)
+'''.replace("SEEN", repr(str(tmp_path / "seen.json"))).replace("READ_ALL", repr(str(tmp_path / "read-all")))}
+    # each run lasts until the judge has read all of its figures (at most eight seconds), however late a busy
+    # machine lets it read; the three runs share the case's time, which is not what this test is about
+    program = ("import os, time\nmarks = " + repr(str(tmp_path / "read-all")) + "\n"
+               "def read():\n    return os.path.getsize(marks) if os.path.exists(marks) else 0\n"
+               "start, end = read(), time.monotonic() + 8\n"
+               "while read() <= start and time.monotonic() < end:\n    time.sleep(0.005)\n")
+    result = judge_program(tmp_path, program, tests, CASE_TIMEOUT_SEC="30")
     seen = json.loads((tmp_path / "seen.json").read_text()) if (tmp_path / "seen.json").is_file() else {}
     assert seen == {"up and down": 10, "given back, then made": 10, "only up": 20}, (seen, message(result, "test_the_records"))
 
@@ -1267,6 +1287,8 @@ def test_between():
         text = f.read()
         f.close()
         reads["total"] += 1
+        if reads["total"] == 60:
+            real_open(READ_ENOUGH, "w").close()  # the act fell into the run: the program may end
         if reads["total"] == 40 or (KEEPS and 40 < reads["total"] <= 52):
             CHANGE
             stand_in(group, held)
@@ -1333,9 +1355,14 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
     source = (BETWEEN.replace("GROUP", repr(str(tmp_path / "group"))).replace("FILES", str(files))
               .replace("KEEPS", repr("keeps" in change))
               .replace("CHANGE", change_code).replace("SEEN", repr(str(seen))))
-    # the program waits 1.5 seconds, long enough for the judge to read 52 times on a busy machine
-    result = judge_program(tmp_path, "import time\ntime.sleep(1.5)\nprint('fine')\n",
-                           {"functional/test_between.py": source}, CASE_MEMORY_MB="256", CASE_TIMEOUT_SEC="4")
+    # the program lasts until the judge has read sixty times (at most eight seconds), however late a busy machine
+    # lets it read
+    enough = tmp_path / "read-enough"
+    source = source.replace("READ_ENOUGH", repr(str(enough)))
+    program = ("import os, time\nend = time.monotonic() + 8\nwhile not os.path.exists(" + repr(str(enough)) + ")"
+               " and time.monotonic() < end:\n    time.sleep(0.005)\nprint('fine')\n")
+    result = judge_program(tmp_path, program, {"functional/test_between.py": source}, CASE_MEMORY_MB="256",
+                           CASE_TIMEOUT_SEC="12")
     assert seen.is_file(), message(result, "test_between")
     measured = json.loads(seen.read_text())
     assert measured["reads"] >= 40, f"the program's act did not fall into its run: {measured}"
@@ -1479,6 +1506,15 @@ def test_measured():
             return cls.now
 
     def container_memory(*args, **kwargs):
+        here = CASE_DIR[0]
+        if here is not None:
+            # the measurements while the writing program writes: between its marks of starting and stopping
+            run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
+            if (here / f"started-{run}").exists() and not (here / f"stopped-{run}").exists():
+                counted = reads.setdefault("in_run_of", {})
+                counted[run] = counted.get(run, 0) + 1
+                if counted[run] == 300:
+                    (here / f"plenty-{run}").write_text("")
         reads["inside"], tool.time = True, Clock
         try:
             return reading(*args, **kwargs)
@@ -1500,11 +1536,14 @@ def test_measured():
                 c._cfg = {**c._cfg, "records_file": str(group)}
             for _ in range(RUNS - 1):
                 c.run([SOLUTION])
+            began = real_time.monotonic()
             r = c.run([SOLUTION])
+            run_seconds = real_time.monotonic() - began
             with real_open(SEEN, "w") as f:
                 json.dump({"limit": r.limit, "out": r.out, "lowest": c.measured.get("lowest"),
                            "tries": reads["try"], "run_tries": reads["tries_of"].get(RUNS - 1, 0),
-                           "late": c.measured.get("late"),
+                           "late": c.measured.get("late"), "run_seconds": run_seconds,
+                           "in_run": reads.get("in_run_of", {}).get(RUNS - 1, 0),
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
             CHECK
@@ -1515,8 +1554,15 @@ def test_measured():
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
 # output and a leak on its error stream; or the wrong output.
-SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n    end = time.monotonic() + 1.5\n"
-             "    while time.monotonic() < end:\n        print('x', flush=True)\n        time.sleep(0.0002)\n"
+# A chatty program writes one byte every 0.3 thousandths of a second, waking the judge again and again, from a
+# mark of starting until the judge has measured 300 times while it writes (at most eight seconds), and then says how
+# long it wrote; a byte at a time keeps even eight seconds of writing far below the case's limit on output.
+SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
+             "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
+             "    began = time.monotonic()\n    open(f'started-{run}', 'w').close()\n"
+             "    while not os.path.exists(f'plenty-{run}') and time.monotonic() < began + 8:\n"
+             "        sys.stdout.write('x')\n        sys.stdout.flush()\n        time.sleep(0.0003)\n"
+             "    open(f'stopped-{run}', 'w').close()\n    print(f'\\nspan={time.monotonic() - began}')\n"
              # a patient program runs until the judge has read the container ENOUGH times since the case's
              # run before it ended, however busy the machine is, and no longer than 8 seconds
              # a patient program behaves as the solution named after "patient-" (as the right one without a name)
@@ -1638,13 +1684,17 @@ LIMITS_OF = {"above the stop by more than what moved": (1024, "2048")}
 def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test: str = "ordinary",
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
                    records_mb: int = 10, watch: float = 0.002, runs: int = 1,
-                   lose_note: bool = False, spaced: bool = False, patient: bool = False,
+                   lose_note: bool = False, spaced: bool = False, patient: bool | None = None,
                    separated: bool = True) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw. A patient program runs until the judge has read the
     container 70 times in its run, counted from the end of the case's run before it, so that a test that
     needs that many readings in a run does not depend on how busy the machine is. A case that is not
     separated runs as it does outside a container: with no confined side."""
+    if patient is None:
+        # a case that is watched during its run lasts until the judge has read it often enough: a fixed run would
+        # leave a held-up case runner no look at all. A test whose subject is a run with one look or none says so.
+        patient = watch < 1 and separated and solution != "chatty"
     if patient:
         solution = "patient" if solution == "right" else f"patient-{solution}"
     seen = tmp_path / "seen.json"
@@ -1660,10 +1710,10 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     if not separated:
         source = source.replace("            c._side = Side()\n", "")
         assert "c._side" not in source
-    # each run of the solution sleeps 0.6 seconds: a case of several runs gets 2 seconds for each, so that
-    # starting its runs on a busy machine does not end it for time
+    # a patient run gives up at eight seconds: it gets twelve; a short run (0.6 seconds) gets six, so that starting
+    # it on a busy machine does not end it for time; no test of this helper is about the case's time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
-                           CASE_TIMEOUT_SEC=str((12 if patient or solution == "chatty" else 2) * runs))
+                           CASE_TIMEOUT_SEC=str((12 if patient or solution == "chatty" else 6) * runs))
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
 
@@ -2008,6 +2058,7 @@ def test_a_reading_cut_by_time_around_a_run_is_counted_as_late(tmp_path, which):
     """A case counts every reading cut by time as late, the one a run begins with and the one taken when
     it has ended as well as those during the run, so that its record says why it could not pass: here one,
     which is its one reading that could not decide, and the case is unmeasured."""
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, LATE_AROUND_A_RUN[which], watch=1000.0)
     assert (seen["late"], seen["undecided"]) == (1, 1), (which, seen)
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, (which, the_case(result))
@@ -2026,13 +2077,17 @@ def test_a_case_says_how_far_its_figure_fell_and_how_many_readings_could_not_dec
 
 
 def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
-    """A program that writes a line every fifth of a thousandth of a second for a second and a half wakes
-    the judge at almost every line; the judge still measures at most once in 0.002 seconds, about 750
-    times in such a run, not at every line. At least twenty measurements, one in 75 thousandths of a
-    second, hold on a busy machine as well."""
+    """A program that writes a byte every 0.3 thousandths of a second wakes the judge at almost every byte; the
+    judge still measures at most once in 0.002 seconds, not at every byte, and at least once in 0.03 seconds, as
+    the span the program really wrote for and the span the run really took show. The program writes until the
+    judge has measured 300 times while it writes, so that a late start or a stall changes the spans, not what
+    the bounds ask."""
     result, seen = judge_measured(tmp_path, way(), solution="chatty", test="chatty")
     assert the_case(result)["outcome"] == "passed", the_case(result)
-    assert 20 <= seen["measurements"] <= 1.5 / 0.002 * 1.5 + 50, seen
+    span = float(re.search(r"span=([0-9.e-]+)", seen["out"]).group(1))
+    assert seen["in_run"] >= span / 0.030, (span, seen["in_run"])
+    assert seen["in_run"] <= span / 0.002 + 5, (span, seen["in_run"])
+    assert seen["in_run"] <= seen["measurements"] <= seen["run_seconds"] / 0.002 + 5, (seen["run_seconds"], seen)
 
 
 def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
@@ -2067,7 +2122,8 @@ def test_the_records_that_stand_when_a_case_begins_count_before_its_first_measur
     a program that ends before the judge has measured it once, while 300 MB of records stand, cannot
     show that it held no more than its limit of 256 MB. Here the records go before the first
     measurement, so only the reading at the start can see them: the case is unmeasured."""
-    result, seen = judge_measured(tmp_path, GONE_AT_ONCE, records_mb=300)
+    # its subject is a program that ends before the judge has measured it once: a short run
+    result, seen = judge_measured(tmp_path, GONE_AT_ONCE, records_mb=300, patient=False)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
 
@@ -2102,6 +2158,7 @@ def test_no_run_is_judged_by_the_count_alone(tmp_path, state):
     from passing where they lie beyond its limit and the amount left out; with nothing of that, it
     passes."""
     code, records_mb, runs, expected = QUICK[state]
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=runs)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == expected, (state, the_case(result))
@@ -2114,6 +2171,7 @@ def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
     """The judge measures a run at the first look after it starts, not one look later: a program that
     holds 300 MB under a limit of 256 MB from its first moments is ended for memory even where the
     judge would look again only after a thousand seconds."""
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, way(takes(300, 2)), watch=1000.0)
     assert seen["limit"] == "memory", seen
     assert the_case(result)["outcome"] == "failed", the_case(result)
@@ -2122,6 +2180,7 @@ def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
 def test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing(tmp_path):
     """The reading taken when a run has ended is held to what a reading cut by time can say, as every
     other one: where every try of it was cut by time, the case cannot pass."""
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, way(late=tuple(3 + i for i in EIGHT)), watch=1000.0)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
@@ -2143,6 +2202,7 @@ def test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure(tmp_p
     from nor that of the kernel's records: the second run, which takes 230 MB under a limit of 256 MB,
     is not ended for memory as it would be counted from 60 MB lower. The case is unmeasured."""
     code, records_mb = AFTER_RUN_DIPS[dip]
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, way(code, takes(230, 12), late=tuple(3 + i for i in EIGHT)),
                                   records_mb=records_mb, watch=1000.0, runs=2)
     assert seen["limit"] is None, (dip, seen)
@@ -2154,6 +2214,7 @@ def test_what_stands_when_a_later_run_begins_is_held_to_the_most_the_case_can_ha
     with holds the case to the most it can have held, beyond its limit of 256 MB, and it is unmeasured."""
     code = way("    if n == 3 and part == 'files after':\n        move(held, records=300)\n",
                "    if n == 4 and part == 'files after':\n        move(held, records=-300)\n")
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, code, watch=1000.0, runs=2)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
@@ -2176,6 +2237,7 @@ def test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted
     memory, counted from what stood after 60 MB went, lies above its limit of 256 MB fails for memory;
     the case says how far its figure fell below where it began before its first run."""
     code, records_mb, fell = BETWEEN_RUNS[fall]
+    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
     result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=2)
     case = the_case(result)
     assert case["outcome"] == "failed", (fall, case, seen)
@@ -2336,6 +2398,7 @@ def test_a_case_outside_a_container_does_not_wait_for_the_kernels_own_part(tmp_p
     """Outside a container the judge measures nothing of a case, and the kernel's part it would read is not
     the case's: the case does not wait for it, and its test alone judges it. Here the part never stops
     falling."""
+    # its subject is a case without separation, which is not read during its run: a short run
     result, seen = judge_measured(tmp_path, NEVER_STILL, separated=False)
     assert seen["settle_looks"] is None, seen
     assert the_case(result)["outcome"] == "passed", the_case(result)
@@ -2346,6 +2409,7 @@ def test_a_case_outside_a_container_writes_no_note(tmp_path, lose_note):
     """Outside a container the judge measures nothing of a case and its case runner writes no note of it,
     also where one could not be written: the case carries none of a note's numbers, and its test alone
     judges it."""
+    # its subject is a case without separation, which is not read during its run: a short run
     result, seen = judge_measured(tmp_path, WAYS["settled"], separated=False, lose_note=lose_note)
     case = the_case(result)
     assert case["outcome"] == "passed", case
@@ -3173,6 +3237,7 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     is; its files are replaced whole, as the kernel's never read half written."""
     from test_cli_isolation import READER
     asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
+    began = tmp_path / "began"
     reclaim, freeze = HELPERS_NAMES[:2]
     asked.mkdir()
     held.mkdir()
@@ -3200,10 +3265,13 @@ _number, _after_drop = number, 0
 
 
 def number(name):
-    # the stand-in kernel: what it let go of at the drop it frees at the third reading after it
+    # the stand-in kernel: what it let go of at the drop it frees at the third reading after it. Its first reading of
+    # the container's memory is the helper's first, right after its time has started: it leaves a mark of that moment
     global _after_drop
     if name != "memory.current":
         return _number(name)
+    if not os.path.exists({str(began)!r}):
+        open({str(began)!r}, "w").close()
     with open("{drop}", "rb") as f:
         dropped = f.read() == b"2"
     _after_drop += dropped
@@ -3215,13 +3283,13 @@ def number(name):
     helper = subprocess.Popen([sys.executable, str(tmp_path / "helper.py")], cwd=tmp_path, stderr=subprocess.PIPE)
     try:
         put(asked / "ask-one", "one")
-        # the helper's time starts when it has the question and holds the container still, which a busy machine may
-        # make later than the question: the waiting pages take four and a half seconds from then
+        # the helper marks the moment its time starts, however late a busy machine hands it the question: the
+        # waiting pages take three and a half seconds from that mark, so that the whole wait lies inside its time
         deadline = time.monotonic() + 60
-        while (held / freeze).read_text().strip() != "1" and time.monotonic() < deadline and helper.poll() is None:
+        while not began.exists() and time.monotonic() < deadline and helper.poll() is None:
             time.sleep(0.01)
-        assert (held / freeze).read_text().strip() == "1", "the helper never held the container still"
-        time.sleep(4.5)
+        assert began.exists(), "the helper never began its time"
+        time.sleep(3.5)
         put(held / "memory.stat", "anon 4096\nfile 0\nfile_dirty 0\n")
         deadline = time.monotonic() + 60
         while not (asked / "answer-one").exists() and time.monotonic() < deadline and helper.poll() is None:
@@ -3737,6 +3805,9 @@ SLOW_REMOVAL = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
 
 
 def removal_moves_the_clock(seconds: float) -> str:
+    # It moves the judge's clock inside the case runner only; the judge outside still reads, on its own clock, the
+    # real time at which a removal began. A test that ends a runner in the middle of a removal must not use it: the
+    # removal in flight is shown by the test whose runner really sleeps.
     """Test code for a case runner in which every file the judge removes moves the judge's clock on by `seconds`
     instead of taking them. How much of the step's time for walking and removing a removal uses is then that,
     however busy the machine is; only the few milliseconds of real work come on top. The notes the runner leaves
@@ -3775,10 +3846,10 @@ def test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_remo
 
 def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatch):
     """Each case runner is given what is left of the step's time for walking and removing, and what it
-    used is taken back. Here the step gives six seconds, and removing what one case left takes four of
-    them, on the judge's clock: the case of the first file passes with two to spare, and the case of the
-    second finds two left where it needs four. A judge that took nothing back would give it six."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 6, raising=False)
+    used is taken back. Here the step gives seven seconds, and removing what one case left takes four of
+    them, on the judge's clock: the case of the first file passes with three to spare, and the case of the
+    second finds three left where it needs four. A judge that took nothing back would give it seven."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 7, raising=False)
     slow = removal_moves_the_clock(0.2)
     tests = {"functional/test_a.py": slow + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
              "functional/test_b.py": slow + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
@@ -3790,11 +3861,11 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
 
 def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_the_steps_time(tmp_path, monkeypatch):
     """A case runner notes what is left of the step's time for walking and removing after every
-    removal as well as before it. Here the step gives three seconds; the first file's runner removes
-    little and then waits four and a half, longer than the whole time; the second file's case needs one
+    removal as well as before it. Here the step gives four seconds; the first file's runner removes
+    little and then waits five and a half, longer than the whole time; the second file's case needs one
     second of it, on the judge's clock. A judge that counted the wait would leave it nothing."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 3, raising=False)
-    waits = "def test_waits_after_it():\n    time.sleep(4.5)\n"
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 4, raising=False)
+    waits = "def test_waits_after_it():\n    time.sleep(5.5)\n"
     tests = {"functional/test_a.py": RUNS_OK.replace("test_ok", "test_removes_little") + "\n\n" + waits,
              "functional/test_b.py": removal_moves_the_clock(0.05) + RUNS_OK.replace("test_ok", "test_needs_some")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
@@ -4012,12 +4083,13 @@ def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_resu
 def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some(tmp_path, monkeypatch):
     """The search is given its time whether or not what it found so far waits to be read: one that
     still finds places when its time is up gives up all the same. Here it has one second, and the
-    search, a stand-in, finds places without a pause for three, which always wait to be read."""
+    search, a stand-in, finds places without a pause for five, which always wait to be read: a search that
+    went on until it ended would take five, and one that keeps its time ends well before three and a half."""
     much = judge_module.TooMuchLeft
     monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 1)
     monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 10**12)
     start = subprocess.Popen
-    finds = ("import sys, time\nend = time.monotonic() + 3\nwhile time.monotonic() < end:\n"
+    finds = ("import sys, time\nend = time.monotonic() + 5\nwhile time.monotonic() < end:\n"
              "    sys.stdout.buffer.write(b'/nowhere\\0' * 1000)\n")
     monkeypatch.setattr(judge_module.subprocess, "Popen", lambda args, **kwargs: start([sys.executable, "-c", finds], **kwargs))
     # what the search found waits to be read whenever the judge asks, however fast this machine reads
@@ -4028,7 +4100,7 @@ def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_stil
     with pytest.raises(much):
         for _ in judge_module.writable_by_others(mounts):
             pass
-    assert time.monotonic() - began < 2.5, "the search went on past its time"
+    assert time.monotonic() - began < 3.5, "the search went on past its time"
 
 
 def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):
