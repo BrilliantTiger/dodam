@@ -664,7 +664,7 @@ def guide(status: dict, desk: dict | None = None) -> str:
         "tasks_ready": str(status["tasks"]["ready"]), "tasks_first": str(status["tasks"]["first"]),
         "open_issues": str(status["open_issues"]), "status_version": str(status["version"]),
         "changes": "\n".join(f"- {spell('en', 'd', c['date'])}: {c['title']} ({c['url']})" for c in status["changes"]) or "- none yet",
-        "rules": "\n".join(f"- {values[f'rule{i}_h']}. {values[f'rule{i}_p']}" for i in range(1, 8)),
+        "rules": "\n".join(f"- {values[f'rule{i}_h']}. {values[f'rule{i}_p']}" for i in range(1, 9)),
         "questions": "\n\n".join(f"### {question}\n\n{answer}" for question, answer in questions("en", strings, desk)),
         "desk": desk_guide(desk),
     }

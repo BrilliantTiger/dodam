@@ -165,6 +165,8 @@
   "policy": "Security policy",
   "rule7_h": "Relaxing a rule or weakening a guarantee needs the owner’s approval",
   "rule7_p": "With a written reason and a benchmark comparison showing that security does not get worse.",
+  "rule8_h": "Every commit is checked",
+  "rule8_p": "Author and committer use a GitHub no-reply address. Messages, titles and descriptions name no AI as an author and carry no work item number and no path of a computer. On a pull request from a fork, one part of the check runs when the project’s account starts it.",
   "faq_k": "Questions",
   "faq_h": "Short answers.",
   "q1": "What is Dodam?",

@@ -1377,7 +1377,7 @@ def test_the_guide_for_agents_says_what_the_page_and_the_status_say(tmp_path):
         assert fact in guide, fact
     for change in status["changes"]:
         assert change["title"] in guide and change["url"] in guide
-    for i in range(1, 8):   # the rules are stated in the guide itself, in the page's own words
+    for i in range(1, 9):   # the rules are stated in the guide itself, in the page's own words
         assert en[f"rule{i}_h"] in guide and en[f"rule{i}_p"] in guide, i
     for question, answer in visible_questions("en"):
         assert question in guide and answer in guide
