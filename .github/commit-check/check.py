@@ -422,13 +422,14 @@ def check_other_encodings(checker, who, repo, fields):
 
 
 def check_people_and_message(checker, who, people, message, signed, merge=False):
-    """The verdict on a commit's names, addresses and message. Main's push gives it each commit; the read-ahead of a
-    pull request gives it the merge commit GitHub will write, so that both judge a merge the same way."""
+    """The verdict on a commit's names, addresses and message, for every commit main's push reads and every commit a
+    pull request's run reads, the merge it builds among them, so that both judge a merge the same way. GitHub's
+    signature is asked (signed()) only of a commit that GitHub's address committed; with no people, only the message."""
     by_github = people is not None and people["committer"][1] == GITHUB_ADDRESS
     for role in ("author", "committer") if people is not None else ():
         name, address = people[role]
         if role == "committer" and by_github:
-            if not signed:
+            if not signed():
                 checker.add(who, "committer address", "GitHub's address without GitHub's verified signature")
             elif name != "GitHub":
                 checker.add(who, "committer name", "a commit GitHub signed carries the name GitHub")
@@ -438,8 +439,7 @@ def check_people_and_message(checker, who, people, message, signed, merge=False)
             checker.add(who, f"{role} address", "not a GitHub no-reply address")
         if not checker.name_passes(name, address):
             checker.add(who, f"{role} name", "neither the login of its address nor a plain name")
-        elif role == "author" and merge and by_github and signed \
-                and not (login and name.casefold() == login.group(2).casefold()):
+        elif merge and by_github and not (login and name.casefold() == login.group(2).casefold()):
             # GitHub writes the merging account's displayed name here; it must be that account's login but for letter
             # case (GitHub writes the login when there is no displayed name), never a name the check cannot tell apart.
             checker.add(who, "author name", "a merge GitHub signed carries the merging account's login, but for case")
@@ -449,9 +449,8 @@ def check_people_and_message(checker, who, people, message, signed, merge=False)
 def check_commit(repo, sha, checker):
     who = f"commit {sha[:12]}"
     people, message = parse_commit(git(repo, "cat-file", "commit", sha))
-    signed = people["committer"][1] == GITHUB_ADDRESS and checker.verifier(sha)
     parents = len(git(repo, "rev-list", "--parents", "-n", "1", sha).split()) - 1
-    check_people_and_message(checker, who, people, message, signed, merge=parents > 1)
+    check_people_and_message(checker, who, people, message, lambda: checker.verifier(sha), merge=parents > 1)
     # The combined forms: for a commit of one parent (and for the first commit) they give what the plain forms give;
     # for a merge, only what it brings beyond all of its parents.
     checker.patch(who, git(repo, "diff-tree", "--cc", "--root", "--format=", *DIFF_OPTIONS, sha))
@@ -493,8 +492,7 @@ def api_get(path, outside_repository=False):
             with urllib.request.urlopen(request, timeout=min(API_TRY, left)) as answer:
                 return json.load(answer)
         except urllib.error.HTTPError as error:
-            limited = error.headers is not None and (error.headers.get("Retry-After") is not None
-                                                     or error.headers.get("X-RateLimit-Remaining") == "0")
+            limited = error.headers.get("Retry-After") is not None or error.headers.get("X-RateLimit-Remaining") == "0"
             if error.code in NOTHING_THERE and not limited:  # a 403 of GitHub's rate limits is no answer
                 return None
         except Exception:
@@ -623,10 +621,9 @@ def build_merges(checker, repo, base, head, texts, context):
     request is run: git only merges trees."""
     done = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--no-messages", base, head],
                           capture_output=True, env=git_env())
-    if done.returncode == 1:
-        raise Problem("the pull request does not merge cleanly with main's tip")
-    if done.returncode != 0:
-        raise Problem("git could not read the history")
+    if done.returncode != 0:  # 1: the two do not merge cleanly
+        raise Problem("the pull request does not merge cleanly with main's tip" if done.returncode == 1
+                      else "git could not read the history")
     tree = done.stdout.decode("ascii", "replace").split("\n", 1)[0].strip()
     authors = []
     logins = merging_logins(repo, base, context)
@@ -746,7 +743,7 @@ def pattern_meets_the_copy(pattern):
             if following[:1] in CONTROL_ESCAPES or re.fullmatch(r"[0-7]{3}", following):
                 return False
             index += 2
-        elif pattern.startswith("(?", index) and re.match(r"\(\?[aiLmsux]*[aL-]", pattern[index:]):
+        elif re.match(r"\(\?[aiLmsux]*[aL-]", pattern[index:]):
             return False  # ASCII or locale matching, or a flag turned off, such as (?-i:...), anywhere in the flags
         else:
             index += 1
@@ -832,7 +829,7 @@ def run(args):
             raise Problem("--text-only needs --event")
         texts = read_event(args.event)
         check_pull_request_text(checker, texts)
-        check_people_and_message(checker, "merge commit", None, merge_message(texts), True)
+        check_people_and_message(checker, "merge commit", None, merge_message(texts), None)
         return report(None, checker.findings, failures)
 
     if not args.start or not args.head or not args.compare_settings:
@@ -881,7 +878,7 @@ def run(args):
     if texts:
         check_pull_request_text(checker, texts)
         if not built:
-            check_people_and_message(checker, "merge commit", None, merge_message(texts), True)
+            check_people_and_message(checker, "merge commit", None, merge_message(texts), None)
     if args.event:
         if not [sha for sha in commits if sha not in built]:
             failures.append("the pull request has no commit to check after the exempt commit")
