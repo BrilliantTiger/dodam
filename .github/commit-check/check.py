@@ -585,7 +585,7 @@ def check_merge_author(checker, repo, start, context):
         if not isinstance(data, dict) or not isinstance(data.get("name") or "", str):
             checker.add("merge commit", "author name", "the displayed name of the account that merges cannot be read")
             continue
-        name = data.get("name") or ""  # with no displayed name GitHub writes the login
+        name = data.get("name")  # with no displayed name GitHub writes the login
         if name and (name.casefold() != login.casefold()
                      or not checker.name_passes(name, f"{login}@users.noreply.github.com")):
             checker.add("merge commit", "author name", "the displayed name GitHub writes on a merge commit breaks a rule")
