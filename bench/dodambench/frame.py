@@ -879,6 +879,40 @@ def batch(**options):
         made.close()
 
 
+# --- not built yet: the one place of enforcing (names only, so that its tests fail on what it does) ---------------
+
+TOOLS: dict[str, str] = {"docker": shutil.which("docker") or "/usr/bin/docker"}
+
+
+def use_tools(**paths: str) -> dict[str, str]:
+    before = dict(TOOLS)
+    TOOLS.clear()
+    TOOLS.update(before if not paths else {**before, **paths})
+    return before
+
+
+def run(words, *, allow=(), machine=(), **kwargs) -> subprocess.CompletedProcess:
+    cmd = container(list(words), allow=allow, machine=machine)
+    return subprocess.run([TOOLS["docker"], *cmd[1:]], **kwargs)
+
+
+def popen(words, *, allow=(), machine=(), **kwargs) -> subprocess.Popen:
+    cmd = container(list(words), allow=allow, machine=machine)
+    return subprocess.Popen([TOOLS["docker"], *cmd[1:]], **kwargs)
+
+
+def read_command(words) -> dict:
+    return {"words": list(words)[1:]}
+
+
+def write_command(structure: dict) -> list[str]:
+    return list(structure["words"])
+
+
+def home() -> Path:
+    return Path.home()
+
+
 # --- the container command of a frame run ------------------------------------------------------------------------
 
 def _shim_refuse(reason: str, message: str) -> int:
@@ -943,7 +977,7 @@ def shim(folder: str, real: str | None, args: list[str]) -> int:
 
 # --- the command --------------------------------------------------------------------------------------------------
 
-def run(command: list[str], worktrees: list[str]) -> int:
+def run_command(command: list[str], worktrees: list[str]) -> int:
     child: subprocess.Popen | None = None
 
     def stop_child(reason: str) -> None:
@@ -1003,7 +1037,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"refused": True, "reason": "usage", "message": "no command"}), file=sys.stderr)
         return 2
     try:
-        return run(command, worktrees)
+        return run_command(command, worktrees)
     except FrameRefused as refused:
         print(json.dumps(refused.said), file=sys.stderr)
         return 2

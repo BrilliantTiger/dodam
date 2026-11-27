@@ -677,6 +677,8 @@ EXEMPT = {
         "the Harbor it runs is a stand-in that starts no container",
     ("bench/tests/test_frame.py", "*"):
         "the frame's own tests: every command they name goes through the frame to the stand-in container command",
+    ("bench/tests/test_frame_table.py", "*"):
+        "the tests of the frame's table: every command they name goes through the frame to the stand-in container command",
 }
 # Calls of a function that builds a container command, made only to read the command it gives.
 INSPECTING = {
@@ -803,7 +805,8 @@ def test_the_files_that_start_containers_and_those_that_only_name_the_command_ar
     assert starting == ["bench/dodambench/pilot.py", "bench/dodambench/vet.py", "bench/experiments/cli_separation.py",
                         "bench/experiments/memory_overshoot.py", "bench/experiments/removal_time.py",
                         "bench/tests/test_cli_isolation.py", "bench/tests/test_cli_runtimes.py",
-                        "bench/tests/test_frame.py", "bench/tests/test_pilot.py", "tools/gemini/job.py"]
+                        "bench/tests/test_frame.py", "bench/tests/test_frame_table.py", "bench/tests/test_pilot.py",
+                        "tools/gemini/job.py"]
     assert naming == ["bench/tests/test_cli_convert.py", "bench/tests/test_cli_judge.py", "bench/tests/test_vet.py"]
 
 
@@ -845,7 +848,8 @@ def test_only_the_judges_tests_name_folders_of_the_container_machine_and_only_fo
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and any(k.arg == "machine" for k in node.keywords):
                 callers.append((f, _function_of(node, parents)))
-    outside = sorted({c for c in callers if c[0] not in ("bench/tests/test_frame.py", "bench/dodambench/frame.py")})
+    outside = sorted({c for c in callers if c[0] not in ("bench/tests/test_frame.py", "bench/tests/test_frame_table.py",
+                                                           "bench/dodambench/frame.py")})
     assert outside == [("bench/tests/test_cli_isolation.py", "in_the_image")], outside
     source = (BENCH / "dodambench/frame.py").read_text(encoding="utf-8")
     assert "--machine" not in source

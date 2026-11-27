@@ -15,6 +15,8 @@ DATA = os.environ["FRAME_STANDIN"]
 args = sys.argv[1:]
 with open(os.path.join(DATA, "calls.jsonl"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps(args) + "\n")
+with open(os.path.join(DATA, "envs.jsonl"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({k: v for k, v in os.environ.items() if k.startswith(("DOCKER", "BUILDX"))}) + "\n")
 path = os.path.join(DATA, "containers.json")
 held = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else []
 vpath = os.path.join(DATA, "volumes.json")
@@ -28,6 +30,8 @@ def save():
 
 def options(rest):
     labels, cidfile, i = {}, None, 0
+    global named
+    named = None
     while i < len(rest) and rest[i].startswith("-"):
         word = rest[i]
         if word in ("--label", "-l"):
@@ -36,6 +40,9 @@ def options(rest):
             i += 2
         elif word == "--cidfile":
             cidfile = rest[i + 1]
+            i += 2
+        elif word == "--name":
+            named = rest[i + 1]
             i += 2
         elif word in ("--rm", "--detach", "-d"):
             i += 1
@@ -57,15 +64,17 @@ if args[:1] in (["create"], ["run"]):
             sys.stderr.write("cidfile exists\n")
             sys.exit(125)
         open(cidfile, "w").write(ident)
-    held.append({"id": ident, "labels": labels, "running": args[0] == "run" and "--rm" not in args})
+    held.append({"id": ident, "name": named, "labels": labels, "running": args[0] == "run" and "--rm" not in args})
     save()
     print(ident)
 elif args[:1] == ["start"]:
     print(args[-1])
 elif args[:2] == ["rm", "--force"]:
-    named = set(args[2:])
-    held = [c for c in held if c["id"] not in named]
+    named = {a for a in args[2:] if a != "--"}
+    held = [c for c in held if c["id"] not in named and c.get("name") not in named]
     save()
+elif args[:1] in (["stop"], ["cp"]):
+    pass
 elif args[:1] == ["ps"]:
     want = None
     if "--filter" in args:
@@ -79,9 +88,9 @@ elif args[:1] == ["ps"]:
         print(c["id"])
 elif args[:1] == ["inspect"]:
     for name in args[1:]:
-        if name.startswith("-") or name.startswith("{{"):
+        if name.startswith("-") or name.startswith("{{") or name in ("container", "--"):
             continue
-        found = [c for c in held if c["id"] == name]
+        found = [c for c in held if c["id"] == name or c.get("name") == name]
         if not found:
             sys.exit(1)
         print(found[0]["labels"].get("dodam.frame.run", ""))
@@ -96,6 +105,8 @@ elif args[:2] == ["volume", "inspect"]:
         sys.exit(1)
     print(found[0]["labels"].get("dodam.frame.run", ""))
 elif args[:2] == ["volume", "rm"]:
+    if os.path.exists(os.path.join(DATA, "volume-rm-fails")):
+        sys.exit(1)
     named = {a for a in args[2:] if not a.startswith("-")}
     volumes = [v for v in volumes if v["name"] not in named]
     save()
@@ -182,6 +193,14 @@ class Standins:
         for pid, said in memory.items():
             (self.data / f"mem-{pid}").write_text(said)
 
+    def envs(self) -> list[dict]:
+        place = self.data / "envs.jsonl"
+        return [json.loads(line) for line in place.read_text().splitlines()] if place.exists() else []
+
+    def tools(self) -> dict[str, str]:
+        """The stand-ins by the names the frame knows its tools by."""
+        return {name: str(self.bin / name) for name in ("docker", "colima", "sysctl", "pgrep", "top")}
+
     def calls(self) -> list[list[str]]:
         place = self.data / "calls.jsonl"
         return [json.loads(line) for line in place.read_text().splitlines()] if place.exists() else []
@@ -194,8 +213,8 @@ class Standins:
         place = self.data / "containers.json"
         return json.loads(place.read_text()) if place.exists() else []
 
-    def add_container(self, ident: str, labels: dict[str, str], running: bool = True) -> None:
-        held = self.containers() + [{"id": ident, "labels": labels, "running": running}]
+    def add_container(self, ident: str, labels: dict[str, str], running: bool = True, name: str | None = None) -> None:
+        held = self.containers() + [{"id": ident, "name": name, "labels": labels, "running": running}]
         (self.data / "containers.json").write_text(json.dumps(held))
 
     def volumes(self) -> list[dict]:
