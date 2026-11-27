@@ -183,10 +183,21 @@ def test_the_documents_say_the_kernel_ending_the_judge_is_not_mended_while_the_t
     container's memory, because the kernel can end the judge at that moment, which this change does not mend.
     Both documents say so for as long as the test holds the judge still, and only then: whoever mends the
     fault takes the holding out of the test, and whoever calls it mended without that fails here."""
+    import ast
     isolation = (BENCH / "tests" / "test_cli_isolation.py").read_text(encoding="utf-8")
-    holds = "JUDGE_HELD_STILL.replace(" in isolation and "os.kill(judge, signal.SIGSTOP)" in isolation
+    functions = {node.name: ast.get_source_segment(isolation, node) for node in ast.parse(isolation).body
+                 if isinstance(node, ast.FunctionDef)}
+    # each of the two tests in which the kernel ends a process keeps the judge out of that moment
+    runner_held = "JUDGE_HELD_STILL.replace(" in functions.get(
+        "test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running", "")
+    program_held = "judge_kept_aside(" in functions.get(
+        "test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged", "")
+    stops = "os.kill(judge, signal.SIGSTOP)" in isolation and "libc.kill(judge, signal.SIGSTOP)" in isolation
     english = (DOCS / "command-line-tasks.en.md").read_text(encoding="utf-8")
     korean = (DOCS / "command-line-tasks.ko.md").read_text(encoding="utf-8")
     said = ("**The kernel can end the judge.**" in english and "This change does not mend it." in english,
             "**커널이 판정기를 끝낼 수 있다.**" in korean and "이 변경은 그것을 고치지 않는다." in korean)
-    assert said == (holds, holds), (said, holds)
+    # the sentences stay while either test keeps the judge aside, and both tests keep it aside while the fault is not
+    # mended: taking the holding out of either test, or the sentence out of either document, fails here
+    assert (runner_held, program_held, stops, *said) == (True, True, True, True, True), (runner_held, program_held,
+                                                                                       stops, said)
