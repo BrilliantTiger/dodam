@@ -505,7 +505,19 @@ def _within(path: Path, folder: Path) -> bool:
 
 
 def _temporary_roots() -> list[Path]:
-    return sorted({Path(os.path.realpath(p)) for p in ("/tmp", "/private/tmp", tempfile.gettempdir())})
+    """The temporary area, from fixed places and the account's own temporary folder as the system keeps it, not
+    from the environment."""
+    places = {"/tmp", "/private/tmp"}
+    if sys.platform == "darwin":
+        try:
+            said = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True,
+                                  timeout=10, env={})
+            mine = said.stdout.strip() if said.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            mine = ""
+        if mine.startswith("/"):
+            places.add(mine)
+    return sorted({Path(os.path.realpath(p)) for p in places})
 
 
 def named_folder(path) -> Path:
@@ -729,11 +741,13 @@ class _Checks:
     def checked(self, structure: dict, allow=(), machine=()) -> list[str]:
         """The words for the tool, from a structure the table has, once everything it names is the batch's."""
         self._refuse_if_stopped()
-        own = Path(os.path.realpath(self.tmp))
-        # a folder in the batch's own temporary folder is the batch's (a frame run gives its programs that folder as
-        # their temporary area); any other named folder must be one the frame may be given
-        allowed = [own] + list(self.worktrees) + [
-            Path(os.path.realpath(p)) if _within(Path(os.path.realpath(p)), own) else named_folder(p) for p in allow]
+        own = [Path(os.path.realpath(self.tmp))] + _outer_temporary()
+        # a folder in the batch's own temporary folder, or in that of the frame run this process is really inside, is
+        # the batch's (a frame run gives its programs that folder as their temporary area); any other named folder
+        # must be one the frame may be given
+        allowed = own + list(self.worktrees) + [
+            Path(os.path.realpath(p)) if any(_within(Path(os.path.realpath(p)), o) for o in own) else named_folder(p)
+            for p in allow]
         head = structure["command"]
         if head in ("run", "create"):
             self._check_start(structure, allowed, tuple(machine))
@@ -1026,6 +1040,19 @@ def _outer() -> Joined | None:
     if state is None or not _alive(state) or state.get("pid") not in _ancestors() | {os.getpid()}:
         return None
     return Joined(folder, state)
+
+
+def _outer_temporary() -> list[Path]:
+    """The temporary folder of the frame run this process is really inside (alive, and one of its ancestors), in
+    the frame's own place, whatever folder this process keeps its own state in."""
+    run_id = os.environ.get("DODAM_FRAME_RUN", "")
+    if not RUN_RE.fullmatch(run_id):
+        return []
+    folder = default_root() / "runs" / run_id
+    state = _read_state(folder)
+    if state is None or not _alive(state) or state.get("pid") not in _ancestors() | {os.getpid()}:
+        return []
+    return [Path(os.path.realpath(folder / "tmp"))]
 
 
 def _interrupt(reason: str) -> None:

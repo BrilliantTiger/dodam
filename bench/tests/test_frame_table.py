@@ -221,7 +221,10 @@ def test_copying_keeps_a_trailing_dot_and_checks_the_side_of_this_computer(tools
 
 def test_a_folder_named_on_the_call_is_a_work_tree_or_a_folder_below_the_temporary_area_and_nothing_wider(tools, tmp_path):
     made(tools, "--name", "mine")
-    temporary = Path(tempfile.gettempdir())
+    # the account's temporary area as the system keeps it (inside a frame run the environment names the run's own)
+    said = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True) \
+        if sys.platform == "darwin" else None
+    temporary = Path(said.stdout.strip()) if said and said.returncode == 0 else Path("/tmp")
     for wide in (temporary, Path("/tmp"), Path("/var/tmp"), Path(pwd.getpwuid(os.getuid()).pw_dir)):
         assert refused(["docker", "cp", f"{wide}/.", "mine:/t"], allow=[wide]) == "mount", wide
     for name in ("dodam-frame-x", "dodam-gemini-x", "claude-x", ".ssh"):
