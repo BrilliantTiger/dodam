@@ -755,7 +755,7 @@ class StructureTest(RepoTestCase):
 
     def test_a_file_in_utf_16_that_is_also_valid_utf_8_is_read_in_utf_16_too(self):
         name = "\u0141ukasz"  # in UTF-16 its bytes are all below 128, so they are valid UTF-8 as well
-        sha = self.repo.commit("A change", files={"z.bin": ("hello " + name).encode("utf-16-le")})
+        sha = self.repo.commit("A change", files={"z.bin": ("hello " + name + "\nagain " + name).encode("utf-16-le")})
         code, out = self.run_check(self.base, pattern="(?i)\u0142ukasz")
         self.assert_fails((code, out), sha, "private pattern (path 1, read as UTF-16LE from byte 0, line 1)")
         self.assertEqual(out.count(f"commit {sha[:12]}: private pattern (path 1, read as UTF-16LE from byte 0"), 1)
@@ -1127,6 +1127,13 @@ class ForkWayTest(RepoTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(outputs, "open=true\n")
         self.assertIn("The way for pull requests from forks is open and the environment names a reviewer.", out)
+
+    def test_the_first_job_s_question_is_refused_outside_a_fork_s_run(self):
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--fork-way-gate", "--context", "own",
+                               "--settings", str(self.settings(open_way=True))],
+                              capture_output=True, text=True, env=clean_env(), timeout=120, cwd=self.dir)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("--fork-way-gate is for a fork's run", done.stdout)
 
     def test_the_fork_s_secret_at_the_repository_s_level_is_asked_only_where_the_workflow_asks(self):
         self.repo.commit("A change")
