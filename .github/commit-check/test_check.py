@@ -260,7 +260,8 @@ class CheckTest(RepoTestCase):
                  ({"sha": sha, "commit": {"verification": {"verified": False}, "committer": {"email": GITHUB}}}, 1),
                  ({"sha": sha, "commit": {"verification": {"verified": True}, "committer": {"email": PERSONAL}}}, 1),
                  ({"sha": "0" * 40, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}}, 1),
-                 ({"sha": sha, "commit": {"verification": "yes", "committer": {"email": GITHUB}}}, 1)]
+                 ({"sha": sha, "commit": {"verification": "yes", "committer": {"email": GITHUB}}}, 1),
+                 (404, 1)]
         for answer, expected in cases:
             with self.subTest(answer=answer):
                 fake = FakeGitHub({f"/repos/made-up/repo/commits/{sha}": answer})
@@ -270,6 +271,8 @@ class CheckTest(RepoTestCase):
                 done = subprocess.run(args, capture_output=True, text=True, env=clean_env(fake.env), timeout=120)
                 fake.close()
                 self.assertEqual(done.returncode, expected, done.stdout)
+                if expected:
+                    self.assertIn(f"commit {sha[:12]}: committer address", done.stdout)
 
     def test_github_as_committer_with_github_s_verified_signature_passes(self):
         sha = self.repo.commit("Merge a change", author=("Display Name", OWN), committer=("GitHub", GITHUB))
@@ -1195,6 +1198,7 @@ class MergeTest(RepoTestCase):
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": "SOMEONE-made-up"}, 0),
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": "Some Real Person"}, 1),
                                  ({"login": OWN_LOGIN, "name": None}, 1),  # no id: the address cannot be written
+                                 ({"login": OWN_LOGIN, "id": True, "name": None}, 1),
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": C}, 1), (404, 1)):
             with self.subTest(answer=answer):
                 self.tearDown_repo()
@@ -1728,7 +1732,7 @@ class ThirdLookTest(RepoTestCase):
                        "zorb\u2238latt", "zorb\u3164latt", "zorb\\x41", "zorb\\u00e9", "zorb\\N{LATIN SMALL LETTER A}",
                        "zorb\\101", "zorb\\0", "zorb\\tlatt", "zorb\uff08a\uff09", "\uff3aorblatt", "zorb\u2122+",
                        "zorb\\\u00b9", "zorb  latt", "zorb\u00a0latt", "(?a)zorb" "latt", "(?-i:Z)orb" "latt", "\u037e",
-                       "\uf900"):
+                       "\uf900", "zorb\u2126", "zorb\u212a", "zorb\u03f4", "zorb\u0131"):
             with self.subTest(secret=secret.encode("unicode_escape").decode()):
                 code, out = self.run_check(self.base, pattern=secret)
                 self.assertEqual(code, 1, out)
@@ -2088,6 +2092,126 @@ class SameVerdictTest(RepoTestCase):
     def tearDown_repo(self):
         self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
         self.base = self.repo.commit("The base commit")
+
+
+class SurvivorsTest(RepoTestCase):
+    """Inputs for the breaks the machine left standing at fc4337b, each with the outcome the check must give."""
+
+    def text_only(self, event, pattern=None):
+        path = self.dir / "text.json"
+        path.write_text(json.dumps(event))
+        env = clean_env({"COMMIT_CHECK_PRIVATE_PATTERN": pattern} if pattern else None)
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--settings", str(self.settings()), "--context", "own",
+                               "--text-only", "--event", str(path)], capture_output=True, text=True, env=env,
+                              timeout=120, cwd=self.dir)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_a_case_change_inside_a_word_splits_only_names_and_branches(self):
+        # For the rules of every place and for the private pattern alike.
+        self.repo.commit("Fix the fix" + T + "-17 case and ZorbLatt", files={"a.txt": "fix" + T + "-17 ZorbLatt\n"})
+        self.assert_passes(self.run_check(self.base, pattern="zorb latt"))
+        for branch, pattern, prop in (("fix" + T + "-17", None, "tracker code"),
+                                      ("ZorbLatt", "zorb latt", "private pattern")):
+            with self.subTest(branch=branch):
+                code, out = self.text_only({"pull_request": {"number": 1, "title": "Plain", "body": "",
+                                                             "head": {"ref": branch}}}, pattern=pattern)
+                self.assertEqual(code, 1, out)
+                self.assertIn(f"pull request: {prop} (pull request branch name)", out)
+
+    def test_a_merge_not_made_by_github_keeps_a_plain_name(self):
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.commit("Side work")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge the side branch", "side",
+                      env={"GIT_AUTHOR_NAME": "A Person", "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": "A Person",
+                           "GIT_COMMITTER_EMAIL": OWN})
+        self.assert_passes(self.run_check(self.base))
+
+    def test_github_s_api_without_a_named_repository_is_no_answer_and_nothing_is_asked(self):
+        check = load("check.py")
+        asked = []
+        saved = os.environ.pop("GITHUB_REPOSITORY", None), check.urllib.request.urlopen
+        check.urllib.request.urlopen = lambda request, timeout: asked.append(request) or (_ for _ in ()).throw(OSError())
+        try:
+            outcome = raised(lambda: check.api_get("commits/x"))
+        finally:
+            check.urllib.request.urlopen = saved[1]
+            if saved[0] is not None:
+                os.environ["GITHUB_REPOSITORY"] = saved[0]
+        self.assertIsInstance(outcome, check.Problem)
+        self.assertEqual(str(outcome), "GitHub's API did not answer")
+        self.assertEqual(asked, [])
+
+    def test_an_id_that_is_no_number_cannot_be_read(self):
+        start = self.github_merge()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "id": True, "name": None}})
+        code, out = self.run_check(start, event=OWN_EVENT, extra=["--build-merge"], env_extra=fake.env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be read)", out)
+        self.assertNotIn("author address", out)
+
+    def test_the_owner_of_the_base_stands_in_the_merge_message_when_the_head_names_none(self):
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "", "head": {"ref": "fix"}},
+                 "repository": {"owner": {"login": PRIVATE_WORD + "-Org"}}}
+        code, out = self.text_only(event, pattern=PRIVATE_PATTERN)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: private pattern (message line 1)", out)
+        self.assertNotIn(PRIVATE_WORD, out)
+
+    def test_the_merge_message_holds_the_pull_request_s_number(self):
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "", "head": {"ref": "fix"}}}
+        code, out = self.text_only(event, pattern="request #7 from")
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: private pattern (message line 1)", out)
+        event["pull_request"]["number"] = "7"  # not a number: GitHub's own number is unknown
+        self.assertEqual(self.text_only(event, pattern="request #7 from")[0], 0)
+
+    def test_the_text_check_holds_the_merge_message_to_the_rules(self):
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                  "head": {"ref": "fix", "repo": {"owner": {"login": T.lower() + "-12"}}}}}
+        code, out = self.text_only(event)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: tracker code (message line 1)", out)
+
+    def test_with_nobody_known_who_merges_the_merge_is_still_built_and_judged(self):
+        self.repo.commit("A change")
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                  "head": {"ref": "fix", "repo": {"owner": {"login": T.lower() + "-12"}}}}}
+        fake = self.fake({})
+        code, out = self.run_check(self.base, event=event, extra=["--build-merge"], env_extra=fake.env)
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r"commit [0-9a-f]{12}: tracker code \(message line 1\)")
+        self.assertEqual(fake.asked, [])
+
+    def test_a_displayed_name_git_cannot_write_is_refused(self):
+        start = self.github_merge()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "id": 1234567, "name": "<>"}})
+        code, out = self.run_check(start, event=OWN_EVENT, extra=["--build-merge"], env_extra=fake.env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be written)", out)
+
+    def github_merge(self):
+        self.repo.git("checkout", "-q", "-b", "earlier")
+        self.repo.commit("Earlier work")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from SomeOrg/earlier\n\nEarlier", "earlier",
+                      env={"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": "GitHub",
+                           "GIT_COMMITTER_EMAIL": GITHUB})
+        return self.repo.head()
+
+    def test_building_the_merge_needs_the_event(self):
+        self.repo.commit("A change")
+        code, out = self.run_check(self.base, extra=["--build-merge"], verified=[])
+        self.assertEqual(code, 1, out)
+        self.assertIn("::error::--build-merge needs --event", out)
+
+    def test_only_the_merge_the_run_built_is_told_a_signature(self):
+        sha = self.repo.commit("Made on GitHub", author=(OWN_LOGIN, OWN), committer=("GitHub", GITHUB))
+        code, out = self.run_check(self.base, event=OWN_EVENT, extra=["--build-merge"], verified=[])
+        self.assert_fails((code, out), sha, "committer address")
+        self.assertEqual(out.count("committer address"), 1)
 
 
 class BudgetTest(unittest.TestCase):
@@ -2558,7 +2682,8 @@ class ForkPathsEdgeTest(ForkPathsCase):
                 self.assertIn("::error::the check of a fork's paths was not called as its workflow calls it", done.stdout)
 
     def test_a_listing_or_a_page_that_cannot_be_read_is_refused_by_name(self):
-        for answers in ({"/repos/made-up/repo/contents/bench/tests?ref=main": 404},
+        for answers in ({"/repos/made-up/repo/pulls/7": 404}, {"/repos/made-up/repo/pulls/7/files?per_page=100&page=1": 404},
+                        {"/repos/made-up/repo/contents/bench/tests?ref=main": 404},
                         {"/repos/made-up/repo/pulls/7/files?per_page=100&page=1": 500},
                         {"/repos/made-up/repo/contents/bench/tasks?ref=main": 404}):
             with self.subTest(answers=answers):
