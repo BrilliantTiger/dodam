@@ -395,6 +395,42 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1, out)
         self.assertIn("tracker code (the range's difference, file old.txt line 1)", out)
 
+    def github_merge(self, branch, title):
+        """A merge commit in the shape GitHub makes it on main: the merger's no-reply address and display
+        name as author, GitHub as committer, the pull request's number, branch and title in the message."""
+        self.repo.git("checkout", "-q", "-b", branch)
+        self.repo.commit(title)
+        self.repo.git("checkout", "-q", "main")
+        self.repo.commit("Meanwhile on main")
+        before = self.repo.head()
+        env = {"GIT_AUTHOR_NAME": "Some Display Name", "GIT_AUTHOR_EMAIL": OWN,
+               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
+        self.repo.git("merge", "-q", "--no-ff", "-m", f"Merge pull request #41 from SomeOrg/{branch}\n\n{title}",
+                      branch, env=env)
+        return before, self.repo.head()
+
+    def test_main_s_run_on_a_merge_github_made_passes(self):
+        before, merge = self.github_merge("commit-check", "Check every commit of a pull request")
+        code, out = self.run_check(before, merge, verified=[merge], extra=["--require-commits"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 commits checked", out)
+
+    def test_main_s_run_on_a_merge_whose_branch_name_carries_a_tracker_code_fails(self):
+        before, merge = self.github_merge(f"{TRACKER_CODE_LOWER}-notes", "Notes")
+        self.assert_fails(self.run_check(before, merge, verified=[merge], extra=["--require-commits"]), merge,
+                          "tracker code (message line 1)")
+
+    def test_main_s_run_on_a_merge_github_did_not_sign_fails(self):
+        before, merge = self.github_merge("commit-check", "Check every commit of a pull request")
+        self.assert_fails(self.run_check(before, merge, verified=[], extra=["--require-commits"]), merge,
+                          "committer address")
+
+    def test_main_s_run_with_nothing_in_its_range_fails(self):
+        self.repo.commit("A change")
+        code, out = self.run_check(self.repo.head(), extra=["--require-commits"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("no commit", out)
+
     def test_an_offending_commit_up_to_the_exempt_commit_is_not_checked(self):
         self.repo.commit(f"Old work ({TRACKER_CODE})", author=("someone", PERSONAL))
         exempt = self.repo.head()
@@ -418,6 +454,50 @@ class CheckTest(unittest.TestCase):
                                "--own", "--verified-shas", os.devnull],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+
+    # A branch judged by its own copy cannot loosen the settings it is judged by.
+
+    def committed_settings(self, expected, exempt=None):
+        path = self.repo.root / ".github" / "commit-check" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"exempt_through": exempt or self.base, "private_pattern_expected": expected}))
+        self.repo.git("add", "--", str(path))
+        return self.repo.commit("Settings", files={}), path
+
+    def run_with_settings(self, start, settings, pattern=PRIVATE_PATTERN):
+        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", start,
+                "--head", self.repo.head(), "--settings", str(settings), "--context", "own",
+                "--compare-settings", start, "--verified-shas", os.devnull]
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "GIT_"))}
+        env["COMMIT_CHECK_PRIVATE_PATTERN"] = pattern
+        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=60)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_a_branch_that_says_the_secret_is_no_longer_expected_fails(self):
+        main, path = self.committed_settings(True)
+        self.committed_settings(False)
+        code, out = self.run_with_settings(main, path)
+        self.assertEqual(code, 1, out)
+        self.assertIn("settings: the private pattern is expected on the range's start", out)
+
+    def test_a_branch_that_moves_the_exempt_commit_fails(self):
+        main, path = self.committed_settings(False)
+        later = self.repo.commit("Later")
+        self.committed_settings(False, exempt=later)
+        code, out = self.run_with_settings(main, path)
+        self.assertEqual(code, 1, out)
+        self.assertIn("settings: the exempt commit differs from the range's start", out)
+
+    def test_a_branch_that_starts_to_expect_the_secret_passes(self):
+        main, path = self.committed_settings(False)
+        self.committed_settings(True)
+        self.assert_passes(self.run_with_settings(main, path))
+
+    def test_a_start_without_settings_is_the_first_merge_and_passes(self):
+        start = self.repo.head()
+        _, path = self.committed_settings(False)
+        self.assert_passes(self.run_with_settings(start, path))
 
     # The pull request's title and description.
 
@@ -461,7 +541,7 @@ class CheckTest(unittest.TestCase):
         here = Path(__file__).resolve().parent
         files = {f"x/{path.name}": path.read_text() for path in sorted(here.iterdir())
                  if path.suffix in (".py", ".json")}
-        for name in ("pull-requests.yml", "ci.yml"):
+        for name in ("pull-requests.yml", "commits.yml"):
             files[f"x/{name}"] = (here.parent / "workflows" / name).read_text()
         self.repo.commit("Add the check", files=files)
         self.assert_passes(self.run_check(self.base, pattern=PRIVATE_PATTERN))

@@ -268,6 +268,8 @@ def main(argv=None):
     parser.add_argument("--event", help="the event's file, for the pull request's title and description")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
     parser.add_argument("--verified-shas", help="a file of commits GitHub signed, in place of asking GitHub's API")
+    parser.add_argument("--compare-settings", metavar="COMMIT",
+                        help="the commit whose settings.json this branch may not loosen (main, or the push's before)")
     args = parser.parse_args(argv)
     try:
         return run(args)

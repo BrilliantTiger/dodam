@@ -1,7 +1,8 @@
-# The gate on every pull request, from the project's own branches and from forks alike. It runs main's
-# copy of this file and of its scripts (pull_request_target), so a pull request cannot change what checks
-# it. That is also why it holds the repository's token and could read secrets for a pull request from a
-# fork; therefore:
+# The gate on every pull request from a fork. It runs main's copy of this file and of its scripts
+# (pull_request_target), so a pull request from outside cannot change what checks it. A pull request from
+# the project's own branches runs no code here: the workflow "commits" judges it with its branch's own copy,
+# so that a broken copy on main cannot block the pull request that mends it. Because this workflow holds the
+# repository's token and could read secrets for a pull request from a fork:
 # - nothing from the pull request is executed or imported: the checkout is main's, the pull request's
 #   commits are fetched into a ref and read as data, nothing is installed, and git is told to use no diff
 #   program and no text conversion;
@@ -9,7 +10,8 @@
 # - no value of the event goes into a shell line through the expression syntax, only through env;
 # - every action is pinned by its commit;
 # - a pull request from a fork does not get the secret, except in the run that the label private-check
-#   starts, which only the project's account can put on it.
+#   starts, which only the project's account can put on it;
+# - every step but the one line for the project's own branches runs for a fork only.
 # The tests in .github/commit-check/test_check.py read this file and fail when one of these is broken.
 # More jobs of the gate belong in this file, beside the one below.
 name: pull-requests
@@ -37,11 +39,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: A pull request from the project's own branches is judged by its branch's own copy
+        if: github.event.pull_request.head.repo.id == github.repository_id
+        run: echo "This pull request comes from a branch of the project; the job commits of the workflow commits judges it with that branch's own copy of the check."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event.pull_request.head.repo.id != github.repository_id
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Fetch the pull request's commits as data
+        if: github.event.pull_request.head.repo.id != github.repository_id
         env:
           NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -53,13 +60,15 @@ jobs:
             exit 1
           fi
       - name: The check's own tests
+        if: github.event.pull_request.head.repo.id != github.repository_id
         run: python3 -I -m unittest discover -s .github/commit-check
       - name: Check the commits and the text
+        if: github.event.pull_request.head.repo.id != github.repository_id
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CONTEXT: ${{ github.event.pull_request.head.repo.id == github.repository_id && 'own' || (github.event.action == 'labeled' && github.event.label.name == 'private-check') && 'fork-labeled' || 'fork' }}
-          COMMIT_CHECK_PRIVATE_PATTERN: ${{ (github.event.pull_request.head.repo.id == github.repository_id || (github.event.action == 'labeled' && github.event.label.name == 'private-check')) && secrets.COMMIT_CHECK_PRIVATE_PATTERN || '' }}
+          CONTEXT: ${{ (github.event.action == 'labeled' && github.event.label.name == 'private-check') && 'fork-labeled' || 'fork' }}
+          COMMIT_CHECK_PRIVATE_PATTERN: ${{ (github.event.action == 'labeled' && github.event.label.name == 'private-check') && secrets.COMMIT_CHECK_PRIVATE_PATTERN || '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
