@@ -1,31 +1,29 @@
 # The gate on every pull request from a fork. It runs main's copy of this file and of its scripts
-# (pull_request_target), so a pull request from outside cannot change what checks it. A pull request from
-# the project's own branches runs no code here: the workflow "commits" judges it with its branch's own copy,
-# so that a broken copy on main cannot block the pull request that mends it. Because this workflow holds the
-# repository's token and could read secrets for a pull request from a fork:
-# - nothing from the pull request is executed or imported: the checkout is main's, the pull request's
-#   commits are fetched into a ref and read as data, nothing is installed, and git is told to use no diff
-#   program and no text conversion;
-# - the permissions are read-only and written out;
+# (pull_request_target), so a pull request from outside cannot change what checks it. A pull request from the
+# project's own branches runs no code here: the workflow "commits" judges it with its branch's own copy. Because this
+# workflow holds the repository's token and could read secrets for a pull request from a fork:
+# - nothing from the pull request is executed or imported: the checkout is main's, the pull request's commits are
+#   fetched into a ref and read as data, its paths are read from GitHub's answer as data, nothing is installed, and
+#   git is told to use no diff program and no text conversion;
+# - the only permission is contents, to read; it also reads whether the environment of forks waits for a reviewer;
 # - no value of the event goes into a shell line through the expression syntax, only through env;
 # - every action is pinned by its commit;
-# - the job that judges a fork's pull request runs in the environment private-check, which holds the secret and
-#   waits for the project's account to approve each run; until then the run is not finished and uses no runner.
-# The owner's gate refuses a head on which any run ended otherwise than in success, so nothing here is cancelled
-# and nothing fails but a real fault: there is no concurrency group, and the judgement is given at once.
-# The tests in .github/commit-check/test_workflows.py read this file and fail when one of these is broken.
-# More jobs of the gate belong in this file, beside the ones below.
+# - the job that judges a fork's commits runs in the environment private-check and names only that environment's
+#   own secret. Until settings.json opens the way for forks, after the owner has set the environment with a named
+#   reviewer, its secret and GitHub's setting that holds every run of an outside contributor, that job says the way is
+#   not open, judges nothing and fails.
+# A pull request from a fork that touches a path closed to outside pull requests fails the job pull-request-paths at
+# once, with no secret and no approval; the closed paths are those of the desk's tool on main.
+# No run here is cancelled and nothing waits but the environment's approval. The tests in
+# .github/commit-check/test_workflows.py hold this file's whole text.
 name: pull-requests
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
 
-# Reading the repository and the pull request needs contents; reading whether the environment waits for a
-# reviewer needs actions. Both only to read.
 permissions:
   contents: read
-  actions: read
 
 jobs:
   # A pull request from the project's own branches: judged by the job commits of the workflow commits.
@@ -37,14 +35,29 @@ jobs:
       - name: A pull request from the project's own branches is judged by its branch's own copy
         run: echo "This pull request comes from a branch of the project; the job commits of the workflow commits judges it with that branch's own copy of the check."
 
-  # A pull request from a fork: every commit after the exempt commit, its title, description and branch name,
-  # with the private pattern; see the top of .github/commit-check/check.py. It waits for the project's approval,
-  # which the project's account gives after both reviews, for every waiting run of the head at once.
-  # Once approved it ends in well under a minute.
-  pull-request-commits:
+  # A pull request from a fork that touches a closed path fails here at once.
+  pull-request-paths:
     if: github.event.pull_request.head.repo.id != github.repository_id
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fail when the pull request touches a path closed to outside pull requests
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/commit-check/fork_paths.py --number "$NUMBER" --base-sha "$BASE_SHA"
+
+  # A pull request from a fork: every commit after the exempt commit, its title, description and branch name, with the
+  # fork's own private pattern. It waits for the project's approval, given after both reviews for every waiting run of
+  # the head at once; while the way for forks is shut it says so and fails.
+  pull-request-commits:
+    if: github.event.pull_request.head.repo.id != github.repository_id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment: private-check
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,8 +76,9 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
-            --settings .github/commit-check/settings.json --context fork-approved --event "$GITHUB_EVENT_PATH"
+            --event "$GITHUB_EVENT_PATH" --settings .github/commit-check/settings.json --context fork-approved \
+            --compare-settings "$BASE_SHA"

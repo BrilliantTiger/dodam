@@ -1,4 +1,6 @@
 {
   "exempt_through": "f786d05dc9bfc41c41cc09e70d0942c83681e281",
-  "private_pattern_expected": false
+  "private_pattern_expected": false,
+  "fork_way_open": false,
+  "outside_runs_held_since": null
 }
