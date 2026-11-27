@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from conftest import CANARY
+from dodambench import frame
 from dodambench.languages import LANGUAGES
 import test_cli_isolation
 from test_cli_isolation import found_by, judge_attack, lost, outcomes
@@ -165,7 +166,7 @@ def test_what_does_not_work():
 
 def _image_ready(image: str) -> bool:
     try:
-        return subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+        return frame.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
     except OSError:
         return False
 
@@ -314,8 +315,9 @@ def test_no_helper_may_be_named_like_a_module_of_the_judges_python(lang):
         pytest.skip(f"needs Docker and the {LANGUAGES[lang].name} image")
     program = ("import json, pkgutil, sys, sysconfig; print(json.dumps(sorted(set(sys.stdlib_module_names) | "
                "{m.name for m in pkgutil.iter_modules([sysconfig.get_paths()['purelib']])})))")
-    done = subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/opt/judge/bin/python", image,
-                           "-c", program], capture_output=True, text=True, timeout=120)
+    done = frame.run(["docker", "run", "--rm", "--network", "none", "--entrypoint",
+                                           "/opt/judge/bin/python", image, "-c", program],
+                          capture_output=True, text=True, timeout=120)
     names = {name.lower() for name in json_module.loads(done.stdout)}
     refused = {name.lower() for name in NOT_A_HELPER}
     assert names and not names - refused, sorted(names - refused)

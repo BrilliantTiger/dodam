@@ -22,8 +22,10 @@ from __future__ import annotations
 import argparse
 import atexit
 import fcntl
+import contextlib
 import hashlib
 import html
+import importlib.util
 import ipaddress
 import json
 import math
@@ -270,6 +272,10 @@ class Settings:
     work_item_prefixes: tuple[str, ...]
     labels: dict[str, str]
     sandbox: dict[str, bool]
+    # for the job's own tests only: the frame's state folder and stand-ins for its tools, so that no test of the job
+    # takes the lock of this computer's batches or reads this computer; the project's settings leave them out
+    frame_root: str | None = None
+    frame_tools: dict[str, str] | None = None
 
 
 def load_settings(path: Path) -> Settings:
@@ -306,7 +312,15 @@ def load_settings(path: Path) -> Settings:
     sandbox = data.get("sandbox")
     if not isinstance(sandbox, dict) or set(sandbox) != set(KINDS) or not all(isinstance(v, bool) for v in sandbox.values()):
         raise SettingsError("sandbox")
+    frame = data.get("frame", {})
+    if not isinstance(frame, dict) or set(frame) - {"root", "tools"} or not (
+            frame.get("root") is None or (isinstance(frame["root"], str) and frame["root"].startswith("/"))) or not (
+            frame.get("tools") is None or (isinstance(frame["tools"], dict) and all(
+                isinstance(k, str) and isinstance(v, str) and v.startswith("/") for k, v in frame["tools"].items()))):
+        raise SettingsError("frame")
     return Settings(
+        frame_root=frame.get("root"),
+        frame_tools=frame.get("tools"),
         repo=repo,
         fetch_url=fetch_url,
         discussion_first_line=line.strip(),
@@ -999,6 +1013,59 @@ def new_run_label() -> str:
     return f"{RUN_LABEL_KEY}={secrets.token_hex(8)}"
 
 
+FRAME_FILE = ROOT / "bench" / "dodambench" / "frame.py"
+
+
+def container_frame():
+    """The frame through which every container on this computer is started, loaded by its path: the job uses
+    the standard library only."""
+    spec = importlib.util.spec_from_file_location("dodam_frame", FRAME_FILE)
+    if spec is None or spec.loader is None:
+        raise JobError("container_frame")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, SyntaxError) as exc:
+        raise JobError("container_frame") from exc
+    return module
+
+
+@contextlib.contextmanager
+def attack_batch(kind: str, env: dict[str, str], repo: Path, settings: Settings):
+    """For an attack run, a batch of the frame around agy, and agy's environment with the frame's container command
+    first on its path: every container the run starts carries the batch's mark, the batch's lock and readings hold,
+    and the batch removes its containers by their ids at its end. The checkout is named to the batch as a work tree,
+    so that the run may mount and copy what it checks; past a line of the frame, agy's whole group is ended. Other
+    kinds start no container and get none."""
+    if kind != "attack":
+        yield env
+        return
+    frame = container_frame()
+    if settings.frame_root:
+        frame.ROOT = Path(settings.frame_root)
+    if settings.frame_tools:
+        frame.use_tools(**settings.frame_tools)
+
+    def stop_agy(reason: str) -> None:
+        for proc in list(_RUNNING.values()):
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+    try:
+        held = frame.batch(shim=True, worktrees=[repo], on_stop=stop_agy)
+        given = held.__enter__()
+    except frame.FrameRefused as exc:
+        raise JobError("container_frame", ["container_frame", str(exc.said.get("reason"))]) from exc
+    try:
+        path = env.get("PATH", "")
+        if (given.folder / "bin" / "docker").exists():
+            path = f"{given.folder / 'bin'}{os.pathsep}{path}"
+        yield {**env, "DODAM_FRAME_RUN": given.run_id, "PATH": path}
+    finally:
+        held.__exit__(None, None, None)
+
+
 class ContainerFault(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -1419,7 +1486,8 @@ def _job(
         if draft == "no_question":
             result.update(status="no_question", reasons=["no_question"])
             return None
-    work = Path(tempfile.mkdtemp(prefix="dodam-gemini-")).resolve()
+    # a name that is not of the job's private folders, so that the frame lets the run mount and copy its checkout
+    work = Path(tempfile.mkdtemp(prefix="dodam-look-")).resolve()
     try:
         if work.is_relative_to(ROOT.resolve()) or work.is_relative_to(private.resolve()):
             raise JobError("work_folder")
@@ -1451,7 +1519,8 @@ def _job(
             say(f"{kind} for {number} has run {minutes} minute" + ("" if minutes == 1 else "s"))
 
         try:
-            run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run, tell_the_minute)
+            with attack_batch(kind, env, repo, settings) as agy_env:
+                run = run_agy(settings, kind, prompt.text, repo, agy_env, answer, lock, count_the_run, tell_the_minute)
         finally:
             # However the run ended (an answer, its time up, an error, a signal), its containers go.
             if kind == "attack" and result["ran"]:

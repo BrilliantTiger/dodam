@@ -26,6 +26,12 @@ FAKE_HARBOR = Path("/opt/dodam-test/bin/harbor")  # never run: the tests' runner
 NOW = 1_790_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _frame_apart(frame_apart):
+    """Harbor here is a stand-in: the pilot's batch of the frame keeps its lock in the test's own folder."""
+    return frame_apart
+
+
 def event(window="five_hour", utilization=0.1, status="allowed", resets=NOW + 3600, **extra) -> dict:
     info = {"status": status, "resetsAt": resets, "rateLimitType": window, "utilization": utilization}
     info.update(extra)
@@ -1615,7 +1621,10 @@ bench, tmp = sys.argv[1], Path(sys.argv[2])
 stage = sys.argv[3] if len(sys.argv) > 3 else ""
 sig = int(sys.argv[4]) if len(sys.argv) > 4 else int(signal.SIGTERM)
 sys.path.insert(0, bench)
-from dodambench import pilot
+from dodambench import frame, pilot
+
+# the pilot's batch of the frame keeps its lock and its state in the test's own folder
+frame.ROOT = tmp / "frame-root"
 
 
 def poke():

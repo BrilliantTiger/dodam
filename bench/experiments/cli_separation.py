@@ -525,20 +525,23 @@ def in_container(part: str, candidate: str, attack: str = "", image: str = "doda
         for target, source in (extra or {}).items():
             shutil.copytree(source, probe / target)
         flags = [flag for key, value in (env or {}).items() for flag in ("-e", f"{key}={value}")]
+        sys.path.insert(0, str(BENCH))
+        from dodambench import frame  # on this side only: the probe inside the container has no frame
         try:
-            subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0",
-                            "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
-                            "--pids-limit", str(CAPS["processes"]),
-                            "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
-                            *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack,
-                            *(["quick"] if QUICK else [])],
-                           check=True, capture_output=True)
-            subprocess.run(["docker", "cp", f"{probe}/.", f"{name}:/probe"], check=True, capture_output=True)
-            done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=300)
+            frame.run([
+                "docker", "create", "--name", name, "--network", "none", "--user", "0",
+                "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
+                "--pids-limit", str(CAPS["processes"]),
+                "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
+                *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack,
+                *(["quick"] if QUICK else [])],
+                check=True, capture_output=True)
+            frame.run(["docker", "cp", f"{probe}/.", f"{name}:/probe"], check=True, capture_output=True, allow=[probe])
+            done = frame.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
             return {"error": "the container did not finish in 300 seconds"}
         finally:
-            subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+            frame.run(["docker", "rm", "--force", name], capture_output=True)
     lines = [line for line in done.stdout.splitlines() if line.startswith("{")]
     if not lines:
         why = (done.stdout + done.stderr).strip().splitlines()[-1:] or [""]

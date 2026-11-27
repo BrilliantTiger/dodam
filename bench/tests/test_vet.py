@@ -256,7 +256,8 @@ def test_image_judge_runs_the_verifier_judge_without_network():
 
 def _image_ready(image: str) -> bool:
     try:
-        return subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+        from dodambench import frame
+        return frame.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
     except OSError:
         return False
 
@@ -275,10 +276,14 @@ def test_vet_in_the_language_image_gives_the_same_judgements(small_task, tmp_pat
 
 FAKE_DOCKER = r'''#!/bin/sh
 # Stands in for Docker: a container that "judges" by leaving what the folder named by FAKE_LEAVES
-# holds, and ends with the exit code FAKE_EXIT.
+# holds, and ends with the exit code FAKE_EXIT. It answers the frame's question about a container's mark with
+# the mark the container was made with.
 case "$1" in
   info) echo 4294967296 ;;
-  create) shift; echo "$@" >> "$FAKE_LOG"; echo made ;;
+  create) shift; echo "$@" >> "$FAKE_LOG"
+    for word in "$@"; do case "$word" in dodam.frame.run=*) echo "${word#dodam.frame.run=}" > "$FAKE_LOG.mark" ;; esac; done
+    echo made ;;
+  inspect) [ -f "$FAKE_LOG.mark" ] && cat "$FAKE_LOG.mark" ;;
   start) exit "${FAKE_EXIT:-0}" ;;
   cp)
     case "$2" in
@@ -291,7 +296,7 @@ exit 0
 
 
 @pytest.fixture
-def fake_docker(tmp_path, monkeypatch):
+def fake_docker(tmp_path, monkeypatch, frame_apart):
     """A Docker on PATH that runs no container; what the container leaves is set per test."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -299,10 +304,14 @@ def fake_docker(tmp_path, monkeypatch):
     (bin_dir / "docker").chmod(0o755)
     leaves = tmp_path / "leaves"
     leaves.mkdir()
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    # the frame starts the container tool itself, so the stand-in is given to it, not put on the path
+    from dodambench import frame
+    before = frame.use_tools(docker=str(bin_dir / "docker"))
     monkeypatch.setenv("FAKE_LEAVES", str(leaves))
     monkeypatch.setenv("FAKE_LOG", str(tmp_path / "docker.log"))
-    return leaves
+    yield leaves
+    frame.close()
+    frame.use_tools(**before)
 
 
 SAMPLE = Path(__file__).resolve().parents[1] / "tasks" / "cli-csv-json"
@@ -497,7 +506,7 @@ def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_wri
     assert said["key"] == ("tests[0].message" if form == "other words" else "unmeasured"), said
 
 
-def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch):
+def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch, frame_apart):
     import dodambench.vet as vetting
     edit(cli_task_dir / "task.toml", "verifier_timeout_sec = 1800", "verifier_timeout_sec = 2400")
     given = []
@@ -512,7 +521,8 @@ def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, m
         if cmd[0] == "docker":
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return real(cmd, *args, **kwargs)
-    monkeypatch.setattr(vetting.subprocess, "run", run)
+    # the vetting tool gives every container command to the frame, which starts the tool: that call is watched
+    monkeypatch.setattr(vetting.frame, "run", run)
     vetting.vet_in_image(load_task(cli_task_dir), "python", tmp_path / "out", "dodam-bench/python:dev")
     assert given and set(given) == {2400}, given
 

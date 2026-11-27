@@ -666,6 +666,9 @@ class World:
         _write_program(self.bin / "agy", AGY_STANDIN)
         _write_program(self.bin / "orca", ORCA_STANDIN)
         _write_program(self.bin / "docker", DOCKER_STANDIN)
+        for name, said in (("sysctl", "print(1)"), ("pgrep", "raise SystemExit(1)"), ("top", "raise SystemExit(1)"),
+                           ("colima", "raise SystemExit(1)")):
+            _write_program(self.bin / f"frame-{name}", f"import sys\n{said}\n")
         (self.root / "runner.py").write_text(RUNNER, encoding="utf-8")
         (self.root / "terminal.py").write_text(TERMINAL, encoding="utf-8")
         self.items: dict[str, dict[str, object]] = {}
@@ -678,7 +681,12 @@ class World:
 
     # settings and stand-in answers
     def write_settings(self, **overrides: object) -> None:
-        self.settings.write_text(settings_text(self.source, **overrides), encoding="utf-8")
+        # the frame of the job's attack batch keeps its state in this world and reads this world's stand-ins: no
+        # test of the job takes the lock of the computer's batches or reads the computer
+        frame = (f'\n[frame]\nroot = "{self.root / "frame-root"}"\n\n[frame.tools]\n'
+                 + "".join(f'{name} = "{self.bin / ("frame-" + name)}"\n' for name in ("sysctl", "pgrep", "top", "colima"))
+                 + f'docker = "{self.bin / "docker"}"\n')
+        self.settings.write_text(settings_text(self.source, **overrides) + frame, encoding="utf-8")
 
     def answer(self, stdout: str, exit_code: int = 0, stderr: str = "", sleep: float = 0, child: bool = False,
                containers: int = 0, block_record: bool = False, terminal: bool = False) -> None:
@@ -2938,7 +2946,7 @@ TEMPLATE_RULES = [
     "only in containers",
     "never on the host",
     "one batch of containers at a time",
-    "20 GB",
+    "through the project's frame",
     "restart or prune",
     "colima",
     "bare wildcard",
