@@ -720,6 +720,7 @@ class StructureTest(RepoTestCase):
         script.write_text("#!/bin/sh\nexit 0\n")
         script.chmod(0o755)
         self.repo.git("config", "diff.external", str(script))
+        self.repo.git("config", "color.diff", "always")
         self.repo.git("config", "diff.x.textconv", str(script))
         sha = self.repo.commit("A change", files={".gitattributes": "*.txt diff=x\n", "z.txt": f"one\n{TRACKER_CODE}\n"})
         code, out = self.run_check(self.base)
@@ -758,6 +759,21 @@ class StructureTest(RepoTestCase):
         code, out = self.run_check(self.base, pattern="(?i)\u0142ukasz")
         self.assert_fails((code, out), sha, "private pattern (path 1, read as UTF-16LE from byte 0, line 1)")
         self.assertEqual(out.count(f"commit {sha[:12]}: private pattern (path 1, read as UTF-16LE from byte 0"), 1)
+
+    def test_a_file_in_utf_16_with_no_zero_byte_is_read_in_utf_16(self):
+        word = "\ubdc1\uafbb"  # two made-up syllables whose UTF-16 bytes hold no zero and are not UTF-8
+        sha = self.repo.commit("A change", files={"z.bin": word.encode("utf-16-be")})
+        self.assert_fails(self.run_check(self.base, pattern=word), sha, "private pattern (path 1, read as UTF-16BE")
+
+    def test_the_order_of_files_does_not_follow_a_setting_of_the_calling_user(self):
+        home = self.dir / "home"
+        home.mkdir()
+        (home / "order.txt").write_text("z.txt\n")
+        (home / ".gitconfig").write_text(f"[diff]\n\torderFile = {home / 'order.txt'}\n")
+        sha = self.repo.commit("A change", files={"a.txt": "plain\n", "z.txt": f"{TRACKER_CODE}\n"})
+        code, out = self.run_check(self.base, env_extra={"HOME": str(home)})
+        self.assert_fails((code, out), sha, "tracker code (file 2, line 1)")
+        self.assertIn("the range: tracker code (file 2, line 1)", out)
 
     def test_a_merge_that_brings_back_a_file_in_another_encoding_from_the_exempt_history_fails(self):
         old = self.repo.commit("Old", files={"z.bin": f"see {TRACKER_CODE}".encode("utf-16-be")})
@@ -1110,6 +1126,11 @@ class ForkWayTest(RepoTestCase):
         code, out, outputs, _ = self.gate(open_way=True)
         self.assertEqual(code, 0, out)
         self.assertEqual(outputs, "open=true\n")
+        self.assertIn("The way for pull requests from forks is open and the environment names a reviewer.", out)
+
+    def test_the_fork_s_secret_at_the_repository_s_level_is_asked_only_where_the_workflow_asks(self):
+        self.repo.commit("A change")
+        self.assert_passes(self.run_check(self.base, env_extra={"FORK_SECRET_AT_REPOSITORY_LEVEL": "true"}))
 
     def tearDown_repo(self):
         self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
@@ -1685,7 +1706,8 @@ class EdgeTest(RepoTestCase):
 
     def test_a_raw_list_that_does_not_keep_its_shape_is_refused(self):
         check = load("check.py")
-        for fields in (["M", "x"], [":100644 100644 aaa M"], [":100644 100644 " + "a" * 40 + " " + "b" * 40 + " M"]):
+        for fields in (["M", "x"], [":100644 100644 aaa M"], [":100644 100644 " + "a" * 40 + " " + "b" * 40 + " M"],
+                       ["100644 100644 " + "a" * 40 + " " + "b" * 40 + " M", "x"], [":100644 100644 aaa M", "x"]):
             with self.subTest(fields=fields):
                 self.assertIsInstance(raised(lambda: check.new_blobs(fields)), check.Problem)
 
@@ -1724,6 +1746,17 @@ class EdgeTest(RepoTestCase):
                               env={**fake.env, "GITHUB_OUTPUT": str(self.dir)})
         self.assertEqual(code, 1, out)
         self.assertIn("the job's outputs cannot be written", out)
+
+    def test_this_repository_s_own_owner_is_spared_in_the_merge_message_whatever_its_name(self):
+        self.repo.commit("A change")
+        owner = T.lower() + "-12org"
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                  "head": {"ref": "fix", "repo": {"owner": {"login": owner}}}},
+                 "repository": {"owner": {"login": owner}}}
+        path = self.dir / "event-owner.json"
+        path.write_text(json.dumps(event))
+        code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
+        self.assertEqual(code, 0, out)
 
     def test_a_branch_whose_name_turns_into_a_path_in_the_merge_message_is_refused(self):
         self.repo.commit("A change")
