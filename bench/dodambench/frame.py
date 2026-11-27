@@ -34,6 +34,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import posixpath
@@ -425,6 +426,19 @@ def frame_words(cmd: list[str], run_id: str, cids: Path, allowed: list[Path], ma
     return cmd[:at] + ["--label", f"{LABEL}={run_id}", "--cidfile", str(cidfile)] + cmd[at:]
 
 
+def _approval(folder: Path, words: list[str]) -> Path:
+    digest = hashlib.sha256(json.dumps(words[1:]).encode("utf-8")).hexdigest()
+    return folder / "approved" / digest
+
+
+def approve(folder: Path, words: list[str]) -> None:
+    """A command that code of the batch framed with folders of the container machine: the container command of
+    the batch passes that exact command once. Folders of the machine are never named to the container command."""
+    place = _approval(folder, words)
+    place.parent.mkdir(mode=0o700, exist_ok=True)
+    place.write_text("", encoding="utf-8")
+
+
 # --- the batch ------------------------------------------------------------------------------------------------------
 
 def _safe_root() -> Path:
@@ -657,6 +671,8 @@ class Batch:
         words = frame_words(list(cmd), self.run_id, self.folder / "cids", allowed, tuple(machine))
         if words != list(cmd):
             self._made()
+        if machine:
+            approve(self.folder, words)
         return words
 
     def _made(self) -> None:
@@ -756,6 +772,8 @@ class Joined:
         words = frame_words(list(cmd), self.run_id, self.folder / "cids", allowed, tuple(machine))
         if words != list(cmd):
             Batch._made(self)  # type: ignore[arg-type]
+        if machine:
+            approve(self.folder, words)
         return words
 
     def volume(self, name: str) -> list[str]:
@@ -901,8 +919,12 @@ def shim(folder: str, real: str | None, args: list[str]) -> int:
         return _shim_refuse("image_removal", "images are never removed")
     if sub in ("run", "create"):
         joined = Joined(folder_path, state)
+        approved = _approval(folder_path, cmd)
         try:
-            cmd = joined.container(cmd)
+            if approved.exists():
+                approved.unlink()  # framed by code of the batch with folders of the machine: passed once
+            else:
+                cmd = joined.container(cmd)
         except FrameRefused as refused:
             return _shim_refuse(refused.said["reason"], refused.said["message"])
     elif sub in ("rm", "kill", "stop", "restart", "pause", "unpause", "update"):

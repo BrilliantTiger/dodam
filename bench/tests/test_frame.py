@@ -581,6 +581,26 @@ def test_a_command_framed_by_the_code_inside_a_frame_run_passes_its_container_co
         assert shim(standins, batch, *framed[1:]).returncode == 2
 
 
+def test_a_command_framed_with_folders_of_the_machine_passes_the_container_command_once_and_a_copy_never(standins):
+    """Inside a frame run the judge's tests frame their helper with folders of the container machine, and the
+    container command of the run then sees that command. It passes that exact command once; the same words typed
+    again, or with the mark copied by hand, are checked as any command and refused."""
+    group = f"/sys/fs/cgroup/{GROUP}"
+    memory = "/proc/sys/vm/" + "drop" + "_caches"
+    helper = ["docker", "run", "--detach", "--network", "none", "--volume", f"{group}:/group",
+              "--volume", f"{memory}:/drop", "image", "python3"]
+    with frame.Batch(shim=True) as batch:
+        joined = frame.Joined(batch.folder, {})
+        framed = joined.container(helper, machine=(group, memory))
+        first = shim(standins, batch, *framed[1:])
+        assert first.returncode == 0, first.stderr
+        again = shim(standins, batch, *framed[1:])
+        assert again.returncode == 2 and json.loads(again.stderr)["reason"] == "mount"
+        copied = framed[:3] + [f"dodam.frame.run={batch.run_id}"] + framed[4:]
+        copied[copied.index("--cidfile") + 1] = str(batch.folder / "cids" / "made-up")
+        assert shim(standins, batch, *copied[1:]).returncode == 2
+
+
 def test_the_container_command_of_a_frame_run_works_with_an_environment_of_its_own(standins):
     """The Gemini job gives agy a fixed list of names; the command finds its batch without them."""
     with frame.Batch(shim=True) as batch:
