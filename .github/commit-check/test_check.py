@@ -236,12 +236,11 @@ class CheckTest(RepoTestCase):
 
     def test_github_as_committer_fails_when_github_s_api_cannot_be_asked(self):
         sha = self.repo.commit("Merge a change", committer=("GitHub", GITHUB))
-        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base, "--head", sha,
-                "--settings", str(self.settings()), "--context", "own", "--compare-settings", self.base]
-        env = clean_env({"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo",
-                         "GITHUB_API_URL": "http://127.0.0.1:9"})
-        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
-        self.assert_fails((done.returncode, done.stdout + done.stderr), sha, "committer address")
+        check = load("check.py")
+        args = ["--repo", str(self.repo.root), "--from", self.base, "--head", sha, "--settings", str(self.settings()),
+                "--context", "own", "--compare-settings", self.base]
+        env = {"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo", "GITHUB_API_URL": "http://127.0.0.1:9"}
+        self.assert_fails(in_process(check.main, args, env, check), sha, "committer address")
 
     def test_github_as_committer_is_believed_only_on_what_github_s_api_says(self):
         sha = self.repo.commit("Merge a change", author=("Display Name", OWN), committer=("GitHub", GITHUB))
@@ -1008,11 +1007,10 @@ class ForkWayTest(RepoTestCase):
         self.base = self.repo.commit("The base commit")
 
 
-class ForkPathsTest(unittest.TestCase):
-    """The job of main's copy that fails a fork's pull request at once when it touches a closed path. The closed
-    paths are the desk's tool's; these tests only show that the job asks it and acts on its verdict."""
+class ForkPathsCase(unittest.TestCase):
+    """Runs the check of a fork's paths against a made-up GitHub."""
 
-    def run_paths(self, files, *, pull=None, tasks=None, extra_answers=None):
+    def run_paths(self, files, *, pull=None, tasks=None, extra_answers=None, quick=False):
         pull = pull or {"number": 7, "changed_files": len(files), "draft": False, "base": {"ref": "main"}}
         answers = {"/repos/made-up/repo/pulls/7": pull,
                    "/repos/made-up/repo/pulls/7/files?per_page=100&page=1": files,
@@ -1022,12 +1020,21 @@ class ForkPathsTest(unittest.TestCase):
         answers.update(extra_answers or {})
         fake = FakeGitHub(answers)
         self.addCleanup(fake.close)
+        if quick:
+            # In this process, with no wait between the tries, for answers that fail on purpose.
+            paths = load("fork_paths.py")
+            return in_process(paths.main, ["--number", "7", "--base-sha", "a" * 40], fake.env, paths.check)
         done = subprocess.run([sys.executable, "-I", str(FORK_PATHS), "--number", "7", "--base-sha", "a" * 40],
                               capture_output=True, text=True, env=clean_env(fake.env), timeout=120)
         return done.returncode, done.stdout + done.stderr
 
     def entry(self, name, status="modified"):
         return {"filename": name, "status": status}
+
+
+class ForkPathsTest(ForkPathsCase):
+    """The job of main's copy that fails a fork's pull request at once when it touches a closed path. The closed
+    paths are the desk's tool's; these tests only show that the job asks it and acts on its verdict."""
 
     def test_a_change_of_a_workflow_fails_at_once(self):
         code, out = self.run_paths([self.entry(".github/workflows/ci.yml")])
@@ -1050,13 +1057,36 @@ class ForkPathsTest(unittest.TestCase):
         code, out = self.run_paths([self.entry("README.md")],
                                    pull={"number": 7, "changed_files": 5, "draft": False, "base": {"ref": "main"}})
         self.assertEqual(code, 1, out)
-        code, out = self.run_paths([], extra_answers={"/repos/made-up/repo/pulls/7": 502})
+        code, out = self.run_paths([], extra_answers={"/repos/made-up/repo/pulls/7": 502}, quick=True)
         self.assertEqual(code, 1, out)
 
     def test_it_prints_no_path_of_the_pull_request(self):
         code, out = self.run_paths([self.entry(f".github/{MARKER}.yml"), self.entry(f"{MARKER}.md")])
         self.assertEqual(code, 1, out)
         self.assertNotIn(MARKER, out)
+
+
+def in_process(main, argv, env, check_module):
+    """Calls a script's main in this process with the given environment and no wait between the tries of GitHub's API;
+    returns its exit code and what it printed."""
+    import contextlib
+    import io
+    printed = io.StringIO()
+    saved = {key: os.environ.get(key) for key in env}
+    sleep = check_module.time.sleep
+    os.environ.update(env)
+    check_module.time.sleep = lambda seconds: None
+    try:
+        with contextlib.redirect_stdout(printed):
+            code = main(argv)
+    finally:
+        check_module.time.sleep = sleep
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return code, printed.getvalue()
 
 
 def load(name):
@@ -1374,6 +1404,7 @@ class ApiTest(unittest.TestCase):
         fake.server.RequestHandlerClass = Handler
         saved = {key: os.environ.get(key) for key in fake.env}
         os.environ.update({**fake.env, "GITHUB_TOKEN": token})
+        check.time.sleep = lambda seconds: None
         try:
             return check.api_get("x"), headers
         finally:
@@ -1417,7 +1448,7 @@ class ApiTest(unittest.TestCase):
                     check.api_get = real
 
 
-class ForkPathsEdgeTest(ForkPathsTest):
+class ForkPathsEdgeTest(ForkPathsCase):
     """The check of a fork's paths refuses what it cannot read completely, and says so."""
 
     def test_a_wrong_call_is_refused(self):
@@ -1433,7 +1464,7 @@ class ForkPathsEdgeTest(ForkPathsTest):
                         {"/repos/made-up/repo/pulls/7/files?per_page=100&page=1": 500},
                         {"/repos/made-up/repo/contents/bench/tasks?ref=main": 404}):
             with self.subTest(answers=answers):
-                code, out = self.run_paths([self.entry("README.md")], extra_answers=answers)
+                code, out = self.run_paths([self.entry("README.md")], extra_answers=answers, quick=True)
                 self.assertEqual(code, 1, out)
                 self.assertIn("could not be read completely", out)
 
