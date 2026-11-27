@@ -729,7 +729,11 @@ class _Checks:
     def checked(self, structure: dict, allow=(), machine=()) -> list[str]:
         """The words for the tool, from a structure the table has, once everything it names is the batch's."""
         self._refuse_if_stopped()
-        allowed = [Path(os.path.realpath(self.tmp))] + list(self.worktrees) + [named_folder(p) for p in allow]
+        own = Path(os.path.realpath(self.tmp))
+        # a folder in the batch's own temporary folder is the batch's (a frame run gives its programs that folder as
+        # their temporary area); any other named folder must be one the frame may be given
+        allowed = [own] + list(self.worktrees) + [
+            Path(os.path.realpath(p)) if _within(Path(os.path.realpath(p)), own) else named_folder(p) for p in allow]
         head = structure["command"]
         if head in ("run", "create"):
             self._check_start(structure, allowed, tuple(machine))

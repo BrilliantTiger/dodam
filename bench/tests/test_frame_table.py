@@ -234,6 +234,17 @@ def test_a_folder_named_on_the_call_is_a_work_tree_or_a_folder_below_the_tempora
     assert refused(["docker", "cp", f"{held}/out", "mine:/t"], allow=[held]) == "mount"
 
 
+def test_a_folder_in_the_batchs_own_temporary_folder_may_be_named_on_a_call(tools):
+    """A frame run gives its programs the batch's own temporary folder as their temporary area: what a test makes
+    there is the batch's, though its path holds the name of the frame's runs."""
+    with frame.Batch() as held:
+        made_here = held.tmp / "pytest-of-x" / "case0" / "tests"
+        made_here.mkdir(parents=True)
+        held.run(["docker", "create", "--name", "mine", "image"], capture_output=True, check=True)
+        assert held.run(["docker", "cp", f"{made_here}/.", "mine:/tests"], capture_output=True,
+                        allow=[made_here]).returncode == 0
+
+
 # --- folders of the container machine: keyword only, a container of this batch, closed --------------------------------
 
 def test_folders_of_the_container_machine_are_named_by_keyword_for_a_container_of_this_batch_only(tools):

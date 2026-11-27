@@ -189,4 +189,6 @@ PLACES: dict[tuple[str, str], str] = {
         "runs an attack run's agy inside a batch of the frame, with the frame's command first on agy's path",
     ('tools/gemini/job.py', 'remove_run_containers'):
         "removes the containers that carry the attack run's own label, a second removal beside the frame's",
+    ('bench/tests/test_frame_table.py', 'test_a_folder_in_the_batchs_own_temporary_folder_may_be_named_on_a_call'):
+        'the tests of the frame\'s table, whose commands reach a stand-in through the frame',
 }
