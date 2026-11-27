@@ -166,7 +166,7 @@
   "rule7_h": "Relaxing a rule or weakening a guarantee needs the owner’s approval",
   "rule7_p": "With a written reason and a benchmark comparison showing that security does not get worse.",
   "rule8_h": "Every commit is checked",
-  "rule8_p": "Author and committer use a GitHub no-reply address, and names name no AI tool. Messages, titles and descriptions carry no line of attribution. Messages, titles, descriptions, branch names, the lines a commit adds and the paths of the files it adds, renames or changes carry no work item number, no address of the tracker, no id of the sessions’ tooling, no home folder of macOS or Windows and no folder an AI tool keeps for its sessions; /tmp and a container’s /home are not checked. A pull request from a fork that changes a closed path fails at once; the rest of the check for forks is not open yet.",
+  "rule8_p": "Author and committer use a GitHub no-reply address, and names name no AI tool. Messages, titles and descriptions carry no line of attribution. Messages, titles, descriptions, branch names, the lines a commit adds and the paths of the files it adds, renames, copies or changes carry no work item number, no address of the tracker, no id of the sessions’ tooling, no path inside a home folder of macOS or Windows and no folder an AI tool keeps for its sessions; /tmp (but for Claude Code’s temporary folder in it) and a container’s /home are not checked. A pull request from a fork that changes a closed path fails at once; the rest of the check for forks is not open yet.",
   "faq_k": "Questions",
   "faq_h": "Short answers.",
   "q1": "What is Dodam?",

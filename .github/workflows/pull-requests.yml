@@ -98,11 +98,11 @@ jobs:
         run: python3 -I .github/commit-check/run_tests.py
       - name: Check the commits and the text
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
-            --event "$GITHUB_EVENT_PATH" --merge-author --settings .github/commit-check/settings.json \
-            --context fork-approved --compare-settings "$BASE_SHA"
+          main=$(git rev-parse --verify origin/main)
+          python3 -I .github/commit-check/check.py --repo . --from "$main" --head "$HEAD_SHA" \
+            --event "$GITHUB_EVENT_PATH" --build-merge --settings .github/commit-check/settings.json \
+            --context fork-approved --compare-settings "$main"

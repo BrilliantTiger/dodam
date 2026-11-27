@@ -39,21 +39,26 @@ and the path of every file a commit adds, renames, copies or changes):
   of the coordinating program (the word, an underscore, eight or more hexadecimal digits), and a conversation
   address of a tool.
 - **A path of the computer the project's sessions run on**:
-  - a home folder of macOS or Windows (a form): the folder "Users", a separator, a name and a separator after it, the
-    shared folder of macOS set aside;
+  - a path inside a home folder of macOS or Windows (a form): the folder "Users" at the start of the text or after a
+    separator, a separator, a name and a separator after it, the shared folder of macOS set aside (the home folder
+    alone, with nothing after its name, passes);
   - the folders that tools keep (a list): an entry directly inside the folder of Claude Code, Codex, Gemini (the
     Antigravity tool keeps its sessions there) or the program the sessions run in; the settings file Claude Code
-    keeps beside its folder; the sessions' working folders and project folders of that program; a temporary folder
-    a session tool makes, named after the tool and a number; the temporary folders of macOS;
+    keeps beside its folder; the sessions' working folders and project folders of that program; the temporary
+    folder Claude Code makes, named after it and a number, wherever it stands; the temporary folders of macOS;
   - a folder named after a home folder (a form): "Users", a name and the program's name, joined by dashes.
 - **The private pattern** (a form, kept in a secret): one regular expression of what may not appear in public text
   and is written in no file (names, and a few numbers the project keeps to itself). It is matched on the text as
-  written and on its copy.
+  written and on its copy (a branch's name also on its copy split into words), in either letter case. It is written
+  in the form the copy has: without accents, without compatibility forms such as full-width letters, and without a
+  letter whose folded form is not its small form (such as the German sharp s); a secret written otherwise stops every
+  run with a fixed message, because it could never match the copy.
 
-What is not checked, on purpose: a temporary folder such as `/tmp`, which the isolation tests use, and a Linux home
+What is not checked, on purpose: a temporary folder such as `/tmp`, which the isolation tests use (Claude Code's
+temporary folder inside it is refused, as above), and a Linux home
 folder such as `/home/agent`, which is the home inside the judge's container; and a bare id of the UUID form, which
 the tests use as made-up values. A web route made of the word "users", a name and a separator is refused as a home
-folder.
+folder. A home folder with nothing after its name is not caught today.
 
 Messages, titles and descriptions only (attribution):
 
@@ -65,15 +70,26 @@ Messages, titles and descriptions only (attribution):
 - **A line that says how the text was made** (a list), at the head of a line, after any marks: one of the verbs
   generated, co-authored, coauthored, assisted, authored, written, drafted, produced, made, created, built,
   prepared, implemented, followed by with, by, using, via or through; or one of the phrases "with help from",
-  "with the help of", "AI-generated", "AI-assisted"; or the robot sign anywhere. A heading of two words ("Case
+  "with help of", "with the help from", "with the help of", "AI-generated", "AI-assisted"; or the robot sign
+  anywhere. A heading of two words ("Case
   runner: ...") is no trailer and passes.
 
-Added lines only: "generated" or "co-authored" followed by with, by, using or via and a tool's name (a list).
+Added lines only: "generated" or "co-authored" followed by with, by, using or via, then a colon or none, spaces or
+none, and a tool's name (a list).
 
 Names (the author's and the committer's, a co-author's, and the displayed name GitHub writes on a merge commit):
 a name names no tool (a list: the names of the tools below, and the word "bot") and does not match the private
 pattern. A name that is its whole own no-reply login but for letter case is spared the private pattern, because
-GitHub shows that login in the address anyway. A person whose name is a tool's name is refused.
+GitHub shows that login in the address anyway. A person whose name is a tool's name is refused. And on a commit
+of more than one parent that GitHub signed, the displayed name GitHub writes on a merge commit must be the login of
+its account, but for letter case, or empty (GitHub then writes the login): the check cannot tell any other name
+from one kept private.
+
+Before a merge, every pull request's run writes the merge commit GitHub will make: for each account that may merge,
+its displayed name (its login when it has none) and its no-reply address as the author, GitHub as the signed
+committer, and the message "Merge pull request #N from <owner>/<branch>" with the pull request's title. That commit
+is judged by the same function that judges every commit on main's push, so a merge the pull request's run passes is a
+merge main's push passes.
 
 A branch's name: a branch named after a tool, that is, a tool's name and a slash at its head (a list), is refused.
 
@@ -93,8 +109,11 @@ from every byte a character of that width can start at, passing over bytes that 
 the start or a header of a binary file hides nothing after it), and once more as UTF-8 with its zero bytes taken
 out. Reading ends there: content that is compressed or encoded (an archive, an image's pixels, base64) is not read.
 
-Lines that a merge adds beyond all of its parents count as the merge's own. The difference and the paths of the
-whole range are checked as well, so that a merge cannot bring back a line or a path of the exempt history.
+A commit with more than one parent is read by its own shape: the lines it adds beyond all of its parents count as
+its own, and its combined list of paths gives one path for every entry, a renamed or copied one too (git gives two
+paths only for a commit with one parent). A file the merge deletes has no line of the result. The difference and
+the paths of the whole range are checked as well, so that a merge cannot bring back a line or a path of the exempt
+history.
 
 What the check prints is made by the check alone: a commit's id, a property's name and positions by number (a
 message's line, the number of a file in the commit's difference and its line, the number of a path in git's list
@@ -112,6 +131,15 @@ then, or because the way for forks is shut.
   copy, so that a broken copy on main never blocks the pull request that mends it, and must have main's newest commit
   among its ancestors. A branch cannot loosen the settings it is judged by. Tags are outside the check.
 - **Main** is checked on every push from the push's "before" commit.
+- **The merge**: a pull request's run (the project's own and a fork's) has git build the merge GitHub will make, of
+  main's tip as it is when the run starts with the pull request's head, and a merge commit of the shape GitHub
+  writes: both parents, the whole merge message ("Merge pull request #N from <owner>/<branch>", an empty line, the
+  title), GitHub as the committer, and as the author each account that may merge (the account that made main's last
+  merge, and on the project's own branches the account that pushed), with its displayed name, or its login when it
+  has none, and its no-reply address. That commit, and the range from main's tip to it, are judged by the same
+  function that judges every commit on main's push; only it is told GitHub's signature, which it cannot have, and
+  main's push is never told one. Nothing of the pull request runs: git only merges trees. When the two do not merge
+  cleanly the run fails with a fixed message.
 - **Pull requests from forks** are judged in the workflow `pull-requests` by main's copy. Nothing of the pull request
   runs there: its commits are fetched into a ref and read as data, and its paths are read from GitHub's answer as
   data.
@@ -152,8 +180,20 @@ step the date is the owner's word.
 
 The owner sets the repository's secret `COMMIT_CHECK_PRIVATE_PATTERN`. It is applied from the moment it has a
 value; `private_pattern_expected` in `settings.json`, turned to `true` by a small pull request afterwards, only makes
-a missing secret fail. Before the secret is set, the account's displayed name, which GitHub writes as the author of
-every merge commit, must not match it beyond what the rule for names spares.
+a missing secret fail.
+
+How it is written: as a regular expression in plain letters, in either case; it is matched ignoring letter case,
+on the text as written and on its copy. The run stops with a fixed message, showing nothing of the secret, when the
+pattern holds a character that is not its own copy but for letter case (an accent or another mark; a format,
+control, surrogate, private-use or unassigned character; one of the four letters named FILLER; a space other than
+the plain one; a dash or minus sign other than the plain hyphen; a character with a compatibility form, such as a
+full-width letter or a ligature), a letter that folding turns into something other than its small letter (such as
+the German sharp s), two spaces in a row, an escape that names a character by its number or its name or names a
+control character, or an inline flag that narrows how it matches.
+
+What it must not match, beyond what the rule for names spares: the account's displayed name, which GitHub writes
+as the author of every merge commit, and this repository's owner's name, which GitHub writes in the first line of
+every merge message. Every pull request's run judges the merge it will make and fails first if either matches.
 
 ## When main turns red
 
@@ -161,10 +201,12 @@ Nothing merges while main's newest commit is red. For every way this check can e
 one of three holds:
 
 - (i) the pull request's own run fails for the same reason before the merge;
-- (ii) the failure does not come from the merged change, and the coordinating session runs the failed job again
-  once, under the project's rule: on main's push run only, once for that commit in all, after the failed job, the
-  test and the message are written down, the first attempt's log is kept and a work item is opened; not when the
-  failure is in behaviour the merged change touched, and not when two or more jobs failed together;
+- (ii) the check names the failure by its fixed message as GitHub's API not answering, or git not fetching, after
+  all its tries: the coordinating session runs the failed job again once, under the project's rule (on main's push
+  run only, once for that commit in all, after the failed job, the test and the message are written down and the
+  first attempt's log is kept). A second failure is reverted. This holds also for a merge that changes the check: a
+  change that broke a way only main walks fails the second time too and is reverted, so no broken check stays on
+  main. Any other failure the merged change could have made is not run again;
 - (iii) only the owner's hand brings main back: the coordinating session opens a pull request that says what
   happened, its checks pass because they look only at the commits after the red one, and the owner merges it by
   hand. What the red commit wrote stays in the history.
@@ -172,15 +214,16 @@ one of three holds:
 | What fails on main | Class | Who acts, and how |
 | --- | --- | --- |
 | a commit, a line, a path, a title or a branch name that breaks a rule | (i) | the pull request's run refuses it first |
-| the displayed name of the merging account | (i) | the pull request's run reads it ahead and refuses it |
-| the merge message's first line, "<owner>/<branch>" (a fork's owner held to the rules; this repository's owner spared, the slash before the branch kept) | (i) | the pull request's run refuses it first |
+| the merge commit: its paths, its lines, its author's name, its message (the repository's owner and a fork's owner in its first line alike) | (i) | the pull request's run builds that merge and judges it with main's function |
 | a rule main gained since the pull request's last green run | (i) | a branch that does not change the check is judged by the base's copy |
 | the settings loosened, or the way opened without what it needs | (i) | the branch's own runs ask the same |
-| GitHub's API did not answer (five tries, waits of 2, 5, 10 and 20 seconds) | (ii) | the coordinating session, once |
-| git could not read the history | (ii) | the coordinating session, once |
-| the project's secret missing while `settings.json` expects it, or a setting of the way changed after it opened | (ii) | the owner puts the secret or the setting back; then the coordinating session, once |
+| the check's own tests | (i) | the same tests run first in every run of the pull request |
+| GitHub's API did not answer (each thing asked up to five times, waits of 2, 5, 10 and 20 seconds, each try at most 10 seconds, and 90 seconds in all for every try of the run, so the job ends well inside its limit with the check's own message) | (ii) | the coordinating session, once |
+| git could not fetch or read the history | (ii) | the coordinating session, once |
+| main moved on between the pull request's last run and its merge, and the merge then differs from the one the run built | (iii) | the owner's hand; the working rules merge only on a run newer than main's last change of the check |
+| the project's secret missing while `settings.json` expects it, a secret written in a form the copy can never meet, the secrets or the displayed name changed after the last green run, or a setting of the way changed after it opened | (iii) | a change the owner made; the owner puts it back, then the coordinating session runs the job once |
 | a merge commit with another address than the merging account's no-reply one, or a merge message written by hand | (iii) | the owner's hand |
-| the displayed name changed, or the secrets changed, between the pull request's last green run and its merge | (iii) | the owner's hand |
+| a squash or rebase merge (the repository is asked to allow merge commits only): such a commit has another author, message and shape than the merge the run built | (iii) | the owner's hand |
 | a pull request merged after main's check changed since its green run, without taking main in | (iii) | the owner's hand; the working rules say it is not done |
 
 Running again changes nothing for a fault in the merge commit's own text, name or address, and a reverting commit

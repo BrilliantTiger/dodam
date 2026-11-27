@@ -1,32 +1,20 @@
-"""Checks every commit of a pull request or of a push, and the pull request's own text.
+"""Checks every commit of a pull request or of a push, the pull request's own text, and the merge GitHub will make.
 
-For each commit after the exempt commit named in settings.json:
-- the author's and the committer's address is a GitHub no-reply address; GitHub's own address
-  (noreply@github.com) stands only as the committer of a commit GitHub signed, and GitHub's API must say so
-  (it is asked a few times; whatever goes wrong counts as not signed);
-- each name is the login inside its own no-reply address, or "GitHub" as the committer of a commit GitHub
-  signed, or a name that names no AI and does not match the private pattern; the author's name that GitHub puts
-  on a commit it signed is held to the same;
-- the message, the pull request's title and description carry no attribution line: a trailer whose key has a
-  hyphen in it is refused unless it is a co-author line for a person with a no-reply address, a one-word key is
-  refused when it is a word of attribution or its value holds an address, and a line that begins by saying how
-  the text was made ("generated with ...") is refused by its form, whatever tool it names;
-- the message, the title, the description, the branch's name, every line a commit adds and every path it adds
-  or renames carry no work item number, no address of the tracker, no path of the computer the project's sessions
-  run on (known by its folder parts) and no id of those sessions' tooling, and do not match the private pattern.
-  Every text is brought to one form first: the forms of a character, letter case, dashes, spaces and characters
-  without width. Lines a file adds are read as text whatever git or an attributes file thinks of the file. The
-  only list of tools' names is the one for "generated with" inside an added line and for a branch named after a
-  tool, where the property cannot be closed by its form.
-Lines that a merge commit adds beyond all of its parents are checked as its own; the difference and the paths of
-the whole range are checked as well, so that a merge cannot bring back a line or a path of the exempt history.
+The rules are the README's: each is a form or a list, and every text (a message, a title, a description, a branch's
+name, a person's name, a line a commit adds, a path) is matched line by line on a copy made by classes of characters,
+and on the text as written. For each commit after the exempt commit named in settings.json, its addresses, names and
+message (check_people_and_message), every line it adds (read by the structure of the difference, and in other
+encodings when its content is not text in UTF-8) and every path git lists for it are checked; for a merge, what it
+brings beyond all of its parents, its combined list read by its own shape. The difference and the paths of the whole
+range are checked too. Before a merge, the merge commit GitHub will write is judged by check_people_and_message, the
+same function main's push uses. Every try at GitHub's API in one run shares one budget.
 
 What it prints is made by the check alone: a commit's id, a property's name and positions by number. It never
 prints a text, a path, a title or anything else it read, also not when it cannot run.
 
-A run fails at once on whatever breaks a rule; nothing waits and nothing is read again. The way back is a new
-head. The same rules can be run on a title, a description and a branch name before they are published
-(--text-only). It uses the standard library only, and it never runs anything from the commits it reads.
+A run fails at once on whatever breaks a rule. The way back is a new head. The same rules can be run on a title, a
+description and a branch name before they are published (--text-only). It uses the standard library only, and it
+never runs anything from the commits it reads.
 """
 
 import argparse
@@ -65,7 +53,7 @@ def any_of(parts):
 AI_NAME_RE = re.compile(r"(?<![a-z0-9])" + any_of(AI_NAMES + NAME_TOKENS) + r"(?![a-z])")
 BRANCH_TOOL_RE = re.compile(r"^" + any_of(AI_NAMES) + r"/")
 FILE_MADE_VERBS = ("gener" "ated", "co-auth" "ored")
-GENERATED_IN_FILE_RE = re.compile(any_of(FILE_MADE_VERBS) + r"(?:\s+|-)(?:with|by|using|via)\s*:?\s+\W{0,6}"
+GENERATED_IN_FILE_RE = re.compile(any_of(FILE_MADE_VERBS) + r"(?:\s+|-)(?:with|by|using|via)\s*:?\s*\W{0,6}"
                                   r"(?:the help of\s+\W{0,6})?" + any_of(AI_NAMES))
 
 # Attribution in prose, closed by its form. A trailer's key has no space; the closed list of keys with a hyphen holds
@@ -95,7 +83,7 @@ TRACKER_ADDRESSES = (r"lin" r"ear\.app",)
 TOOLING_IDS = ("te" "rm_[0-9a-f]{8,}", "ta" "sk_[0-9a-f]{8,}", "c" "tx_[0-9a-f]{8,}", "dis" "patch_[0-9a-f]{8,}",
                "ms" "g_[0-9a-f]{8,}", "w" "f_[0-9a-f]{8,}", "conver" "sation://")
 LOCAL_PATHS = (
-    r"[\\/]us" r"ers[\\/]+(?!shared[\\/])[^\\/\s]+[\\/]",                       # a home folder of macOS or Windows
+    r"(?:^|[\\/])us" r"ers[\\/]+(?!shared[\\/])[^\\/\s]+[\\/]",                  # a home folder of macOS or Windows
     r"(?<![a-z0-9])\.cla" r"ude[\\/]+[\w.-]",                                  # an entry in a tool's own folder
     r"(?<![a-z0-9])\.co" r"dex[\\/]+[\w.-]",
     r"(?<![a-z0-9])\.gem" r"ini[\\/]+[\w.-]",
@@ -181,19 +169,20 @@ class Checker:
     def add(self, who, prop, where):
         self.findings.append(f"{who}: {prop} ({where})")
 
-    def private_hit(self, text):
-        return self.private is not None and (self.private.search(text) is not None
-                                             or self.private.search(normalise(text)) is not None)
+    def private_hit(self, text, words=False):
+        copies = [text, normalise(text)] + ([normalise(text, words=True)] if words else [])
+        return self.private is not None and any(self.private.search(copy) is not None for copy in copies)
 
-    def place(self, who, text, where):
-        """The rules of every place, on every line of the text."""
+    def place(self, who, text, where, words=False):
+        """The rules of every place, on every line of the text; for a branch's name also on the copy split where a
+        small letter meets a capital."""
         found = set()
         for line in lines_of(text):
-            plain = normalise(line)
-            for prop, pattern in PLACE_RULES:
-                if pattern.search(plain):
-                    found.add(prop)
-            if self.private_hit(line):
+            for plain in [normalise(line)] + ([normalise(line, words=True)] if words else []):
+                for prop, pattern in PLACE_RULES:
+                    if pattern.search(plain):
+                        found.add(prop)
+            if self.private_hit(line, words):
                 found.add("private pattern")
         for prop, _ in PLACE_RULES + [("private pattern", None)]:
             if prop in found:
@@ -248,7 +237,7 @@ class Checker:
                     and self.name_passes(person.group(1).strip(), person.group(2).strip()))
 
     def branch(self, who, name, where):
-        self.place(who, name, where)
+        self.place(who, name, where, words=True)
         if BRANCH_TOOL_RE.search(normalise(name)):
             self.add(who, "AI name", where)
 
@@ -279,11 +268,16 @@ class Checker:
         lines = patch.split("\n")
         index = 0
         file_number = 0
+        deleted = False
         while index < len(lines):
             line = lines[index]
             index += 1
             if line.startswith("diff --git ") or line.startswith("diff --cc "):
                 file_number += 1
+                deleted = False
+                continue
+            if line == "+++ /dev/null":
+                deleted = True  # the file is gone from the result: its hunks have no line of the result
                 continue
             hunk = re.match(r"^(@@+) ((?:-\d+(?:,\d+)? )+)\+(\d+)(?:,(\d+))? @@+", line)
             if not hunk:
@@ -292,7 +286,9 @@ class Checker:
             if len(hunk.group(2).split()) != parents:
                 raise Problem("a difference cannot be read")
             number = int(hunk.group(3))
-            new_left = int(hunk.group(4)) if hunk.group(4) is not None else 1
+            # git writes the length of a combined hunk of a deleted file as minus one wrapped round; the removed lines
+            # after it begin with "-" or " " and are read as no header.
+            new_left = 0 if deleted else int(hunk.group(4)) if hunk.group(4) is not None else 1
             # The hunk ends after the lines of the result its header counts; a removed line after the last of them
             # begins with "-" or " " and is no header.
             while new_left > 0:
@@ -331,15 +327,16 @@ def parse_commit(raw):
 DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "-M"]
 
 
-def check_paths(checker, who, fields):
-    """The paths a difference adds, renames, copies or changes, from --name-status -z, numbered in git's order."""
+def check_paths(checker, who, fields, parents=1):
+    """The paths a difference adds, renames, copies or changes, from --name-status -z, numbered in git's order. A
+    combined list (a merge's, more than one parent) gives one path for every entry, a renamed one too."""
     fields = [field for field in fields if field != ""]
     index = 0
     number = 0
     while index < len(fields):
         status = fields[index]
         number += 1
-        if status[:1] in ("R", "C"):
+        if status[:1] in ("R", "C") and parents == 1:
             if index + 2 >= len(fields):
                 raise Problem("a list of paths cannot be read")
             checker.path(who, number, fields[index + 2])
@@ -424,58 +421,88 @@ def check_other_encodings(checker, who, repo, fields):
             checker.read_as(who, number, label, text)
 
 
-def check_commit(repo, sha, checker):
-    who = f"commit {sha[:12]}"
-    people, message = parse_commit(git(repo, "cat-file", "commit", sha))
-    by_github = people["committer"][1] == GITHUB_ADDRESS
-    for role in ("author", "committer"):
+def check_people_and_message(checker, who, people, message, signed, merge=False):
+    """The verdict on a commit's names, addresses and message. Main's push gives it each commit; the read-ahead of a
+    pull request gives it the merge commit GitHub will write, so that both judge a merge the same way."""
+    by_github = people is not None and people["committer"][1] == GITHUB_ADDRESS
+    for role in ("author", "committer") if people is not None else ():
         name, address = people[role]
         if role == "committer" and by_github:
-            if not checker.verifier(sha):
+            if not signed:
                 checker.add(who, "committer address", "GitHub's address without GitHub's verified signature")
             elif name != "GitHub":
                 checker.add(who, "committer name", "a commit GitHub signed carries the name GitHub")
             continue
-        if not NO_REPLY_RE.match(address):
+        login = NO_REPLY_RE.match(address)
+        if not login:
             checker.add(who, f"{role} address", "not a GitHub no-reply address")
         if not checker.name_passes(name, address):
             checker.add(who, f"{role} name", "neither the login of its address nor a plain name")
+        elif role == "author" and merge and by_github and signed \
+                and not (login and name.casefold() == login.group(2).casefold()):
+            # GitHub writes the merging account's displayed name here; it must be that account's login but for letter
+            # case (GitHub writes the login when there is no displayed name), never a name the check cannot tell apart.
+            checker.add(who, "author name", "a merge GitHub signed carries the merging account's login, but for case")
     checker.prose(who, message, lambda n: f"message line {n}")
+
+
+def check_commit(repo, sha, checker):
+    who = f"commit {sha[:12]}"
+    people, message = parse_commit(git(repo, "cat-file", "commit", sha))
+    signed = people["committer"][1] == GITHUB_ADDRESS and checker.verifier(sha)
+    parents = len(git(repo, "rev-list", "--parents", "-n", "1", sha).split()) - 1
+    check_people_and_message(checker, who, people, message, signed, merge=parents > 1)
     # The combined forms: for a commit of one parent (and for the first commit) they give what the plain forms give;
     # for a merge, only what it brings beyond all of its parents.
     checker.patch(who, git(repo, "diff-tree", "--cc", "--root", "--format=", *DIFF_OPTIONS, sha))
     fields = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
-    check_paths(checker, who, fields.split("\0"))
+    check_paths(checker, who, fields.split("\0"), parents)
     raw = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--raw", "-z", "-M", sha)
     check_other_encodings(checker, who, repo, raw.split("\0"))
 
 
+API_BUDGET = 90.0  # seconds for every try at GitHub's API in one run, on a clock that only runs forward
+API_TRY = 10.0  # seconds at most for one try
+API_SPENT = {"deadline": None}
+SILENT = "GitHub's API did not answer"
+NOTHING_THERE = (403, 404, 410, 422)  # answers that say what was asked for is not there, or not for this token
+
+
 def api_get(path, outside_repository=False):
-    """One answer of GitHub's API, asked up to five times when it fails to answer (waits of 2, 5, 10 and 20 seconds
-    between the tries, nothing when the first try answers); None when no answer came."""
+    """One answer of GitHub's API. None only when GitHub answers that what was asked for is not there (or not for this
+    token). Asked up to five times when it does not answer (waits of 2, 5, 10 and 20 seconds between the tries), all
+    tries of the run within one budget; when they or the budget run out, the check stops: GitHub's API did not
+    answer."""
     token = os.environ.get("GITHUB_TOKEN", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository):
-        return None
+        raise Problem(SILENT)
     headers = {"Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     url = f"{api}/{path}" if outside_repository else f"{api}/repos/{repository}/{path}"
     request = urllib.request.Request(url, headers=headers)
+    if API_SPENT["deadline"] is None:
+        API_SPENT["deadline"] = time.monotonic() + API_BUDGET
     for wait in (2, 5, 10, 20, None):
+        left = API_SPENT["deadline"] - time.monotonic()
+        if left <= 0:
+            break
         try:
-            with urllib.request.urlopen(request, timeout=20) as answer:
+            with urllib.request.urlopen(request, timeout=min(API_TRY, left)) as answer:
                 return json.load(answer)
         except urllib.error.HTTPError as error:
-            if error.code < 500 and error.code != 429:
-                return None  # an answer: what was asked for is not there, or not for this token
+            limited = error.headers is not None and (error.headers.get("Retry-After") is not None
+                                                     or error.headers.get("X-RateLimit-Remaining") == "0")
+            if error.code in NOTHING_THERE and not limited:  # a 403 of GitHub's rate limits is no answer
+                return None
         except Exception:
             pass
-        if wait is None:
-            return None
+        if wait is None or wait >= API_SPENT["deadline"] - time.monotonic():
+            break
         time.sleep(wait)
-    return None
+    raise Problem(SILENT)
 
 
 def github_api_verifier(sha):
@@ -554,6 +581,7 @@ def read_event(path):
              "head_owner": head_owner.get("login") or "", "base_owner": base_owner.get("login") or ""}
     if not all(isinstance(value, str) for value in texts.values()):
         raise Problem("the event's pull request cannot be read")
+    texts["number"] = pull.get("number") if isinstance(pull.get("number"), int) else 0
     return texts
 
 
@@ -566,7 +594,7 @@ def merging_logins(repo, start, context):
     file), and on the project's own branches the account that pushed, when it is another. On a fork's run the account
     that pushed is the outside contributor, who never makes the merge commit, so it is not read."""
     logins = []
-    log = git(repo, "log", "--merges", "-n", "50", "--format=%ae%x00%ce", start)
+    log = git(repo, "log", "--first-parent", "--merges", "-n", "50", "--format=%ae%x00%ce", start)
     for line in log.split("\n"):
         author, _, committer = line.partition("\0")
         found = NO_REPLY_RE.match(author)
@@ -579,16 +607,49 @@ def merging_logins(repo, start, context):
     return logins
 
 
-def check_merge_author(checker, repo, start, context):
-    for login in merging_logins(repo, start, context):
+def merge_message(texts):
+    """The message GitHub writes on the merge commit of a pull request."""
+    owner = texts["head_owner"] or texts["base_owner"]
+    return f"Merge pull request #{texts['number']} from {owner}/{texts['branch']}\n\n{texts['title']}"
+
+
+STAND_IN_AUTHOR = ("merging-account", "0+merging-account@users.noreply.github.com")
+
+
+def build_merges(checker, repo, base, head, texts, context):
+    """The merge commits GitHub will write when it merges the pull request into main's tip as it is now: git's merge
+    of the two, both parents, the whole merge message, GitHub as the committer, and as the author each account that
+    may merge (its displayed name, or its login when it has none, and its no-reply address). Nothing of the pull
+    request is run: git only merges trees."""
+    done = subprocess.run(["git", "-C", repo, "merge-tree", "--write-tree", "--no-messages", base, head],
+                          capture_output=True, env=git_env())
+    if done.returncode == 1:
+        raise Problem("the pull request does not merge cleanly with main's tip")
+    if done.returncode != 0:
+        raise Problem("git could not read the history")
+    tree = done.stdout.decode("ascii", "replace").split("\n", 1)[0].strip()
+    authors = []
+    logins = merging_logins(repo, base, context)
+    for login in logins:
         data = api_get(f"users/{login}", outside_repository=True)
-        if not isinstance(data, dict) or not isinstance(data.get("name") or "", str):
+        if not isinstance(data, dict) or not isinstance(data.get("name") or "", str) \
+                or not isinstance(data.get("id"), int) or isinstance(data.get("id"), bool):
             checker.add("merge commit", "author name", "the displayed name of the account that merges cannot be read")
             continue
-        name = data.get("name")  # with no displayed name GitHub writes the login
-        if name and (name.casefold() != login.casefold()
-                     or not checker.name_passes(name, f"{login}@users.noreply.github.com")):
-            checker.add("merge commit", "author name", "the displayed name GitHub writes on a merge commit breaks a rule")
+        authors.append((data.get("name") or login, f"{data['id']}+{login}@users.noreply.github.com"))
+    if not logins:
+        authors.append(STAND_IN_AUTHOR)  # nobody known who merges: the merge's message, paths and lines still count
+    merges = []
+    for name, address in authors:
+        env = {**git_env(), "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": address, "GIT_COMMITTER_NAME": "GitHub",
+               "GIT_COMMITTER_EMAIL": GITHUB_ADDRESS}
+        made = subprocess.run(["git", "-C", repo, "commit-tree", tree, "-p", base, "-p", head, "-F", "-"],
+                              input=merge_message(texts).encode("utf-8"), capture_output=True, env=env)
+        if made.returncode != 0:
+            checker.add("merge commit", "author name", "the displayed name of the account that merges cannot be written")
+            continue
+        merges.append(made.stdout.decode("ascii", "replace").strip())
+    return merges
 
 
 def check_pull_request_text(checker, texts):
@@ -596,12 +657,6 @@ def check_pull_request_text(checker, texts):
     checker.prose("pull request", texts["body"], lambda n: f"pull request description line {n}")
     # GitHub writes the branch's name into the message of the merge commit it makes on main.
     checker.branch("pull request", texts["branch"], "pull request branch name")
-    # And the name of the repository the branch is in: "Merge pull request #N from <owner>/<branch>". A fork's owner is
-    # held to the rules of a message there; this repository's own owner is not, because it is in every merge already,
-    # but the slash before the branch's name is.
-    own = texts["head_owner"].casefold() in ("", texts["base_owner"].casefold())
-    owner = "" if own else texts["head_owner"]
-    checker.prose("pull request", f"{owner}/{texts['branch']}", lambda n: "merge message's first line")
 
 
 def report(commits, findings, failures):
@@ -646,8 +701,9 @@ def main(argv=None):
     parser.add_argument("--event", action=Once, help="the event's file, for the pull request's title, description and branch")
     parser.add_argument("--branch", action=Once, help="the name of the branch a push went to")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
-    parser.add_argument("--merge-author", action="store_true",
-                        help="read ahead the displayed name GitHub will write as the author of the merge commit")
+    parser.add_argument("--build-merge", action="store_true",
+                        help="a pull request's run: build the merge GitHub will make of --head into --from (main's tip) "
+                             "and judge it as main's push will")
     parser.add_argument("--check-fork-way", action="store_true",
                         help="on main: when the way for forks is open, ask GitHub whether everything it needs is set")
     parser.add_argument("--fork-way-gate", action="store_true",
@@ -657,6 +713,7 @@ def main(argv=None):
                         help="check only the pull request's text in --event, before it is published; no git")
     parser.add_argument("--verified-shas", action=Once, help="a file of commits GitHub signed, in place of asking GitHub")
     args = parser.parse_args(argv)
+    API_SPENT["deadline"] = None  # one budget for each run
     try:
         return run(args)
     except Problem as problem:
@@ -665,6 +722,35 @@ def main(argv=None):
     except Exception:
         print("::error::the check stopped on something it does not know")
         return 1
+
+
+CONTROL_ESCAPES = set("xuUN0afnrtv")  # escapes that name a character by its number or its name, or a control
+
+
+def pattern_meets_the_copy(pattern):
+    """Whether every text the pattern names can stand in the copy, so that its reach does not hang on how it is
+    written: no character that the copy takes out or replaces or that has a compatibility form (each character must
+    be its own copy but for letter case), no letter that folding turns into something other than its small letter, no
+    two spaces in a row (the copy makes them one), no escape that names a character by its number or its name or names
+    a control character, and no inline flag that narrows how the pattern matches."""
+    if "  " in pattern:
+        return False
+    for ch in pattern:
+        if ch != unicodedata.normalize("NFKC", ch) or normalise(ch) != ch.casefold() or ch.casefold() != ch.lower() \
+                or ch.upper().casefold() != ch.casefold():
+            return False
+    index = 0
+    while index < len(pattern):
+        if pattern[index] == "\\":
+            following = pattern[index + 1:index + 4]
+            if following[:1] in CONTROL_ESCAPES or re.fullmatch(r"[0-7]{3}", following):
+                return False
+            index += 2
+        elif pattern.startswith("(?", index) and re.match(r"\(\?[aiLmsux]*[aL-]", pattern[index:]):
+            return False  # ASCII or locale matching, or a flag turned off, such as (?-i:...), anywhere in the flags
+        else:
+            index += 1
+    return True
 
 
 def private_pattern(args, settings, failures):
@@ -677,8 +763,17 @@ def private_pattern(args, settings, failures):
         else:
             print("::notice::No private pattern is set yet; only the public properties were checked.")
         return None
+    return compile_private(pattern)
+
+
+def compile_private(pattern):
+    """The private pattern as every place matches it: as written, ignoring letter case."""
+    if not pattern_meets_the_copy(pattern):
+        raise Problem("the private pattern given in the secret is written in a way the copy can never meet: a "
+                      "character the copy takes out or replaces, a letter that folds into another, or a character "
+                      "named by its number or its name")
     try:
-        return re.compile(pattern)
+        return re.compile(pattern, re.IGNORECASE)
     except re.error:
         raise Problem("the private pattern given in the secret is not a regular expression") from None
 
@@ -735,7 +830,9 @@ def run(args):
     if args.text_only:
         if not args.event:
             raise Problem("--text-only needs --event")
-        check_pull_request_text(checker, read_event(args.event))
+        texts = read_event(args.event)
+        check_pull_request_text(checker, texts)
+        check_people_and_message(checker, "merge commit", None, merge_message(texts), True)
         return report(None, checker.findings, failures)
 
     if not args.start or not args.head or not args.compare_settings:
@@ -760,8 +857,19 @@ def run(args):
             failures.append("the way for forks is open, but the environment private-check does not wait for a named "
                             "reviewer")
 
+    texts = read_event(args.event) if args.event else None
+    built = []
+    if args.build_merge:
+        if texts is None:
+            raise Problem("--build-merge needs --event")
+        built = build_merges(checker, repo, start, head, texts, args.context)
+        if built:
+            # The merge is judged as main's push will judge it; it is told GitHub's signature, which it cannot have,
+            # and only it.
+            checker.verifier = lambda sha, own=checker.verifier, made=frozenset(built): sha in made or own(sha)
+            head = built[0]
     commits = git(repo, "rev-list", "--topo-order", "--reverse", head, "^" + start, "^" + exempt).split()
-    for sha in commits:
+    for sha in commits + built[1:]:
         check_commit(repo, sha, checker)
     if commits:
         checker.patch("the range", git(repo, "diff", *DIFF_OPTIONS, f"{start}...{head}"))
@@ -770,11 +878,12 @@ def run(args):
                               git(repo, "diff", "--raw", "-z", "-M", "--abbrev=40", f"{start}...{head}").split("\0"))
     if args.branch is not None:
         checker.branch("push", args.branch, "branch name")
-    if args.merge_author:
-        check_merge_author(checker, repo, start, args.context)
+    if texts:
+        check_pull_request_text(checker, texts)
+        if not built:
+            check_people_and_message(checker, "merge commit", None, merge_message(texts), True)
     if args.event:
-        check_pull_request_text(checker, read_event(args.event))
-        if not commits:
+        if not [sha for sha in commits if sha not in built]:
             failures.append("the pull request has no commit to check after the exempt commit")
     elif args.require_commits and not commits:
         failures.append("no commit to check in this range")

@@ -51,6 +51,9 @@ def main(argv=None):
         return 2
     try:
         verdict = judge(args.number, args.base_sha)
+    except check.Problem as problem:
+        print(f"::error::{problem}")
+        return 1
     except Exception:
         print("::error::the check of a fork's paths stopped on something it does not know")
         return 1
