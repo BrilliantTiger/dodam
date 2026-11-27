@@ -392,10 +392,10 @@ MACHINE_SHARE = 0.75  # how much of the Docker machine's memory one container ma
 def machine_memory_mb() -> int | None:
     """The memory of the machine Docker runs containers on; None when Docker does not say."""
     try:
-        res = subprocess.run(["docker", "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True,
+        res = frame.run(["docker", "info", "--format", "{{.MemTotal}}"], capture_output=True, text=True,
                              timeout=60)
         return int(res.stdout.strip()) // 2**20 or None
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError, frame.FrameRefused):
         return None
 
 
@@ -462,19 +462,25 @@ def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Pat
     name = f"dodam-vet-{uuid.uuid4().hex[:12]}"
     empty_place(out_dir)
     try:
-        subprocess.run(frame.container(docker_create_cmd(name, image, step, room)), check=True, capture_output=True,
-                       text=True)
-        subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
-        subprocess.run(["docker", "cp", f"{solution_dir}/.", f"{name}:/solution"], check=True, capture_output=True)
+        # every command for the container tool goes through the frame, which writes it and starts the tool itself;
+        # the folders copied from are named to it on the call
+        here = (tests_dir, solution_dir, out_dir)
+        frame.run(docker_create_cmd(name, image, step, room), check=True, capture_output=True, text=True)
+        frame.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True, allow=here)
+        frame.run(["docker", "cp", f"{solution_dir}/.", f"{name}:/solution"], check=True, capture_output=True,
+                  allow=here)
         try:
-            ended = subprocess.run(["docker", "start", "--attach", name], capture_output=True,
+            ended = frame.run(["docker", "start", "--attach", name], capture_output=True,
                                    timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             ended = None
         # what the container left, if anything: a container that left nothing is read below
-        subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out_dir)], capture_output=True)
+        frame.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out_dir)], capture_output=True, allow=here)
     finally:
-        subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+        try:
+            frame.run(["docker", "rm", "--force", name], capture_output=True)
+        except frame.FrameRefused:
+            pass  # a container never made is no container of this batch; one that was is removed at the batch's end
     return read_judging(out_dir, task, step, ended, timeout, separated=True)
 
 

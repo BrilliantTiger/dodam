@@ -169,18 +169,18 @@ def judged(program: str, memory_mb: int, limit_mb: int, stop: bool) -> dict:
         script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && printf 'DODAM_STEP=build\\n' > /tests/step.env "
                   "&& exec sh /tests/test.sh")
         try:
-            subprocess.run(frame.container(["docker", "create", "--name", name, "--network", "none", "--user", "0",
+            frame.run(["docker", "create", "--name", name, "--network", "none", "--user", "0",
                                             "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
                                             "--pids-limit", "512", "--tmpfs",
                                             "/dodam-cases:rw,exec,nosuid,nodev,size=32m,nr_inodes=20000,mode=0711",
-                                            "-e", "DODAM_APP_USER=agent", IMAGE, "sh", "-c", script]),
+                                            "-e", "DODAM_APP_USER=agent", IMAGE, "sh", "-c", script],
                            check=True, capture_output=True)
-            subprocess.run(["docker", "cp", f"{tests}/.", f"{name}:/tests"], check=True, capture_output=True)
-            subprocess.run(["docker", "cp", f"{solution}/.", f"{name}:/solution"], check=True, capture_output=True)
-            done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=300)
-            subprocess.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out)], capture_output=True)
+            frame.run(["docker", "cp", f"{tests}/.", f"{name}:/tests"], check=True, capture_output=True, allow=[tests, solution, out])
+            frame.run(["docker", "cp", f"{solution}/.", f"{name}:/solution"], check=True, capture_output=True, allow=[tests, solution, out])
+            done = frame.run(["docker", "start", "--attach", name], capture_output=True, timeout=300)
+            frame.run(["docker", "cp", f"{name}:/logs/verifier/.", str(out)], capture_output=True, allow=[tests, solution, out])
         finally:
-            subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+            frame.run(["docker", "rm", "--force", name], capture_output=True)
         seen = json.loads((out / "overshoot.json").read_text()) if (out / "overshoot.json").is_file() else {}
         report = json.loads((out / "details.json").read_text()) if (out / "details.json").is_file() else {}
         return {**seen, "exit_code": done.returncode, "outcomes": [c["outcome"] for c in report.get("tests", [])],

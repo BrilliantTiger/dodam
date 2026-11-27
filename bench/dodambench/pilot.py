@@ -17,6 +17,7 @@ out/pilot/<UTC timestamp>/.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import math
@@ -1561,15 +1562,22 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         watch.track(proc)
         return request
 
+    def frame_stops(reason: str) -> None:
+        # a line of the frame was crossed: Harbor's group is stopped by the runner's own stop path, as for the watch
+        request.begun_by(f"the frame ({reason})")
+        request.asked.set()
+
+    # The pilot is the frame's one named exception: Harbor starts its containers through compose, from the fixed
+    # file the converter writes, and they carry no mark of the frame. The frame's batch gives the run the lock, the
+    # readings with the stop, the removal of Harbor's containers below while the lock is still held, and giving
+    # space back at its end.
+    held = contextlib.ExitStack()
     try:
         # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
         with watch:
             if watch.clean:
-                # Harbor's containers come from docker compose, which takes no mark from the command line: they are
-                # removed by their compose projects below. The frame gives the run its lock and its readings.
-                with frame.batch():
-                    record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout,
-                                                         on_start=hand_over)
+                held.enter_context(frame.batch(on_stop=frame_stops)).made()
+                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout, on_start=hand_over)
         finished = True
     finally:
         _gate().enter()  # the containers step, the scan and the record are never cut short
@@ -1588,6 +1596,7 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
                 if result:  # containers that stay are reported with the other failures, record or not
                     _gate().failures.append(f"the containers of the {lang} run are still in Docker: "
                                             + ", ".join(result))
+        _gate().step(f"the end of the frame's batch of the {lang} run", held.close)
         scanned, scan = _gate().step(f"the scan of the {lang} run folder", lambda: check_for_token(run_dir, token))
         if not scanned:  # a scan that could not run rules nothing out: it counts as a failed scan
             scan = LeakScan([], ["the whole run folder (the scan itself failed)"])

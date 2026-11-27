@@ -91,7 +91,7 @@ def test_a_volume_given_the_short_way_is_written_the_long_way_and_only_ro_or_rw_
     frame.run(["docker", "volume", "create", "asked"], capture_output=True, check=True)
     frame.run(["docker", "run", "--rm", "-v", "asked:/reading:ro", "image"], capture_output=True, check=True)
     [call] = [c for c in tools.calls() if c[:1] == ["run"]]
-    assert call[5:7] == ["--volume", "asked:/reading:ro"], call
+    assert call[6:8] == ["--volume", "asked:/reading:ro"], call
     for mode in ("z", "Z", "shared", "rw,z", "nocopy"):
         assert refused(["docker", "run", "--rm", "--volume", f"asked:/reading:{mode}", "image"]) == "value", mode
 
@@ -394,7 +394,7 @@ def test_the_pilots_batch_stops_harbor_at_a_line_and_removes_its_containers_whil
 
     def runner(cmd, env, log_path, timeout, on_start=None):
         jobs = Path(cmd[cmd.index("-o") + 1]) / cmd[cmd.index("--job-name") + 1]
-        jobs.mkdir(parents=True)
+        (jobs / "web-signup__python__abc").mkdir(parents=True)  # a trial, whose containers the pilot removes
         frame.current().stop("free_disk")
         request = on_start(subprocess.Popen(["true"])) if on_start else None
         deadline = time.monotonic() + 5

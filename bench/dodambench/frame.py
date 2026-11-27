@@ -1,32 +1,52 @@
 """The frame through which every container on this computer is started.
 
-    python -m dodambench.frame run [--worktree PATH]... -- COMMAND...
+    python -m dodambench.frame run [--worktree PATH]... [--refuse-all] -- COMMAND...
 
-runs COMMAND as one batch. In code, a command that makes a container goes through `container`:
+runs COMMAND as one batch. In code, every command for the container tool goes through `run` or `popen`:
 
-    subprocess.run(frame.container(["docker", "create", ...]), ...)
+    frame.run(["docker", "create", ...], capture_output=True, check=True)
+
+The frame enforces in one place. It reads the words into a structure, checks the structure against a closed
+table of what the repository's own commands use, writes the command anew from the structure, and starts the
+container tool itself: from a fixed path for each platform, with an environment from which every variable that
+would point it at another daemon, context, configuration or certificate is removed. Whatever the table does not
+have is refused, with a diagnostic in JSON, before anything reaches the tool.
 
 What the frame does for a batch:
 - before it starts, it reads free disk, memory pressure and fseventsd's memory, and refuses under a line;
 - it holds a lock, so that one batch runs at a time: a batch that waits is told after a minute which process
   holds it, and is refused;
 - every container it makes carries the batch's mark (a label with the batch's run id) and writes its id to a
-  file of the batch;
-- every two minutes it reads again, and past a line it removes its containers and stops;
-- at its end, also after a failure or a signal, it ends the programs it started, removes exactly the containers
-  it made, by their ids, and the named volumes made through it, and its temporary folder; a batch that was
-  killed is cleaned up so by the next one, once its process is dead;
-- it refuses to mount the sensitive folders of this computer: what may be mounted is the batch's own temporary
-  folder and work trees named to it;
-- at the end it gives space back by trimming the disk of the container machine, only when no container at all
-  runs. It never prunes, never removes an image, and never starts or stops the container machine.
+  file of the batch; a volume it makes carries the mark too;
+- a command that names a container or a volume (remove, stop, start, look at, copy) passes only when every object
+  it names carries this batch's mark;
+- every two minutes it reads again, and past a line it starts no more, tells whoever runs the batch, which stops
+  its programs, and removes its containers;
+- at its end, also after a failure or a signal, it ends the programs it started, removes exactly its containers,
+  by their ids, and the volumes it made, and its temporary folder; a batch that was killed is cleaned up so by the
+  next one, once its process is dead;
+- what may be mounted or copied from this computer is the batch's own temporary folder, and a folder named on the
+  call in code: one inside a git work tree, or one below the temporary area (never the temporary area itself);
+- at the end it gives space back by trimming the disk of the container machine, only when the batch made a
+  container and no container at all runs. It never prunes, never removes an image, and never starts or stops the
+  container machine.
+
+The command that a frame run puts first on the path of its programs goes through the same reading and checking,
+without what only code may name (folders named on a call, folders of the container machine). In the automatic
+check it is put there in a mode that refuses every call, so that a start in any spelling the frame's code does not
+make is refused when it runs. That command is a guard for the project's sessions and their ordinary commands, not a
+boundary: a program that calls the real tool by its full path is outside it.
 
 Where it runs is told by the platform. The readings belong to this computer (macOS); elsewhere, as in the
 automatic check, they are not made, and everything else is the same.
 
-A process that starts a container without an outer batch opens one of its own at its first container and keeps
+A process that gives a container command without an outer batch opens one of its own at its first command and keeps
 it until it ends. A process inside a `frame run` joins that batch: the run must still be alive and be one of the
 process's own ancestors, so that naming a run in the environment lets no other process in.
+
+The one exception is the pilot: Harbor starts its containers through compose, from a fixed file the project's
+converter writes, and that does not go through the table. The pilot's batch gives it the lock, the readings with the
+stop, the removal of Harbor's containers while the lock is held, and giving space back at its end.
 
 Only the standard library is used: the Gemini job loads this file by its path."""
 from __future__ import annotations
@@ -34,10 +54,10 @@ from __future__ import annotations
 import atexit
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 import posixpath
+import pwd
 import re
 import secrets
 import shutil
@@ -45,6 +65,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -66,35 +87,62 @@ SETTINGS: dict[str, object] = {
     "trim_seconds": 30,        # the bound of time for giving space back
     "retry_seconds": 1,        # a reading that fails is tried once more after this; a second failure stops
     "end_seconds": 10,         # between asking the programs of a batch to end and ending them
-    "command_seconds": 60,     # the bound of time for one call of the container command
+    "command_seconds": 60,     # the bound of time for one call the frame makes itself
 }
 PENDING = ("pressure_level", "swap_used_gb", "fseventsd_gb")
 
-# Folders of the container machine, not of this computer, that a caller may name for one container: a judged
-# container's folder of the kernel's, and a file of the machine's memory settings. The caller names each one
-# exactly (the judge's tests give their helper two of them, named in those tests only), and they are given only
-# to a container without network and without any folder of this computer.
-MACHINE_PATHS = (re.compile(r"/sys/fs/cgroup/(docker/[0-9a-f]{64}|system\.slice/docker-[0-9a-f]{64}\.scope)"),
-                 re.compile(r"/proc/sys/vm/[a-z_]+"))
-# Folders under the home folder that are never mounted, nor a folder that holds one of them.
-SENSITIVE = (".dodam", ".dodam-desk", ".ssh", ".gnupg", ".aws", ".config", ".docker", ".colima", ".claude",
-             ".codex", ".gemini", ".kube", ".netrc", "Library")
-
-SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 RUN_RE = re.compile(r"[0-9a-f]{32}")
 ID_RE = re.compile(r"[0-9a-f]{64}")
 
 
-def default_root() -> Path:
-    """One folder for every session of this user: not the temporary folder of a session, which may differ."""
-    return Path("/tmp").resolve() / f"dodam-frame-{os.getuid()}"
+# --- the tools, at fixed paths --------------------------------------------------------------------------------------
+
+# One fixed list of places for each platform; the first that holds the tool is taken. Nothing is looked up on the
+# path, so that a folder put first on it cannot answer for the tool or for a reading.
+CANDIDATES = {
+    "darwin": {"docker": ("/opt/homebrew/bin/docker", "/usr/local/bin/docker"),
+               "colima": ("/opt/homebrew/bin/colima", "/usr/local/bin/colima"),
+               "sysctl": ("/usr/sbin/sysctl",), "pgrep": ("/usr/bin/pgrep",), "top": ("/usr/bin/top",),
+               "ps": ("/bin/ps",)},
+    "linux": {"docker": ("/usr/bin/docker",), "colima": (), "sysctl": ("/usr/sbin/sysctl", "/sbin/sysctl"),
+              "pgrep": ("/usr/bin/pgrep",), "top": ("/usr/bin/top",), "ps": ("/usr/bin/ps", "/bin/ps")},
+}
 
 
-ROOT = default_root()
+def _fixed_tools() -> dict[str, str]:
+    places = CANDIDATES.get(sys.platform, CANDIDATES["linux"])
+    return {name: next((p for p in paths if os.access(p, os.X_OK)), paths[0] if paths else "")
+            for name, paths in places.items()}
+
+
+TOOLS: dict[str, str] = _fixed_tools()
+
+
+def use_tools(**paths: str) -> dict[str, str]:
+    """Give the frame other tools by name (for tests: stand-ins); returns what it had, to give back."""
+    before = dict(TOOLS)
+    TOOLS.clear()
+    TOOLS.update(_fixed_tools())
+    TOOLS.update(paths)
+    return before
+
+
+def home() -> Path:
+    """The account's home folder, from the account's record, not from the environment."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+# variables that would point the container tool at another daemon, context, configuration folder or certificates
+STEERING = ("DOCKER_", "BUILDX_", "COMPOSE_")
+
+
+def tool_env(env: dict | None = None) -> dict[str, str]:
+    given = dict(os.environ if env is None else env)
+    return {k: v for k, v in given.items() if not k.startswith(STEERING)}
 
 
 class FrameRefused(Exception):
-    """A batch or a container the frame does not start. `said` is the diagnostic, JSON first."""
+    """A batch or a command the frame does not start. `said` is the diagnostic, JSON first."""
 
     def __init__(self, said: dict):
         super().__init__(json.dumps(said))
@@ -109,37 +157,43 @@ def _refuse(reason: str, message: str, **more) -> FrameRefused:
     return FrameRefused({"refused": True, "reason": reason, "message": message, **more})
 
 
-# --- the commands this computer is read and the containers are handled with -----------------------------------------
-
-def _run(args: list[str], seconds: float | None = None, env: dict | None = None) -> subprocess.CompletedProcess | None:
-    """A command found on the path, or None when it is not there, did not end in time or could not start."""
-    # the path first, so that a stand-in is found; then the system's folders, which a narrowed path may lack
-    path = os.pathsep.join(filter(None, [(env or os.environ).get("PATH", ""), SYSTEM_PATH]))
-    program = shutil.which(args[0], path=path)
-    if program is None:
+def _run(tool: str, args: list[str], seconds: float | None = None) -> subprocess.CompletedProcess | None:
+    """One of the frame's own calls of a tool at its fixed path, or None when it is not there or did not end."""
+    program = TOOLS.get(tool) or ""
+    if not program or not os.access(program, os.X_OK):
         return None
     try:
-        return subprocess.run([program, *args[1:]], capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=seconds or SETTINGS["command_seconds"], env=env)
+        return subprocess.run([program, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=seconds or SETTINGS["command_seconds"], env=tool_env())
     except (OSError, subprocess.SubprocessError):
         return None
 
 
-def _said(args: list[str], seconds: float | None = None) -> str | None:
-    done = _run(args, seconds)
+def _said(tool: str, args: list[str], seconds: float | None = None) -> str | None:
+    done = _run(tool, args, seconds)
     return done.stdout if done is not None and done.returncode == 0 else None
 
 
 def started_at(pid: int) -> str | None:
     """When the process started, as `ps` tells it; with its number, it names one process and no later one."""
-    said = _said(["ps", "-o", "lstart=", "-p", str(pid)])
+    said = _said("ps", ["-o", "lstart=", "-p", str(pid)])
     return said.strip() or None if said else None
+
+
+def _exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def _ancestors() -> set[int]:
     seen, pid = set(), os.getpid()
     for _ in range(64):
-        said = _said(["ps", "-o", "ppid=", "-p", str(pid)])
+        said = _said("ps", ["-o", "ppid=", "-p", str(pid)])
         try:
             pid = int(said.strip()) if said else 0
         except ValueError:
@@ -151,8 +205,13 @@ def _ancestors() -> set[int]:
 
 
 def _alive(state: dict) -> bool:
+    """A batch's process lives: its number is in use, and by the process that started when the record says. A
+    record whose start could not be read counts as alive only while its number is in use."""
     pid = state.get("pid")
-    return isinstance(pid, int) and pid > 0 and started_at(pid) == state.get("started")
+    if not isinstance(pid, int) or pid <= 0 or not _exists(pid):
+        return False
+    recorded = state.get("started")
+    return recorded is None or started_at(pid) == recorded
 
 
 # --- the readings of this computer --------------------------------------------------------------------------------
@@ -175,7 +234,7 @@ def read_top_memory(said: str) -> int | None:
 
 
 def _read_pressure() -> int:
-    said = _said(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+    said = _said("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])
     try:
         return int(said.strip())
     except (AttributeError, ValueError):
@@ -183,7 +242,7 @@ def _read_pressure() -> int:
 
 
 def _read_swap_used() -> int:
-    said = _said(["sysctl", "-n", "vm.swapusage"]) or ""
+    said = _said("sysctl", ["-n", "vm.swapusage"]) or ""
     found = re.search(r"used = (\d+(?:\.\d+)?)([KMG])", said)
     if not found:
         raise _ReadingFailed("swap")
@@ -192,7 +251,7 @@ def _read_swap_used() -> int:
 
 def _read_fseventsd() -> int | None:
     """The largest memory of the processes named fseventsd, by top; None when there is none."""
-    done = _run(["pgrep", "-x", "fseventsd"])
+    done = _run("pgrep", ["-x", "fseventsd"])
     if done is None or done.returncode not in (0, 1):
         raise _ReadingFailed("fseventsd")
     pids = done.stdout.split()
@@ -200,7 +259,7 @@ def _read_fseventsd() -> int | None:
         return None
     figures = []
     for pid in pids:
-        said = _said(["top", "-l", "1", "-pid", pid, "-stats", "mem"])
+        said = _said("top", ["-l", "1", "-pid", pid, "-stats", "mem"])
         lines = [line for line in (said or "").splitlines() if line.strip()]
         figure = read_top_memory(lines[-1]) if lines else None
         if figure is None:
@@ -210,7 +269,7 @@ def _read_fseventsd() -> int | None:
 
 
 def _read_once() -> dict:
-    readings = {"free_disk": free_disk(Path.home()), "pressure": _read_pressure(), "fseventsd": _read_fseventsd()}
+    readings = {"free_disk": free_disk(home()), "pressure": _read_pressure(), "fseventsd": _read_fseventsd()}
     if SETTINGS["swap_used_gb"] is not None:
         readings["swap_used"] = _read_swap_used()
     return readings
@@ -256,190 +315,253 @@ MESSAGES = {
 }
 
 
-# --- the words the frame adds, and the mounts it refuses ----------------------------------------------------------
+# --- the closed table ------------------------------------------------------------------------------------------------
 
-# options of `docker run` and `docker create` that take a value, and those that take none
-VALUE_OPTIONS = {
-    "--name", "--network", "--net", "--network-alias", "--user", "-u", "--memory", "-m", "--memory-swap",
-    "--memory-reservation", "--memory-swappiness", "--cpus", "--cpu-shares", "-c", "--cpuset-cpus", "--cpuset-mems",
-    "--cpu-period", "--cpu-quota", "--pids-limit", "--tmpfs", "-e", "--env", "--entrypoint", "--security-opt",
-    "--cap-add", "--cap-drop", "--label", "-l", "--workdir", "-w", "--ulimit", "--shm-size", "--stop-timeout",
-    "--stop-signal", "--platform", "--hostname", "-h", "--add-host", "--ipc", "--pid", "--cgroupns", "--restart",
-    "--log-driver", "--log-opt", "--runtime", "--userns", "--uts", "--expose", "-p", "--publish", "--dns",
-    "--dns-option", "--dns-search", "--group-add", "--health-cmd", "--health-interval", "--health-retries",
-    "--health-timeout", "--health-start-period", "--sysctl", "--oom-score-adj", "--blkio-weight", "--gpus",
-    "--mac-address", "--ip", "--ip6", "--attach", "-a", "--pull", "--storage-opt", "--domainname",
-    "--volume", "-v", "--mount",
+NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
+ABSOLUTE = r"/[^\x00-\x1f\x7f]*"
+IMAGE = r"[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?"
+
+# The options of `run` and `create`: the name the frame writes, the names it reads for it, and the shape of the value
+# (None: an option without a value). What is not here is refused; so is a value of another shape.
+START_OPTIONS = {
+    "--name": (("--name",), NAME),
+    "--network": (("--network",), r"none"),
+    "--user": (("--user",), r"0"),
+    "--memory": (("--memory",), r"\d{1,6}[mg]"),
+    "--memory-swap": (("--memory-swap",), r"\d{1,6}[mg]"),
+    "--cpus": (("--cpus",), r"\d{1,3}(?:\.\d{1,3})?"),
+    "--pids-limit": (("--pids-limit",), r"\d{1,7}"),
+    "--tmpfs": (("--tmpfs",), r"/[A-Za-z0-9_./-]*(?::[a-z0-9=,_]+)?"),
+    "--env": (("--env", "-e"), r"[A-Z_][A-Z0-9_]*=[^\n\r\x00]*"),
+    "--volume": (("--volume", "-v"), r"[^:\s\x00]+:/[^:\s\x00]*(?::(?:ro|rw))?"),
+    "--entrypoint": (("--entrypoint",), ABSOLUTE),
+    "--security-opt": (("--security-opt",), r"seccomp=unconfined"),
+    "--cap-add": (("--cap-add",), r"LINUX_IMMUTABLE"),
+    "--label": (("--label",), r"(?!dodam\.frame)[A-Za-z0-9._-]+=[A-Za-z0-9._:/=-]*"),
+    "--rm": (("--rm",), None),
+    "--detach": (("--detach",), None),
 }
-FLAG_OPTIONS = {"--rm", "--detach", "-d", "-i", "--interactive", "-t", "--tty", "--init", "--read-only",
-                "--oom-kill-disable", "--no-healthcheck", "-P", "--publish-all", "-q", "--quiet"}
-# options that hand the container a file, a device or the folders of this computer by another way
-REFUSED_OPTIONS = {"--env-file", "--label-file", "--device", "--device-cgroup-rule", "--volumes-from",
-                   "--privileged", "--cidfile"}
-SHORT_FLAGS = set("dit") | {"P", "q"}
-SHORT_VALUES = {"v": "--volume", "e": "--env", "u": "--user", "m": "--memory", "w": "--workdir", "h": "--hostname",
-                "p": "--publish", "a": "--attach", "l": "--label", "c": "--cpu-shares"}
-GLOBAL_FLAGS = {"-D", "--debug"}
-GLOBAL_VALUES = {"-l", "--log-level"}
+READ_AS = {given: written for written, (names, _) in START_OPTIONS.items() for given in names}
+ONCE = {"--name", "--network", "--user", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--entrypoint",
+        "--rm", "--detach"}
+INFO_FORMATS = ("{{.MemTotal}}", "{{.CgroupDriver}}")
+COMMANDS = ("run", "create", "start", "rm", "stop", "inspect", "cp", "ps", "info", "image inspect", "volume create",
+            "volume rm")
 
 
-def _options(words: list[str]) -> list[tuple[str, str | None]]:
-    """The options before the image, each with its value; refused when an option is not known."""
-    found, i = [], 0
-    while i < len(words):
-        word = words[i]
-        if word == "--" or not word.startswith("-") or word == "-":
-            break
-        if word.startswith("--"):
-            name, eq, value = word.partition("=")
-            if name in REFUSED_OPTIONS:
-                raise _refuse("option", f"the frame does not pass {name}: it hands the container what is not its own")
-            if name in FLAG_OPTIONS and not eq:
-                found.append((name, None))
-                i += 1
-            elif name in VALUE_OPTIONS:
-                if not eq:
-                    if i + 1 >= len(words):
-                        raise _refuse("option", f"{name} has no value")
-                    value = words[i + 1]
-                    i += 1
-                found.append((name, value))
-                i += 1
-            else:
-                raise _refuse("option", f"the frame does not know the option {name}")
+def _value(option: str, value: str, shape: str) -> None:
+    if not re.fullmatch(shape, value):
+        raise _refuse("value", f"the frame does not pass {option} with the value {value!r}")
+
+
+def read_command(words) -> dict:
+    """The structure of a container command, from its words; refused when the table does not have it."""
+    words = list(words)
+    if not words or words[0] != "docker":
+        raise _refuse("command", "a container command begins with the word docker")
+    rest = words[1:]
+    if rest and rest[0].startswith("-"):
+        raise _refuse("daemon_option", f"the frame does not pass {rest[0]}: the container tool talks to the container "
+                                       "machine of this computer only, with its own settings")
+    head = " ".join(rest[:2]) if rest[:1] in (["image"], ["volume"]) else (rest[0] if rest else "")
+    if head not in COMMANDS:
+        raise _refuse("command", f"the frame does not pass the command {' '.join(rest[:2]) or '(none)'}")
+    args = rest[len(head.split()):]
+    if head in ("run", "create"):
+        return _read_start(head, args)
+    return _read_other(head, args)
+
+
+def _read_start(head: str, args: list[str]) -> dict:
+    options, i = [], 0
+    while i < len(args) and args[i].startswith("-"):
+        given = args[i]
+        if given not in READ_AS:
+            raise _refuse("option", f"the frame does not pass the option {given} in this form")
+        written = READ_AS[given]
+        shape = START_OPTIONS[written][1]
+        if shape is None:
+            options.append((written, None))
+            i += 1
             continue
-        letters = word[1:]
-        for at, letter in enumerate(letters):
-            if letter in SHORT_FLAGS:
-                found.append((f"-{letter}", None))
-                continue
-            if letter in SHORT_VALUES:
-                value = letters[at + 1:].removeprefix("=")
-                if not value:
-                    if i + 1 >= len(words):
-                        raise _refuse("option", f"-{letter} has no value")
-                    value = words[i + 1]
-                    i += 1
-                found.append((SHORT_VALUES[letter], value))
-                break
-            raise _refuse("option", f"the frame does not know the option -{letter}")
+        if i + 1 >= len(args):
+            raise _refuse("option", f"{given} has no value")
+        _value(written, args[i + 1], shape)
+        options.append((written, args[i + 1]))
+        i += 2
+    names = [name for name, _ in options]
+    twice = sorted({n for n in names if n in ONCE and names.count(n) > 1})
+    if twice:
+        raise _refuse("option", f"the frame does not pass {twice[0]} twice")
+    if i >= len(args):
+        raise _refuse("value", "no image is named")
+    _value("the image", args[i], IMAGE)
+    return {"command": head, "options": options, "image": args[i], "args": args[i + 1:]}
+
+
+def _flags_then(head: str, args: list[str], allowed: dict, at_least: int, at_most: int | None) -> tuple[list, list]:
+    options, i = [], 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        given = args[i]
+        if given not in allowed:
+            raise _refuse("option", f"the frame does not pass {given} with {head}")
+        shape = allowed[given]
+        if shape is None:
+            options.append((given, None))
+            i += 1
+        else:
+            if i + 1 >= len(args):
+                raise _refuse("option", f"{given} has no value")
+            _value(given, args[i + 1], shape)
+            options.append((given, args[i + 1]))
+            i += 2
+    if i < len(args) and args[i] == "--":
         i += 1
-    return found
+    rest = args[i:]
+    if len(rest) < at_least or (at_most is not None and len(rest) > at_most):
+        raise _refuse("value", f"{head} is not given that many names here")
+    return options, rest
+
+
+def _read_other(head: str, args: list[str]) -> dict:
+    if head == "start":
+        options, rest = _flags_then(head, args, {"--attach": None}, 1, 1)
+        _names(rest)
+        return {"command": head, "options": options, "names": rest}
+    if head in ("rm", "stop"):
+        allowed = {"--force": None, "-f": None} if head == "rm" else {}
+        options, rest = _flags_then(head, args, allowed, 1, None)
+        _names(rest)
+        return {"command": head, "options": [("--force", None)] if options else [], "names": rest}
+    if head == "inspect":
+        options, rest = _flags_then(head, args, {"--type": r"container", "--format": r"\{\{\.Id\}\}"}, 1, 1)
+        _names(rest)
+        return {"command": head, "options": [], "names": rest}
+    if head == "cp":
+        _flags_then(head, args, {}, 2, 2)
+        return {"command": head, "options": [], "from": args[0], "to": args[1]}
+    if head == "ps":
+        options, _ = _flags_then(head, args, {"--all": None, "-a": None, "--quiet": None, "-q": None,
+                                              "--no-trunc": None,
+                                              "--filter": r"label=[A-Za-z0-9._-]+(?:=[A-Za-z0-9._-]+)?"}, 0, 0)
+        long = {"-a": "--all", "-q": "--quiet"}
+        return {"command": head, "options": [(long.get(n, n), v) for n, v in options]}
+    if head == "info":
+        options, _ = _flags_then(head, args, {"--format": "|".join(re.escape(f) for f in INFO_FORMATS)}, 0, 0)
+        if not options:
+            raise _refuse("option", "info is passed with one of its two formats only")
+        return {"command": head, "options": options}
+    if head == "image inspect":
+        _, rest = _flags_then(head, args, {}, 1, 1)
+        _value("the image", rest[0], IMAGE)
+        return {"command": head, "options": [], "names": rest}
+    if head == "volume create":
+        _, rest = _flags_then(head, args, {}, 1, 1)
+        _names(rest)
+        return {"command": head, "options": [], "names": rest}
+    if head == "volume rm":
+        options, rest = _flags_then(head, args, {"--force": None, "-f": None}, 1, None)
+        _names(rest)
+        return {"command": head, "options": [("--force", None)] if options else [], "names": rest}
+    raise _refuse("command", f"the frame does not pass the command {head}")
+
+
+def _names(names: list[str]) -> None:
+    for name in names:
+        if not re.fullmatch(NAME, name):
+            raise _refuse("value", f"{name!r} is not a name the frame passes")
+
+
+def write_command(structure: dict) -> list[str]:
+    """The words of the command, written from its structure (without the program)."""
+    head = structure["command"]
+    if head == "inspect":
+        return ["inspect", "--type", "container", "--format", "{{.Id}}", "--", *structure["names"]]
+    words = head.split()
+    for name, value in structure.get("options", []):
+        words += [name] if value is None else [name, value]
+    if head in ("run", "create"):
+        return words + [structure["image"], *structure["args"]]
+    if head == "cp":
+        return words + [structure["from"], structure["to"]]
+    if "names" in structure:
+        return words + (["--"] if head in ("rm", "stop", "volume rm") else []) + structure["names"]
+    return words
+
+
+# --- what may be mounted or copied -----------------------------------------------------------------------------------
+
+# Folders under the home folder that are never mounted or copied, nor a folder that holds one of them.
+SENSITIVE = (".dodam", ".dodam-desk", ".ssh", ".gnupg", ".aws", ".config", ".docker", ".colima", ".claude",
+             ".codex", ".gemini", ".kube", ".netrc", "Library", ".git-credentials")
+# Beginnings of names that no folder named on a call may have on its way: other runs of the frame, the Gemini job's
+# folders, other sessions' scratch, and the sensitive folders.
+NEVER_ON_THE_WAY = ("dodam-frame", "dodam-gemini", "claude-", ".dodam", ".ssh", ".aws", ".gnupg", ".config",
+                    "git-credentials")
 
 
 def _within(path: Path, folder: Path) -> bool:
     return path == folder or folder in path.parents
 
 
-def _work_tree(path) -> Path:
-    """A work tree named to the frame: a folder with its history, not the home folder, a folder above it, or
-    a sensitive folder or one inside it."""
+def _temporary_roots() -> list[Path]:
+    return sorted({Path(os.path.realpath(p)) for p in ("/tmp", "/private/tmp", tempfile.gettempdir())})
+
+
+def named_folder(path) -> Path:
+    """A folder named on a call in code: inside a git work tree, or below the temporary area; never the home
+    folder, a folder above it, a sensitive folder, a temporary root, or a folder of another run, job or session."""
     real = Path(os.path.realpath(path))
-    home = Path(os.path.realpath(Path.home()))
-    if not (real / ".git").exists() or _within(home, real):
-        raise _refuse("mount", f"{path} is not a work tree the frame may mount")
-    if any(_within(real, home / name) for name in SENSITIVE):
-        raise _refuse("mount", f"{path} lies in a sensitive folder of this computer")
+    mine = home()
+    if not real.is_dir() or real.stat().st_uid != os.getuid():
+        raise _refuse("mount", f"{path} is not a folder of this account")
+    if _within(mine, real) or any(_within(real, mine / name) for name in SENSITIVE):
+        raise _refuse("mount", f"{path} is the home folder, above it, or a sensitive folder")
+    if any(part.startswith(NEVER_ON_THE_WAY) for part in real.parts):
+        raise _refuse("mount", f"{path} lies in a folder of another run, job or session, or a sensitive one")
+    if _within(real, Path(os.path.realpath("/var/tmp"))):
+        raise _refuse("mount", f"{path} lies below /var/tmp")
+    roots = _temporary_roots()
+    if real in roots:
+        raise _refuse("mount", f"{path} is the temporary area itself")
+    below_temporary = any(_within(real, root) for root in roots)
+    in_work_tree = any((above / ".git").exists() and not _within(mine, above) for above in (real, *real.parents))
+    if not (below_temporary or in_work_tree):
+        raise _refuse("mount", f"{path} is neither inside a work tree nor below the temporary area")
     return real
 
 
-def _bind_allowed(source: str, allowed: list[Path]) -> bool:
-    real = Path(os.path.realpath(source))
+def _host_path_allowed(path: str, allowed: list[Path]) -> Path:
+    """A path of this computer that may be mounted or copied: in an allowed folder after its links are followed,
+    not a socket, and in no sensitive folder."""
+    real = Path(os.path.realpath(path))
+    mine = home()
     try:
         if stat.S_ISSOCK(os.stat(real).st_mode):
-            return False
+            raise _refuse("mount", f"{path} is a socket")
     except OSError:
         pass
-    home = Path(os.path.realpath(Path.home()))
-    if any(_within(real, home / name) for name in SENSITIVE):
-        return False
-    return any(_within(real, folder) for folder in allowed)
+    if any(_within(real, mine / name) for name in SENSITIVE) or not any(_within(real, a) for a in allowed):
+        raise _refuse("mount", f"the frame does not mount or copy {path}: only its own temporary folder and the "
+                               "folders named on the call")
+    return real
 
 
-def _check_mounts(options: list[tuple[str, str | None]], allowed: list[Path], machine=()) -> None:
-    binds, given = [], []
-    for name, value in options:
-        if name == "--label" and value is not None and value.split("=", 1)[0] == LABEL:
-            raise _refuse("option", "the mark of a batch is given by the frame only")
-        if name == "--volume":
-            source = value.split(":", 1)[0] if ":" in value else ""
-            if not source or ("/" not in source and not source.startswith((".", "~"))):
-                continue  # a named volume of the container machine, or an anonymous one
-            kind, path = "bind", source
-        elif name == "--mount":
-            fields = dict(part.partition("=")[::2] for part in value.split(","))
-            kind = fields.get("type", "volume")
-            if kind in ("volume", "tmpfs"):
-                continue
-            if kind != "bind":
-                raise _refuse("mount", f"the frame does not mount the kind {kind}")
-            path = fields.get("source") or fields.get("src") or ""
-        else:
-            continue
-        if path in machine and any(p.fullmatch(path) for p in MACHINE_PATHS) and posixpath.normpath(path) == path:
-            given.append(path)
-        elif _bind_allowed(path, allowed):
-            binds.append(path)
-        else:
-            raise _refuse("mount", f"the frame does not mount {path}: only its own temporary folder and the work "
-                                   "trees named to it")
-    if given:
-        network = [value for name, value in options if name in ("--network", "--net")]
-        if network != ["none"] or binds:
-            raise _refuse("mount", "the folders of the container machine are given only to a container without "
-                                   "network and without any folder of this computer")
+# The folders of the container machine that code may name for one container: a judged container's folder of the
+# kernel's, and the machine's file for letting go of unused records.
+MACHINE_GROUP = re.compile(r"/sys/fs/cgroup/(?:docker/([0-9a-f]{64})|system\.slice/docker-([0-9a-f]{64})\.scope)")
+MACHINE_DROP = "/proc/sys/vm/" + "drop" + "_caches"
 
 
-def _subcommand(cmd: list[str]) -> tuple[int, str]:
-    """Where the words of the subcommand start (after the program's own options) and what it is."""
-    i = 1
-    while i < len(cmd) and cmd[i].startswith("-"):
-        name = cmd[i].partition("=")[0]
-        if name in GLOBAL_FLAGS:
-            i += 1
-        elif name in GLOBAL_VALUES:
-            i += 1 if "=" in cmd[i] else 2
-        else:
-            raise _refuse("daemon_option", f"the frame does not pass {name}: the container command talks to the "
-                                           "container machine of this computer only")
-    sub = cmd[i] if i < len(cmd) else ""
-    if sub == "container" and i + 1 < len(cmd):
-        return i + 2, cmd[i + 1]
-    return i + 1, sub
+# --- the batch's state ------------------------------------------------------------------------------------------------
+
+def default_root() -> Path:
+    """One folder for every session of this user: not the temporary folder of a session, which may differ."""
+    return Path("/tmp").resolve() / f"dodam-frame-{os.getuid()}"
 
 
-def frame_words(cmd: list[str], run_id: str, cids: Path, allowed: list[Path], machine=()) -> list[str]:
-    """A command with the frame's words: for a command that makes a container, the mark and the file for its id
-    right after the subcommand, once its mounts are checked; any other command as it was."""
-    cmd = list(cmd)
-    at, sub = _subcommand(cmd)
-    if sub not in ("run", "create"):
-        return cmd
-    given = cmd[at:at + 4]
-    if (len(given) == 4 and given[:3] == ["--label", f"{LABEL}={run_id}", "--cidfile"]
-            and Path(given[3]).parent == cids):
-        # framed already, in this batch, by the code that runs inside a frame run: its mounts are checked again
-        _check_mounts(_options(cmd[at + 4:]), allowed, machine)
-        return cmd
-    _check_mounts(_options(cmd[at:]), allowed, machine)
-    cidfile = cids / secrets.token_hex(8)
-    return cmd[:at] + ["--label", f"{LABEL}={run_id}", "--cidfile", str(cidfile)] + cmd[at:]
+ROOT = default_root()
 
-
-def _approval(folder: Path, words: list[str]) -> Path:
-    digest = hashlib.sha256(json.dumps(words[1:]).encode("utf-8")).hexdigest()
-    return folder / "approved" / digest
-
-
-def approve(folder: Path, words: list[str]) -> None:
-    """A command that code of the batch framed with folders of the container machine: the container command of
-    the batch passes that exact command once. Folders of the machine are never named to the container command."""
-    place = _approval(folder, words)
-    place.parent.mkdir(mode=0o700, exist_ok=True)
-    place.write_text("", encoding="utf-8")
-
-
-# --- the batch ------------------------------------------------------------------------------------------------------
 
 def _safe_root() -> Path:
     root = Path(ROOT)
@@ -473,11 +595,17 @@ def _write_state(folder: Path, state: dict) -> None:
 
 
 def _docker(args: list[str]) -> subprocess.CompletedProcess | None:
-    return _run(["docker", *args])
+    return _run("docker", args)
 
 
-def _label_of(ident: str) -> str | None:
-    done = _docker(["inspect", "--format", '{{index .Config.Labels "' + LABEL + '"}}', ident])
+def _label_of(name: str) -> str | None:
+    """The mark a container carries, asked of the tool as a container, never of any object of that name."""
+    done = _docker(["inspect", "--type", "container", "--format", '{{index .Config.Labels "' + LABEL + '"}}', "--", name])
+    return done.stdout.strip() if done is not None and done.returncode == 0 else None
+
+
+def _volume_label_of(name: str) -> str | None:
+    done = _docker(["volume", "inspect", "--format", '{{index .Labels "' + LABEL + '"}}', "--", name])
     return done.stdout.strip() if done is not None and done.returncode == 0 else None
 
 
@@ -489,9 +617,9 @@ def _say(said: dict) -> None:
 
 
 def collect(folder: Path, run_id: str) -> bool:
-    """Remove the containers and named volumes of one batch: the ids its files hold and the ids listed by its
-    exact mark, each confirmed to carry that mark, removed by id; volumes by name, also after their mark is
-    confirmed. True when nothing of the batch is left that could not be removed."""
+    """Remove the containers and volumes of one batch: the ids its files hold and the ids listed by its exact
+    mark, each confirmed to carry that mark, removed by id; volumes by name, also after their mark is confirmed.
+    True only when nothing of the batch is left."""
     cids = folder / "cids"
     named = [p.read_text(encoding="utf-8").strip() for p in sorted(cids.glob("*"))] if cids.is_dir() else []
     volumes = [p.name for p in sorted((folder / "volumes").glob("*"))] if (folder / "volumes").is_dir() else []
@@ -500,29 +628,30 @@ def collect(folder: Path, run_id: str) -> bool:
         return True
     listed = _docker(["ps", "--all", "--quiet", "--no-trunc", "--filter", f"label={LABEL}={run_id}"])
     if listed is None or listed.returncode != 0:
-        _say({"collect": "the container command did not answer", "run": run_id})
+        _say({"collect": "the container tool did not answer", "run": run_id})
         return False
     ids = sorted({i for i in named + listed.stdout.split() if ID_RE.fullmatch(i)})
     own = [ident for ident in ids if _label_of(ident) == run_id]
     whole = True
     if own:
-        done = _docker(["rm", "--force", *own])
+        done = _docker(["rm", "--force", "--", *own])
         whole = done is not None and done.returncode == 0
     for name in volumes:
-        done = _docker(["volume", "inspect", "--format", '{{index .Labels "' + LABEL + '"}}', name])
-        if done is not None and done.returncode == 0 and done.stdout.strip() == run_id:
-            _docker(["volume", "rm", name])
+        if _volume_label_of(name) == run_id:
+            done = _docker(["volume", "rm", "--force", "--", name])
+            whole = whole and done is not None and done.returncode == 0
     return whole
 
 
-def end_group(pgid: int | None, leader_started: str | None, grace: float | None = None) -> None:
-    """End the programs of one process group: asked first, then made to. A group whose leader is alive and is
-    another program than the one recorded is left alone."""
+def end_group(pgid: int | None, leader_started: str | None, grace: float | None = None, own: bool = False) -> None:
+    """End the programs of one process group: asked first, then made to. Only a group the caller started itself
+    (`own`) or one whose leader lives and is the program recorded gets a signal."""
     if not pgid or pgid <= 1:
         return
-    leader = started_at(pgid)
-    if leader is not None and leader_started is not None and leader != leader_started:
-        return
+    if not own:
+        leader = started_at(pgid)
+        if leader is None or leader_started is None or leader != leader_started:
+            return
     for sig, wait in ((signal.SIGTERM, float(SETTINGS["end_seconds"]) if grace is None else grace), (signal.SIGKILL, 2)):
         try:
             os.killpg(pgid, sig)
@@ -555,20 +684,130 @@ def clean_earlier(root: Path, own: str | None = None) -> None:
             _say({"cleaned": folder.name})
 
 
-def _shim_text(folder: Path, real: str | None) -> str:
+def _shim_text(folder: Path, mode: str) -> str:
     return (f"#!{sys.executable} -I\n"
             "import importlib.util, sys\n"
             f"spec = importlib.util.spec_from_file_location('dodam_frame_shim', {str(Path(__file__).resolve())!r})\n"
             "frame = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(frame)\n"
-            f"sys.exit(frame.shim({str(folder)!r}, {real!r}, sys.argv[1:]))\n")
+            f"frame.use_tools(**{dict(TOOLS)!r})\n"
+            f"sys.exit(frame.shim({str(folder)!r}, {mode!r}, sys.argv[1:]))\n")
 
 
-class Batch:
+class _Checks:
+    """What a batch checks a command against: shared by a batch of its own and a batch joined from a frame run."""
+
+    folder: Path
+    run_id: str
+    tmp: Path
+    worktrees: list[Path]
+
+    def _stopped_reason(self) -> str | None:
+        return getattr(self, "_refusing", None) or (_read_state(self.folder) or {}).get("stopped")
+
+    def _refuse_if_stopped(self) -> None:
+        reason = self._stopped_reason()
+        if reason:
+            raise FrameStopped({"refused": True, "reason": reason, "message": MESSAGES.get(reason, reason)})
+
+    def _made(self) -> None:
+        state = _read_state(self.folder)
+        if state is not None and not state.get("made"):
+            state["made"] = True
+            _write_state(self.folder, state)
+
+    def made(self) -> None:
+        """Note that the batch made a container by another way (the pilot's Harbor), so that space is given back."""
+        state = _read_state(self.folder)
+        if state is not None:
+            state.update(made=True, by_other_way=True)
+            _write_state(self.folder, state)
+
+    def _own(self, name: str) -> bool:
+        return _label_of(name) == self.run_id
+
+    def checked(self, structure: dict, allow=(), machine=()) -> list[str]:
+        """The words for the tool, from a structure the table has, once everything it names is the batch's."""
+        self._refuse_if_stopped()
+        allowed = [Path(os.path.realpath(self.tmp))] + list(self.worktrees) + [named_folder(p) for p in allow]
+        head = structure["command"]
+        if head in ("run", "create"):
+            self._check_start(structure, allowed, tuple(machine))
+            cid = self.folder / "cids" / secrets.token_hex(8)
+            self._made()
+            words = write_command(structure)
+            return words[:1] + ["--label", f"{LABEL}={self.run_id}", "--cidfile", str(cid)] + words[1:]
+        if head in ("start", "rm", "stop", "inspect"):
+            for name in structure["names"]:
+                if not self._own(name):
+                    raise _refuse("not_own", f"{name} is not a container of this batch")
+        elif head == "cp":
+            self._check_copy(structure, allowed)
+        elif head == "volume create":
+            [name] = structure["names"]
+            (self.folder / "volumes" / name).write_text("", encoding="utf-8")
+            return ["volume", "create", "--label", f"{LABEL}={self.run_id}", name]
+        elif head == "volume rm":
+            for name in structure["names"]:
+                if not (self.folder / "volumes" / name).exists() or _volume_label_of(name) != self.run_id:
+                    raise _refuse("not_own", f"{name} is not a volume of this batch")
+        return write_command(structure)
+
+    def _check_start(self, structure: dict, allowed: list[Path], machine: tuple) -> None:
+        options = structure["options"]
+        network = [v for n, v in options if n == "--network"]
+        binds, given = [], []
+        for name, value in options:
+            if name != "--volume":
+                continue
+            source = value.split(":", 1)[0]
+            if "/" not in source:
+                if not (self.folder / "volumes" / source).exists():
+                    raise _refuse("mount", f"the volume {source} was not made by this batch")
+                continue
+            if source in machine and posixpath.normpath(source) == source:
+                group = MACHINE_GROUP.fullmatch(source)
+                if source == MACHINE_DROP or (group and self._own(group.group(1) or group.group(2))):
+                    given.append(source)
+                    continue
+                raise _refuse("mount", f"{source} is not a folder of the container machine that a container of this "
+                                       "batch may be given")
+            _host_path_allowed(source, allowed)
+            binds.append(source)
+        if given and (network != ["none"] or binds):
+            raise _refuse("mount", "the folders of the container machine are given only to a container without "
+                                   "network and without any folder of this computer")
+
+    def _check_copy(self, structure: dict, allowed: list[Path]) -> None:
+        sides = [structure["from"], structure["to"]]
+        inside = [s for s in sides if not s.startswith(("/", ".")) and re.fullmatch(NAME + r":.*", s)]
+        if len(inside) != 1:
+            raise _refuse("value", "a copy goes between this computer and one container of this batch")
+        name, _, path = inside[0].partition(":")
+        if not re.fullmatch(ABSOLUTE, path):
+            raise _refuse("value", f"the path in the container, {path!r}, is not absolute")
+        if not self._own(name):
+            raise _refuse("not_own", f"{name} is not a container of this batch")
+        host = sides[1] if inside[0] == sides[0] else sides[0]
+        keep_dot = host.endswith("/.")
+        real = _host_path_allowed(host[:-2] if keep_dot else host, allowed)
+        written = f"{real}/." if keep_dot else str(real)
+        if host == sides[0]:
+            structure["from"] = written
+            # what lies in a folder copied from this computer, links followed, must stay in the allowed folders
+            if real.is_dir():
+                for below in real.rglob("*"):
+                    if below.is_symlink():
+                        _host_path_allowed(str(below), allowed)
+        else:
+            structure["to"] = written
+
+
+class Batch(_Checks):
     """One batch: the lock, the readings, the mark, and its end."""
 
-    def __init__(self, worktrees=(), shim: bool = False, on_stop=None):
-        self.worktrees = [_work_tree(w) for w in worktrees]
+    def __init__(self, worktrees=(), shim: bool | str = False, on_stop=None):
+        self.worktrees = [named_folder(w) for w in worktrees]
         self.shim = shim
         self.on_stop = on_stop
         self.run_id = secrets.token_hex(16)
@@ -623,8 +862,8 @@ class Batch:
                 (self.folder / name).mkdir(mode=0o700)
             self.tmp = self.folder / "tmp"
             if self.shim:
-                real = shutil.which("docker")
-                (self.folder / "bin" / "docker").write_text(_shim_text(self.folder, real), encoding="utf-8")
+                mode = "refuse" if self.shim == "refuse" else "check"
+                (self.folder / "bin" / "docker").write_text(_shim_text(self.folder, mode), encoding="utf-8")
                 (self.folder / "bin" / "docker").chmod(0o700)
             if PLATFORM == "darwin":
                 self._watch = threading.Thread(target=self._measure, name="dodam-frame-readings", daemon=True)
@@ -653,45 +892,21 @@ class Batch:
                 return
 
     def stop(self, reason: str, read: dict | None = None) -> None:
-        """Past a line: remove the batch's containers, start no more, and tell whoever runs the batch."""
+        """Past a line: start no more, tell whoever runs the batch, which stops its programs, and remove the
+        batch's containers."""
         self._refusing = reason
         state = _read_state(self.folder)
         if state is not None:
-            state["stopped"] = reason  # the container command of the batch's programs refuses from now on
+            state["stopped"] = reason
             _write_state(self.folder, state)
         _say({"stopped": reason, "message": MESSAGES.get(reason, reason), "readings": read, "run": self.run_id})
-        collect(self.folder, self.run_id)
         if self.on_stop is not None:
-            self.on_stop(reason)
+            try:
+                self.on_stop(reason)
+            except Exception as exc:  # noqa: BLE001 - the stop goes on; what failed is said
+                _say({"on_stop": f"{type(exc).__name__}: {exc}"})
+        collect(self.folder, self.run_id)
         self.stopped = reason
-
-    def container(self, cmd, allow=(), machine=()) -> list[str]:
-        self._refuse_if_stopped()
-        allowed = [Path(os.path.realpath(self.tmp))] + self.worktrees + [_work_tree(p) for p in allow]
-        words = frame_words(list(cmd), self.run_id, self.folder / "cids", allowed, tuple(machine))
-        if words != list(cmd):
-            self._made()
-        if machine:
-            approve(self.folder, words)
-        return words
-
-    def _made(self) -> None:
-        state = _read_state(self.folder)
-        if state is not None and not state.get("made"):
-            state["made"] = True
-            _write_state(self.folder, state)
-
-    def _refuse_if_stopped(self) -> None:
-        reason = getattr(self, "_refusing", None)
-        if reason:
-            raise FrameStopped({"refused": True, "reason": reason, "message": MESSAGES.get(reason, "")})
-
-    def volume(self, name: str) -> list[str]:
-        self._refuse_if_stopped()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-            raise _refuse("option", f"{name!r} is not a name of a volume")
-        (self.folder / "volumes" / name).write_text("", encoding="utf-8")
-        return ["docker", "volume", "create", "--label", f"{LABEL}={self.run_id}", name]
 
     def env(self) -> dict[str, str]:
         """What the programs of the batch are given: the batch's run, its temporary folder and, with the
@@ -701,10 +916,16 @@ class Batch:
             env["PATH"] = f"{self.folder / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
         return env
 
-    def record_group(self, pgid: int) -> None:
+    def record_group(self, pgid: int, own: bool = False) -> None:
         state = _read_state(self.folder) or {}
-        state.update(pgid=pgid, child_started=started_at(pgid))
+        state.update(pgid=pgid, child_started=started_at(pgid), own_group=own)
         _write_state(self.folder, state)
+
+    def run(self, words, *, allow=(), machine=(), **kwargs) -> subprocess.CompletedProcess:
+        return _start(self, words, allow, machine, subprocess.run, kwargs)
+
+    def popen(self, words, *, allow=(), machine=(), **kwargs) -> subprocess.Popen:
+        return _start(self, words, allow, machine, subprocess.Popen, kwargs)
 
     # its end
 
@@ -723,8 +944,8 @@ class Batch:
         self._ended.set()
         try:
             state = _read_state(self.folder) or {}
-            made = any((self.folder / "cids").glob("*"))
-            end_group(state.get("pgid"), state.get("child_started"))
+            made = bool(state.get("by_other_way")) or any((self.folder / "cids").glob("*"))
+            end_group(state.get("pgid"), state.get("child_started"), own=bool(state.get("own_group")))
             whole = collect(self.folder, self.run_id)
             shutil.rmtree(self.tmp, ignore_errors=True)
             if whole:
@@ -740,18 +961,18 @@ def give_space_back() -> None:
     at all runs on it. Never more: no pruning, no image removed, the machine neither started nor stopped."""
     if PLATFORM != "darwin":
         return
-    status = _run(["colima", "status"], seconds=SETTINGS["trim_seconds"])
+    status = _run("colima", ["status"], seconds=SETTINGS["trim_seconds"])
     if status is None or status.returncode != 0:
         return
     running = _docker(["ps", "--quiet"])
     if running is None or running.returncode != 0 or running.stdout.strip():
         return
-    done = _run(["colima", "ssh", "--", "sudo", "fstrim", "-a"], seconds=SETTINGS["trim_seconds"])
+    done = _run("colima", ["ssh", "--", "sudo", "fstrim", "-a"], seconds=SETTINGS["trim_seconds"])
     if done is None or done.returncode != 0:
         _say({"trim": "the container machine's disk was not trimmed"})
 
 
-class Joined:
+class Joined(_Checks):
     """A process inside a frame run: its containers carry that run's mark and are collected by that run."""
 
     def __init__(self, folder: Path, state: dict):
@@ -761,43 +982,42 @@ class Joined:
         self.worktrees = [Path(w) for w in state.get("worktrees", [])]
         self.stopped = None
 
-    def _refuse_if_stopped(self) -> None:
-        reason = (_read_state(self.folder) or {}).get("stopped")
-        if reason:
-            raise FrameStopped({"refused": True, "reason": reason, "message": MESSAGES.get(reason, "")})
-
-    def container(self, cmd, allow=(), machine=()) -> list[str]:
-        self._refuse_if_stopped()
-        allowed = [Path(os.path.realpath(self.tmp))] + self.worktrees + [_work_tree(p) for p in allow]
-        words = frame_words(list(cmd), self.run_id, self.folder / "cids", allowed, tuple(machine))
-        if words != list(cmd):
-            Batch._made(self)  # type: ignore[arg-type]
-        if machine:
-            approve(self.folder, words)
-        return words
-
-    def volume(self, name: str) -> list[str]:
-        return Batch.volume(self, name)  # type: ignore[arg-type]
-
     def env(self) -> dict[str, str]:
         return Batch.env(self)  # type: ignore[arg-type]
+
+    def run(self, words, *, allow=(), machine=(), **kwargs) -> subprocess.CompletedProcess:
+        return _start(self, words, allow, machine, subprocess.run, kwargs)
+
+    def popen(self, words, *, allow=(), machine=(), **kwargs) -> subprocess.Popen:
+        return _start(self, words, allow, machine, subprocess.Popen, kwargs)
 
     def close(self) -> None:
         pass
 
 
+def _start(held: _Checks, words, allow, machine, starter, kwargs):
+    structure = read_command(words)
+    written = held.checked(structure, allow=allow, machine=machine)
+    kwargs = dict(kwargs)
+    kwargs["env"] = tool_env(kwargs.get("env"))
+    program = TOOLS.get("docker") or ""
+    if not program:
+        raise _refuse("no_tool", "the container tool is not at its fixed place")
+    return starter([program, *written], **kwargs)
+
+
 # --- the batch of a process ---------------------------------------------------------------------------------------
 
 _current: Batch | Joined | None = None
-_guard = threading.Lock()
+_guard = threading.RLock()
 
 
 def _outer() -> Joined | None:
-    run = os.environ.get("DODAM_FRAME_RUN", "")
-    if not RUN_RE.fullmatch(run):
+    run_id = os.environ.get("DODAM_FRAME_RUN", "")
+    if not RUN_RE.fullmatch(run_id):
         return None
     root = _safe_root()
-    folder = root / "runs" / run
+    folder = root / "runs" / run_id
     state = _read_state(folder)
     if state is None or not _alive(state) or state.get("pid") not in _ancestors() | {os.getpid()}:
         return None
@@ -817,7 +1037,7 @@ def current() -> Batch | Joined | None:
     return _current
 
 
-def _process_batch(**options) -> Batch | Joined:
+def _process_batch() -> Batch | Joined:
     global _current
     with _guard:
         if _current is None:
@@ -825,7 +1045,7 @@ def _process_batch(**options) -> Batch | Joined:
             if joined is not None:
                 _current = joined
             else:
-                _current = Batch(on_stop=options.pop("on_stop", _interrupt), **options).open()
+                _current = Batch(on_stop=_interrupt).open()
                 atexit.register(close)
                 if threading.current_thread() is threading.main_thread() and \
                         signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
@@ -833,15 +1053,30 @@ def _process_batch(**options) -> Batch | Joined:
         return _current
 
 
-def container(cmd, allow=(), machine=()) -> list[str]:
-    """The command with the frame's words, in this process's batch (opened at the first container). `allow`
-    names work trees that may be mounted; `machine` names, exactly, folders of the container machine."""
-    return _process_batch().container(cmd, allow=allow, machine=machine)
+# Questions that make nothing and name nothing of a batch: asked without opening one, so that asking whether an
+# image is there takes no lock.
+QUESTIONS = ("image inspect", "info")
 
 
-def volume(name: str) -> list[str]:
-    """The command that makes a named volume with the batch's mark; the batch removes it at its end."""
-    return _process_batch().volume(name)
+def run(words, *, allow=(), machine=(), **kwargs) -> subprocess.CompletedProcess:
+    """Run a container command in this process's batch (opened at the first command): read, checked, written anew
+    and started by the frame. `allow` names folders that may be mounted or copied; `machine` names, exactly, folders
+    of the container machine for a container without network. Both only by keyword, only in code."""
+    if _current is None and not allow and not machine:
+        structure = read_command(words)
+        if structure["command"] in QUESTIONS:
+            kwargs = dict(kwargs)
+            kwargs["env"] = tool_env(kwargs.get("env"))
+            program = TOOLS.get("docker") or ""
+            if not program:
+                raise _refuse("no_tool", "the container tool is not at its fixed place")
+            return subprocess.run([program, *write_command(structure)], **kwargs)
+    return _process_batch().run(words, allow=allow, machine=machine, **kwargs)
+
+
+def popen(words, *, allow=(), machine=(), **kwargs) -> subprocess.Popen:
+    """The same, for a command whose end the caller waits for itself."""
+    return _process_batch().popen(words, allow=allow, machine=machine, **kwargs)
 
 
 def close() -> None:
@@ -879,40 +1114,6 @@ def batch(**options):
         made.close()
 
 
-# --- not built yet: the one place of enforcing (names only, so that its tests fail on what it does) ---------------
-
-TOOLS: dict[str, str] = {"docker": shutil.which("docker") or "/usr/bin/docker"}
-
-
-def use_tools(**paths: str) -> dict[str, str]:
-    before = dict(TOOLS)
-    TOOLS.clear()
-    TOOLS.update(before if not paths else {**before, **paths})
-    return before
-
-
-def run(words, *, allow=(), machine=(), **kwargs) -> subprocess.CompletedProcess:
-    cmd = container(list(words), allow=allow, machine=machine)
-    return subprocess.run([TOOLS["docker"], *cmd[1:]], **kwargs)
-
-
-def popen(words, *, allow=(), machine=(), **kwargs) -> subprocess.Popen:
-    cmd = container(list(words), allow=allow, machine=machine)
-    return subprocess.Popen([TOOLS["docker"], *cmd[1:]], **kwargs)
-
-
-def read_command(words) -> dict:
-    return {"words": list(words)[1:]}
-
-
-def write_command(structure: dict) -> list[str]:
-    return list(structure["words"])
-
-
-def home() -> Path:
-    return Path.home()
-
-
 # --- the container command of a frame run ------------------------------------------------------------------------
 
 def _shim_refuse(reason: str, message: str) -> int:
@@ -920,84 +1121,50 @@ def _shim_refuse(reason: str, message: str) -> int:
     return 2
 
 
-def _targets(words: list[str]) -> list[str]:
-    valued = {"-t", "--time", "-s", "--signal", "--format", "-f"}
-    found, i = [], 0
-    while i < len(words):
-        word = words[i]
-        if word.startswith("-"):
-            i += 2 if word in valued else 1
-            continue
-        found.append(word)
-        i += 1
-    return found
-
-
-def shim(folder: str, real: str | None, args: list[str]) -> int:
-    """The container command that a frame run puts first on the path of its programs."""
+def shim(folder: str, mode: str, args: list[str]) -> int:
+    """The container command that a frame run puts first on the path of its programs: the same reading and checks
+    as code gets, without folders named on a call or folders of the container machine. In the mode `refuse` it
+    refuses every call."""
+    if mode == "refuse":
+        return _shim_refuse("refuse_all", "in the automatic check the container tool is reached only through the "
+                                          "frame's code")
     folder_path = Path(folder)
     state = _read_state(folder_path)
-    if state is None or real is None:
-        return _shim_refuse("no_batch", "the frame's batch or the container command is not there")
-    run_id = folder_path.name
-    cmd = [real, *args]
+    program = TOOLS.get("docker") or ""
+    if state is None or not program:
+        return _shim_refuse("no_batch", "the frame's batch or the container tool is not there")
+    joined = Joined(folder_path, state)
     try:
-        at, sub = _subcommand(cmd)
+        written = joined.checked(read_command(["docker", *args]))
     except FrameRefused as refused:
         return _shim_refuse(refused.said["reason"], refused.said["message"])
-    words = cmd[at - 1:]
-    second = cmd[at] if at < len(cmd) else ""
-    if sub == "prune" or second == "prune":
-        return _shim_refuse("prune", "nothing is ever pruned: the frame removes its own containers by their ids")
-    if sub == "rmi" or (sub == "image" and second in ("rm", "remove")):
-        return _shim_refuse("image_removal", "images are never removed")
-    if sub in ("run", "create"):
-        joined = Joined(folder_path, state)
-        approved = _approval(folder_path, cmd)
-        try:
-            if approved.exists():
-                approved.unlink()  # framed by code of the batch with folders of the machine: passed once
-            else:
-                cmd = joined.container(cmd)
-        except FrameRefused as refused:
-            return _shim_refuse(refused.said["reason"], refused.said["message"])
-    elif sub in ("rm", "kill", "stop", "restart", "pause", "unpause", "update"):
-        for target in _targets(words[1:]):
-            done = _run([real, "inspect", "--format", '{{index .Config.Labels "' + LABEL + '"}}', target])
-            if done is None or done.returncode != 0 or done.stdout.strip() != run_id:
-                return _shim_refuse("not_own", f"{target} is not a container of this batch")
-    elif sub == "volume" and second in ("rm", "remove"):
-        for target in _targets(cmd[at + 1:]):
-            done = _run([real, "volume", "inspect", "--format", '{{index .Labels "' + LABEL + '"}}', target])
-            if done is None or done.returncode != 0 or done.stdout.strip() != run_id:
-                return _shim_refuse("not_own", f"{target} is not a volume of this batch")
-    os.execv(real, cmd)
+    os.execve(program, [program, *written], tool_env())
     return 0
 
 
 # --- the command --------------------------------------------------------------------------------------------------
 
-def run_command(command: list[str], worktrees: list[str]) -> int:
+def run_command(command: list[str], worktrees: list[str], refuse_all: bool = False) -> int:
     child: subprocess.Popen | None = None
+    stop = {"signal": None}
 
     def stop_child(reason: str) -> None:
         if child is not None:
-            end_group(child.pid, None)
-
-    try:
-        held = Batch(worktrees=worktrees, shim=True, on_stop=stop_child).open()
-    except FrameRefused as refused:
-        print(json.dumps(refused.said), file=sys.stderr)
-        return 2
-    stop = {"signal": None}
+            end_group(child.pid, None, own=True)
 
     def forward(signum, frame_):
         stop["signal"] = signum
         if child is not None:
-            end_group(child.pid, None, grace=float(SETTINGS["end_seconds"]))
+            end_group(child.pid, None, grace=float(SETTINGS["end_seconds"]), own=True)
 
+    # the signals are taken before the batch opens, so that none comes between the start of the command and them
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, forward)
+    try:
+        held = Batch(worktrees=worktrees, shim="refuse" if refuse_all else True, on_stop=stop_child).open()
+    except FrameRefused as refused:
+        print(json.dumps(refused.said), file=sys.stderr)
+        return 2
     code = 1
     try:
         try:
@@ -1005,7 +1172,7 @@ def run_command(command: list[str], worktrees: list[str]) -> int:
         except OSError as err:
             print(json.dumps({"refused": True, "reason": "command", "message": str(err)}), file=sys.stderr)
             return 2
-        held.record_group(child.pid)
+        held.record_group(child.pid, own=True)
         code = child.wait()
     finally:
         held.close()
@@ -1018,26 +1185,26 @@ def run_command(command: list[str], worktrees: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] != "run" or "--" not in argv:
-        print(json.dumps({"refused": True, "reason": "usage",
-                          "message": "python -m dodambench.frame run [--worktree PATH]... -- COMMAND..."}),
-              file=sys.stderr)
+    def usage(message: str) -> int:
+        print(json.dumps({"refused": True, "reason": "usage", "message": message}), file=sys.stderr)
         return 2
+    if not argv or argv[0] != "run" or "--" not in argv:
+        return usage("python -m dodambench.frame run [--worktree PATH]... [--refuse-all] -- COMMAND...")
     ours, command = argv[1:argv.index("--")], argv[argv.index("--") + 1:]
-    worktrees, i = [], 0
+    worktrees, refuse_all, i = [], False, 0
     while i < len(ours):
         if ours[i] == "--worktree" and i + 1 < len(ours):
             worktrees.append(ours[i + 1])
             i += 2
+        elif ours[i] == "--refuse-all":
+            refuse_all = True
+            i += 1
         else:
-            print(json.dumps({"refused": True, "reason": "usage", "message": f"unknown option {ours[i]}"}),
-                  file=sys.stderr)
-            return 2
+            return usage(f"unknown option {ours[i]}")
     if not command:
-        print(json.dumps({"refused": True, "reason": "usage", "message": "no command"}), file=sys.stderr)
-        return 2
+        return usage("no command")
     try:
-        return run_command(command, worktrees)
+        return run_command(command, worktrees, refuse_all)
     except FrameRefused as refused:
         print(json.dumps(refused.said), file=sys.stderr)
         return 2

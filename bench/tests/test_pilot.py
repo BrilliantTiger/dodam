@@ -1621,7 +1621,10 @@ bench, tmp = sys.argv[1], Path(sys.argv[2])
 stage = sys.argv[3] if len(sys.argv) > 3 else ""
 sig = int(sys.argv[4]) if len(sys.argv) > 4 else int(signal.SIGTERM)
 sys.path.insert(0, bench)
-from dodambench import pilot
+from dodambench import frame, pilot
+
+# the pilot's batch of the frame keeps its lock and its state in the test's own folder
+frame.ROOT = tmp / "frame-root"
 
 
 def poke():

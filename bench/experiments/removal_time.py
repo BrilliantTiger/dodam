@@ -133,20 +133,20 @@ def main(argv: list[str] | None = None) -> None:
         return
     name = f"dodam-removal-{secrets.token_hex(6)}"
     work = Path(tempfile.mkdtemp(prefix="dodam-removal-"))
+    sys.path.insert(0, str(HERE.parents[1]))
+    from dodambench import frame  # on this side only: the copy inside the container has no frame
     try:
         shutil.copy(a.judge, work / "judge.py")
         shutil.copy(HERE, work / "removal_time.py")
-        sys.path.insert(0, str(HERE.parents[1]))
-        from dodambench import frame  # on this side only: the copy inside the container has no frame
-        subprocess.run(frame.container(["docker", "create", "--name", name, *CAPS, "--user", "0", IMAGE,
+        frame.run(["docker", "create", "--name", name, *CAPS, "--user", "0", IMAGE,
                                         "/opt/judge/bin/python", "/measure/removal_time.py", "--inside", "--judge",
                                         "/measure/judge.py", "--layouts", ";".join(layouts),
-                                        "--sizes", ",".join(map(str, sizes))]),
+                                        "--sizes", ",".join(map(str, sizes))],
                        check=True, capture_output=True)
-        subprocess.run(["docker", "cp", f"{work}/.", f"{name}:/measure"], check=True, capture_output=True)
-        done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=3000)
+        frame.run(["docker", "cp", f"{work}/.", f"{name}:/measure"], check=True, capture_output=True, allow=[work])
+        done = frame.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=3000)
     finally:
-        subprocess.run(["docker", "rm", "--force", name], capture_output=True)
+        frame.run(["docker", "rm", "--force", name], capture_output=True)
         shutil.rmtree(work, ignore_errors=True)
     rows = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
     print(json.dumps({"image": IMAGE, "caps": " ".join(CAPS), "rows": rows}, indent=1))

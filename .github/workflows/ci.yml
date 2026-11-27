@@ -155,10 +155,12 @@ jobs:
         working-directory: bench/images
         run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
       # Inside the frame through which every container is started, as on the project's own machine: here without
-      # that machine's readings, which the frame makes on macOS only.
+      # that machine's readings, which the frame makes on macOS only. The frame's command first on the path refuses
+      # every call here: the tests reach the container tool only through the frame's code, so that a start in any
+      # other spelling is refused when it runs. Building the image, above, is the one step outside it.
       - name: Run the tests that judge inside the image
         working-directory: bench
-        run: python -m dodambench.frame run -- python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py
+        run: python -m dodambench.frame run --refuse-all -- python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py
 
   # Every protection of the judging is broken in turn, in a copy; a test must then fail. A
   # protection that can be removed without a test noticing fails this job.
@@ -183,7 +185,7 @@ jobs:
         run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
       - name: Break each protection and see a test fail
         working-directory: bench
-        run: python -m dodambench.frame run -- python experiments/check_protections.py
+        run: python -m dodambench.frame run --refuse-all -- python experiments/check_protections.py
 
   # Every test of the judge, of the vetting tool, of the formats of tasks and of the two converters that
   # needs no image is run once with nothing taken out, and then against each second line of the protections
