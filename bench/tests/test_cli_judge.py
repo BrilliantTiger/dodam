@@ -1433,7 +1433,7 @@ def kernel_part(held):
 
 # the case's own folder, where the program leaves a mark each time a run of it ends
 CASE_DIR = [None]
-# the run whose program the judge has started and that has not yet ended, and the judge's looks in each run
+# the run whose program the judge has started and not yet waited for, and the judge's looks in each run
 SPAWNED = [None]
 LOOKS_IN_RUN = {}
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
@@ -1513,15 +1513,12 @@ def test_measured():
     def container_memory(*args, **kwargs):
         here = CASE_DIR[0]
         if SPAWNED[0] is not None and here is not None:
-            # a reading after the judge started the program and before the program's mark of its end is a look in
-            # its run; the first leaves the mark a run that is looked at once ends on
-            run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
-            if run == SPAWNED[0]:
-                LOOKS_IN_RUN[run] = LOOKS_IN_RUN.get(run, 0) + 1
-                if LOOKS_IN_RUN[run] == 1:
-                    (here / f"looked-{run}").write_text("")
-            else:
-                SPAWNED[0] = None
+            # a reading after the judge started the program and before it waits for the program's end is a look
+            # in its run, however the run ends; the first leaves the mark a program looked at once ends on
+            run = SPAWNED[0]
+            LOOKS_IN_RUN[run] = LOOKS_IN_RUN.get(run, 0) + 1
+            if LOOKS_IN_RUN[run] == 1 and SOLUTION.startswith("once-"):
+                (here / f"looked-{run}").write_text("")
         if here is not None:
             # the measurements while the writing program writes: between its marks of starting and stopping
             run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
@@ -1539,10 +1536,18 @@ def test_measured():
     real_popen = dodam_cli.subprocess.Popen
 
     def starting(*args, **kwargs):
-        # the judge starts the program: the next reading is its first look in the run
+        # the judge starts the program: the next reading is its first look in the run, and the run ends for the
+        # count when the judge waits for the program's end (the watch only polls)
         proc = real_popen(*args, **kwargs)
         here = CASE_DIR[0]
         SPAWNED[0] = (len(real_open(here / "ended").read()) if here is not None and (here / "ended").exists() else 0)
+        waiting = proc.wait
+
+        def wait(*a, **k):
+            SPAWNED[0] = None
+            return waiting(*a, **k)
+
+        proc.wait = wait
         return proc
 
     builtins.open = io.open = opening
@@ -1593,11 +1598,13 @@ SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
              # a patient program runs until the judge has read the container ENOUGH times since the case's
              # run before it ended, however busy the machine is, and no longer than 8 seconds
              # a patient program behaves as the solution named after "patient-" (as the right one without a name)
-             # a program that is looked at once runs until the judge's first look in its run, and no longer than 8 s
+             # a program that is looked at once runs until the judge's first look in its run (no longer than 8 s), and
+             # 0.6 s after it, as long as on main: a judge that looks again within that time is counted doing so
              "elif sys.argv[1].startswith('once'):\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    end = time.monotonic() + 8\n"
              "    while not os.path.exists(f'looked-{run}') and time.monotonic() < end:\n        time.sleep(0.005)\n"
+             "    time.sleep(0.6)\n"
              "elif sys.argv[1].startswith('patient'):\n    end = time.monotonic() + 8\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    while not os.path.exists(f'enough-{run}') and time.monotonic() < end:\n        time.sleep(0.01)\n"
@@ -1734,7 +1741,7 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         once = not patient and watch >= 1 and separated
     if once:
         # with a long watch the judge's only look in the run is its first, taken only while the program runs: the
-        # program lasts until that look (at most eight seconds), and no second look comes
+        # program lasts until that look (at most eight seconds) and 0.6 s more, in which a right judge does not look
         solution = f"once-{solution}"
     seen = tmp_path / "seen.json"
     # the way first, so that it may name the stand-in's own folder and figures as the rest does
@@ -1758,7 +1765,8 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     if once:
         assert said["looks"] == [1] * runs, f"a run looked at once had another number of looks: {said['looks']}"
     if not separated:
-        assert said["looks"] == [0] * runs, f"a case without separation was measured during its run: {said['looks']}"
+        assert said["looks"] == [0] * runs and said["tries"] == 0, \
+            f"a case without separation was measured: {said['looks']}, {said['tries']} tries"
     return result, said
 
 
