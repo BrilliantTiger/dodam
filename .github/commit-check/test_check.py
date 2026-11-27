@@ -1796,9 +1796,12 @@ class MergeKindTest(RepoTestCase):
         self.repo.git("checkout", "-q", first)
         env = {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
                "GIT_COMMITTER_EMAIL": OWN}
+        # git needs a name and an address to merge, also without committing; a conflict (1) is resolved below.
         done = subprocess.run(["git", "merge", "-q", "--no-ff", "--no-commit", second], cwd=self.repo.root,
                               capture_output=True, env={**clean_env(), "GIT_CONFIG_GLOBAL": os.devnull,
-                                                        "GIT_CONFIG_NOSYSTEM": "1"})
+                                                        "GIT_CONFIG_NOSYSTEM": "1", **env})
+        self.assertIn(done.returncode, (0, 1), done.stderr)
+        self.assertTrue((self.repo.root / ".git" / "MERGE_HEAD").exists(), "git began no merge")
         if resolve:
             resolve()
         self.repo.git("add", "-A")
