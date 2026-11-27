@@ -1435,7 +1435,7 @@ def kernel_part(held):
 CASE_DIR = [None]
 # the run whose program the judge has started and that has not yet ended, and the judge's looks in each run
 SPAWNED = [None]
-LOOKS = {}
+LOOKS_IN_RUN = {}
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
@@ -1517,8 +1517,8 @@ def test_measured():
             # its run; the first leaves the mark a run that is looked at once ends on
             run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
             if run == SPAWNED[0]:
-                LOOKS[run] = LOOKS.get(run, 0) + 1
-                if LOOKS[run] == 1:
+                LOOKS_IN_RUN[run] = LOOKS_IN_RUN.get(run, 0) + 1
+                if LOOKS_IN_RUN[run] == 1:
                     (here / f"looked-{run}").write_text("")
             else:
                 SPAWNED[0] = None
@@ -1569,7 +1569,7 @@ def test_measured():
                            "tries": reads["try"], "run_tries": reads["tries_of"].get(RUNS - 1, 0),
                            "late": c.measured.get("late"), "run_seconds": run_seconds,
                            "in_run": reads.get("in_run_of", {}).get(RUNS - 1, 0),
-                           "looks": [LOOKS.get(run, 0) for run in range(RUNS)],
+                           "looks": [LOOKS_IN_RUN.get(run, 0) for run in range(RUNS)],
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
             CHECK
