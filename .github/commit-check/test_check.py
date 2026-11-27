@@ -2208,6 +2208,10 @@ class SurvivorsTest(RepoTestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("::error::--build-merge needs --event", out)
 
+    def test_a_commit_github_signed_on_the_branch_keeps_its_own_signature_beside_the_built_merge(self):
+        sha = self.repo.commit("Made on GitHub", author=(OWN_LOGIN, OWN), committer=("GitHub", GITHUB))
+        self.assert_passes(self.run_check(self.base, event=OWN_EVENT, extra=["--build-merge"], verified=[sha]))
+
     def test_only_the_merge_the_run_built_is_told_a_signature(self):
         sha = self.repo.commit("Made on GitHub", author=(OWN_LOGIN, OWN), committer=("GitHub", GITHUB))
         code, out = self.run_check(self.base, event=OWN_EVENT, extra=["--build-merge"], verified=[])
