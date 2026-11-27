@@ -1,0 +1,147 @@
+# Trials of the kernel-ends tests on fb3a624, by the rule written before them; on a side branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: fb3a62466f9e6fd627657eb66320b3f879efba6b
+  BOTH: >-
+    tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged
+    tests/test_cli_isolation.py::test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running
+jobs:
+  # (a) both tests, 20 times in a row in each of 2 jobs; every turn asserts the kernel's count rose and only the judge was held
+  both:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do python -m pytest -q -p no:cacheprovider -rs --tb=line $BOTH > ../said/$r.txt 2>&1; done
+          echo "summaries:"; cat ../said/*.txt | grep -E "^[0-9]+ (passed|failed|skipped)" | sed 's/ in .*//' | sort | uniq -c
+          echo "failed, by test:"; cat ../said/*.txt | grep "^FAILED" | sed 's/ - .*//' | sort | uniq -c
+          echo "what failed said:"; cat ../said/*.txt | grep -E "^E |^/.*Error" | cut -c1-400 | sort | uniq -c | head -40
+          echo "times of the mended form:"; grep -hE "^[0-9]+ passed.* in " ../said/*.txt | sed -E 's/.* in ([0-9.]+)s.*/\1/' | sort -n | tr '\n' ' '; echo
+          ! grep -qE "failed|skipped" ../said/*.txt
+      - name: main's form of the two tests, 5 times on the same runner, for the time it takes
+        if: matrix.part == 1
+        working-directory: bench
+        run: |
+          git -C .. fetch --quiet --depth 1 origin main
+          git -C .. checkout --quiet FETCH_HEAD -- bench/tests/test_cli_isolation.py
+          mkdir -p ../main-said
+          for r in $(seq 1 5); do python -m pytest -q -p no:cacheprovider --tb=line $BOTH > ../main-said/$r.txt 2>&1; done
+          echo "times of main's form:"; grep -hE "^[0-9]+ (passed|failed).* in " ../main-said/*.txt | sed 's/.* in //' | tr '\n' ' '; echo
+  # (b) the job attacks, twice, as the check runs it
+  attacks:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - working-directory: bench
+        run: python -m pytest -q -p no:cacheprovider -rs tests/test_cli_isolation.py tests/test_web_isolation.py tests/test_vet.py tests/test_cli_runtimes.py
+  # the judge's lines this test stands for, broken one at a time: the program test must fail on an assertion
+  breaks:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [entry, kernel-kill-not-memory, kill-count-read-as-0]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: break and run
+        working-directory: bench
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          python - <<'PY'
+          import os, tomllib
+          from pathlib import Path
+          part = os.environ["PART"]
+          if part == "entry":
+              entry = next(p for p in tomllib.loads(Path("experiments/protections.toml").read_text())["protection"]
+                           if p["what"] == "The judge ends a program that leaves the container too little memory")
+              changes = [(entry["file"], c["find"], c["put"]) for c in entry["change"]]
+          elif part == "kernel-kill-not-memory":
+              changes = [("dodambench/dodam_cli.py", "    return killed_now > killed_before\n", "    return False\n")]
+          else:
+              changes = [("dodambench/judge.py", '    return memory_events(group).get("oom_kill", 0)\n', "    return 0\n")]
+          for file, find, put in changes:
+              path = Path(file); text = path.read_text()
+              assert text.count(find) == 1, (file, find)
+              path.write_text(text.replace(find, put))
+          PY
+          set +e
+          python -m pytest -q -p no:cacheprovider --tb=short tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged > said.txt 2>&1; code=$?
+          tail -40 said.txt
+          echo "exit code with the break: $code"
+          [ "$code" -eq 1 ] && grep -q "AssertionError" said.txt
+  # (c) the job that ran this test when it failed falsely, protections, six times, three at a time
+  protections:
+    needs: [both, attacks, breaks]
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - working-directory: bench
+        run: python experiments/check_protections.py
