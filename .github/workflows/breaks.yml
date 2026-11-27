@@ -1,0 +1,34 @@
+# Only on the side branch commit-check-breaks-2: the check broken by machine, every break against its tests. The other
+# workflows are not on this branch; the check's two workflows stand beside it in .github/breaks-workflows, where they run
+# nothing, for the tests that read their text.
+name: breaks
+
+on:
+  push:
+    branches: [commit-check-breaks-2]
+
+permissions:
+  contents: read
+
+jobs:
+  breaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Break the check and run its tests against every break
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          python3 -I .github/commit-check/break_check.py --shard "$SHARD" --workers 4 --report "$RUNNER_TEMP/breaks.json" \
+            --workflows .github/breaks-workflows
+          code=$?
+          cat "$RUNNER_TEMP/breaks.json"
+          exit $code
