@@ -1,12 +1,13 @@
-"""Tests that hold the two workflows of the commit check to the lines they must keep.
+"""Tests that hold the two workflows of the commit check to the text they must have.
 
-The gate on pull requests from forks ("pull-requests") runs main's copy under pull_request_target: it
-holds the repository's token and could read secrets also for a pull request from a fork. The workflow
-"commits" runs a branch's own copy and gets the secret only for a push or for a pull request from the
-project's own branches. The rules below read the files as text; each test of a broken copy shows that
-breaking one line makes a rule fail.
+The gate on pull requests from forks ("pull-requests") runs main's copy under pull_request_target: it holds the
+repository's token and could read secrets also for a pull request from a fork. The workflow "commits" runs a
+branch's own copy and gets the project's secret only for a push or for a pull request from the project's own
+branches. A rule that looks for forbidden shapes misses the shapes it does not know, so these tests hold the whole
+text of both files, comments included: every shell block, every action line and every expression. A change of
+either workflow is then always a change of this file, in sight of a review. Any further workflow file fails too.
 
-Run: python -m unittest discover -s .github/commit-check
+Run: python3 -I -m unittest discover -s .github/commit-check
 """
 
 import re
@@ -14,351 +15,213 @@ import unittest
 from pathlib import Path
 
 WORKFLOWS = Path(__file__).resolve().parent.parent / "workflows"
-GATE = WORKFLOWS / "pull-requests.yml"
-COMMITS = WORKFLOWS / "commits.yml"
-OTHERS = [WORKFLOWS / "ci.yml", WORKFLOWS / "site.yml", WORKFLOWS / "pages.yml"]
 
-OWN_REPO = "github.event.pull_request.head.repo.id == github.repository_id"
-FORK = "github.event.pull_request.head.repo.id != github.repository_id"
-SECRET = "secrets.COMMIT_CHECK_PRIVATE_PATTERN"
-FORBIDDEN_IN_RUN = re.compile(
-    r"\bgit\s+(?:checkout|switch|worktree|reset|merge|pull|restore|am|apply|cherry-pick|rebase|submodule|stash)\b"
-    r"|\b(?:pip|pip3|npm|npx|yarn|make|cargo|go|uv|poetry|bash|sh|source|eval)\b|(?:^|\s)\./")
+# The workflows that exist; the three beside the two of the check are not the check's, and their names only are held.
+WORKFLOW_FILES = {"ci.yml", "commits.yml", "pages.yml", "pull-requests.yml", "site.yml"}
 
+GATE = r'''# The gate on every pull request from a fork. It runs main's copy of this file and of its scripts
+# (pull_request_target), so a pull request from outside cannot change what checks it. A pull request from the
+# project's own branches runs no code here: the workflow "commits" judges it with its branch's own copy. Because this
+# workflow holds the repository's token and could read secrets for a pull request from a fork:
+# - nothing from the pull request is executed or imported: the checkout is main's, the pull request's commits are
+#   fetched into a ref and read as data, its paths are read from GitHub's answer as data, nothing is installed, and
+#   git is told to use no diff program and no text conversion;
+# - the only permission is contents, to read; it also reads whether the environment of forks waits for a reviewer;
+# - no value of the event goes into a shell line through the expression syntax, only through env;
+# - every action is pinned by its commit;
+# - the job that judges a fork's commits runs in the environment private-check and names only that environment's
+#   own secret. Until settings.json opens the way for forks, after the owner has set the environment with a named
+#   reviewer, its secret and GitHub's setting that holds every run of an outside contributor, that job says the way is
+#   not open, judges nothing and fails.
+# A pull request from a fork that touches a path closed to outside pull requests fails the job pull-request-paths at
+# once, with no secret and no approval; the closed paths are those of the desk's tool on main.
+# No run here is cancelled and nothing waits but the environment's approval. The tests in
+# .github/commit-check/test_workflows.py hold this file's whole text.
+name: pull-requests
 
-def uncommented(text):
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
 
+permissions:
+  contents: read
 
-def run_blocks(text):
-    """The shell text of every run key, one-line and block form."""
-    lines = text.splitlines()
-    blocks = []
-    index = 0
-    while index < len(lines):
-        found = re.match(r"^(\s*)(?:- )?run:\s*(.*)$", lines[index])
-        if not found:
-            index += 1
-            continue
-        indent = len(found.group(1))
-        rest = found.group(2)
-        body = []
-        if rest in ("|", ">", "|-", ">-"):
-            index += 1
-            while index < len(lines) and (not lines[index].strip()
-                                          or len(lines[index]) - len(lines[index].lstrip()) > indent):
-                body.append(lines[index])
-                index += 1
-        else:
-            body.append(rest)
-            index += 1
-        blocks.append("\n".join(body))
-    return blocks
+jobs:
+  # A pull request from the project's own branches: judged by the job commits of the workflow commits.
+  pull-request-own:
+    if: github.event.pull_request.head.repo.id == github.repository_id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: A pull request from the project's own branches is judged by its branch's own copy
+        run: echo "This pull request comes from a branch of the project; the job commits of the workflow commits judges it with that branch's own copy of the check."
 
+  # A pull request from a fork that touches a closed path fails here at once.
+  pull-request-paths:
+    if: github.event.pull_request.head.repo.id != github.repository_id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fail when the pull request touches a path closed to outside pull requests
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/commit-check/fork_paths.py --number "$NUMBER" --base-sha "$BASE_SHA"
 
-def top_level_block(text, key):
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if line.rstrip() == f"{key}:" or line.startswith(f"{key}: "):
-            body = [line]
-            for following in lines[index + 1:]:
-                if following and not following.startswith(" "):
-                    break
-                body.append(following)
-            return [entry for entry in body if entry.strip()]
-    return None
+  # A pull request from a fork: every commit after the exempt commit, its title, description and branch name, with the
+  # fork's own private pattern. It waits for the project's approval, given after both reviews for every waiting run of
+  # the head at once; while the way for forks is shut it says so and fails.
+  pull-request-commits:
+    if: github.event.pull_request.head.repo.id != github.repository_id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: private-check
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fetch the pull request's commits as data
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$HEAD_SHA" in *[!0-9a-f]*|'') echo "::error::no head commit"; exit 1;; esac
+          git fetch --no-tags --quiet origin "+$HEAD_SHA:refs/remotes/pull/head"
+      - name: The check's own tests
+        run: python3 -I -m unittest discover -s .github/commit-check
+      - name: Check the commits and the text
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
+            --event "$GITHUB_EVENT_PATH" --settings .github/commit-check/settings.json --context fork-approved \
+            --compare-settings "$BASE_SHA"
+'''
 
+COMMITS = r'''# Every commit that a push to a branch brings, and every commit and the text of a pull request from the project's
+# own branches: the properties at the top of .github/commit-check/check.py. It runs the branch's own copy of the
+# check, with the private pattern: a push from one of the project's branches runs that branch's workflows with the
+# repository's secrets anyway, so judging the branch by its own copy opens nothing new, and a broken copy of the
+# check's script on main cannot block the pull request that mends it. A pull request from a fork is judged by main's
+# copy in the workflow "pull-requests"; here it only runs the check's own tests. Tags are outside the check.
+#
+# The owner's gate refuses a head on which any run ended otherwise than in success, so no run here is cancelled
+# (there is no concurrency group), nothing waits and nothing is read again: a run fails only on a commit, a text or
+# a path that breaks a rule. The way back after a text is mended is a new head: on a branch of the project an empty
+# commit whose message says why. On main the range starts at the push's "before", so it is never empty; there the
+# check detects and does not prevent, and a red main stops the next merge at the owner's gate.
+#
+# Reading whether the environment of forks waits for a reviewer needs no permission beyond contents in this public
+# repository (measured on the side branch: the token of contents only reads an environment). It needs no package and ends in well under a minute.
+name: commits
 
-def steps(text):
-    """The text of each step of the file's jobs."""
-    found = []
-    current = None
-    for line in text.splitlines():
-        if re.match(r"^      - ", line):
-            current = [line]
-            found.append(current)
-        elif current is not None and (line.startswith("        ") or not line.strip()):
-            current.append(line)
-        else:
-            current = None
-    return ["\n".join(step) for step in found]
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
 
+permissions:
+  contents: read
 
-def step_if(step):
-    found = re.search(r"^        if: (.*)$", step, re.M)
-    return found.group(1).strip() if found else None
-
-
-def job_names(text):
-    return set(re.findall(r"^  ([\w-]+):\s*$", text.split("\njobs:", 1)[-1], re.M))
-
-
-def common_problems(code, found, permissions_wanted=("contents: read",)):
-    blocks = run_blocks(code)
-    if not blocks or any("${{" in block for block in blocks):
-        found.add("expression in a shell line")
-    uses = re.findall(r"^\s*(?:- )?uses:\s*(\S+)", code, re.M)
-    if not uses or any(not re.fullmatch(r"actions/checkout@[0-9a-f]{40}", ref) for ref in uses):
-        found.add("unpinned action")
-    permissions = top_level_block(code, "permissions")
-    if permissions is None or [line.strip() for line in permissions] != ["permissions:", *permissions_wanted] \
-            or code.count("permissions:") != 1 or re.search(r"\bwrite(-all)?\b", code):
-        found.add("permissions")
-    if "secrets: inherit" in code or len(re.findall(r"secrets\.", code)) != code.count(SECRET):
-        found.add("secret")
-    return blocks
-
-
-def jobs(text):
-    """Each job's name and text."""
-    body = text.split("\njobs:\n", 1)[-1]
-    found = {}
-    name = None
-    for line in body.splitlines():
-        head = re.match(r"^  ([\w-]+):\s*$", line)
-        if head:
-            name = head.group(1)
-            found[name] = []
-        elif name is not None and (line.startswith("    ") or not line.strip()):
-            found[name].append(line)
-        elif line.strip():
-            name = None
-    return {key: "\n".join(value) for key, value in found.items()}
-
-
-def job_if(job):
-    found = re.search(r"^    if: (.*)$", job, re.M)
-    return found.group(1).strip() if found else None
-
-
-def gate_problems(text, others=()):
-    """The lines of the gate on pull requests from forks."""
-    found = set()
-    code = uncommented(text)
-    on = top_level_block(code, "on")
-    if on is None or [line.strip() for line in on[1:]] != ["pull_request_target:", "types: [opened, synchronize, reopened, edited]"]:
-        found.add("trigger")
-    blocks = common_problems(code, found, ("contents: read", "actions: read"))
-    # Nothing of the pull request runs: main's checkout, no other ref checked out, nothing installed, nothing run
-    # but main's own check, the head fetched into a ref only.
-    if re.search(r"^\s*(?:ref|repository|path):", code, re.M) or any(FORBIDDEN_IN_RUN.search(block) for block in blocks):
-        found.add("runs something of the pull request")
-    for block in blocks:
-        for line in block.splitlines():
-            if re.search(r"\bpython", line) and not re.match(
-                    r"^\s*python3 -I (?:-m unittest discover -s )?\.github/commit-check(?:/check\.py)?\b", line):
-                found.add("runs something of the pull request")
-            if "git fetch" in line and not re.search(r"\"\+\$HEAD_SHA:refs/remotes/pull/head\"\s*$", line):
-                found.add("runs something of the pull request")
-    # Every job is for the project's own branches or for forks. The one for the project's own branches only prints;
-    # each job for forks waits in the environment private-check, which alone gets the secret.
-    all_jobs = jobs(code)
-    own = {name: job for name, job in all_jobs.items() if job_if(job) == OWN_REPO}
-    fork = {name: job for name, job in all_jobs.items() if job_if(job) == FORK}
-    if len(own) != 1 or len(own) + len(fork) != len(all_jobs) or not fork:
-        found.add("own branches")
-    for job in own.values():
-        if "uses:" in job or "env:" in job or "environment:" in job or not re.search(r"^        run: echo \"[^\"$`\\]*\"$", job, re.M) \
-                or len(re.findall(r"^        run:", job, re.M)) != 1:
-            found.add("own branches")
-    for job in fork.values():
-        if not re.search(r"^    environment: private-check$", job, re.M):
-            found.add("secret")
-    secret_lines = [line for line in code.splitlines() if SECRET in line]
-    if len(secret_lines) != 1 or not re.fullmatch(r"\s*COMMIT_CHECK_PRIVATE_PATTERN: \$\{\{ " + re.escape(SECRET) + r" \}\}",
-                                                  secret_lines[0]) \
-            or not any(SECRET in job and "environment: private-check" in job for job in fork.values()):
-        found.add("secret")
-    if "--context fork-approved" not in code or re.search(r"--context (?!fork-approved)", code):
-        found.add("secret")
-    # Nothing is cancelled and no run of a fork waits: a waiting run holds a runner, and in the approved run it would let
-    # the fork try its text again and again.
-    if top_level_block(code, "concurrency") is not None or "concurrency:" in code:
-        found.add("concurrency")
-    if "--wait-for-text" in code:
-        found.add("waits")
-    names = job_names(code)
-    if not names or any(names & job_names(other) for other in others):
-        found.add("job name")
-    return found
-
-
-def commits_problems(text, others=()):
-    """The lines of the workflow that judges pushes and the project's own pull requests by their own copy."""
-    found = set()
-    code = uncommented(text)
-    on = top_level_block(code, "on")
-    if on is None or [line.strip() for line in on[1:]] != ["push:", "pull_request:", "types: [opened, synchronize, reopened, edited]"]:
-        found.add("trigger")
-    common_problems(code, found)
-    # The secret goes only to the step of a push and to the step of a pull request from the project's own branches.
-    for step in steps(code):
-        if SECRET in step and step_if(step) not in ("github.event_name == 'push'",
-                                                     f"github.event_name == 'pull_request' && {OWN_REPO}"):
-            found.add("secret")
-        if SECRET in step and not re.search(r"^          COMMIT_CHECK_PRIVATE_PATTERN: \$\{\{ " + re.escape(SECRET) + r" \}\}$",
-                                            step, re.M):
-            found.add("secret")
-    if not any(SECRET in step for step in steps(code)):
-        found.add("secret")
-    if "concurrency:" in code:
-        found.add("concurrency")
-    for step in steps(code):
-        if "--wait-for-text" in step and step_if(step) != f"github.event_name == 'pull_request' && {OWN_REPO}":
-            found.add("waits")
-    if not any("--wait-for-text 900 --poll 15" in step for step in steps(code)):
-        found.add("waits")
-    names = job_names(code)
-    if not names or any(names & job_names(other) for other in others):
-        found.add("job name")
-    return found
+jobs:
+  commits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The check's own tests
+        run: python3 -I -m unittest discover -s .github/commit-check
+      - name: Check the commits of a push to a branch other than main, and the branch's name
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        env:
+          BRANCH: ${{ github.ref_name }}
+          AFTER: ${{ github.sha }}
+          COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I .github/commit-check/check.py --repo . --from origin/main --head "$AFTER" --branch "$BRANCH" \
+            --settings .github/commit-check/settings.json --context own --compare-settings origin/main
+      - name: Check the commits of a push to main, and what the way for forks needs when it is open
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I .github/commit-check/check.py --repo . --from "$BEFORE" --head "$AFTER" --require-commits \
+            --check-fork-way --settings .github/commit-check/settings.json --context own --compare-settings "$BEFORE"
+      - name: Check the commits and the text of a pull request from the project's own branches
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
+            --event "$GITHUB_EVENT_PATH" --settings .github/commit-check/settings.json --context own \
+            --compare-settings "$BASE_SHA"
+'''
 
 
 class WorkflowTest(unittest.TestCase):
 
-    def setUp(self):
-        self.gate = GATE.read_text()
-        self.commits = COMMITS.read_text()
-        self.others = [path.read_text() for path in OTHERS]
+    def test_no_further_workflow_file_exists(self):
+        self.assertEqual({path.name for path in WORKFLOWS.iterdir()}, WORKFLOW_FILES)
 
-    def test_the_gate_keeps_every_line(self):
-        self.assertEqual(gate_problems(self.gate, [self.commits, *self.others]), set())
+    def test_the_gate_on_pull_requests_from_forks_has_exactly_its_written_text(self):
+        self.assertEqual((WORKFLOWS / "pull-requests.yml").read_text(encoding="utf-8"), GATE)
 
-    def test_the_workflow_commits_keeps_every_line(self):
-        self.assertEqual(commits_problems(self.commits, [self.gate, *self.others]), set())
+    def test_the_workflow_commits_has_exactly_its_written_text(self):
+        self.assertEqual((WORKFLOWS / "commits.yml").read_text(encoding="utf-8"), COMMITS)
 
-    def broken(self, old, new, rule, count=1):
-        self.assertIn(old, self.gate)
-        variant = self.gate.replace(old, new, count)
-        self.assertIn(rule, gate_problems(variant, [self.commits, *self.others]), f"breaking {old!r} went unnoticed")
+    def test_the_written_texts_use_no_form_that_hides_a_key_or_a_block(self):
+        # What the written texts may hold: plain keys, block scalars only as "|", no mapping in one line, no anchors.
+        for name, text in (("pull-requests.yml", GATE), ("commits.yml", COMMITS)):
+            for number, line in enumerate(text.split("\n"), 1):
+                content = line.split(" #", 1)[0] if not line.lstrip().startswith("#") else ""
+                with self.subTest(name=name, line=number):
+                    self.assertNotRegex(content, r"^\s*(?:- )?[\"']")
+                    self.assertNotRegex(content, r"^\s*(?:- )?\{")
+                    self.assertNotRegex(content, r"(?:^|\s)[&*!][\w-]")
+                    self.assertNotRegex(content, r"<<\s*:")
+                    header = re.match(r"^\s*(?:- )?[\w-]+:\s*([|>].*)$", content)
+                    if header:
+                        self.assertEqual(header.group(1), "|")
 
-    def broken_commits(self, old, new, rule, count=1):
-        self.assertIn(old, self.commits)
-        variant = self.commits.replace(old, new, count)
-        self.assertIn(rule, commits_problems(variant, [self.gate, *self.others]), f"breaking {old!r} went unnoticed")
+    def test_the_fork_s_secret_and_the_project_s_secret_stand_where_they_belong(self):
+        # Shown on the written texts, so that a review of a change to them sees these lines change.
+        self.assertEqual(GATE.count("secrets."), 1)
+        self.assertIn("    environment: private-check\n", GATE.split("  pull-request-commits:\n", 1)[1])
+        self.assertIn("FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}",
+                      GATE.split("  pull-request-commits:\n", 1)[1])
+        self.assertNotIn("COMMIT_CHECK_PRIVATE_PATTERN", GATE)
+        self.assertEqual(COMMITS.count("secrets.FORK_CHECK_PRIVATE_PATTERN"), 1)
+        main_step = COMMITS.split("Check the commits of a push to main", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}", main_step)
+        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'", main_step)
 
-    # The gate.
-
-    def test_a_second_trigger_is_noticed(self):
-        self.broken("on:\n  pull_request_target:", "on:\n  pull_request:\n  pull_request_target:", "trigger")
-
-    def test_a_label_trigger_is_noticed(self):
-        self.broken(", edited]", ", edited, labeled]", "trigger")
-
-    def test_a_write_permission_is_noticed(self):
-        self.broken("contents: read", "contents: write", "permissions")
-
-    def test_permissions_given_to_a_job_are_noticed(self):
-        self.broken("    environment: private-check\n", "    environment: private-check\n    permissions:\n      pull-requests: read\n",
-                    "permissions")
-
-    def test_missing_permissions_are_noticed(self):
-        self.broken("permissions:\n  contents: read\n  actions: read\n", "", "permissions")
-
-    def test_a_write_permission_for_actions_is_noticed(self):
-        self.broken("  actions: read\n", "  actions: write\n", "permissions")
-
-    def test_an_expression_in_a_shell_line_is_noticed(self):
-        self.broken('--head "$HEAD_SHA"', '--head "${{ github.event.pull_request.head.sha }}"',
-                    "expression in a shell line")
-
-    def test_an_action_pinned_by_a_tag_is_noticed(self):
-        self.broken("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v7", "unpinned action")
-
-    def test_checking_out_the_pull_request_s_head_is_noticed(self):
-        self.broken("          persist-credentials: false\n",
-                    "          persist-credentials: false\n          ref: ${{ github.event.pull_request.head.sha }}\n",
-                    "runs something of the pull request")
-
-    def test_switching_to_the_fetched_head_is_noticed(self):
-        self.broken('refs/remotes/pull/head"\n', 'refs/remotes/pull/head"\n          git checkout --quiet refs/remotes/pull/head\n',
-                    "runs something of the pull request")
-
-    def test_fetching_the_head_into_a_branch_is_noticed(self):
-        self.broken(":refs/remotes/pull/head\"", ":refs/heads/main\"", "runs something of the pull request")
-
-    def test_an_install_is_noticed(self):
-        self.broken("        run: python3 -I -m unittest", "        run: pip install -r requirements.txt && python3 -I -m unittest",
-                    "runs something of the pull request")
-
-    def test_setting_up_python_is_noticed(self):
-        self.broken("      - name: Fetch the pull request's commits as data",
-                    "      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0\n"
-                    "      - name: Fetch the pull request's commits as data", "unpinned action")
-
-    def test_running_a_script_of_the_pull_request_is_noticed(self):
-        self.broken("        run: python3 -I -m unittest discover -s .github/commit-check",
-                    "        run: python3 -I -m unittest discover -s tests", "runs something of the pull request")
-
-    def test_python_without_isolation_is_noticed(self):
-        self.broken("python3 -I .github/commit-check/check.py", "python3 .github/commit-check/check.py",
-                    "runs something of the pull request")
-
-    def test_the_fork_s_job_outside_the_environment_is_noticed(self):
-        self.broken("    environment: private-check\n", "", "secret")
-
-    def test_the_secret_in_the_job_for_the_project_s_own_branches_is_noticed(self):
-        self.broken("      - name: A pull request from the project's own branches is judged by its branch's own copy\n",
-                    "      - name: A pull request from the project's own branches is judged by its branch's own copy\n"
-                    "        env:\n          X: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}\n", "secret")
-
-    def test_the_secret_by_another_name_is_noticed(self):
-        self.broken("          GITHUB_TOKEN: ${{ github.token }}\n",
-                    "          GITHUB_TOKEN: ${{ github.token }}\n          OTHER: ${{ secrets.OTHER }}\n", "secret")
-
-    def test_a_fork_judged_as_one_of_the_project_s_own_branches_is_noticed(self):
-        self.broken("--context fork-approved", "--context own", "secret")
-
-    def test_a_fork_s_job_that_is_skipped_for_some_forks_is_noticed(self):
-        self.broken("    if: " + FORK + "\n", "    if: " + FORK + " && github.event.action != 'edited'\n", "own branches")
-
-    def test_a_job_for_the_project_s_own_branches_that_runs_the_check_is_noticed(self):
-        self.broken('        run: echo "This pull request', '        run: echo "$(cat x)" "This pull request', "own branches")
-
-    def test_a_concurrency_group_is_noticed(self):
-        self.broken("permissions:\n  contents: read\n  actions: read\n", "permissions:\n  contents: read\n  actions: read\n\nconcurrency:\n  group: x\n"
-                    "  cancel-in-progress: true\n", "concurrency")
-
-    def test_a_fork_s_run_that_waits_for_its_text_is_noticed(self):
-        self.broken('--event "$GITHUB_EVENT_PATH"', '--event "$GITHUB_EVENT_PATH" --wait-for-text 900', "waits")
-
-    def test_a_job_named_like_one_of_another_workflow_is_noticed(self):
-        self.broken("  pull-request-commits:\n", "  commits:\n", "job name")
-
-    # The workflow commits.
-
-    def test_the_secret_for_a_fork_s_pull_request_is_noticed(self):
-        self.broken_commits("        if: github.event_name == 'pull_request' && " + OWN_REPO + "\n",
-                            "        if: github.event_name == 'pull_request'\n", "secret")
-
-    def test_the_secret_in_the_step_of_the_tests_is_noticed(self):
-        self.broken_commits("        run: python3 -I -m unittest discover -s .github/commit-check\n",
-                            "        env:\n          COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}\n"
-                            "        run: python3 -I -m unittest discover -s .github/commit-check\n", "secret")
-
-    def test_pull_request_target_in_the_workflow_commits_is_noticed(self):
-        self.broken_commits("  pull_request:\n", "  pull_request_target:\n", "trigger")
-
-    def test_an_expression_in_a_shell_line_of_the_workflow_commits_is_noticed(self):
-        self.broken_commits('--from "$BASE_SHA"', '--from "${{ github.event.pull_request.base.sha }}"',
-                            "expression in a shell line")
-
-    def test_a_write_permission_in_the_workflow_commits_is_noticed(self):
-        self.broken_commits("contents: read", "contents: write", "permissions")
-
-    def test_a_concurrency_group_in_the_workflow_commits_is_noticed(self):
-        self.broken_commits("permissions:\n  contents: read\n", "permissions:\n  contents: read\n\nconcurrency:\n  group: x\n",
-                            "concurrency")
-
-    def test_waiting_for_the_text_outside_the_project_s_own_pull_requests_is_noticed(self):
-        self.broken_commits('--context own --compare-settings origin/main', '--context own --compare-settings origin/main --wait-for-text 900',
-                            "waits")
-
-    def test_a_longer_wait_for_the_text_is_noticed(self):
-        self.broken_commits("--wait-for-text 900", "--wait-for-text 21000", "waits")
-
-    def test_a_job_of_the_workflow_commits_named_like_one_of_ci_is_noticed(self):
-        self.broken_commits("  commits:\n    runs-on", "  bench:\n    runs-on", "job name")
+    def test_every_run_of_the_check_names_its_context_and_its_comparison_once(self):
+        for name, text in (("pull-requests.yml", GATE), ("commits.yml", COMMITS)):
+            calls = text.split("check.py ")[1:]
+            for call in calls:
+                command = call.split("\n      - ", 1)[0].split("\n\n", 1)[0]
+                with self.subTest(name=name):
+                    self.assertEqual(len(re.findall(r"--context (?:own|fork-approved)\b", command)), 1)
+                    self.assertEqual(command.count("--compare-settings"), 1)
 
 
 if __name__ == "__main__":
