@@ -1,0 +1,66 @@
+# The gate on every pull request, from the project's own branches and from forks alike. It runs main's
+# copy of this file and of its scripts (pull_request_target), so a pull request cannot change what checks
+# it. That is also why it holds the repository's token and could read secrets for a pull request from a
+# fork; therefore:
+# - nothing from the pull request is executed or imported: the checkout is main's, the pull request's
+#   commits are fetched into a ref and read as data, nothing is installed, and git is told to use no diff
+#   program and no text conversion;
+# - the permissions are read-only and written out;
+# - no value of the event goes into a shell line through the expression syntax, only through env;
+# - every action is pinned by its commit;
+# - a pull request from a fork does not get the secret, except in the run that the label private-check
+#   starts, which only the project's account can put on it.
+# The tests in .github/commit-check/test_check.py read this file and fail when one of these is broken.
+# More jobs of the gate belong in this file, beside the one below.
+name: pull-requests
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+# A later event of the same pull request cancels a run still going, so that an earlier run cannot finish
+# last and paint a head green that a newer push or edit made red.
+concurrency:
+  group: pull-requests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Every commit of the pull request after the exempt commit, and its title and description; see the top
+  # of .github/commit-check/check.py for the properties. A pull request from a fork is held to the private
+  # pattern only in the run its label starts, for the head it has at that moment; every later push, edit or
+  # removal of the label makes the head red again until the label is put on anew.
+  # It ends in well under a minute.
+  pull-request-commits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Fetch the pull request's commits as data
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$NUMBER" in ''|*[!0-9]*) echo "::error::no pull request number"; exit 1;; esac
+          git fetch --no-tags --quiet origin "+refs/pull/$NUMBER/head:refs/remotes/pull/head"
+          if [ "$(git rev-parse refs/remotes/pull/head)" != "$HEAD_SHA" ]; then
+            echo "::error::The pull request's head moved while this run started; the newer run checks it."
+            exit 1
+          fi
+      - name: The check's own tests
+        run: python3 -I -m unittest discover -s .github/commit-check
+      - name: Check the commits and the text
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CONTEXT: ${{ github.event.pull_request.head.repo.id == github.repository_id && 'own' || (github.event.action == 'labeled' && github.event.label.name == 'private-check') && 'fork-labeled' || 'fork' }}
+          COMMIT_CHECK_PRIVATE_PATTERN: ${{ (github.event.pull_request.head.repo.id == github.repository_id || (github.event.action == 'labeled' && github.event.label.name == 'private-check')) && secrets.COMMIT_CHECK_PRIVATE_PATTERN || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
+            --settings .github/commit-check/settings.json --context "$CONTEXT" --event "$GITHUB_EVENT_PATH"
