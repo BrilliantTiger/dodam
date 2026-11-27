@@ -231,14 +231,22 @@ def read_while_held(c, label, into):
     return after_the_run
 
 
+STEADY = 250
+
+
 def attempt(name, args, files=None, looked=False):
     # one case: a reading when it begins, the program run once, a reading while it holds. With `looked`, the mark
     # the program waits for after deleting the test's files is left by a reading of the case runner that began after
     # the program wrote "files-gone" and shows the kernel's memory of those files gone and no longer falling: its own
-    # part and its records together, some 18 MB for 19,000 files, which the program's own memory does not move
+    # part and its records together, which the program's own memory does not move. Gone means fallen to within 3 MB
+    # of what stood before the case made the files (some 18 MB for 19,000), and no longer falling means STEADY
+    # readings in a row within 64 KB of the lowest seen: the kernel lets go of them in bursts, so this is counted in
+    # readings, not read from a clock
+    if looked:
+        import dodam_cli
+        empty = dodam_cli._judge.kernel_part() + dodam_cli._judge.container_memory()["records"]
     with case(files=files) as c:
         if looked:
-            import dodam_cli
             reading_of, before, after = c._container, [], []
 
             def marked():
@@ -251,9 +259,15 @@ def attempt(name, args, files=None, looked=False):
                     # the first reading in time, before the program started: the files all stand
                     before.append(kernel)
                 elif gone and not os.path.exists(c.work / "looked-after-gone"):
-                    if before[0] - kernel >= 8 * 2**20 and after and kernel >= after[-1] - 2**20:
+                    if not after:
+                        after[:] = [kernel, 1]
+                    elif kernel < after[0] - 2**16:
+                        after[:] = [kernel, 0]
+                    else:
+                        after[1] += 1
+                    fell = before[0] - kernel >= max(8 * 2**20, before[0] - empty - 3 * 2**20)
+                    if fell and after[1] >= STEADY:
                         c.write("looked-after-gone", "")
-                    after.append(kernel)
                 return figure
             c._container = marked
         start, while_held = reading(name + "-start"), {}
