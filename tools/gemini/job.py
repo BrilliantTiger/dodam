@@ -22,8 +22,10 @@ from __future__ import annotations
 import argparse
 import atexit
 import fcntl
+import contextlib
 import hashlib
 import html
+import importlib.util
 import ipaddress
 import json
 import math
@@ -999,6 +1001,46 @@ def new_run_label() -> str:
     return f"{RUN_LABEL_KEY}={secrets.token_hex(8)}"
 
 
+FRAME_FILE = ROOT / "bench" / "dodambench" / "frame.py"
+
+
+def container_frame():
+    """The frame through which every container on this computer is started, loaded by its path: the job uses
+    the standard library only."""
+    spec = importlib.util.spec_from_file_location("dodam_frame", FRAME_FILE)
+    if spec is None or spec.loader is None:
+        raise JobError("container_frame")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, SyntaxError) as exc:
+        raise JobError("container_frame") from exc
+    return module
+
+
+@contextlib.contextmanager
+def attack_batch(kind: str, env: dict[str, str]):
+    """For an attack run, a batch of the frame around agy, and agy's environment with the frame's container command
+    first on its path: every container the run starts carries the batch's mark, the batch's lock and readings hold,
+    and the batch removes its containers by their ids at its end. Other kinds start no container and get none."""
+    if kind != "attack":
+        yield env
+        return
+    frame = container_frame()
+    try:
+        held = frame.batch(shim=True)
+        given = held.__enter__()
+    except frame.FrameRefused as exc:
+        raise JobError("container_frame", ["container_frame", str(exc.said.get("reason"))]) from exc
+    try:
+        path = env.get("PATH", "")
+        if (given.folder / "bin" / "docker").exists():
+            path = f"{given.folder / 'bin'}{os.pathsep}{path}"
+        yield {**env, "DODAM_FRAME_RUN": given.run_id, "PATH": path}
+    finally:
+        held.__exit__(None, None, None)
+
+
 class ContainerFault(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -1451,7 +1493,8 @@ def _job(
             say(f"{kind} for {number} has run {minutes} minute" + ("" if minutes == 1 else "s"))
 
         try:
-            run = run_agy(settings, kind, prompt.text, repo, env, answer, lock, count_the_run, tell_the_minute)
+            with attack_batch(kind, env) as agy_env:
+                run = run_agy(settings, kind, prompt.text, repo, agy_env, answer, lock, count_the_run, tell_the_minute)
         finally:
             # However the run ended (an answer, its time up, an error, a signal), its containers go.
             if kind == "attack" and result["ran"]:

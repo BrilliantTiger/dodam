@@ -526,13 +526,16 @@ def in_container(part: str, candidate: str, attack: str = "", image: str = "doda
             shutil.copytree(source, probe / target)
         flags = [flag for key, value in (env or {}).items() for flag in ("-e", f"{key}={value}")]
         try:
-            subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0",
-                            "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
-                            "--pids-limit", str(CAPS["processes"]),
-                            "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
-                            *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack,
-                            *(["quick"] if QUICK else [])],
-                           check=True, capture_output=True)
+            sys.path.insert(0, str(BENCH))
+            from dodambench import frame  # on this side only: the probe inside the container has no frame
+            subprocess.run(frame.container([
+                "docker", "create", "--name", name, "--network", "none", "--user", "0",
+                "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
+                "--pids-limit", str(CAPS["processes"]),
+                "--tmpfs", f"{CASES}:rw,exec,nosuid,nodev,size={LIMITS['disk_mb']}m,nr_inodes=20000,mode=0711",
+                *flags, image, "/opt/judge/bin/python", "/probe/probe.py", "inside", part, candidate, attack,
+                *(["quick"] if QUICK else [])]),
+                check=True, capture_output=True)
             subprocess.run(["docker", "cp", f"{probe}/.", f"{name}:/probe"], check=True, capture_output=True)
             done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:

@@ -291,7 +291,7 @@ exit 0
 
 
 @pytest.fixture
-def fake_docker(tmp_path, monkeypatch):
+def fake_docker(tmp_path, monkeypatch, frame_apart):
     """A Docker on PATH that runs no container; what the container leaves is set per test."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -497,7 +497,7 @@ def test_a_case_not_judged_for_measuring_is_taken_only_in_the_form_the_judge_wri
     assert said["key"] == ("tests[0].message" if form == "other words" else "unmeasured"), said
 
 
-def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch):
+def test_the_container_gets_the_tasks_own_judging_time(tmp_path, cli_task_dir, monkeypatch, frame_apart):
     import dodambench.vet as vetting
     edit(cli_task_dir / "task.toml", "verifier_timeout_sec = 1800", "verifier_timeout_sec = 2400")
     given = []

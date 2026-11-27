@@ -2938,7 +2938,7 @@ TEMPLATE_RULES = [
     "only in containers",
     "never on the host",
     "one batch of containers at a time",
-    "20 GB",
+    "through the project's frame",
     "restart or prune",
     "colima",
     "bare wildcard",

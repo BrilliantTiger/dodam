@@ -311,6 +311,7 @@ def test_the_end_collects_exactly_the_containers_it_started_by_their_id(standins
 
 def test_a_container_whose_id_never_reached_its_file_is_found_by_the_exact_mark_of_the_run(standins):
     batch = frame.Batch().open()
+    batch.container(["docker", "create", "image"])  # made, and killed before docker wrote its id
     standins.add_container("a" * 64, {"dodam.frame.run": batch.run_id})
     standins.add_container("b" * 64, {"dodam.frame.run": batch.run_id + "0"})
     batch.close()
@@ -365,10 +366,11 @@ def test_what_a_run_that_was_killed_left_is_ended_and_removed_by_the_next_batch(
 def end_programs(*pids: int) -> None:
     """What a test started and the frame should have ended: ended here if it is still there."""
     for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        for end in (os.killpg, os.kill):  # its group, where it leads one, and itself
+            try:
+                end(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 def frame_ends_what_the_killed_run_left(standins, held, left: int, folder: Path) -> None:
@@ -479,22 +481,35 @@ def test_what_may_be_mounted_is_the_frames_own_folder_a_named_work_tree_and_name
         assert refused_reason(batch, ["docker", "run", "-v", f"{Path.home()}:/t", "image"], allow=[Path.home()]) == "mount"
 
 
-def test_the_judges_helper_keeps_its_two_folders_of_the_container_machine_and_no_one_else_gets_them(standins):
+def test_folders_of_the_container_machine_are_given_only_as_the_caller_names_them_and_only_to_a_closed_container(
+        standins):
+    """The judge's tests give their helper two folders of the container machine. The frame names neither: the
+    caller names each exactly, and only a container without network and without a folder of this computer gets
+    them."""
+    group = f"/sys/fs/cgroup/{GROUP}"
+    scoped = "/sys/fs/cgroup/system.slice/docker-" + "ab" * 32 + ".scope"
+    memory = "/proc/sys/vm/" + "drop" + "_caches"
     helper = ["docker", "run", "--detach", "--name", "j-reader", "--network", "none", "--user", "0",
-              "--memory", "256m", "--pids-limit", "64", "--volume", f"/sys/fs/cgroup/{GROUP}:/group",
-              "--volume", "/proc/sys/vm/drop_caches:/drop", "--volume", "j-asked:/reading", "image", "python3"]
-    scoped = [w.replace(f"/sys/fs/cgroup/{GROUP}", "/sys/fs/cgroup/system.slice/docker-" + "ab" * 32 + ".scope")
-              for w in helper]
+              "--memory", "256m", "--pids-limit", "64", "--volume", f"{group}:/group",
+              "--volume", f"{memory}:/drop", "--volume", "j-asked:/reading", "image", "python3"]
     with frame.Batch() as batch:
-        assert refused_reason(batch, helper) is None
-        assert refused_reason(batch, scoped) is None
+        def said(cmd, machine):
+            try:
+                batch.container(cmd, machine=machine)
+            except frame.FrameRefused as refused:
+                return refused.said["reason"]
+            return None
+        assert said(helper, (group, memory)) is None
+        assert said([w.replace(group, scoped) for w in helper], (scoped, memory)) is None
+        assert said(helper, ()) == "mount"
+        assert said(helper, (group,)) == "mount"
         with_network = [w for w in helper if w not in ("--network", "none")]
-        assert refused_reason(batch, with_network) == "mount"
-        for path in ("/sys/fs/cgroup", "/sys/fs/cgroup/docker/../..", f"/sys/fs/cgroup/{GROUP}/../x", "/proc/sys/vm",
-                     "/sys/fs/cgroup/docker/1234", "/proc/self/root"):
-            assert refused_reason(batch, ["docker", "run", "--network", "none", "-v", f"{path}:/g", "image"]) == "mount", path
+        assert said(with_network, (group, memory)) == "mount"
         with_bind = helper[:2] + ["-v", f"{batch.tmp}:/t"] + helper[2:]
-        assert refused_reason(batch, with_bind) == "mount"
+        assert said(with_bind, (group, memory)) == "mount"
+        for path in ("/sys/fs/cgroup", "/sys/fs/cgroup/docker/../..", f"{group}/../x", "/proc/sys/vm",
+                     "/sys/fs/cgroup/docker/1234", "/proc/self/root", "/proc/sys/vm/../../self"):
+            assert said(["docker", "run", "--network", "none", "-v", f"{path}:/g", "image"], (path,)) == "mount", path
 
 
 # --- giving space back ---------------------------------------------------------------------------------------------
@@ -550,6 +565,20 @@ def test_the_container_command_of_a_frame_run_marks_starts_and_refuses_pruning_a
         assert shim(standins, batch, "rm", "--force", ident).returncode == 0
     assert [c["id"] for c in standins.containers()] == ["d" * 64]
     assert not [call for call in standins.calls() if "prune" in call or "rmi" in call]
+
+
+def test_a_command_framed_by_the_code_inside_a_frame_run_passes_its_container_command_once(standins):
+    """Code inside a frame run frames its command, and the frame run's container command then sees it: the mark
+    and the file for the id are given once, and its mounts are still checked."""
+    with frame.Batch(shim=True) as batch:
+        joined = frame.Joined(batch.folder, {})
+        made = shim(standins, batch, *joined.container(["docker", "run", "--detach", "image"])[1:])
+        assert made.returncode == 0, made.stderr
+        [call] = [c for c in standins.calls() if c[:1] == ["run"]]
+        assert call.count("--label") == 1 and call.count("--cidfile") == 1, call
+        framed = joined.container(["docker", "run", "image"])
+        framed[framed.index("image"):framed.index("image")] = ["-v", f"{Path.home()}:/h"]
+        assert shim(standins, batch, *framed[1:]).returncode == 2
 
 
 def test_the_container_command_of_a_frame_run_works_with_an_environment_of_its_own(standins):
@@ -633,6 +662,10 @@ EXEMPT = {
 INSPECTING = {
     ("bench/tests/test_vet.py", "test_image_judge_runs_the_verifier_judge_without_network"):
         "reads the vetting tool's command word by word and starts nothing",
+    ("bench/tests/test_cli_convert.py", "test_a_web_task_converts_as_before_and_is_vetted_in_a_capped_container"):
+        "reads the caps of the vetting tool's command and starts nothing",
+    ("bench/tests/test_cli_convert.py", "test_a_command_line_task_carries_its_caps_onto_the_path_the_measurement_uses"):
+        "reads the caps of the vetting tool's command and starts nothing",
 }
 
 
@@ -733,9 +766,9 @@ def test_every_file_that_starts_a_container_goes_through_the_frame_or_is_exempt_
     assert loose == [], "these start a container outside the frame: " + json.dumps(loose, indent=1)
     for f, reason in OTHER_PROGRAMS.items():
         tree = ast.parse((REPO / f).read_text(encoding="utf-8"))
-        holds = [node for node in ast.walk(tree) if isinstance(node, ast.With) for item in node.items
-                 if isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute)
-                 and item.context_expr.func.attr == "batch"]
+        holds = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and node.func.attr == "batch"
+                 and isinstance(node.func.value, ast.Name) and node.func.value.id == "frame"]
         assert holds, f"{f} runs another program that starts containers outside a batch of the frame ({reason})"
 
 
@@ -779,3 +812,21 @@ def test_a_command_built_in_a_function_goes_through_the_frame_only_where_every_c
     assert [p["framed"] for p in container_starts(tmp_path, ["a.py"])["places"]] == [True]
     (tmp_path / "b.py").write_text("subprocess.run(made('y'))\n")
     assert [p["framed"] for p in container_starts(tmp_path, ["a.py", "b.py"])["places"]] == [False]
+
+
+def test_only_the_judges_tests_name_folders_of_the_container_machine_and_only_for_their_helper():
+    """Folders of the container machine are given only where a caller names them in code, and the one caller
+    outside the frame's own tests is the helper of the judge's container tests. The frame's command and its
+    container command take no such option."""
+    callers = []
+    for f in repository_files():
+        tree = ast.parse((REPO / f).read_text(encoding="utf-8"))
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and any(k.arg == "machine" for k in node.keywords):
+                callers.append((f, _function_of(node, parents)))
+    outside = sorted({c for c in callers if c[0] not in ("bench/tests/test_frame.py", "bench/dodambench/frame.py")})
+    assert outside == [("bench/tests/test_cli_isolation.py", "in_the_image")], outside
+    source = (BENCH / "dodambench/frame.py").read_text(encoding="utf-8")
+    assert "--machine" not in source
+    assert frame.shim.__code__.co_varnames[:3] == ("folder", "real", "args")

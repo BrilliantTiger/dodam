@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import frame
 from .convert import to_harbor
 from .harbor_patch import HarborSetupError, check as harbor_setup_check
 from .languages import LANGUAGES
@@ -1564,7 +1565,11 @@ def run_one(task, lang: str, batch: Path, env: dict[str, str], token: str, harbo
         # Harbor starts only when the token is on no command line, and is stopped as soon as it is on one.
         with watch:
             if watch.clean:
-                record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout, on_start=hand_over)
+                # Harbor's containers come from docker compose, which takes no mark from the command line: they are
+                # removed by their compose projects below. The frame gives the run its lock and its readings.
+                with frame.batch():
+                    record["harbor_returncode"] = runner(cmd, env, run_dir / "harbor.log", timeout,
+                                                         on_start=hand_over)
         finished = True
     finally:
         _gate().enter()  # the containers step, the scan and the record are never cut short

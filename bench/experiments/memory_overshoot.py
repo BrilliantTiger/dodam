@@ -43,6 +43,7 @@ from pathlib import Path
 
 BENCH = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BENCH))
+from dodambench import frame  # noqa: E402
 from dodambench.convert import TEST_SH  # noqa: E402
 
 IMAGE = "dodam-bench/python:dev"
@@ -168,11 +169,12 @@ def judged(program: str, memory_mb: int, limit_mb: int, stop: bool) -> dict:
         script = ("mkdir -p /logs/verifier && cp -R /solution/. /app/ && printf 'DODAM_STEP=build\\n' > /tests/step.env "
                   "&& exec sh /tests/test.sh")
         try:
-            subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0",
-                            "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
-                            "--pids-limit", "512", "--tmpfs",
-                            "/dodam-cases:rw,exec,nosuid,nodev,size=32m,nr_inodes=20000,mode=0711",
-                            "-e", "DODAM_APP_USER=agent", IMAGE, "sh", "-c", script], check=True, capture_output=True)
+            subprocess.run(frame.container(["docker", "create", "--name", name, "--network", "none", "--user", "0",
+                                            "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "2",
+                                            "--pids-limit", "512", "--tmpfs",
+                                            "/dodam-cases:rw,exec,nosuid,nodev,size=32m,nr_inodes=20000,mode=0711",
+                                            "-e", "DODAM_APP_USER=agent", IMAGE, "sh", "-c", script]),
+                           check=True, capture_output=True)
             subprocess.run(["docker", "cp", f"{tests}/.", f"{name}:/tests"], check=True, capture_output=True)
             subprocess.run(["docker", "cp", f"{solution}/.", f"{name}:/solution"], check=True, capture_output=True)
             done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=300)

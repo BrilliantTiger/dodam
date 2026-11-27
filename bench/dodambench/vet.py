@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
+from . import frame
 from .convert import to_harbor, verifier_env
 from .judge import (LEFT_BEHIND, OUTCOMES, UNMEASURED, UNMEASURED_REASONS, JudgeFault, judge, names_of_tests,
                     reward_of)
@@ -461,7 +462,8 @@ def judge_in_image(image: str, tests_dir: Path, solution_dir: Path, out_dir: Pat
     name = f"dodam-vet-{uuid.uuid4().hex[:12]}"
     empty_place(out_dir)
     try:
-        subprocess.run(docker_create_cmd(name, image, step, room), check=True, capture_output=True, text=True)
+        subprocess.run(frame.container(docker_create_cmd(name, image, step, room)), check=True, capture_output=True,
+                       text=True)
         subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{solution_dir}/.", f"{name}:/solution"], check=True, capture_output=True)
         try:

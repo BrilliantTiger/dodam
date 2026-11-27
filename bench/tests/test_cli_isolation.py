@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from conftest import CANARY, note_figures
+from dodambench import frame
 from dodambench.convert import TEST_SH
 from dodambench.judge import RECORDS_LEFT_OUT_MB, UNMEASURED
 from dodambench.task import load_task
@@ -357,8 +358,13 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
     if reading:
         flags += ["--volume", f"{name}-asked:/logs/reading"]
     try:
-        subprocess.run(["docker", "create", "--name", name, "--network", "none", "--user", "0", *flags,
-                        "--cpus", str(ROOM["cpus"]), "-e", f"DODAM_APP_USER={user}", IMAGE, "sh", "-c", script],
+        if reading:
+            # made with the frame's mark before the containers that use it, so that the frame removes it however
+            # the test ends
+            subprocess.run(frame.volume(f"{name}-asked"), check=True, capture_output=True)
+        subprocess.run(frame.container(["docker", "create", "--name", name, "--network", "none", "--user", "0", *flags,
+                                        "--cpus", str(ROOM["cpus"]), "-e", f"DODAM_APP_USER={user}", IMAGE, "sh", "-c",
+                                        script]),
                        check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{tests_dir}/.", f"{name}:/tests"], check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{solution}/.", f"{name}:/solution"], check=True, capture_output=True)
@@ -371,7 +377,8 @@ def in_the_image(tests_dir: Path, solution: Path, out: Path, disk_mb: str = "32"
             driver = subprocess.run(["docker", "info", "--format", "{{.CgroupDriver}}"], check=True, capture_output=True,
                                     text=True).stdout.strip()
             group = f"system.slice/docker-{ident}.scope" if driver == "systemd" else f"docker/{ident}"
-            subprocess.run(reader_command(name, group), check=True, capture_output=True)
+            subprocess.run(frame.container(reader_command(name, group), machine=(
+                f"/sys/fs/cgroup/{group}", "/proc/sys/vm/drop_caches")), check=True, capture_output=True)
         try:
             said, errors = running.communicate(timeout=seconds)
             done = subprocess.CompletedProcess(running.args, running.returncode, said, errors)
@@ -1260,11 +1267,12 @@ def test_what_one_case_reads_of_what_the_container_was_given_shows_nothing_to_th
     """Not only what the build left: what a file system other than the image's own layers holds, and
     the files the container's runtime puts in, show the next case nothing of what one case read."""
     volume = f"dodam-given-{uuid.uuid4().hex[:12]}"
-    subprocess.run(["docker", "volume", "create", volume], check=True, capture_output=True)
+    subprocess.run(frame.volume(volume), check=True, capture_output=True)
     try:
-        subprocess.run(["docker", "run", "--rm", "--network", "none", "--memory", "128m", "--pids-limit", "32",
-                        "--volume", f"{volume}:/given", IMAGE, "sh", "-c",
-                        "echo x > /given/g0 && echo x > /given/g1 && chmod 0755 /given && chmod 0644 /given/g0 /given/g1"],
+        subprocess.run(frame.container(["docker", "run", "--rm", "--network", "none", "--memory", "128m",
+                                        "--pids-limit", "32", "--volume", f"{volume}:/given", IMAGE, "sh", "-c",
+                                        "echo x > /given/g0 && echo x > /given/g1 && chmod 0755 /given && "
+                                        "chmod 0644 /given/g0 /given/g1"]),
                        check=True, capture_output=True)
         time.sleep(3)
         result = judge_attack(tmp_path, READS_WHAT_IT_WAS_GIVEN, {"functional/test_given.py": READS_THEN_LOOKS},

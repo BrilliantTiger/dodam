@@ -27,6 +27,18 @@ def pilot_guard_folder(tmp_path: Path, monkeypatch) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def frame_apart(tmp_path: Path, monkeypatch) -> Path:
+    """For a test whose container command is a stand-in: the frame keeps its lock and its state in the test's
+    own folder, so that the test takes no part in the lock of the batches that start real containers, and the
+    batch the test opened ends with it."""
+    from dodambench import frame
+    root = tmp_path / "frame-root"
+    monkeypatch.setattr(frame, "ROOT", root)
+    yield root
+    frame.close()
+
+
 def write(root: Path, rel: str, text: str) -> Path:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

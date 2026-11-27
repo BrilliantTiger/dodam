@@ -136,9 +136,12 @@ def main(argv: list[str] | None = None) -> None:
     try:
         shutil.copy(a.judge, work / "judge.py")
         shutil.copy(HERE, work / "removal_time.py")
-        subprocess.run(["docker", "create", "--name", name, *CAPS, "--user", "0", IMAGE, "/opt/judge/bin/python",
-                        "/measure/removal_time.py", "--inside", "--judge", "/measure/judge.py",
-                        "--layouts", ";".join(layouts), "--sizes", ",".join(map(str, sizes))],
+        sys.path.insert(0, str(HERE.parents[1]))
+        from dodambench import frame  # on this side only: the copy inside the container has no frame
+        subprocess.run(frame.container(["docker", "create", "--name", name, *CAPS, "--user", "0", IMAGE,
+                                        "/opt/judge/bin/python", "/measure/removal_time.py", "--inside", "--judge",
+                                        "/measure/judge.py", "--layouts", ";".join(layouts),
+                                        "--sizes", ",".join(map(str, sizes))]),
                        check=True, capture_output=True)
         subprocess.run(["docker", "cp", f"{work}/.", f"{name}:/measure"], check=True, capture_output=True)
         done = subprocess.run(["docker", "start", "--attach", name], capture_output=True, text=True, timeout=3000)
