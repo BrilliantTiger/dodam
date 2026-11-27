@@ -9,6 +9,7 @@ Run: python3 -I -m unittest discover -s .github/commit-check
 
 import http.server
 import json
+import re
 import os
 import subprocess
 import sys
@@ -360,8 +361,7 @@ class CheckTest(RepoTestCase):
                 self.assert_fails((code, out), sha, "local path (message line 1)", hidden=[text])
 
     def test_a_temporary_folder_and_a_container_s_home_in_an_added_line_of_a_test_pass(self):
-        self.repo.commit("A change", files={"test_x.py": "ROOT = '/tmp/x'\nHOME = '/home/agent'\nIGNORE = '.cla"
-                                            "ude/worktrees/'\n"})
+        self.repo.commit("A change", files={"test_x.py": "ROOT = '/tmp/x'\nHOME = '/home/agent'\n"})
         self.assert_passes(self.run_check(self.base))
 
     def test_an_id_of_the_session_tooling_fails_in_the_message_and_in_an_added_line(self):
@@ -715,6 +715,41 @@ class StructureTest(RepoTestCase):
         sha = self.repo.commit("A change", files={"cache.pyc": b"\x00\x0d\x0a" + TRACKER_CODE.encode() + b"\n"})
         self.assert_fails(self.run_check(self.base), sha, "tracker code (file 1, line 2)")
 
+    def test_an_outside_diff_program_named_in_the_repository_s_settings_is_not_used(self):
+        script = self.dir / "hide.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o755)
+        self.repo.git("config", "diff.external", str(script))
+        self.repo.git("config", "diff.x.textconv", str(script))
+        sha = self.repo.commit("A change", files={".gitattributes": "*.txt diff=x\n", "z.txt": f"one\n{TRACKER_CODE}\n"})
+        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 2, line 2)")
+
+    def test_every_rule_holds_inside_a_file_in_each_listed_encoding(self):
+        samples = [(f"see {TRACKER_CODE} here", "tracker code"), (f"see {TRACKER_ADDRESS} here", "tracker address"),
+                   (f"see {TASK_ID} here", "tooling id"), (f"see {HOME_PATH} here", "local path"),
+                   (f"thanks to {PRIVATE_WORD} here", "private pattern"),
+                   ("gener" "ated with " + C + " Code", "attribution line")]
+        encodings = [("utf-16-le", b""), ("utf-16-le", b"\xff\xfe"), ("utf-16-be", b""), ("utf-16-be", b"\xfe\xff"),
+                     ("utf-32-le", b""), ("utf-32-le", b"\xff\xfe\x00\x00"), ("utf-32-be", b""),
+                     ("utf-32-be", b"\x00\x00\xfe\xff")]
+        files, expected = {}, {}
+        for rule_index, (text, prop) in enumerate(samples):
+            for encoding_index, (codec, mark) in enumerate(encodings):
+                for shift in range(4 if "32" in codec else 2):
+                    name = f"f{rule_index}{encoding_index}{shift}.bin"
+                    files[name] = b"\x89PNG\x00" + b"\x01" * shift + mark + text.encode(codec)
+                    expected[name] = prop
+            name = f"f{rule_index}z.bin"
+            files[name] = b"\x00".join(text[i:i + 3].encode() for i in range(0, len(text), 3)) + b"\x00\xff"
+            expected[name] = prop
+        sha = self.repo.commit("Files in other encodings", files=files)
+        code, out = self.run_check(self.base, pattern=PRIVATE_PATTERN)
+        self.assertEqual(code, 1, out)
+        for number, name in enumerate(sorted(files), 1):
+            with self.subTest(name=name):
+                self.assertRegex(out, rf"commit {sha[:12]}: {expected[name]} \(path {number}, read as ")
+        self.assertNotIn(PRIVATE_WORD, out)
+
     def test_a_line_without_a_newline_at_the_end_is_checked(self):
         sha = self.repo.commit("A change", files={"a.txt": f"one\n{TRACKER_CODE}"})
         self.assert_fails(self.run_check(self.base), sha, "tracker code (file 1, line 2)")
@@ -801,7 +836,10 @@ class SampleTest(RepoTestCase):
         ("Gener" "ated with " + C + " Code", "attribution line"),
         ("/ho" "me/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
         ("/tmp/x/y", None),  # 91 lines of main's isolation tests
-        (".cla" "ude/worktrees/", None),  # the repository's .gitignore names the folder alone
+        (".cla" "ude/worktrees/", "local path"),  # an entry directly in a tool's own folder
+        (".co" "dex/config.toml", "local path"), ("~/.or" "ca/logs/x.log", "local path"),
+        ("~/.cla" "ude.json", "local path"), (".gem" "ini/oauth_creds", "local path"),
+        ("~/.co" "dex/sessions/2026/11/27/rollout-1.jsonl", "local path"),
         ("Code written by " + C + " is reviewed by another company's model", None),  # the charter's words
     ]
     PATHS = [
@@ -979,7 +1017,7 @@ class ForkWayTest(RepoTestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("private pattern", out)
 
-    def main_push(self, *, open_way, held="2026-11-27", environment=REVIEWED, repository_secret=""):
+    def main_push(self, *, open_way, held="2026-11-27", environment=REVIEWED, repository_secret="false"):
         self.repo.commit("A change")
         before = self.base
         fake = self.fake({ENVIRONMENT_PATH: environment} if environment is not None else {})
@@ -994,13 +1032,186 @@ class ForkWayTest(RepoTestCase):
 
     def test_main_s_push_turns_red_when_the_way_is_open_and_something_is_missing(self):
         cases = [dict(environment=None), dict(environment=UNREVIEWED), dict(environment=NOBODY),
-                 dict(repository_secret="made-up"), dict(held=None)]
+                 dict(held=None)]
         for case in cases:
             with self.subTest(case=case):
                 self.tearDown_repo()
                 code, out = self.main_push(open_way=True, **case)
                 self.assertEqual(code, 1, out)
                 self.assertIn("the way for forks is open", out)
+
+    def test_a_fork_s_secret_at_the_repository_s_level_turns_every_own_run_red_open_or_shut(self):
+        for open_way in (False, True):
+            with self.subTest(open_way=open_way):
+                self.tearDown_repo()
+                code, out = self.main_push(open_way=open_way, repository_secret="true")
+                self.assertEqual(code, 1, out)
+                self.assertIn("the fork's secret is a secret of the whole repository", out)
+
+    def gate(self, *, open_way, held="2026-11-27", environment=REVIEWED):
+        fake = self.fake({ENVIRONMENT_PATH: environment} if environment is not None else {})
+        outputs = self.dir / "outputs.txt"
+        outputs.write_text("")
+        code, out = self.call_gate(open_way, held, {**fake.env, "GITHUB_OUTPUT": str(outputs)})
+        return code, out, outputs.read_text(), fake
+
+    def call_gate(self, open_way, held, env):
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--fork-way-gate", "--context", "fork-approved",
+                               "--settings", str(self.settings(open_way=open_way, held=held))],
+                              capture_output=True, text=True, env=clean_env(env), timeout=120, cwd=self.dir)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_the_first_job_of_a_fork_s_run_fails_while_the_way_is_shut_and_asks_nothing(self):
+        for open_way, held in ((False, "2026-11-27"), (True, None)):
+            with self.subTest(open_way=open_way, held=held):
+                code, out, outputs, fake = self.gate(open_way=open_way, held=held)
+                self.assertEqual(code, 1, out)
+                self.assertIn("The way for pull requests from forks is not open yet", out)
+                self.assertEqual(outputs, "")
+                self.assertEqual(fake.asked, [])
+
+    def test_the_first_job_of_a_fork_s_run_fails_when_no_reviewer_is_named_or_it_cannot_tell(self):
+        for environment in (UNREVIEWED, NOBODY, None):
+            with self.subTest(environment=environment):
+                code, out, outputs, _ = self.gate(open_way=True, environment=environment)
+                self.assertEqual(code, 1, out)
+                self.assertIn("does not wait for a named reviewer", out)
+                self.assertEqual(outputs, "")
+
+    def test_the_first_job_of_a_fork_s_run_says_open_only_when_the_way_is_open_and_a_reviewer_is_named(self):
+        code, out, outputs, _ = self.gate(open_way=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(outputs, "open=true\n")
+
+    def tearDown_repo(self):
+        self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
+        self.base = self.repo.commit("The base commit")
+
+
+class MergeTest(RepoTestCase):
+    """What a merge on main will carry is held to the rules before the merge: the displayed name of the account that
+    merges, and the first line of the merge's message; and a red main can be left by a repair on top of it."""
+
+    def merged_main(self):
+        """A main whose last merge GitHub made, with the merging account's no-reply address as its author."""
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.commit("Side work")
+        self.repo.git("checkout", "-q", "main")
+        env = {"GIT_AUTHOR_NAME": "Someone-Made-Up", "GIT_AUTHOR_EMAIL": OWN,
+               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from SomeOrg/side\n\nSide work", "side",
+                      env=env)
+        return self.repo.head()
+
+    def preview(self, user_answer, *, actor=None, actor_answer=None, pattern=None):
+        start = self.merged_main()
+        self.repo.commit("A change")
+        answers = {f"/users/{OWN_LOGIN}": user_answer}
+        if actor:
+            answers[f"/users/{actor}"] = actor_answer
+        fake = self.fake(answers)
+        env = dict(fake.env)
+        if actor:
+            env["GITHUB_ACTOR"] = actor
+        return self.run_check(start, pattern=pattern, extra=["--merge-author"], env_extra=env)
+
+    def test_a_name_that_equals_its_login_but_for_case_is_spared_the_private_pattern_whole_or_not_at_all(self):
+        self.repo.commit("A change", author=("Someone-Made-Up", OWN), committer=(OWN_LOGIN.upper(), OWN))
+        self.assert_passes(self.run_check(self.base, pattern="(?i)someone-made-" "up"))
+        sha = self.repo.commit("Another", author=("Someone-Made-Up Junior", OWN), committer=(OWN_LOGIN, OWN))
+        self.assert_fails(self.run_check(sha + "~1", pattern="(?i)someone-made-" "up"), sha, "author name")
+
+    def test_the_displayed_name_github_will_write_on_the_merge_commit_is_read_ahead(self):
+        for answer, expected in (({"login": OWN_LOGIN, "name": None}, 0), ({"login": OWN_LOGIN, "name": ""}, 0),
+                                 ({"login": OWN_LOGIN, "name": "SOMEONE-made-up"}, 0),
+                                 ({"login": OWN_LOGIN, "name": "Some Real Person"}, 1),
+                                 ({"login": OWN_LOGIN, "name": C}, 1), (404, 1)):
+            with self.subTest(answer=answer):
+                self.tearDown_repo()
+                code, out = self.preview(answer)
+                self.assertEqual(code, expected, out)
+                if expected:
+                    self.assertIn("merge commit: author name", out)
+                    self.assertNotIn("Some Real Person", out)
+
+    def test_a_displayed_name_github_does_not_answer_fails_after_every_try(self):
+        start = self.merged_main()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": 502})
+        check = load("check.py")
+        args = ["--repo", str(self.repo.root), "--from", start, "--head", "HEAD", "--settings", str(self.settings()),
+                "--context", "own", "--compare-settings", start, "--verified-shas", os.devnull, "--merge-author"]
+        code, out = in_process(check.main, args, fake.env, check)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be read)", out)
+        self.assertEqual(fake.asked.count(f"/users/{OWN_LOGIN}"), 5)
+
+    def test_the_displayed_name_is_held_to_the_private_pattern_too(self):
+        code, out = self.preview({"login": OWN_LOGIN, "name": OWN_LOGIN.upper() + " " + PRIVATE_WORD},
+                                 pattern=PRIVATE_PATTERN)
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(PRIVATE_WORD, out)
+
+    def test_the_account_that_pushed_is_read_ahead_as_well_when_it_is_another(self):
+        code, out = self.preview({"login": OWN_LOGIN, "name": None}, actor="another-made-up",
+                                 actor_answer={"login": "another-made-up", "name": "A Different Name"})
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name", out)
+
+    def test_on_a_fork_s_run_only_the_name_of_whoever_merges_is_read_ahead(self):
+        # On a fork's run the account that pushed is the outside contributor, who never makes the merge commit.
+        start = self.merged_main()
+        self.repo.commit("A change")
+        fake = self.fake({ENVIRONMENT_PATH: REVIEWED, f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "name": None},
+                          "/users/an-outside-person": {"login": "an-outside-person", "name": "Quite Another Name"}})
+        code, out = self.run_check(start, context="fork-approved", open_way=True, extra=["--merge-author"],
+                                   event={"pull_request": {"number": 7, "title": "Fix", "body": ""}},
+                                   env_extra={**fake.env, "GITHUB_ACTOR": "an-outside-person"})
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"/users/{OWN_LOGIN}", fake.asked)
+        self.assertNotIn("/users/an-outside-person", fake.asked)
+
+    def test_without_a_merge_on_main_and_without_an_account_nothing_is_read_ahead(self):
+        self.repo.commit("A change")
+        fake = self.fake({})
+        code, out = self.run_check(self.base, extra=["--merge-author"], env_extra=fake.env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.asked, [])
+
+    def test_the_first_line_of_the_merge_s_message_is_held_to_the_rules_for_a_fork(self):
+        self.repo.commit("A change")
+        fork = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                 "head": {"ref": "fix", "repo": {"owner": {"login": T.lower() + "-12"}}}},
+                "repository": {"owner": {"login": "SomeOrg"}}}
+        code, out = self.run_check(self.base, event=fork)
+        self.assertEqual(code, 1, out)
+        self.assertIn("pull request: tracker code (merge message's first line)", out)
+        own = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                "head": {"ref": "fix", "repo": {"owner": {"login": "someorg"}}}},
+               "repository": {"owner": {"login": "SomeOrg"}}}
+        self.assert_passes(self.run_check(self.base, event=own))
+
+    def test_a_red_merge_on_main_is_left_by_a_repair_on_top_of_it(self):
+        # A merge commit with a personal address turns main's push red; a repair branch from it passes its own
+        # push, and the hand merge of the repair passes main's next push, with the exempt commit where it was.
+        self.repo.git("checkout", "-q", "-b", "side")
+        self.repo.commit("Side work")
+        self.repo.git("checkout", "-q", "main")
+        before = self.repo.head()
+        env = {"GIT_AUTHOR_NAME": "someone", "GIT_AUTHOR_EMAIL": PERSONAL,
+               "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #2 from SomeOrg/side", "side", env=env)
+        red = self.repo.head()
+        self.assert_fails(self.run_check(before, red, verified=[red], extra=["--require-commits"]), red,
+                          "author address")
+        self.repo.git("checkout", "-q", "-b", "repair")
+        repair = self.repo.commit("Say what happened at the red merge")
+        self.assert_passes(self.run_check(red, repair))
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge the repair", "repair",
+                      env={"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
+                           "GIT_COMMITTER_EMAIL": OWN})
+        self.assert_passes(self.run_check(red, self.repo.head(), extra=["--require-commits"]))
 
     def tearDown_repo(self):
         self.repo = Repo(Path(tempfile.mkdtemp(dir=self.dir)) / "repo")
@@ -1141,7 +1352,12 @@ class RowsTest(RepoTestCase):
                 ("Produ" "ced using " + C, "attribution line"), ("Gener" "ated via " + C, "attribution line"),
                 ("Gener" "ated through " + C, "attribution line"), ("Gener" "ated by " + C, "attribution line"),
                 ("\N{ROBOT FACE} done", "attribution line"), ("Change id: I0123", "attribution line"),
-                ("Co-" "authored-" "by: A Person", "attribution line"), ("Written for the owner's eyes", None)]
+                ("Co-" "authored-" "by: A Person", "attribution line"), ("Written for the owner's eyes", None),
+                ("Ma" "de with " + C + " Code", "attribution line"), ("Crea" "ted with " + C + " Code", "attribution line"),
+                ("Bu" "ilt with Co" "dex", "attribution line"), ("Prepa" "red by " + C, "attribution line"),
+                ("Implemen" "ted by Co" "dex", "attribution line"), ("With help from " + C + " Code", "attribution line"),
+                ("With the help of " + C, "attribution line"), ("AI-gener" "ated.", "attribution line"),
+                ("AI-assi" "sted", "attribution line")]
         self.described(rows)
 
     def test_every_id_of_the_sessions_tooling(self):
@@ -1158,8 +1374,8 @@ class RowsTest(RepoTestCase):
         self.described(rows)
 
     def test_every_form_of_a_dash_and_a_space_is_brought_to_one_form(self):
-        rows = [(T + "\t12", "tracker code"), (T + " 12", "tracker code"), (T + "−12", "tracker code"),
-                (T + "⁃12", "tracker code"), (T + "–12", "tracker code")]
+        rows = [(T + "\t12", "tracker code"), (T + "\u168012", "tracker code"), (T + "\u221212", "tracker code"),
+                (T + "\u201312", "tracker code")]
         self.described(rows)
 
     def test_the_private_pattern_is_matched_on_the_text_as_written_too(self):
@@ -1173,6 +1389,163 @@ class RowsTest(RepoTestCase):
         self.assert_fails((code, out), sha, "attribution line (file 1, line 1)")
         self.assert_fails((code, out), sha, "attribution line (file 1, line 2)")
         self.assertNotIn("(file 1, line 3)", out)
+
+
+class ClassesTest(unittest.TestCase):
+    """The copy for matching, walked over every character of its classes as the language's character tables give
+    them: a forbidden text, the private pattern's included, with such a character inside it, or in place of its space,
+    its dash or its line break, is refused in a message, in a name and in an added line."""
+
+    TAKEN_OUT = ("Mn", "Me", "Cf", "Cc", "Cs", "Co", "Cn")  # marks, format, control, surrogate, private use, unassigned
+
+    @classmethod
+    def setUpClass(cls):
+        import unicodedata
+        cls.check = load("check.py")
+        everything = [chr(point) for point in range(0x110000)]
+        cls.breaks = [ch for ch in everything if len(("a" + ch + "b").splitlines()) > 1]
+        breaks = set(cls.breaks)
+        rest = [ch for ch in everything if ch not in breaks]
+        cls.spaces = [ch for ch in rest if ch.isspace()]
+        cls.taken_out = [ch for ch in rest if not ch.isspace() and (
+            unicodedata.category(ch) in cls.TAKEN_OUT
+            or (unicodedata.category(ch) == "Lo" and "FILLER" in unicodedata.name(ch, "").split()))]
+        cls.dashes = [ch for ch in rest if unicodedata.category(ch) == "Pd" or (
+            unicodedata.category(ch) == "Sm" and "MINUS" in unicodedata.name(ch, "").split()
+            and "SET" not in unicodedata.name(ch, "").split())]
+
+    def checker(self, pattern=None):
+        import re as regex
+        return self.check.Checker(regex.compile(pattern) if pattern else None, lambda sha: False)
+
+    def refused_everywhere(self, text, prop):
+        message = self.checker(PRIVATE_PATTERN)
+        message.prose("x", f"A plain subject\n\n{text}", lambda n: "w")
+        line = self.checker(PRIVATE_PATTERN)
+        line.added_line("x", 1, 1, text)
+        return any(prop in found for found in message.findings) and any(prop in found for found in line.findings)
+
+    def first_survivor(self, characters, make, prop):
+        """The first character that lets the text through, for the message of a failed test."""
+        for ch in characters:
+            if not self.refused_everywhere(make(ch), prop):
+                return f"U+{ord(ch):04X}"
+        return None
+
+    def test_plus_minus_signs_and_the_gap_fillers_of_other_scripts_stay_as_they_are(self):
+        self.assertEqual(self.check.normalise("a\u00b1b\u2213c"), "a\u00b1b\u2213c")
+        self.assertEqual(self.check.normalise("a\ua8f9b"), "a\ua8f9b")
+
+    def test_the_classes_are_not_empty(self):
+        # Shown so that a change of the language's tables cannot empty a class and leave the walk with nothing.
+        self.assertGreater(len(self.taken_out), 900000)
+        self.assertGreater(len(self.spaces), 15)
+        self.assertGreater(len(self.dashes), 25)
+        self.assertGreater(len(self.breaks), 6)
+
+    def test_every_character_taken_out_inside_a_forbidden_text_lets_nothing_through(self):
+        # Each character on its own, next to a letter of the forbidden text, so that no character can hide another.
+        # The assigned ones (marks, format, control, the fillers) go through every place; the unassigned, private and
+        # surrogate points, which have no decomposition, through the copy every place matches on.
+        import unicodedata
+        assigned = [ch for ch in self.taken_out if unicodedata.category(ch) not in ("Cn", "Co", "Cs")]
+        others = [ch for ch in self.taken_out if unicodedata.category(ch) in ("Cn", "Co", "Cs")]
+        self.assertGreater(len(assigned), 2000)
+        message = self.checker(PRIVATE_PATTERN)
+        message.prose("x", "\n".join(f"DO{ch}D-17 Zorb{ch}latt lin{ch}ear.app" for ch in assigned), lambda n: f"line {n}")
+        for prop in ("tracker code", "private pattern", "tracker address"):
+            caught = {found.rsplit("(", 1)[1] for found in message.findings if f": {prop} (" in found}
+            missing = [ch for number, ch in enumerate(assigned, 1) if f"line {number})" not in caught]
+            self.assertEqual([f"U+{ord(ch):04X}" for ch in missing[:5]], [], prop)
+        for ch in assigned:
+            line = self.checker(PRIVATE_PATTERN)
+            line.added_line("x", 1, 1, f"DO{ch}D-17 Zorb{ch}latt")
+            if len(line.findings) != 2 or self.checker(PRIVATE_PATTERN).name_passes(f"Cl{ch}aude", OWN) \
+                    or self.checker(PRIVATE_PATTERN).name_passes(f"Zorb{ch}latt", OWN):
+                self.fail(f"U+{ord(ch):04X} lets a forbidden text through in a line or a name")
+        # Every one of them between two letters, so that each stands next to a letter and none next to another.
+        copy = self.check.normalise("O" + "O".join(others) + "O")
+        if copy != "o" * (len(others) + 1):
+            survivors = [ch for ch in others if self.check.normalise(f"DO{ch}D") != "dod"]
+            self.fail(", ".join(f"U+{ord(ch):04X}" for ch in survivors[:5]))
+
+    def test_plus_minus_signs_and_the_gap_fillers_of_other_scripts_stay_as_they_are(self):
+        self.assertEqual(self.check.normalise("a\u00b1b\u2213c"), "a\u00b1b\u2213c")
+        self.assertEqual(self.check.normalise("a\ua8f9b"), "a\ua8f9b")
+
+    def test_the_classes_are_not_empty(self):
+        # Shown so that a change of the language's tables cannot empty a class and leave the walk with nothing.
+        self.assertGreater(len(self.taken_out), 900000)
+        self.assertGreater(len(self.spaces), 15)
+        self.assertGreater(len(self.dashes), 25)
+        self.assertGreater(len(self.breaks), 6)
+
+    def test_every_space_and_every_dash_in_place_of_a_forbidden_text_s_own(self):
+        for ch in self.spaces:
+            with self.subTest(point=f"U+{ord(ch):04X}"):
+                self.assertTrue(self.refused_everywhere(f"{T}{ch}17", "tracker code"))
+        for ch in self.dashes:
+            with self.subTest(point=f"U+{ord(ch):04X}"):
+                self.assertTrue(self.refused_everywhere(f"{T}{ch}17", "tracker code"))
+                self.assertFalse(self.checker().name_passes(f"GPT{ch}4", OWN))
+
+    def test_every_line_break_ends_a_line_before_a_trailer(self):
+        for ch in self.breaks:
+            with self.subTest(point=f"U+{ord(ch):04X}"):
+                message = self.checker()
+                message.prose("x", f"Plain words.{ch}" + AI_COAUTHOR, lambda n: f"line {n}")
+                self.assertTrue(any("attribution line" in found for found in message.findings), ch)
+                line = self.checker()
+                line.added_line("x", 1, 1, f"plain{ch}see {T}-17")
+                self.assertTrue(any("tracker code" in found for found in line.findings), ch)
+
+    def test_an_accent_is_folded_away_and_a_word_split_where_cases_meet(self):
+        self.assertTrue(self.refused_everywhere("D\u00d3D-17", "tracker code"))
+        self.assertFalse(self.checker().name_passes("GPT" "Bot", OWN))
+        self.assertFalse(self.checker().name_passes("\uff23\uff4c\uff41\uff55\uff44\uff45\uff22\uff4f\uff54", OWN))
+        self.assertTrue(self.checker().name_passes("\uac00\ub098\ub2e4", OWN))  # Korean syllables come back whole
+
+
+class TextsTest(unittest.TestCase):
+    """The README says what the code holds: the closed paths are the desk's, and every list is written out in it."""
+
+    def setUp(self):
+        self.readme = (HERE / "README.md").read_text(encoding="utf-8")
+        self.check = load("check.py")
+
+    def test_the_closed_paths_in_the_readme_are_the_desk_s(self):
+        sys.path.insert(0, str(HERE.parents[1] / "tools" / "desk"))
+        import pr_files
+        self.assertIn("The paths closed to outside pull requests", self.readme)
+        section = self.readme.split("The paths closed to outside pull requests", 1)[1].split("\n\n", 1)[0]
+        named = [name for name in re.findall(r"`([^`]+/)`", section.split("Allowed in them", 1)[0])]
+        self.assertEqual(sorted(named), sorted(pr_files.PROTECTED_FOLDERS))
+        self.assertIn("the rest of `bench/`", section)
+        self.assertEqual(pr_files.PAGE_TEXT, "tools/site/strings/")
+        self.assertIn("`tools/site/strings/`", section)
+
+    def test_every_word_of_every_list_stands_in_the_readme(self):
+        text = self.readme.casefold()
+        for word in self.check.ATTRIBUTION_WORDS:
+            with self.subTest(word=word):
+                self.assertRegex(text, r"(?<![a-z])" + re.escape(word) + r"(?![a-z])")
+        for verb in ("generated", "co-authored", "coauthored", "assisted", "authored", "written", "drafted", "produced",
+                     "made", "created", "built", "prepared", "implemented"):
+            with self.subTest(verb=verb):
+                self.assertIn(verb, text)
+        for name in ("claude", "anthropic", "openai", "chatgpt", "gpt", "codex", "gemini", "bard", "copilot", "cursor",
+                     "devin", "antigravity", "llama", "mistral", "deepseek", "grok", "windsurf", "aider", "cline", "qwen",
+                     "tabnine", "codeium", "codewhisperer", "jules", "perplexity", "o1", "o3", "o4-mini"):
+            with self.subTest(name=name):
+                self.assertRegex(text, r"(?<![a-z0-9])" + re.escape(name) + r"(?![a-z0-9])")
+        self.assertEqual(len(self.check.AI_NAMES), 28)
+        self.assertEqual(len(self.check.ATTRIBUTION_WORDS), 22)
+        self.assertEqual(len(self.check.MADE_VERBS), 12)
+        self.assertEqual(len(self.check.LOCAL_PATHS), 11)
+        self.assertEqual(len(self.check.TOOLING_IDS), 7)
+
+    def test_no_number_of_main_s_history_stands_in_the_readme(self):
+        self.assertNotRegex(self.readme, r"\d+ (?:added )?lines? of \d+ commits")
 
 
 class EdgeTest(RepoTestCase):
@@ -1404,15 +1777,36 @@ class ApiTest(unittest.TestCase):
         fake.server.RequestHandlerClass = Handler
         saved = {key: os.environ.get(key) for key in fake.env}
         os.environ.update({**fake.env, "GITHUB_TOKEN": token})
-        check.time.sleep = lambda seconds: None
+        sleep = check.time.sleep
+        self.waits = []
+        check.time.sleep = self.waits.append
         try:
             return check.api_get("x"), headers
         finally:
+            check.time.sleep = sleep
             for key, value in saved.items():
                 if value is None:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def test_a_failed_answer_is_asked_five_times_in_all_with_waits_of_two_five_ten_and_twenty_seconds(self):
+        answer, asked = self.ask([502])
+        self.assertIsNone(answer)
+        self.assertEqual(len(asked), 5)
+        self.assertEqual(self.waits, [2, 5, 10, 20])
+        answer, asked = self.ask([500, 503, {"a": 1}])
+        self.assertEqual(answer, {"a": 1})
+        self.assertEqual(len(asked), 3)
+        self.assertEqual(self.waits, [2, 5])
+        answer, asked = self.ask([{"a": 1}])
+        self.assertEqual(self.waits, [])
+
+    def test_the_wait_between_tries_is_put_back_after_the_test(self):
+        import time as clock
+        before = clock.sleep
+        self.ask([502])
+        self.assertIs(clock.sleep, before)
 
     def test_the_token_is_sent_when_there_is_one_and_not_otherwise(self):
         self.assertEqual(self.ask([{"a": 1}])[1], ["Bearer made-up"])
@@ -1510,6 +1904,39 @@ class ForkPathsEdgeTest(ForkPathsCase):
         self.assertEqual(code, 1)
         self.assertIn("::error::the check of a fork's paths stopped on something it does not know", printed.getvalue())
         self.assertNotIn(MARKER, printed.getvalue())
+
+
+class RunTestsTest(unittest.TestCase):
+    """The runner of these tests fails when a test fails and when it cannot find or run every test it found."""
+
+    def run_in(self, files):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        for name, text in files.items():
+            (folder / name).write_text(text)
+        done = subprocess.run([sys.executable, "-I", str(HERE / "run_tests.py"), str(folder)], capture_output=True,
+                              text=True, env=clean_env(), timeout=120)
+        return done.returncode, done.stdout + done.stderr
+
+    def test_passing_tests_pass_and_are_counted(self):
+        code, out = self.run_in({"test_a.py": "import unittest\nclass A(unittest.TestCase):\n"
+                                              "    def test_one(self): pass\n    def test_two(self): pass\n"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 tests of the commit check passed", out)
+
+    def test_a_failing_test_fails_the_run(self):
+        code, out = self.run_in({"test_a.py": "import unittest\nclass A(unittest.TestCase):\n"
+                                              "    def test_one(self): self.fail('made up')\n"})
+        self.assertEqual(code, 1, out)
+
+    def test_no_test_at_all_fails_the_run(self):
+        code, out = self.run_in({"notes.txt": "nothing"})
+        self.assertEqual(code, 1, out)
+        self.assertIn("could not be found", out)
+
+    def test_a_test_file_that_does_not_load_fails_the_run(self):
+        code, out = self.run_in({"test_a.py": "import nothing_of_that_name\n"})
+        self.assertEqual(code, 1, out)
 
 
 if __name__ == "__main__":

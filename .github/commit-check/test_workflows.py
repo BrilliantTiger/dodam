@@ -7,7 +7,7 @@ branches. A rule that looks for forbidden shapes misses the shapes it does not k
 text of both files, comments included: every shell block, every action line and every expression. A change of
 either workflow is then always a change of this file, in sight of a review. Any further workflow file fails too.
 
-Run: python3 -I -m unittest discover -s .github/commit-check
+Run: python3 -I .github/commit-check/run_tests.py
 """
 
 import re
@@ -29,10 +29,9 @@ GATE = r'''# The gate on every pull request from a fork. It runs main's copy of 
 # - the only permission is contents, to read; it also reads whether the environment of forks waits for a reviewer;
 # - no value of the event goes into a shell line through the expression syntax, only through env;
 # - every action is pinned by its commit;
-# - the job that judges a fork's commits runs in the environment private-check and names only that environment's
-#   own secret. Until settings.json opens the way for forks, after the owner has set the environment with a named
-#   reviewer, its secret and GitHub's setting that holds every run of an outside contributor, that job says the way is
-#   not open, judges nothing and fails.
+# - the job that judges a fork's commits runs in the environment private-check, names only that environment's own
+#   secret, and starts only after a first job without environment or secret said that settings.json opens the way for
+#   forks and that the environment names a reviewer; until then that first job fails with a fixed message.
 # A pull request from a fork that touches a path closed to outside pull requests fails the job pull-request-paths at
 # once, with no secret and no approval; the closed paths are those of the desk's tool on main.
 # No run here is cancelled and nothing waits but the environment's approval. The tests in
@@ -72,11 +71,32 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -I .github/commit-check/fork_paths.py --number "$NUMBER" --base-sha "$BASE_SHA"
 
-  # A pull request from a fork: every commit after the exempt commit, its title, description and branch name, with the
-  # fork's own private pattern. It waits for the project's approval, given after both reviews for every waiting run of
-  # the head at once; while the way for forks is shut it says so and fails.
-  pull-request-commits:
+  # The first job of a fork's run names no environment and no secret: it reads main's settings and, when they say the
+  # way for forks is open, asks GitHub whether the environment names a reviewer. While the way is shut, nobody is named,
+  # or it cannot tell, it fails with a fixed message, and the job that names the environment and the secret never
+  # starts, so GitHub makes no environment and hands no secret to a runner.
+  pull-request-way:
     if: github.event.pull_request.head.repo.id != github.repository_id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      open: ${{ steps.way.outputs.open }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Ask whether the way for forks is open and a reviewer is named
+        id: way
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/commit-check/check.py --fork-way-gate --settings .github/commit-check/settings.json --context fork-approved
+
+  # A pull request from a fork: every commit after the exempt commit, its title, description and branch name, with the
+  # environment's own private pattern. It waits for the project's approval, given after both reviews for every waiting
+  # run of the head at once; before its secret is named, a step asks once more for the named reviewer.
+  pull-request-commits:
+    needs: pull-request-way
+    if: github.event.pull_request.head.repo.id != github.repository_id && needs.pull-request-way.outputs.open == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: private-check
@@ -85,6 +105,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Ask once more for the named reviewer, before any step that names the secret
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/commit-check/check.py --fork-way-gate --settings .github/commit-check/settings.json --context fork-approved
       - name: Fetch the pull request's commits as data
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -92,7 +116,7 @@ jobs:
           case "$HEAD_SHA" in *[!0-9a-f]*|'') echo "::error::no head commit"; exit 1;; esac
           git fetch --no-tags --quiet origin "+$HEAD_SHA:refs/remotes/pull/head"
       - name: The check's own tests
-        run: python3 -I -m unittest discover -s .github/commit-check
+        run: python3 -I .github/commit-check/run_tests.py
       - name: Check the commits and the text
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -101,21 +125,25 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
-            --event "$GITHUB_EVENT_PATH" --settings .github/commit-check/settings.json --context fork-approved \
-            --compare-settings "$BASE_SHA"
+            --event "$GITHUB_EVENT_PATH" --merge-author --settings .github/commit-check/settings.json \
+            --context fork-approved --compare-settings "$BASE_SHA"
 '''
 
 COMMITS = r'''# Every commit that a push to a branch brings, and every commit and the text of a pull request from the project's
 # own branches: the properties at the top of .github/commit-check/check.py. It runs the branch's own copy of the
 # check, with the private pattern: a push from one of the project's branches runs that branch's workflows with the
 # repository's secrets anyway, so judging the branch by its own copy opens nothing new, and a broken copy of the
-# check's script on main cannot block the pull request that mends it. A pull request from a fork is judged by main's
+# check's script on main cannot block the pull request that mends it. A branch or a pull request that does not change
+# the check or its two workflows is judged by the base's copy instead, so that a rule main gained since the branch
+# was made holds for it before its merge; one that changes them must have main's newest commit among its ancestors. A pull request from a fork is judged by main's
 # copy in the workflow "pull-requests"; here it only runs the check's own tests. Tags are outside the check.
 #
 # The owner's gate refuses a head on which any run ended otherwise than in success, so no run here is cancelled
 # (there is no concurrency group), nothing waits and nothing is read again: a run fails only on a commit, a text or
 # a path that breaks a rule. The way back after a text is mended is a new head: on a branch of the project an empty
-# commit whose message says why. On main the range starts at the push's "before", so it is never empty; there the
+# commit whose message says why. The runs of a branch also read ahead what a merge will carry (the displayed name of
+# the account that merges) and, once the way for forks is open, what main's push asks; the fork's secret is passed only
+# as whether it is set, never its value. On main the range starts at the push's "before", so it is never empty; there the
 # check detects and does not prevent, and a red main stops the next merge at the owner's gate.
 #
 # Reading whether the environment of forks waits for a reviewer needs no permission beyond contents in this public
@@ -141,24 +169,35 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: The check's own tests
-        run: python3 -I -m unittest discover -s .github/commit-check
+        run: python3 -I .github/commit-check/run_tests.py
       - name: Check the commits of a push to a branch other than main, and the branch's name
         if: github.event_name == 'push' && github.ref != 'refs/heads/main'
         env:
           BRANCH: ${{ github.ref_name }}
           AFTER: ${{ github.sha }}
           COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN != '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 -I .github/commit-check/check.py --repo . --from origin/main --head "$AFTER" --branch "$BRANCH" \
-            --settings .github/commit-check/settings.json --context own --compare-settings origin/main
+          check=.github/commit-check
+          if git diff --quiet origin/main..."$AFTER" -- .github/commit-check .github/workflows/commits.yml \
+              .github/workflows/pull-requests.yml; then
+            mkdir -p "$RUNNER_TEMP/base"
+            git archive origin/main .github/commit-check | tar -x -C "$RUNNER_TEMP/base"
+            check="$RUNNER_TEMP/base/.github/commit-check"
+          elif ! git merge-base --is-ancestor origin/main "$AFTER"; then
+            echo "::error::This branch changes the commit check: take main in first, so that main's newest commit is among its ancestors."
+            exit 1
+          fi
+          python3 -I "$check/check.py" --repo . --from origin/main --head "$AFTER" --branch "$BRANCH" \
+            --merge-author --check-fork-way --settings "$check/settings.json" --context own --compare-settings origin/main
       - name: Check the commits of a push to main, and what the way for forks needs when it is open
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
           COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
-          FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
+          FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN != '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 -I .github/commit-check/check.py --repo . --from "$BEFORE" --head "$AFTER" --require-commits \
@@ -169,11 +208,21 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
+          FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN != '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
-            --event "$GITHUB_EVENT_PATH" --settings .github/commit-check/settings.json --context own \
-            --compare-settings "$BASE_SHA"
+          check=.github/commit-check
+          if git diff --quiet "$BASE_SHA"..."$HEAD_SHA" -- .github/commit-check .github/workflows/commits.yml \
+              .github/workflows/pull-requests.yml; then
+            mkdir -p "$RUNNER_TEMP/base"
+            git archive "$BASE_SHA" .github/commit-check | tar -x -C "$RUNNER_TEMP/base"
+            check="$RUNNER_TEMP/base/.github/commit-check"
+          elif ! git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
+            echo "::error::This pull request changes the commit check: take main in first, so that main's newest commit is among its ancestors."
+            exit 1
+          fi
+          python3 -I "$check/check.py" --repo . --from "$BASE_SHA" --head "$HEAD_SHA" --event "$GITHUB_EVENT_PATH" \
+            --merge-author --check-fork-way --settings "$check/settings.json" --context own --compare-settings "$BASE_SHA"
 '''
 
 
@@ -209,19 +258,38 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}",
                       GATE.split("  pull-request-commits:\n", 1)[1])
         self.assertNotIn("COMMIT_CHECK_PRIVATE_PATTERN", GATE)
-        self.assertEqual(COMMITS.count("secrets.FORK_CHECK_PRIVATE_PATTERN"), 1)
-        main_step = COMMITS.split("Check the commits of a push to main", 1)[1].split("      - name:", 1)[0]
-        self.assertIn("FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}", main_step)
-        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/main'", main_step)
+        # The fork's secret reaches the workflow commits only as whether it is set, in the three steps that ask what
+        # the way for forks needs, never as its value.
+        self.assertEqual(COMMITS.count("secrets.FORK_CHECK_PRIVATE_PATTERN"), 3)
+        self.assertEqual(COMMITS.count("FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN != '' }}"), 3)
+        self.assertEqual(COMMITS.count("--check-fork-way"), 3)
 
     def test_every_run_of_the_check_names_its_context_and_its_comparison_once(self):
+        # A call of the fork's first job names its context and no range; every other call names both once.
         for name, text in (("pull-requests.yml", GATE), ("commits.yml", COMMITS)):
             calls = text.split("check.py ")[1:]
+            self.assertTrue(calls, name)
             for call in calls:
                 command = call.split("\n      - ", 1)[0].split("\n\n", 1)[0]
                 with self.subTest(name=name):
                     self.assertEqual(len(re.findall(r"--context (?:own|fork-approved)\b", command)), 1)
-                    self.assertEqual(command.count("--compare-settings"), 1)
+                    if command.startswith("--fork-way-gate"):
+                        self.assertNotIn("--compare-settings", command)
+                        self.assertNotIn("--from", command)
+                    else:
+                        self.assertEqual(command.count("--compare-settings"), 1)
+
+    def test_a_fork_s_job_that_names_the_environment_waits_for_the_first_job_and_its_open(self):
+        judging = GATE.split("  pull-request-commits:\n", 1)[1]
+        self.assertIn("    needs: pull-request-way\n", judging)
+        self.assertIn("needs.pull-request-way.outputs.open == 'true'", judging)
+        first = GATE.split("  pull-request-way:\n", 1)[1].split("\n  pull-request-", 1)[0]
+        self.assertNotIn("environment:", first)
+        self.assertNotIn("secrets.", first)
+        steps = judging.split("      - ")
+        gate = next(index for index, step in enumerate(steps) if "--fork-way-gate" in step)
+        secret = next(index for index, step in enumerate(steps) if "secrets." in step)
+        self.assertLess(gate, secret)
 
 
 if __name__ == "__main__":

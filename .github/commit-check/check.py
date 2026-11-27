@@ -482,6 +482,8 @@ def main(argv=None):
     parser.add_argument("--event", action=Once, help="the event's file, for the pull request's title, description and branch")
     parser.add_argument("--branch", action=Once, help="the name of the branch a push went to")
     parser.add_argument("--require-commits", action="store_true", help="fail when there is no commit to check")
+    parser.add_argument("--merge-author", action="store_true", help="not built yet")
+    parser.add_argument("--fork-way-gate", action="store_true", help="not built yet")
     parser.add_argument("--check-fork-way", action="store_true",
                         help="on main: when the way for forks is open, ask GitHub whether everything it needs is set")
     parser.add_argument("--text-only", action="store_true",

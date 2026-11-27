@@ -1670,7 +1670,7 @@ def test_only_a_missing_status_file_counts_as_nothing_published(monkeypatch):
 @pytest.mark.parametrize("lang", LANGS)
 def test_the_rules_for_outside_work_say_what_the_check_on_every_commit_holds_it_to(lang):
     # The automatic check reads every commit: the addresses, the lines about an AI, the work item numbers and the
-    # paths of a computer; on a pull request from a fork one part of it waits for the project's account.
+    # paths of a computer; on a pull request from a fork that part is not open yet.
     html = page_path(lang).read_text(encoding="utf-8")
     rules = html.split('<section id="rules">', 1)[1].split("</section>", 1)[0]
     assert "no-reply" in rules, lang
