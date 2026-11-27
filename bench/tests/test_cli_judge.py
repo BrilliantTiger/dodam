@@ -1431,6 +1431,8 @@ def kernel_part(held):
 
 # the case's own folder, where the program leaves a mark each time a run of it ends
 CASE_DIR = [None]
+# whether the judge has started the program and not yet looked at it in its run
+SPAWNED = [False]
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
@@ -1507,6 +1509,11 @@ def test_measured():
 
     def container_memory(*args, **kwargs):
         here = CASE_DIR[0]
+        if SPAWNED[0] and here is not None:
+            # the first reading after the judge started the program is its first look in the run
+            SPAWNED[0] = False
+            run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
+            (here / f"looked-{run}").write_text("")
         if here is not None:
             # the measurements while the writing program writes: between its marks of starting and stopping
             run = len(real_open(here / "ended").read()) if (here / "ended").exists() else 0
@@ -1521,7 +1528,16 @@ def test_measured():
         finally:
             reads["inside"], tool.time = False, real_time
 
+    real_popen = dodam_cli.subprocess.Popen
+
+    def starting(*args, **kwargs):
+        # the judge starts the program: the next reading is its first look in the run
+        proc = real_popen(*args, **kwargs)
+        SPAWNED[0] = True
+        return proc
+
     builtins.open = io.open = opening
+    dodam_cli.subprocess.Popen = starting
     tool.container_memory = container_memory
     tool.kernel_part = lambda *args, **kwargs: kernel_part(held)
     dodam_cli._files_held = files_held
@@ -1550,6 +1566,7 @@ def test_measured():
     finally:
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
         tool.kernel_part = kept_kernel
+        dodam_cli.subprocess.Popen = real_popen
 '''
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
@@ -1566,10 +1583,16 @@ SOLUTIONS = ("import os, sys, time\nif sys.argv[1] == 'chatty':\n"
              # a patient program runs until the judge has read the container ENOUGH times since the case's
              # run before it ended, however busy the machine is, and no longer than 8 seconds
              # a patient program behaves as the solution named after "patient-" (as the right one without a name)
+             # a program that is looked at once runs until the judge's first look in its run, and no longer than 8 s
+             "elif sys.argv[1].startswith('once'):\n"
+             "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
+             "    end = time.monotonic() + 8\n"
+             "    while not os.path.exists(f'looked-{run}') and time.monotonic() < end:\n        time.sleep(0.005)\n"
              "elif sys.argv[1].startswith('patient'):\n    end = time.monotonic() + 8\n"
              "    run = len(open('ended').read()) if os.path.exists('ended') else 0\n"
              "    while not os.path.exists(f'enough-{run}') and time.monotonic() < end:\n        time.sleep(0.01)\n"
-             "else:\n    time.sleep(0.6)\nkind = sys.argv[1].partition('patient-')[2] or sys.argv[1]\n"
+             "else:\n    time.sleep(0.6)\nkind = (sys.argv[1].partition('patient-')[2] or sys.argv[1].partition('once-')[2]\n"
+             "        or sys.argv[1])\n"
              "print('wrong' if kind == 'broken' else 'fine')\n"
              "if kind == 'vulnerable':\n    print('leak', file=sys.stderr)\n"
              "with open('ended', 'a') as mark:\n    mark.write('x')\n")
@@ -1697,6 +1720,10 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         patient = watch < 1 and separated and solution != "chatty"
     if patient:
         solution = "patient" if solution == "right" else f"patient-{solution}"
+    elif watch >= 1 and separated:
+        # with a long watch the judge's only look in the run is its first, taken only while the program runs: the
+        # program lasts until that look (at most eight seconds), and no second look comes
+        solution = f"once-{solution}"
     seen = tmp_path / "seen.json"
     # the way first, so that it may name the stand-in's own folder and figures as the rest does
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
@@ -1713,7 +1740,8 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     # a patient run gives up at eight seconds: it gets twelve; a short run (0.6 seconds) gets six, so that starting
     # it on a busy machine does not end it for time; no test of this helper is about the case's time
     result = judge_program(tmp_path, SOLUTIONS, {FILES_OF[test]: source}, CASE_MEMORY_MB=memory_mb,
-                           CASE_TIMEOUT_SEC=str((12 if patient or solution == "chatty" else 6) * runs))
+                           CASE_TIMEOUT_SEC=str((12 if patient or solution == "chatty" or solution.startswith("once")
+                                                 else 6) * runs))
     assert seen.is_file(), message(result, "test_measured")
     return result, json.loads(seen.read_text())
 
@@ -2058,7 +2086,7 @@ def test_a_reading_cut_by_time_around_a_run_is_counted_as_late(tmp_path, which):
     """A case counts every reading cut by time as late, the one a run begins with and the one taken when
     it has ended as well as those during the run, so that its record says why it could not pass: here one,
     which is its one reading that could not decide, and the case is unmeasured."""
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, LATE_AROUND_A_RUN[which], watch=1000.0)
     assert (seen["late"], seen["undecided"]) == (1, 1), (which, seen)
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, (which, the_case(result))
@@ -2158,7 +2186,7 @@ def test_no_run_is_judged_by_the_count_alone(tmp_path, state):
     from passing where they lie beyond its limit and the amount left out; with nothing of that, it
     passes."""
     code, records_mb, runs, expected = QUICK[state]
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=runs)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == expected, (state, the_case(result))
@@ -2171,7 +2199,7 @@ def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
     """The judge measures a run at the first look after it starts, not one look later: a program that
     holds 300 MB under a limit of 256 MB from its first moments is ended for memory even where the
     judge would look again only after a thousand seconds."""
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, way(takes(300, 2)), watch=1000.0)
     assert seen["limit"] == "memory", seen
     assert the_case(result)["outcome"] == "failed", the_case(result)
@@ -2180,7 +2208,7 @@ def test_the_judge_measures_a_run_at_its_first_look(tmp_path):
 def test_a_reading_cut_by_time_when_a_run_has_ended_keeps_its_case_from_passing(tmp_path):
     """The reading taken when a run has ended is held to what a reading cut by time can say, as every
     other one: where every try of it was cut by time, the case cannot pass."""
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, way(late=tuple(3 + i for i in EIGHT)), watch=1000.0)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
@@ -2202,7 +2230,7 @@ def test_a_reading_cut_by_time_when_a_run_has_ended_moves_no_lowest_figure(tmp_p
     from nor that of the kernel's records: the second run, which takes 230 MB under a limit of 256 MB,
     is not ended for memory as it would be counted from 60 MB lower. The case is unmeasured."""
     code, records_mb = AFTER_RUN_DIPS[dip]
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, way(code, takes(230, 12), late=tuple(3 + i for i in EIGHT)),
                                   records_mb=records_mb, watch=1000.0, runs=2)
     assert seen["limit"] is None, (dip, seen)
@@ -2214,7 +2242,7 @@ def test_what_stands_when_a_later_run_begins_is_held_to_the_most_the_case_can_ha
     with holds the case to the most it can have held, beyond its limit of 256 MB, and it is unmeasured."""
     code = way("    if n == 3 and part == 'files after':\n        move(held, records=300)\n",
                "    if n == 4 and part == 'files after':\n        move(held, records=-300)\n")
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, code, watch=1000.0, runs=2)
     assert seen["limit"] is None, seen
     assert the_case(result)["outcome"] == judge_module.UNMEASURED, the_case(result)
@@ -2237,7 +2265,7 @@ def test_what_goes_between_two_runs_moves_the_lowest_figures_the_case_is_counted
     memory, counted from what stood after 60 MB went, lies above its limit of 256 MB fails for memory;
     the case says how far its figure fell below where it began before its first run."""
     code, records_mb, fell = BETWEEN_RUNS[fall]
-    # its subject is a run the judge reads only as it begins and ends (a long watch): a short run
+    # its subject is a run the judge reads once, at its first look (a long watch): the run ends on that look
     result, seen = judge_measured(tmp_path, code, records_mb=records_mb, watch=1000.0, runs=2)
     case = the_case(result)
     assert case["outcome"] == "failed", (fall, case, seen)
