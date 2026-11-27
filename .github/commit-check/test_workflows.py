@@ -119,14 +119,14 @@ jobs:
         run: python3 -I .github/commit-check/run_tests.py
       - name: Check the commits and the text
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FORK_CHECK_PRIVATE_PATTERN: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 -I .github/commit-check/check.py --repo . --from "$BASE_SHA" --head "$HEAD_SHA" \
-            --event "$GITHUB_EVENT_PATH" --merge-author --settings .github/commit-check/settings.json \
-            --context fork-approved --compare-settings "$BASE_SHA"
+          main=$(git rev-parse --verify origin/main)
+          python3 -I .github/commit-check/check.py --repo . --from "$main" --head "$HEAD_SHA" \
+            --event "$GITHUB_EVENT_PATH" --build-merge --settings .github/commit-check/settings.json \
+            --context fork-approved --compare-settings "$main"
 '''
 
 COMMITS = r'''# Every commit that a push to a branch brings, and every commit and the text of a pull request from the project's
@@ -190,7 +190,7 @@ jobs:
             exit 1
           fi
           python3 -I "$check/check.py" --repo . --from origin/main --head "$AFTER" --branch "$BRANCH" \
-            --merge-author --check-fork-way --settings "$check/settings.json" --context own --compare-settings origin/main
+            --check-fork-way --settings "$check/settings.json" --context own --compare-settings origin/main
       - name: Check the commits of a push to main, and what the way for forks needs when it is open
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -205,24 +205,24 @@ jobs:
       - name: Check the commits and the text of a pull request from the project's own branches
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           COMMIT_CHECK_PRIVATE_PATTERN: ${{ secrets.COMMIT_CHECK_PRIVATE_PATTERN }}
           FORK_SECRET_AT_REPOSITORY_LEVEL: ${{ secrets.FORK_CHECK_PRIVATE_PATTERN != '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          main=$(git rev-parse --verify origin/main)
           check=.github/commit-check
-          if git diff --quiet "$BASE_SHA"..."$HEAD_SHA" -- .github/commit-check .github/workflows/commits.yml \
+          if git diff --quiet "$main"..."$HEAD_SHA" -- .github/commit-check .github/workflows/commits.yml \
               .github/workflows/pull-requests.yml; then
             mkdir -p "$RUNNER_TEMP/base"
-            git archive "$BASE_SHA" .github/commit-check | tar -x -C "$RUNNER_TEMP/base"
+            git archive "$main" .github/commit-check | tar -x -C "$RUNNER_TEMP/base"
             check="$RUNNER_TEMP/base/.github/commit-check"
-          elif ! git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"; then
+          elif ! git merge-base --is-ancestor "$main" "$HEAD_SHA"; then
             echo "::error::This pull request changes the commit check: take main in first, so that main's newest commit is among its ancestors."
             exit 1
           fi
-          python3 -I "$check/check.py" --repo . --from "$BASE_SHA" --head "$HEAD_SHA" --event "$GITHUB_EVENT_PATH" \
-            --merge-author --check-fork-way --settings "$check/settings.json" --context own --compare-settings "$BASE_SHA"
+          python3 -I "$check/check.py" --repo . --from "$main" --head "$HEAD_SHA" --event "$GITHUB_EVENT_PATH" \
+            --build-merge --check-fork-way --settings "$check/settings.json" --context own --compare-settings "$main"
 '''
 
 
