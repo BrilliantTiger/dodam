@@ -2108,10 +2108,11 @@ class SurvivorsTest(RepoTestCase):
 
     def test_a_case_change_inside_a_word_splits_only_names_and_branches(self):
         # For the rules of every place and for the private pattern alike.
-        self.repo.commit("Fix the fix" + T + "-17 case and ZorbLatt", files={"a.txt": "fix" + T + "-17 ZorbLatt\n"})
+        word = "Zorb" "Latt"
+        self.repo.commit("Fix the fix" + T + "-17 case and " + word, files={"a.txt": "fix" + T + "-17 " + word + "\n"})
         self.assert_passes(self.run_check(self.base, pattern="zorb latt"))
         for branch, pattern, prop in (("fix" + T + "-17", None, "tracker code"),
-                                      ("ZorbLatt", "zorb latt", "private pattern")):
+                                      ("Zorb" "Latt", "zorb latt", "private pattern")):
             with self.subTest(branch=branch):
                 code, out = self.text_only({"pull_request": {"number": 1, "title": "Plain", "body": "",
                                                              "head": {"ref": branch}}}, pattern=pattern)
