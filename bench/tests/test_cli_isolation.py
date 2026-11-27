@@ -1841,6 +1841,94 @@ def test_the_one_that_is_ended():
     assert said["severity"] == "error" and said["key"] == "ended" and "without a result" in said["message"], said
 
 
+# The judge out of the way while the program takes the container's memory, as in the test of a case runner the kernel
+# ends below: the kernel can end the judge itself at that moment, a fault not mended here (the documents name it).
+# A watcher started as root before the judge, and so marked like the judge and below the case runner and the program,
+# waits for the hidden test to ask; it stops the judge, and only the judge, and lets the hidden test go on once the
+# kernel shows the judge stopped. It lets the judge go once the program's run is over (or the case runner is gone)
+# and the container's memory has come back, or after five seconds of that, whatever happens. While the judge is held
+# it reads only into buffers made beforehand, so that it asks the kernel for no memory in that moment. What it did
+# is written to held.json beside the results.
+KEEP_ASIDE = r"""
+import ctypes, errno, json, os, signal, time
+libc = ctypes.CDLL(None, use_errno=True)
+here = "/logs/verifier/keep-"
+os.mkfifo(here + "fifo", 0o600)
+ended = os.open(here + "fifo", os.O_RDONLY | os.O_NONBLOCK)
+while not os.path.exists(here + "ask"):
+    time.sleep(0.01)
+judge, runner = (int(word) for word in open(here + "ask").read().split())
+cmdline = open(f"/proc/{judge}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
+stat = os.open(f"/proc/{judge}/stat", os.O_RDONLY)
+current = os.open("/sys/fs/cgroup/memory.current", os.O_RDONLY)
+cap = int(open("/sys/fs/cgroup/memory.max").read())
+runner_state = open(f"/proc/{runner}/stat").read().rsplit(")", 1)[-1].split()[0]
+buf = ctypes.create_string_buffer(512)
+pause = (ctypes.c_long * 2)(0, 5_000_000)
+def state_of(fd):
+    n = libc.pread(fd, buf, 511, 0)
+    return buf.raw[:n].rsplit(b")", 1)[-1].split()[0] if n > 0 else b"?"
+began = time.monotonic()
+libc.kill(judge, signal.SIGSTOP)
+for _ in range(2000):
+    if state_of(stat) == b"T":
+        break
+    libc.nanosleep(pause, None)
+stopped_state = state_of(stat).decode()
+open(here + "held", "w").close()
+# from here until the judge goes on, only what was made beforehand: the pipe's write end closes when the attack's run
+# is over or the case runner is gone, also as a zombie its stopped parent has not taken back
+while libc.read(ended, buf, 1) != 0:
+    libc.nanosleep(pause, None)
+for _ in range(1000):
+    n = libc.pread(current, buf, 31, 0)
+    if n > 0 and int(buf.raw[:n]) < cap - 64 * 2**20:
+        break
+    libc.nanosleep(pause, None)
+libc.kill(judge, signal.SIGCONT)
+with open("/logs/verifier/held.json", "w") as f:
+    json.dump({"judge": judge, "runner": runner, "stopped": judge, "state": stopped_state, "cmdline": cmdline,
+               "runner_state": runner_state, "seconds": time.monotonic() - began}, f)
+os._exit(0)
+"""
+
+
+def judge_kept_aside(tests: str) -> tuple[str, str]:
+    """The hidden tests with the judge kept aside while the attack runs, and the command, run as root before the
+    judge, that starts the watcher in the background."""
+    asking = """    with case() as c:
+        started = time.monotonic()
+        ended = None
+        while ended is None and time.monotonic() < started + 10:
+            try:  # the watcher's pipe, once it is there and the watcher reads it
+                ended = os.open("/logs/verifier/keep-fifo", os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                time.sleep(0.005)
+        assert ended is not None, "the watcher never began"
+        with open("/logs/verifier/keep-ask.part", "w") as f:
+            f.write(f"{os.getppid()} {os.getpid()}")
+        os.rename("/logs/verifier/keep-ask.part", "/logs/verifier/keep-ask")
+        while not os.path.exists("/logs/verifier/keep-held") and time.monotonic() < started + 10:
+            time.sleep(0.005)
+        assert os.path.exists("/logs/verifier/keep-held"), "the judge was not kept aside"
+        try:
+            r = c.run(["attack"])
+        finally:
+            os.close(ended)
+"""
+    plain = """    with case() as c:
+        started = time.monotonic()
+        r = c.run(["attack"])
+"""
+    assert tests.count(plain) == 1, "the attack's hidden test no longer runs its program as this expects"
+    import base64
+    code = base64.b64encode(KEEP_ASIDE.encode()).decode()
+    before = ("( /opt/judge/bin/python -c "
+              '"import base64; exec(base64.b64decode(' + "'" + code + "'" + '))"'
+              " < /dev/null > /dev/null 2>&1 & )")
+    return tests.replace(plain, asking), before
+
+
 # The judge with its own two stops taken out: it no longer ends a program that leaves the container
 # too little memory, and it measures once in an hour. What ends the program then is the kernel.
 NO_STOPS = (("dodam_judge.py", "MEMORY_RESERVE_MB = 128", "MEMORY_RESERVE_MB = 0"),
@@ -1856,11 +1944,18 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
     for turn in range(turns):
         where = tmp_path / str(turn)
         where.mkdir()
-        result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS},
-                              room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1]},
-                              CASE_MEMORY_MB="100000")
+        tests, before = judge_kept_aside(LIMIT_TESTS)
+        result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": tests},
+                              room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1],
+                                    "before": before},
+                              CASE_MEMORY_MB="100000", CASE_TIMEOUT_SEC="15")
         assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
         assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
+        # (i) the judge, and only the judge, was held: the case runner was not, and the program never is
+        kept = found_by(where / "out", "held.json")
+        assert kept["stopped"] == kept["judge"] != kept["runner"] and kept["state"] == "T", kept
+        assert "dodam_judge" in kept["cmdline"], kept
+        assert kept["runner_state"] != "T", kept
         if (where / "out/attack.json").is_file():
             seen = found_by(where / "out", "attack.json")
             assert seen["after"]["kernel_kills"] > seen["before"]["kernel_kills"], "the kernel was to end the program here"
