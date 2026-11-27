@@ -8,9 +8,10 @@ The rule, fixed before any run: in check.py and fork_paths.py
 - every operand of an "or" is made False and every operand of an "and" is made True, one at a time;
 - every element of a list, a set or a tuple at the module's level, and of a literal that a loop or a comprehension runs
   over (the waits between the tries among them), is taken out, one at a time.
-A break is caught only when a test fails on an assertion. A break ends in one of three classes: caught; not settled
-(the tests met their time limit, and again on a second try, or ended in an error with no test failing on an
-assertion, or did not load);
+A break is caught only when a test fails on an assertion. Each run of the tests is bounded: 180 seconds, 2 GB of address
+space for each of its processes, and a process group of its own that is ended whole. A break ends in one of three
+classes: caught; not settled (the tests met their time limit, and again on a second try, or ended in an error with no
+test failing on an assertion, or did not load);
 not caught (every test passed). A break that does not settle is listed; one that is not caught fails the run.
 
 It runs in the automatic check on a side branch, never on the project's computer. It first runs the tests once with
@@ -25,7 +26,9 @@ import concurrent.futures
 import json
 import os
 import re
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -34,7 +37,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TARGETS = ("check.py", "fork_paths.py")
-TIME_LIMIT = 240
+TIME_LIMIT = 180
 WORKFLOWS = HERE.parent / "workflows"
 
 
@@ -209,22 +212,40 @@ def apply(source, tree, brk):
     return (data[:start] + text.encode("utf-8") + data[end:]).decode("utf-8")
 
 
+MEMORY_LIMIT = 2 * 1024 ** 3  # bytes of address space for each process of a run of the tests
+
+
+def bound_memory():
+    if sys.platform.startswith("linux"):  # the runners of the automatic check; macOS does not bound address space
+        resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
+
+
 def run_tests(folder, limit, failfast=True):
     """Runs the check's tests in a copy; returns (class, number of tests run, names that failed)."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "FORK_"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Each run of the tests is a process group of its own, bounded in memory, and ended whole at its time limit, so
+    # that a break that loops or grows takes down neither the runner nor the processes it started after it.
+    process = subprocess.Popen([sys.executable, "-I", "-m", "unittest", "discover", *(["-f"] if failfast else []),
+                                "-s", str(folder), "-p", "test_check.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, env=env, cwd=folder, start_new_session=True, preexec_fn=bound_memory)
     try:
-        done = subprocess.run([sys.executable, "-I", "-m", "unittest", "discover", *(["-f"] if failfast else []),
-                               "-s", str(folder), "-p", "test_check.py"], capture_output=True, text=True, timeout=limit, env=env,
-                              cwd=folder)
+        out, _ = process.communicate(timeout=limit)
     except subprocess.TimeoutExpired:
-        return "not settled", 0, []
-    out = done.stdout + done.stderr
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        return "not settled", 0, ["time limit"]
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # whatever the tests left running
+        except ProcessLookupError:
+            pass
+
     ran = re.search(r"^Ran (\d+) tests?", out, re.M)
     count = int(ran.group(1)) if ran else 0
     failed = re.findall(r"^FAIL: (\S+)", out, re.M)
     errors = re.findall(r"^ERROR: (\S+)", out, re.M)
-    if done.returncode == 0 and count > 0:
+    if process.returncode == 0 and count > 0:
         return "not caught", count, []
     if failed:
         return "caught", count, failed  # a test failed on an assertion
