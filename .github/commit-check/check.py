@@ -377,7 +377,7 @@ def new_blobs(fields):
         names = 2 if status[:1] in ("R", "C") and parents == 1 else 1
         if index + names >= len(fields):
             raise Problem("a list of paths cannot be read")
-        if not status.startswith("D") and re.fullmatch(r"[0-9a-f]{40}", new) and new != "0" * 40:
+        if new != "0" * 40:  # a deleted path has no new content
             found.append((number, new))
         index += 1 + names
     return found
@@ -597,9 +597,11 @@ def check_pull_request_text(checker, texts):
     # GitHub writes the branch's name into the message of the merge commit it makes on main.
     checker.branch("pull request", texts["branch"], "pull request branch name")
     # And the name of the repository the branch is in: "Merge pull request #N from <owner>/<branch>". A fork's owner is
-    # held to the rules of a message there; this repository's own owner is not, because it is in every merge already.
-    if texts["head_owner"] and texts["head_owner"].casefold() != texts["base_owner"].casefold():
-        checker.prose("pull request", f"{texts['head_owner']}/{texts['branch']}", lambda n: "merge message's first line")
+    # held to the rules of a message there; this repository's own owner is not, because it is in every merge already,
+    # but the slash before the branch's name is.
+    own = texts["head_owner"].casefold() in ("", texts["base_owner"].casefold())
+    owner = "" if own else texts["head_owner"]
+    checker.prose("pull request", f"{owner}/{texts['branch']}", lambda n: "merge message's first line")
 
 
 def report(commits, findings, failures):

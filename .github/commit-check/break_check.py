@@ -9,7 +9,8 @@ The rule, fixed before any run: in check.py and fork_paths.py
 - every element of a list, a set or a tuple at the module's level, and of a literal that a loop or a comprehension runs
   over (the waits between the tries among them), is taken out, one at a time.
 A break is caught only when a test fails on an assertion. A break ends in one of three classes: caught; not settled
-(the tests met their time limit twice, or ended in an error with no test failing on an assertion, or did not load);
+(the tests met their time limit, and again on a second try, or ended in an error with no test failing on an
+assertion, or did not load);
 not caught (every test passed). A break that does not settle is listed; one that is not caught fails the run.
 
 It runs in the automatic check on a side branch, never on the project's computer. It first runs the tests once with
@@ -269,7 +270,7 @@ def one(job):
     started = time.monotonic()
     result, count, failed = run_tests(folder, TIME_LIMIT)
     if result == "not settled":
-        result, count, failed = run_tests(folder, TIME_LIMIT * 2)
+        result, count, failed = run_tests(folder, TIME_LIMIT)  # once more, in case the machine was slow
     shutil.rmtree(folder.parents[1], ignore_errors=True)
     return {"file": target, "line": brk["line"], "column": brk["column"], "kind": brk["kind"], "part": brk["extra"],
             "result": result,

@@ -173,7 +173,7 @@ one of three holds:
 | --- | --- | --- |
 | a commit, a line, a path, a title or a branch name that breaks a rule | (i) | the pull request's run refuses it first |
 | the displayed name of the merging account | (i) | the pull request's run reads it ahead and refuses it |
-| a fork's owner in the merge message's first line | (i) | the pull request's run refuses it first |
+| the merge message's first line, "<owner>/<branch>" (a fork's owner held to the rules; this repository's owner spared, the slash before the branch kept) | (i) | the pull request's run refuses it first |
 | a rule main gained since the pull request's last green run | (i) | a branch that does not change the check is judged by the base's copy |
 | the settings loosened, or the way opened without what it needs | (i) | the branch's own runs ask the same |
 | GitHub's API did not answer (five tries, waits of 2, 5, 10 and 20 seconds) | (ii) | the coordinating session, once |

@@ -722,7 +722,9 @@ class StructureTest(RepoTestCase):
         self.repo.git("config", "diff.external", str(script))
         self.repo.git("config", "diff.x.textconv", str(script))
         sha = self.repo.commit("A change", files={".gitattributes": "*.txt diff=x\n", "z.txt": f"one\n{TRACKER_CODE}\n"})
-        self.assert_fails(self.run_check(self.base), sha, "tracker code (file 2, line 2)")
+        code, out = self.run_check(self.base)
+        self.assert_fails((code, out), sha, "tracker code (file 2, line 2)")
+        self.assertIn("the range: tracker code (file 2, line 2)", out)
 
     def test_every_rule_holds_inside_a_file_in_each_listed_encoding(self):
         samples = [(f"see {TRACKER_CODE} here", "tracker code"), (f"see {TRACKER_ADDRESS} here", "tracker address"),
@@ -749,6 +751,32 @@ class StructureTest(RepoTestCase):
             with self.subTest(name=name):
                 self.assertRegex(out, rf"commit {sha[:12]}: {expected[name]} \(path {number}, read as ")
         self.assertNotIn(PRIVATE_WORD, out)
+
+    def test_a_file_in_utf_16_that_is_also_valid_utf_8_is_read_in_utf_16_too(self):
+        name = "\u0141ukasz"  # in UTF-16 its bytes are all below 128, so they are valid UTF-8 as well
+        sha = self.repo.commit("A change", files={"z.bin": ("hello " + name).encode("utf-16-le")})
+        code, out = self.run_check(self.base, pattern="(?i)\u0142ukasz")
+        self.assert_fails((code, out), sha, "private pattern (path 1, read as UTF-16LE from byte 0, line 1)")
+        self.assertEqual(out.count(f"commit {sha[:12]}: private pattern (path 1, read as UTF-16LE from byte 0"), 1)
+
+    def test_a_merge_that_brings_back_a_file_in_another_encoding_from_the_exempt_history_fails(self):
+        old = self.repo.commit("Old", files={"z.bin": f"see {TRACKER_CODE}".encode("utf-16-be")})
+        self.repo.commit("Take it out", files={}, remove=["z.bin"])
+        base = self.repo.head()
+        self.repo.git("checkout", "-q", "-b", "old-side", old)
+        self.repo.git("checkout", "-q", "main")
+        owner = {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
+                 "GIT_COMMITTER_EMAIL": OWN}
+        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "-s", "ours", "old-side", env=owner)
+        self.repo.git("checkout", "old-side", "--", "z.bin")
+        self.repo.git("commit", "-q", "-m", "Merge the old side", env=owner)
+        path = self.dir / "settings6.json"
+        path.write_text(json.dumps({"exempt_through": base, "private_pattern_expected": False, "fork_way_open": False,
+                                    "outside_runs_held_since": None}))
+        done = subprocess.run([sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", base, "--head",
+                               self.repo.head(), "--settings", str(path), "--context", "own", "--compare-settings", base,
+                               "--verified-shas", os.devnull], capture_output=True, text=True, env=clean_env(), timeout=120)
+        self.assertIn("the range: tracker code (path 1, read as UTF-16BE", done.stdout)
 
     def test_a_line_without_a_newline_at_the_end_is_checked(self):
         sha = self.repo.commit("A change", files={"a.txt": f"one\n{TRACKER_CODE}"})
@@ -1092,12 +1120,12 @@ class MergeTest(RepoTestCase):
     """What a merge on main will carry is held to the rules before the merge: the displayed name of the account that
     merges, and the first line of the merge's message; and a red main can be left by a repair on top of it."""
 
-    def merged_main(self):
+    def merged_main(self, author=("Someone-Made-Up", OWN)):
         """A main whose last merge GitHub made, with the merging account's no-reply address as its author."""
         self.repo.git("checkout", "-q", "-b", "side")
         self.repo.commit("Side work")
         self.repo.git("checkout", "-q", "main")
-        env = {"GIT_AUTHOR_NAME": "Someone-Made-Up", "GIT_AUTHOR_EMAIL": OWN,
+        env = {"GIT_AUTHOR_NAME": author[0], "GIT_AUTHOR_EMAIL": author[1],
                "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB}
         self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #1 from SomeOrg/side\n\nSide work", "side",
                       env=env)
@@ -1110,6 +1138,7 @@ class MergeTest(RepoTestCase):
         if actor:
             answers[f"/users/{actor}"] = actor_answer
         fake = self.fake(answers)
+        self.last_fake = fake
         env = dict(fake.env)
         if actor:
             env["GITHUB_ACTOR"] = actor
@@ -1170,6 +1199,46 @@ class MergeTest(RepoTestCase):
         self.assertEqual(code, 0, out)
         self.assertIn(f"/users/{OWN_LOGIN}", fake.asked)
         self.assertNotIn("/users/an-outside-person", fake.asked)
+
+    def test_only_a_merge_github_made_with_a_no_reply_author_names_the_merging_account(self):
+        self.merged_main()
+        self.repo.git("checkout", "-q", "-b", "later")
+        self.repo.commit("Later work")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge a local branch", "later",
+                      env={"GIT_AUTHOR_NAME": "another-made-up", "GIT_AUTHOR_EMAIL": OLD_STYLE,
+                           "GIT_COMMITTER_NAME": "another-made-up", "GIT_COMMITTER_EMAIL": OLD_STYLE})
+        self.repo.git("checkout", "-q", "-b", "side2")
+        self.repo.commit("Side two")
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #3 from SomeOrg/side2", "side2",
+                      env={"GIT_AUTHOR_NAME": "someone", "GIT_AUTHOR_EMAIL": PERSONAL, "GIT_COMMITTER_NAME": "GitHub",
+                           "GIT_COMMITTER_EMAIL": GITHUB})
+        start = self.repo.head()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "name": None}})
+        code, out = self.run_check(start, extra=["--merge-author"], env_extra=fake.env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.asked, [f"/users/{OWN_LOGIN}"])
+
+    def test_the_account_that_pushed_is_not_asked_twice_when_it_is_the_merging_one(self):
+        code, out = self.preview({"login": OWN_LOGIN, "name": None}, actor=OWN_LOGIN.upper(),
+                                 actor_answer={"login": OWN_LOGIN, "name": None})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.last_fake.asked, [f"/users/{OWN_LOGIN}"])
+
+    def test_a_displayed_name_that_is_not_text_cannot_be_read(self):
+        code, out = self.preview({"login": OWN_LOGIN, "name": 5})
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be read)", out)
+
+    def test_a_merging_account_named_like_a_tool_is_refused_even_by_its_own_login(self):
+        start = self.merged_main(author=("Co" "pilot", "175728472+Co" "pilot@users.noreply.github.com"))
+        self.repo.commit("A change")
+        fake = self.fake({"/users/Co" "pilot": {"login": "Co" "pilot", "name": "Co" "pilot"}})
+        code, out = self.run_check(start, extra=["--merge-author"], env_extra=fake.env)
+        self.assertEqual(code, 1, out)
+        self.assertIn("merge commit: author name", out)
 
     def test_without_a_merge_on_main_and_without_an_account_nothing_is_read_ahead(self):
         self.repo.commit("A change")
@@ -1298,6 +1367,15 @@ def in_process(main, argv, env, check_module):
             else:
                 os.environ[key] = value
     return code, printed.getvalue()
+
+
+def raised(call):
+    """What a call raised, or None: so that a test of a refusal fails on its assertion whatever is raised instead."""
+    try:
+        call()
+    except Exception as error:  # noqa: BLE001
+        return error
+    return None
 
 
 def load(name):
@@ -1435,6 +1513,9 @@ class ClassesTest(unittest.TestCase):
     def test_plus_minus_signs_and_the_gap_fillers_of_other_scripts_stay_as_they_are(self):
         self.assertEqual(self.check.normalise("a\u00b1b\u2213c"), "a\u00b1b\u2213c")
         self.assertEqual(self.check.normalise("a\ua8f9b"), "a\ua8f9b")
+        self.assertEqual(self.check.normalise("a\u2216b"), "a\u2216b")  # SET MINUS is no dash
+        self.assertEqual(self.check.normalise("a\u02d7b"), "a\u02d7b")  # a modifier letter named MINUS is no sign
+        self.assertEqual(self.check.normalise("\uac00\ub098\ub2e4 \u6f22\u5b57"), "\uac00\ub098\ub2e4 \u6f22\u5b57")
 
     def test_the_classes_are_not_empty(self):
         # Shown so that a change of the language's tables cannot empty a class and leave the walk with nothing.
@@ -1472,6 +1553,9 @@ class ClassesTest(unittest.TestCase):
     def test_plus_minus_signs_and_the_gap_fillers_of_other_scripts_stay_as_they_are(self):
         self.assertEqual(self.check.normalise("a\u00b1b\u2213c"), "a\u00b1b\u2213c")
         self.assertEqual(self.check.normalise("a\ua8f9b"), "a\ua8f9b")
+        self.assertEqual(self.check.normalise("a\u2216b"), "a\u2216b")  # SET MINUS is no dash
+        self.assertEqual(self.check.normalise("a\u02d7b"), "a\u02d7b")  # a modifier letter named MINUS is no sign
+        self.assertEqual(self.check.normalise("\uac00\ub098\ub2e4 \u6f22\u5b57"), "\uac00\ub098\ub2e4 \u6f22\u5b57")
 
     def test_the_classes_are_not_empty(self):
         # Shown so that a change of the language's tables cannot empty a class and leave the walk with nothing.
@@ -1589,15 +1673,68 @@ class EdgeTest(RepoTestCase):
                       "diff --git a/x b/x\n@@ -0,0 +1,2 @@\n+a",
                       "diff --git a/x b/x\n@@ -0,0 +1,1 @@\nXa\n", "diff --cc x\n@@@ -1,1 -1,1 +1,1 @@@\n*+a\n"):
             with self.subTest(patch=patch):
-                with self.assertRaises(check.Problem):
-                    check.Checker(None, lambda sha: False).patch("x", patch)
+                self.assertIsInstance(raised(lambda: check.Checker(None, lambda sha: False).patch("x", patch)),
+                                      check.Problem)
 
     def test_a_list_of_paths_that_does_not_keep_its_shape_is_refused(self):
         check = load("check.py")
         for fields in (["R100", "a"], ["M"], ["A"]):
             with self.subTest(fields=fields):
-                with self.assertRaises(check.Problem):
-                    check.check_paths(check.Checker(None, lambda sha: False), "x", fields)
+                self.assertIsInstance(raised(lambda: check.check_paths(check.Checker(None, lambda sha: False), "x",
+                                                                         fields)), check.Problem)
+
+    def test_a_raw_list_that_does_not_keep_its_shape_is_refused(self):
+        check = load("check.py")
+        for fields in (["M", "x"], [":100644 100644 aaa M"], [":100644 100644 " + "a" * 40 + " " + "b" * 40 + " M"]):
+            with self.subTest(fields=fields):
+                self.assertIsInstance(raised(lambda: check.new_blobs(fields)), check.Problem)
+
+    def test_contents_git_cannot_give_are_refused(self):
+        check = load("check.py")
+        tree = self.repo.git("rev-parse", "HEAD^{tree}")
+        for repo, shas in ((str(self.dir / "nowhere"), ["a" * 40]), (str(self.repo.root), ["0" * 40]),
+                           (str(self.repo.root), [tree])):
+            with self.subTest(shas=shas):
+                self.assertIsInstance(raised(lambda: check.blob_contents(repo, shas)), check.Problem)
+
+    def test_a_deleted_file_in_another_encoding_asks_for_no_content(self):
+        self.repo.commit("Add", files={"z.bin": "D\x00O\x00D\x00".encode() + b"\xff"})
+        start = self.repo.head()
+        self.repo.commit("Remove", files={}, remove=["z.bin"])
+        self.assert_passes(self.run_check(start))
+
+    def test_a_renamed_file_does_not_bring_its_old_lines_in_again(self):
+        self.repo.commit("Old", files={"notes.md": f"{TRACKER_CODE}\n" + "".join(f"line {n}\n" for n in range(20))})
+        exempt = self.repo.head()
+        self.repo.git("mv", "notes.md", "kept.md")
+        self.repo.commit("Rename", files={})
+        path = self.dir / "settings5.json"
+        path.write_text(json.dumps({"exempt_through": exempt, "private_pattern_expected": False, "fork_way_open": False,
+                                    "outside_runs_held_since": None}))
+        code, out = self.call("--repo", str(self.repo.root), "--settings", str(path), "--context", "own", "--from", exempt,
+                              "--head", "HEAD", "--compare-settings", exempt, "--verified-shas", os.devnull)
+        self.assertEqual(code, 0, out)
+
+    def test_the_job_s_outputs_that_cannot_be_written_are_refused(self):
+        fake = self.fake({ENVIRONMENT_PATH: REVIEWED})
+        settings = self.dir / "open.json"
+        settings.write_text(json.dumps({"exempt_through": self.base, "private_pattern_expected": False,
+                                        "fork_way_open": True, "outside_runs_held_since": "2026-11-27"}))
+        code, out = self.call("--fork-way-gate", "--context", "fork-approved", "--settings", str(settings),
+                              env={**fake.env, "GITHUB_OUTPUT": str(self.dir)})
+        self.assertEqual(code, 1, out)
+        self.assertIn("the job's outputs cannot be written", out)
+
+    def test_a_branch_whose_name_turns_into_a_path_in_the_merge_message_is_refused(self):
+        self.repo.commit("A change")
+        event = {"pull_request": {"number": 7, "title": "Fix", "body": "",
+                                  "head": {"ref": "Us" "ers/someone/notes", "repo": {"owner": {"login": "SomeOrg"}}}},
+                 "repository": {"owner": {"login": "SomeOrg"}}}
+        path = self.dir / "event-own.json"
+        path.write_text(json.dumps(event))
+        code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
+        self.assertEqual(code, 1, out)
+        self.assertIn("pull request: local path (merge message's first line)", out)
 
     def test_git_s_variables_of_the_calling_process_do_not_steer_the_check(self):
         self.repo.commit("A change")
@@ -1837,9 +1974,10 @@ class ApiTest(unittest.TestCase):
                 real = check.api_get
                 check.api_get = lambda path: answer
                 try:
-                    self.assertEqual(check.environment_waits_for_a_named_reviewer(), expected)
+                    result = raised(lambda: self.assertEqual(check.environment_waits_for_a_named_reviewer(), expected))
                 finally:
                     check.api_get = real
+                self.assertIsNone(result)
 
 
 class ForkPathsEdgeTest(ForkPathsCase):
