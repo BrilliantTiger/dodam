@@ -236,12 +236,11 @@ class CheckTest(RepoTestCase):
 
     def test_github_as_committer_fails_when_github_s_api_cannot_be_asked(self):
         sha = self.repo.commit("Merge a change", committer=("GitHub", GITHUB))
-        args = [sys.executable, "-I", str(CHECK), "--repo", str(self.repo.root), "--from", self.base, "--head", sha,
-                "--settings", str(self.settings()), "--context", "own", "--compare-settings", self.base]
-        env = clean_env({"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo",
-                         "GITHUB_API_URL": "http://127.0.0.1:9"})
-        done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
-        self.assert_fails((done.returncode, done.stdout + done.stderr), sha, "committer address")
+        check = load("check.py")
+        args = ["--repo", str(self.repo.root), "--from", self.base, "--head", sha, "--settings", str(self.settings()),
+                "--context", "own", "--compare-settings", self.base]
+        env = {"GITHUB_TOKEN": "made-up", "GITHUB_REPOSITORY": "made-up/repo", "GITHUB_API_URL": "http://127.0.0.1:9"}
+        self.assert_fails(in_process(check.main, args, env, check), sha, "committer address")
 
     def test_github_as_committer_is_believed_only_on_what_github_s_api_says(self):
         sha = self.repo.commit("Merge a change", author=("Display Name", OWN), committer=("GitHub", GITHUB))
@@ -800,7 +799,7 @@ class SampleTest(RepoTestCase):
         ("/Us" "ers/somebody/work/dodam/notes.md", "local path"),
         (".cla" "ude/worktrees/feat-1/notes.md", "local path"),
         ("Gener" "ated with " + C + " Code", "attribution line"),
-        ("/home/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
+        ("/ho" "me/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
         ("/tmp/x/y", None),  # 91 lines of main's isolation tests
         (".cla" "ude/worktrees/", None),  # the repository's .gitignore names the folder alone
         ("Code written by " + C + " is reviewed by another company's model", None),  # the charter's words
@@ -1008,11 +1007,10 @@ class ForkWayTest(RepoTestCase):
         self.base = self.repo.commit("The base commit")
 
 
-class ForkPathsTest(unittest.TestCase):
-    """The job of main's copy that fails a fork's pull request at once when it touches a closed path. The closed
-    paths are the desk's tool's; these tests only show that the job asks it and acts on its verdict."""
+class ForkPathsCase(unittest.TestCase):
+    """Runs the check of a fork's paths against a made-up GitHub."""
 
-    def run_paths(self, files, *, pull=None, tasks=None, extra_answers=None):
+    def run_paths(self, files, *, pull=None, tasks=None, extra_answers=None, quick=False):
         pull = pull or {"number": 7, "changed_files": len(files), "draft": False, "base": {"ref": "main"}}
         answers = {"/repos/made-up/repo/pulls/7": pull,
                    "/repos/made-up/repo/pulls/7/files?per_page=100&page=1": files,
@@ -1022,12 +1020,21 @@ class ForkPathsTest(unittest.TestCase):
         answers.update(extra_answers or {})
         fake = FakeGitHub(answers)
         self.addCleanup(fake.close)
+        if quick:
+            # In this process, with no wait between the tries, for answers that fail on purpose.
+            paths = load("fork_paths.py")
+            return in_process(paths.main, ["--number", "7", "--base-sha", "a" * 40], fake.env, paths.check)
         done = subprocess.run([sys.executable, "-I", str(FORK_PATHS), "--number", "7", "--base-sha", "a" * 40],
                               capture_output=True, text=True, env=clean_env(fake.env), timeout=120)
         return done.returncode, done.stdout + done.stderr
 
     def entry(self, name, status="modified"):
         return {"filename": name, "status": status}
+
+
+class ForkPathsTest(ForkPathsCase):
+    """The job of main's copy that fails a fork's pull request at once when it touches a closed path. The closed
+    paths are the desk's tool's; these tests only show that the job asks it and acts on its verdict."""
 
     def test_a_change_of_a_workflow_fails_at_once(self):
         code, out = self.run_paths([self.entry(".github/workflows/ci.yml")])
@@ -1050,13 +1057,36 @@ class ForkPathsTest(unittest.TestCase):
         code, out = self.run_paths([self.entry("README.md")],
                                    pull={"number": 7, "changed_files": 5, "draft": False, "base": {"ref": "main"}})
         self.assertEqual(code, 1, out)
-        code, out = self.run_paths([], extra_answers={"/repos/made-up/repo/pulls/7": 502})
+        code, out = self.run_paths([], extra_answers={"/repos/made-up/repo/pulls/7": 502}, quick=True)
         self.assertEqual(code, 1, out)
 
     def test_it_prints_no_path_of_the_pull_request(self):
         code, out = self.run_paths([self.entry(f".github/{MARKER}.yml"), self.entry(f"{MARKER}.md")])
         self.assertEqual(code, 1, out)
         self.assertNotIn(MARKER, out)
+
+
+def in_process(main, argv, env, check_module):
+    """Calls a script's main in this process with the given environment and no wait between the tries of GitHub's API;
+    returns its exit code and what it printed."""
+    import contextlib
+    import io
+    printed = io.StringIO()
+    saved = {key: os.environ.get(key) for key in env}
+    sleep = check_module.time.sleep
+    os.environ.update(env)
+    check_module.time.sleep = lambda seconds: None
+    try:
+        with contextlib.redirect_stdout(printed):
+            code = main(argv)
+    finally:
+        check_module.time.sleep = sleep
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    return code, printed.getvalue()
 
 
 def load(name):
@@ -1092,7 +1122,8 @@ class RowsTest(RepoTestCase):
         names = ["Cl" "aude", "Anthrop" "ic", "Open" "AI", "Chat" "GPT", "GPT-4", "Co" "dex", "Gem" "ini", "Ba" "rd",
                  "Co" "pilot", "Cur" "sor", "Dev" "in", "Anti" "gravity", "Ll" "ama", "Mis" "tral", "Deep" "Seek",
                  "Gr" "ok", "Wind" "surf", "Ai" "der", "Cl" "ine", "Qw" "en", "Tab" "nine", "Code" "ium",
-                 "Code" "Whisperer", "Ju" "les", "Perple" "xity", "o" "1", "o" "3", "o4-mini", "helper-b" "ot"]
+                 "Code" "Whisperer", "Ju" "les", "Perple" "xity", "o" "1", "o" "3", "o4-mini", "helper-b" "ot",
+                 "chat" "gpt", "open" "ai", "deep" "seek"]
         rows = [("Co-" "authored-" f"by: {name} <{OWN}>", "attribution line") for name in names]
         self.described(rows + [("Co-" "authored-" f"by: A Person <{OWN}>", None)])
 
@@ -1123,7 +1154,7 @@ class RowsTest(RepoTestCase):
         rows = [("/Us" "ers/x/y", "local path"), (".cla" "ude/plans/x.md", "local path"), (".gem" "ini/x/y", "local path"),
                 ("or" "ca/work" "spaces/x", "local path"), ("or" "ca/proj" "ects/x", "local path"),
                 ("cla" "ude-501/x", "local path"), ("/va" "r/folders/ab/x", "local path"),
-                ("-us" "ers-x-or" "ca-", "local path"), ("/Users/Shared/x", None)]
+                ("-us" "ers-x-or" "ca-", "local path"), ("/Us" "ers/Shared/x", None)]
         self.described(rows)
 
     def test_every_form_of_a_dash_and_a_space_is_brought_to_one_form(self):
@@ -1182,6 +1213,7 @@ class EdgeTest(RepoTestCase):
     def test_a_difference_that_does_not_keep_its_own_lengths_is_refused(self):
         check = load("check.py")
         for patch in ("diff --git a/x b/x\n@@ -1 -1 +1 @@\n+a\n", "diff --git a/x b/x\n@@ -0,0 +1,2 @@\n+a\n",
+                      "diff --git a/x b/x\n@@ -0,0 +1,2 @@\n+a",
                       "diff --git a/x b/x\n@@ -0,0 +1,1 @@\nXa\n", "diff --cc x\n@@@ -1,1 -1,1 +1,1 @@@\n*+a\n"):
             with self.subTest(patch=patch):
                 with self.assertRaises(check.Problem):
@@ -1205,6 +1237,12 @@ class EdgeTest(RepoTestCase):
     def test_settings_of_every_wrong_kind_are_refused_by_name(self):
         good = {"exempt_through": self.base, "private_pattern_expected": False, "fork_way_open": False,
                 "outside_runs_held_since": None}
+        path = self.dir / "listed.json"
+        path.write_text(json.dumps(sorted(good)))
+        code, out = self.call("--repo", str(self.repo.root), "--settings", str(path), "--context", "own",
+                              "--from", self.base, "--head", "HEAD", "--compare-settings", self.base)
+        self.assertEqual(code, 1, out)
+        self.assertIn("::error::settings.json does not hold", out)
         for change in ({"exempt_through": 123}, {"fork_way_open": "no"}, {"outside_runs_held_since": 5},
                        {"outside_runs_held_since": "yesterday"}, {"private_pattern_expected": None}):
             with self.subTest(change=change):
@@ -1265,13 +1303,14 @@ class EdgeTest(RepoTestCase):
                 self.assertEqual(code, 1, out)
                 self.assertIn(message, out)
 
-    def test_a_pull_request_without_a_description_passes(self):
+    def test_a_pull_request_without_a_description_or_without_a_title_passes(self):
         self.repo.commit("A change")
-        path = self.dir / "event-none.json"
-        path.write_text(json.dumps({"pull_request": {"number": 7, "title": "Fix the notes", "body": None,
-                                                     "head": {"ref": "notes"}}}))
-        code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
-        self.assertEqual(code, 0, out)
+        for pull in ({"title": "Fix the notes", "body": None}, {"title": None, "body": "Plain words."}):
+            with self.subTest(pull=pull):
+                path = self.dir / "event-none.json"
+                path.write_text(json.dumps({"pull_request": {"number": 7, **pull, "head": {"ref": "notes"}}}))
+                code, out = self.call(*self.basic("--event", str(path), "--verified-shas", os.devnull))
+                self.assertEqual(code, 0, out)
 
     def test_the_count_of_problems_is_printed(self):
         self.repo.commit(f"One ({TRACKER_CODE})")
@@ -1365,6 +1404,7 @@ class ApiTest(unittest.TestCase):
         fake.server.RequestHandlerClass = Handler
         saved = {key: os.environ.get(key) for key in fake.env}
         os.environ.update({**fake.env, "GITHUB_TOKEN": token})
+        check.time.sleep = lambda seconds: None
         try:
             return check.api_get("x"), headers
         finally:
@@ -1408,7 +1448,7 @@ class ApiTest(unittest.TestCase):
                     check.api_get = real
 
 
-class ForkPathsEdgeTest(ForkPathsTest):
+class ForkPathsEdgeTest(ForkPathsCase):
     """The check of a fork's paths refuses what it cannot read completely, and says so."""
 
     def test_a_wrong_call_is_refused(self):
@@ -1424,12 +1464,13 @@ class ForkPathsEdgeTest(ForkPathsTest):
                         {"/repos/made-up/repo/pulls/7/files?per_page=100&page=1": 500},
                         {"/repos/made-up/repo/contents/bench/tasks?ref=main": 404}):
             with self.subTest(answers=answers):
-                code, out = self.run_paths([self.entry("README.md")], extra_answers=answers)
+                code, out = self.run_paths([self.entry("README.md")], extra_answers=answers, quick=True)
                 self.assertEqual(code, 1, out)
                 self.assertIn("could not be read completely", out)
 
     def test_a_pull_request_that_touches_no_closed_path_is_told_so(self):
-        code, out = self.run_paths([self.entry("README.md")])
+        code, out = self.run_paths([self.entry("README.md")], extra_answers={
+            "/repos/made-up/repo/contents/bench/tests?ref=main": [{"name": "test_judge.py", "type": "file"}, "junk"]})
         self.assertEqual(code, 0, out)
         self.assertIn("touches no path that the working rules close", out)
 

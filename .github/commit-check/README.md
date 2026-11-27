@@ -28,9 +28,10 @@ For every commit after the exempt commit named in `settings.json`:
   whatever stands in front (a home folder of macOS or Windows, the sessions' tool folders, working folders and
   temporary folders, and folders named after a home folder); and nothing that matches the private pattern.
   Every text is first brought to one form: the forms of a character, letter case, dashes, spaces and characters
-  without width. A temporary folder (`/tmp`) and a home inside a container (`/home/agent`) are not paths of the
-  sessions' computer: the isolation tests use them on purpose. Tests that need an offending text as a sample put
-  it together from parts.
+  without width. What is not caught, on purpose: a temporary folder (`/tmp/...`: 91 added lines of 32 commits of
+  main, the isolation tests) and a home folder of Linux (`/home/<name>/...`: 17 added lines of 9 commits of main, a
+  home inside the judge's container); and a bare id of the UUID form (30 added lines of 9 commits, made-up ids in
+  tests). Tests that need an offending text as a sample put it together from parts.
 - **Lists.** Where a property cannot be closed by its form, a list of tools' names stays a list: a branch named
   after a tool (`<tool>/...`), "generated with" or "co-authored by" followed by a tool's name inside an added line,
   and a person's name that names a tool.

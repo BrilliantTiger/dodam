@@ -64,7 +64,8 @@ class Breaks(ast.NodeVisitor):
                 self.path.pop()
 
     def add(self, kind, node, extra=None):
-        self.found.append({"kind": kind, "where": list(self.path), "line": node.lineno, "extra": extra})
+        self.found.append({"kind": kind, "where": list(self.path), "line": node.lineno, "column": node.col_offset,
+                           "extra": extra})
 
     def visit_Expr(self, node):
         call = node.value
@@ -107,7 +108,7 @@ class Breaks(ast.NodeVisitor):
     def visit_comprehension(self, node):
         for index in range(len(node.ifs)):
             self.found.append({"kind": "turn round comprehension", "where": list(self.path), "line": node.ifs[index].lineno,
-                               "extra": index})
+                               "column": node.ifs[index].col_offset, "extra": index})
         self.generic_visit(node)
 
     def visit_BoolOp(self, node):
@@ -242,7 +243,7 @@ def one(job):
     try:
         compile(broken, target, "exec")
     except SyntaxError:
-        return {"file": target, "line": brk["line"], "kind": brk["kind"], "part": brk["extra"],
+        return {"file": target, "line": brk["line"], "column": brk["column"], "kind": brk["kind"], "part": brk["extra"],
                 "result": "caught at loading", "tests": 0, "first failed": [], "seconds": 0}
     folder = prepare(base, sources, target, broken, workflow_folder)
     started = time.monotonic()
@@ -250,7 +251,8 @@ def one(job):
     if result == "not settled":
         result, count, failed = run_tests(folder, TIME_LIMIT * 2)
     shutil.rmtree(folder.parents[1], ignore_errors=True)
-    return {"file": target, "line": brk["line"], "kind": brk["kind"], "part": brk["extra"], "result": result,
+    return {"file": target, "line": brk["line"], "column": brk["column"], "kind": brk["kind"], "part": brk["extra"],
+            "result": result,
             "tests": count, "first failed": failed[:1], "seconds": round(time.monotonic() - started, 1)}
 
 
@@ -293,7 +295,7 @@ def main(argv=None):
     print(json.dumps(counts))
     for entry in results:
         if entry["result"] in ("not caught", "not settled"):
-            print(f"{entry['result']}: {entry['file']} line {entry['line']}, {entry['kind']}"
+            print(f"{entry['result']}: {entry['file']} line {entry['line']} column {entry['column']}, {entry['kind']}"
                   + (f", part {entry['part']}" if entry["part"] is not None else ""))
     return 0 if all(entry["result"].startswith("caught") for entry in results) else 1
 
