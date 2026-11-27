@@ -291,9 +291,9 @@ def loosened_settings(repo, commit, exempt, expected):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default=".")
-    parser.add_argument("--from", dest="start", required=True,
+    parser.add_argument("--from", dest="start",
                         help="the commit the range starts after (the pull request's base, main, or the push's before)")
-    parser.add_argument("--head", required=True)
+    parser.add_argument("--head")
     parser.add_argument("--settings", required=True)
     parser.add_argument("--context", choices=("own", "fork", "fork-approved"), default=None,
                         help="own: the project's own branch; fork: a pull request from a fork; fork-approved: a fork's "

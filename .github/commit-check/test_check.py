@@ -800,7 +800,7 @@ class SampleTest(RepoTestCase):
         ("/Us" "ers/somebody/work/dodam/notes.md", "local path"),
         (".cla" "ude/worktrees/feat-1/notes.md", "local path"),
         ("Gener" "ated with " + C + " Code", "attribution line"),
-        ("/home/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
+        ("/ho" "me/somebody/work/dodam/notes.md", None),  # 17 lines of main's tests name a container's home
         ("/tmp/x/y", None),  # 91 lines of main's isolation tests
         (".cla" "ude/worktrees/", None),  # the repository's .gitignore names the folder alone
         ("Code written by " + C + " is reviewed by another company's model", None),  # the charter's words
@@ -1124,7 +1124,7 @@ class RowsTest(RepoTestCase):
         rows = [("/Us" "ers/x/y", "local path"), (".cla" "ude/plans/x.md", "local path"), (".gem" "ini/x/y", "local path"),
                 ("or" "ca/work" "spaces/x", "local path"), ("or" "ca/proj" "ects/x", "local path"),
                 ("cla" "ude-501/x", "local path"), ("/va" "r/folders/ab/x", "local path"),
-                ("-us" "ers-x-or" "ca-", "local path"), ("/Users/Shared/x", None)]
+                ("-us" "ers-x-or" "ca-", "local path"), ("/Us" "ers/Shared/x", None)]
         self.described(rows)
 
     def test_every_form_of_a_dash_and_a_space_is_brought_to_one_form(self):
