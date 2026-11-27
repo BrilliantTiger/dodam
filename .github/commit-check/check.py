@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 
 GITHUB_ADDRESS = "noreply" + "@" + "github.com"
@@ -237,21 +238,50 @@ def github_api_verifier():
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 
     def verified(sha):
-        if not token or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repository) or not re.fullmatch(r"[0-9a-f]{40}", sha):
             return False
-        request = urllib.request.Request(f"{api}/repos/{repository}/commits/{sha}", headers={
-            "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
-        try:
-            with urllib.request.urlopen(request, timeout=20) as answer:
-                data = json.load(answer)
-            commit = data.get("commit") or {}
-            return (data.get("sha") == sha
-                    and (commit.get("verification") or {}).get("verified") is True
-                    and (commit.get("committer") or {}).get("email") == GITHUB_ADDRESS)
-        except Exception:
-            return False
+        headers = {"Accept": "application/vnd.github+json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(f"{api}/repos/{repository}/commits/{sha}", headers=headers)
+        # Asked up to three times, so that one failed answer does not turn a clean main red; whatever goes
+        # wrong in the end counts as not verified.
+        for wait in (2, 5, None):
+            try:
+                with urllib.request.urlopen(request, timeout=20) as answer:
+                    data = json.load(answer)
+                commit = data.get("commit") or {}
+                return (data.get("sha") == sha
+                        and (commit.get("verification") or {}).get("verified") is True
+                        and (commit.get("committer") or {}).get("email") == GITHUB_ADDRESS)
+            except Exception:
+                if wait is None:
+                    return False
+                time.sleep(wait)
+        return False
 
     return verified
+
+
+SETTINGS_PATH = ".github/commit-check/settings.json"
+
+
+def loosened_settings(repo, commit, exempt, expected):
+    """A branch is judged by its own copy, so it may not loosen the settings that its start has."""
+    commit = git(repo, "rev-parse", "--verify", commit + "^{commit}").strip()
+    listed = git(repo, "ls-tree", "--name-only", commit, "--", SETTINGS_PATH).strip()
+    if not listed:
+        return []  # the first merge of the check: nothing to compare with
+    try:
+        before = json.loads(git(repo, "show", f"{commit}:{SETTINGS_PATH}"))
+    except ValueError:
+        return ["settings: the settings on the range's start cannot be read"]
+    found = []
+    if before.get("private_pattern_expected") is True and not expected:
+        found.append("settings: the private pattern is expected on the range's start, and this branch says it is not")
+    if before.get("exempt_through") != exempt:
+        found.append("settings: the exempt commit differs from the range's start")
+    return found
 
 
 def main(argv=None):
@@ -295,6 +325,8 @@ def run(args):
     head = git(repo, "rev-parse", "--verify", args.head + "^{commit}").strip()
 
     failures = []
+    if args.compare_settings:
+        failures += loosened_settings(repo, args.compare_settings, exempt, expected)
     private = None
     pattern = os.environ.get("COMMIT_CHECK_PRIVATE_PATTERN", "")
     if context == "fork":
