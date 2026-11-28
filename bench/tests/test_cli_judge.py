@@ -1672,8 +1672,9 @@ def test_measured():
         finally:
             ALLOWED[0] -= 1
 
+    # the plain built-in kinds; not type, of which every class is an instance
     PURE = (bool, int, float, complex, str, bytes, bytearray, memoryview, list, tuple, dict, set, frozenset, slice,
-            range, type, super, BaseException)
+            range, super, BaseException)
     # methods made in C (the slots and the instance dictionary of a Python class are made by Python itself)
     C_PARTS = (types.MethodDescriptorType, types.BuiltinMethodType, types.WrapperDescriptorType,
                types.ClassMethodDescriptorType)
@@ -1684,6 +1685,10 @@ def test_measured():
         return (str(getattr(module, "__file__", "") or "").endswith(".py")
                 and not any(isinstance(value, C_PARTS) for value in vars(kind).values()))
 
+    def allowed_type(kind):
+        return kind is type or issubclass(kind, PURE) or all(
+            part is object or part in PURE or written_in_python(part) for part in kind.__mro__)
+
     def harmless(target, first):
         if isinstance(target, types.FunctionType):
             return True
@@ -1692,8 +1697,10 @@ def test_measured():
         if isinstance(target, types.MethodType):
             return isinstance(target.__func__, types.FunctionType)
         if isinstance(target, type):
-            return issubclass(target, PURE) or all(part is object or part in PURE or written_in_python(part)
-                                                   for part in target.__mro__)
+            return allowed_type(target)
+        if target is object.__new__:
+            # what a class written in Python makes its objects with
+            return isinstance(first, type) and allowed_type(first)
         owner = getattr(target, "__self__", None)
         if isinstance(target, (types.MethodDescriptorType, types.WrapperDescriptorType, types.ClassMethodDescriptorType)):
             # unbound: the object it is called on is its first argument
@@ -2061,10 +2068,12 @@ def held_to_its_own_time(said: dict, with_tool: bool, short_watch: bool) -> None
             # the last stretch, after the last reading, is held as the others where the watch is short: a reading
             # would have closed it within one interval
             if stretch["by_a_reading"] or short_watch:
-                assert round(stretch["empty"], 9) <= (0.002 if n == 0 else 0.010), f"(1) {where}: {stretch}"
-                # (2) waking without reading: at most 50 waits for output (a right one: 1 to 8; output in bursts: 5
-                # to 23)
+                # (2) waking without reading: at most 50 waits for output (a right one: 8 to 9 on the writing
+                # program, 10 to 11 with output in bursts, 20 to 21 with output without a pause), asked before the
+                # empty waits are added up, so that a runner waking too often fails by this bound even where a busy
+                # machine leaves some of its waits empty
                 assert stretch["waits"] <= 50, f"(2) {where}: {stretch}"
+                assert round(stretch["empty"], 9) <= (0.002 if n == 0 else 0.010), f"(1) {where}: {stretch}"
             if with_tool:
                 # (3) no call that reaches the system but those a right case runner makes (a right one: none other)
                 assert stretch["calls"] == [], f"(3) {where}: {stretch['calls']}"
@@ -2477,14 +2486,14 @@ def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
 
 # Case runners that each break one of the bounds the helper holds a watched run to, and nothing else: the waiting
 # asked (a wait for output of 0.05 s), waking without reading (measuring a writing program only every 0.2 s), a call
-# that reaches the system (asking for its parent's number), its own computing in steps (a loop of 5,000 turns) and on
+# that reaches the system (asking for its parent's number), its own computing in steps (a loop of 2,000 turns, four times the bound and little of the processor) and on
 # the processor (a sum over 120 million numbers, in one call: 0.5 to 0.8 s on this Mac at a load of about 2)
 WATCHED_BEFORE = "_watching = dodam_cli.Case._watch\n\n\ndef _watch(self, *a, **k):\n    {}\n    return _watching(self, *a, **k)\n\n\ndodam_cli.Case._watch = _watch"
 ONE_BOUND_BROKEN = {
     "(1)": ("dodam_cli.TICK = 0.05", "silent", True),
     "(2)": ("dodam_cli.WATCH = 0.2", "chatty", False),
     "(3)": (WATCHED_BEFORE.format("os.getppid()"), "silent", True),
-    "(4) steps": (WATCHED_BEFORE.format("for _ in range(5000):\n        pass"), "silent", True),
+    "(4) steps": (WATCHED_BEFORE.format("for _ in range(2000):\n        pass"), "silent", True),
     "(4) cpu": (WATCHED_BEFORE.format("sum(range(120_000_000))"), "silent", True),
 }
 

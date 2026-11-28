@@ -8,6 +8,7 @@ vetting and the verifier run it. They need Docker and the image, and are skipped
 missing; CI builds the image and runs them.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -253,6 +254,11 @@ def attempt(name, args, files=None, looked=False):
     # seconds, at the mark and the lowest after it, the seconds and readings to the mark
     mark = {}
     if looked:
+        # what the case before left goes first, for at most a second, so that the figure before the files is its own
+        for _ in range(100):
+            if slabs() <= GONE_MB * 2**20:
+                break
+            time.sleep(0.01)
         empty = slabs()
     with case(files=files) as c:
         if looked:
@@ -3396,6 +3402,17 @@ def test_after():
 """
 
 
+def runner_kind() -> str:
+    """The machine's maker and model, and its processor's name, as this machine says them."""
+    def said(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return "?"
+    names = [line.split(":", 1)[1].strip() for line in said("/proc/cpuinfo").splitlines() if line.startswith("model name")]
+    return f"{said('/sys/class/dmi/id/sys_vendor')} {said('/sys/class/dmi/id/product_name')}, {names[0] if names else '?'}"
+
+
 @pytest.mark.parametrize("limit_mb", [64, 256, 512])
 def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it(tmp_path, limit_mb):
     """A first run of a case leaves attributes on a folder and empty folders, some 40 MB of the
@@ -3419,6 +3436,7 @@ def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in
     mark = seen["given"]["mark"]
     assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
     MiB = 2**20
+    note_figures(f"the runner: {runner_kind()}", cores=os.cpu_count() or 0)
     note_figures(f"the mark after deleting the test's files, limit {limit_mb} MB", readings=mark["readings"],
                  seconds=mark["seconds"], records_before_the_files=mark["empty"] / MiB,
                  records_with_the_files=mark["before"] / MiB, records_at_the_mark=mark["at"] / MiB,
