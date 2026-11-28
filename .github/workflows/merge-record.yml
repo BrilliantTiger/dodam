@@ -1,0 +1,22 @@
+# Only on the side branch commit-check-merge-record: the head's tests of merges against the check as it was at
+# b834268, once, for the record. It runs nothing else.
+name: merge-record
+
+on:
+  push:
+    branches: [commit-check-merge-record]
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The head's tests of merges against the check of b834268
+        run: |
+          python3 -I -m unittest discover -s .github/commit-check -p test_check.py -k MergeKindTest -k MergeKindByEntryTest 2>&1 | grep -E "^(FAIL|ERROR|Ran|OK|FAILED)" || true
