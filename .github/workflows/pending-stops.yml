@@ -1,6 +1,6 @@
 name: pending stops
 # Does the kernel keep a stop signal pending on a process that already stands stopped, until it is continued? A
-# script straight on the runner, no container, in three jobs so that both kinds of runner are in it; every expected
+# script straight on the runner, no container, in seven jobs, since three all landed on AWS; every expected
 # value is written in the script, and a job fails on a difference. On a side branch only.
 on: push
 permissions:
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [1, 2, 3]
+        part: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
