@@ -615,11 +615,11 @@ def nothing_there(error):
                 or error.headers.get("Retry-After") is not None or error.headers.get("X-RateLimit-Remaining") == "0":
             return False
         body = json.loads(error.read().decode("utf-8"))
-        return isinstance(body, dict) and is_text(body.get("message"))
     except Exception:
-        return False
+        return False  # a body that cannot be read
     finally:
         error.close()
+    return isinstance(body, dict) and is_text(body.get("message"))
 
 
 def api_get(question, path, subject, outside_repository=False):
@@ -640,17 +640,18 @@ def api_get(question, path, subject, outside_repository=False):
     if API_SPENT["deadline"] is None:
         API_SPENT["deadline"] = time.monotonic() + API_BUDGET
     for wait in API_WAITS + (None,):
+        data, read = None, False
         try:
             with OPENER.open(request, timeout=min(API_TRY, API_SPENT["deadline"] - time.monotonic())) as answer:
                 if answer.status == 200 and "json" in (answer.headers.get("Content-Type") or ""):
-                    data = json.load(answer)
-                    if ANSWERS[question](data, subject):
-                        return data
+                    data, read = json.load(answer), True
         except urllib.error.HTTPError as error:
             if nothing_there(error):
                 return None
         except Exception:
-            pass
+            pass  # no answer: a time-out, a failed connection, a body that is no JSON
+        if read and ANSWERS[question](data, subject):  # judged outside: the judge's own faults are not "no answer"
+            return data
         if wait is None or wait >= API_SPENT["deadline"] - time.monotonic():
             break
         time.sleep(wait)
