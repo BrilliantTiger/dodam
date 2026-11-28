@@ -1382,7 +1382,7 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
 # container starts with 400 MB in all, of it 100 MB of pages of files, 100 MB of the kernel's records
 # and 40 MB of the cases' files; the case's limit is 256 MB.
 UNDECIDED = r'''
-import builtins, functools, io
+import builtins, functools, io, os, sys
 import pytest
 from pathlib import Path
 import dodam_cli
@@ -1441,6 +1441,16 @@ LOOKS_IN_RUN = {}
 # program of each run
 BEFORE_FIRST_LOOK = [None]
 ASKED_WAIT = {}
+# and, in the same span, what the case runner does besides the waits it asks for: its steps (calls and jumps of its
+# code) and every call of the system that can wait, by its name; a stop of the case runner from outside makes none
+STEPS, UNCOUNTED, ALLOWED = {}, {}, [0]
+WAITING_MODULES = {"select", "socket", "_socket", "signal", "_signal", "_posixsubprocess", "ctypes", "_ctypes",
+                   "_thread", "threading", "subprocess"}
+WAITING_NAMES = {"sleep", "select", "poll", "epoll", "kqueue", "control", "waitpid", "wait", "wait3", "wait4",
+                 "waitid", "acquire", "acquire_lock", "join", "pipe", "pipe2", "fork", "fork_exec", "system",
+                 "posix_spawn", "posix_spawnp", "spawnv", "spawnve", "pause", "sigwait", "sigwaitinfo",
+                 "sigtimedwait", "recv", "recv_into", "recvfrom", "accept", "connect", "sendall", "nanosleep",
+                 "usleep", "communicate", "lockf", "flock"}
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
@@ -1517,6 +1527,8 @@ def test_measured():
 
     def container_memory(*args, **kwargs):
         here = CASE_DIR[0]
+        if BEFORE_FIRST_LOOK[0] is not None:
+            watching(False)
         BEFORE_FIRST_LOOK[0] = None
         if SPAWNED[0] is not None and here is not None:
             # a reading after the judge started the program and before it waits for the program's end is a look
@@ -1547,14 +1559,25 @@ def test_measured():
         proc = real_popen(*args, **kwargs)
         here = CASE_DIR[0]
         SPAWNED[0] = (len(real_open(here / "ended").read()) if here is not None and (here / "ended").exists() else 0)
-        if TRACK_WAIT:
-            BEFORE_FIRST_LOOK[0] = SPAWNED[0]
-            ASKED_WAIT[SPAWNED[0]] = 0.0
+        polling = proc.poll
+
+        def poll(*a, **k):
+            return allowed(polling, *a, **k)
+
+        proc.poll = poll
         waiting = proc.wait
 
         def wait(*a, **k):
+            if BEFORE_FIRST_LOOK[0] is not None:
+                watching(False)
             SPAWNED[0] = BEFORE_FIRST_LOOK[0] = None
             return waiting(*a, **k)
+
+        if TRACK_WAIT:
+            BEFORE_FIRST_LOOK[0] = SPAWNED[0]
+            ASKED_WAIT[SPAWNED[0]] = 0.0
+            STEPS[SPAWNED[0]], UNCOUNTED[SPAWNED[0]] = 0, []
+            watching(True)
 
         proc.wait = wait
         return proc
@@ -1562,6 +1585,40 @@ def test_measured():
     def asked(seconds):
         if BEFORE_FIRST_LOOK[0] is not None:
             ASKED_WAIT[BEFORE_FIRST_LOOK[0]] += float("inf") if seconds is None else max(seconds, 0.0)
+
+    def allowed(call, *a, **k):
+        # a wait the case runner asks for, counted above, or its look at whether the program has ended
+        ALLOWED[0] += 1
+        try:
+            return call(*a, **k)
+        finally:
+            ALLOWED[0] -= 1
+
+    def profiled(frame, event, arg):
+        run = BEFORE_FIRST_LOOK[0]
+        if run is None or ALLOWED[0]:
+            return
+        if event in ("call", "c_call"):
+            STEPS[run] += 1
+        if event == "c_call":
+            module = getattr(arg, "__module__", None) or type(getattr(arg, "__self__", None)).__module__
+            name = getattr(arg, "__name__", "")
+            if module in WAITING_MODULES or name in WAITING_NAMES:
+                UNCOUNTED[run].append(f"{module}.{name}")
+
+    def jumped(code, instruction, destination):
+        run = BEFORE_FIRST_LOOK[0]
+        if run is not None and not ALLOWED[0]:
+            STEPS[run] += 1
+
+    monitor = sys.monitoring
+    monitor_id = next(i for i in range(6) if monitor.get_tool(i) is None)
+    monitor.use_tool_id(monitor_id, "the case runner's steps before its first look")
+    monitor.register_callback(monitor_id, monitor.events.JUMP, jumped)
+
+    def watching(on):
+        monitor.set_events(monitor_id, monitor.events.JUMP if on else 0)
+        sys.setprofile(profiled if on else None)
 
     class AskedTime:
         """The case runner's time, which adds up what it asks to sleep before a run's first reading."""
@@ -1571,19 +1628,20 @@ def test_measured():
         @staticmethod
         def sleep(seconds):
             asked(seconds)
-            real_time_module.sleep(seconds)
+            allowed(real_time_module.sleep, seconds)
 
     class AskedSelector:
         """The case runner's wait for output, which adds up the timeouts it asks for before a run's first reading."""
         def __init__(self):
-            self._real = real_selector()
+            self._real = allowed(real_selector)
 
         def __getattr__(self, name):
-            return getattr(self._real, name)
+            real = getattr(self._real, name)
+            return (lambda *a, **k: allowed(real, *a, **k)) if callable(real) else real
 
         def select(self, timeout=None):
             asked(timeout)
-            return self._real.select(timeout)
+            return allowed(self._real.select, timeout)
 
     real_time_module, real_selector = dodam_cli.time, dodam_cli.selectors.DefaultSelector
     builtins.open = io.open = opening
@@ -1614,6 +1672,8 @@ def test_measured():
                            "in_run": reads.get("in_run_of", {}).get(RUNS - 1, 0),
                            "looks": [LOOKS_IN_RUN.get(run, 0) for run in range(RUNS)],
                            "asked_wait": [ASKED_WAIT.get(run) for run in range(RUNS)],
+                           "steps": [STEPS.get(run) for run in range(RUNS)],
+                           "uncounted": [UNCOUNTED.get(run) for run in range(RUNS)],
                            "gave_up": os.path.exists(CASE_DIR[0] / "gave-up"),
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
@@ -1623,6 +1683,9 @@ def test_measured():
         tool.kernel_part = kept_kernel
         dodam_cli.subprocess.Popen = real_popen
         dodam_cli.time, dodam_cli.selectors.DefaultSelector = real_time_module, real_selector
+        watching(False)
+        monitor.register_callback(monitor_id, monitor.events.JUMP, None)
+        monitor.free_tool_id(monitor_id)
 '''
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
@@ -1819,6 +1882,11 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         # for output of at most two thousandths of a second, or less in parts; however long the runner is held up
         assert all(w is not None and round(w, 9) <= 0.002 for w in said["asked_wait"]), \
             f"the case runner asked to wait longer before a run's first reading: {said['asked_wait']}"
+        # nor did it wait in any other way, or keep itself busy: a right case runner takes some tens of steps there,
+        # and a stop of it from outside adds none
+        assert all(u == [] for u in said["uncounted"]), f"the case runner waited before a run's first reading: {said['uncounted']}"
+        assert all(n is not None and n <= 500 for n in said["steps"]), \
+            f"the case runner kept itself busy before a run's first reading: {said['steps']} steps"
     if not separated:
         assert said["looks"] == [0] * runs and said["tries"] == 0, \
             f"a case without separation was measured: {said['looks']}, {said['tries']} tries"

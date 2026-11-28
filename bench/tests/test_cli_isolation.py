@@ -241,13 +241,27 @@ def attempt(name, args, files=None, looked=False):
     # part and its records together, which the program's own memory does not move. Gone means fallen to within 3 MB
     # of what stood before the case made the files (some 18 MB for 19,000), and no longer falling means STEADY
     # readings in a row within 64 KB of the lowest seen: the kernel lets go of them in bursts, so this is counted in
-    # readings, not read from a clock
+    # readings, not read from a clock. The mark's figures are kept with the case: how many readings it took, how far
+    # above what stood before the files it was, and what the kernel still let go of after it
     if looked:
         import dodam_cli
-        empty = dodam_cli._judge.kernel_part() + dodam_cli._judge.container_memory()["records"]
+
+        def kernels():
+            return dodam_cli._judge.kernel_part() + dodam_cli._judge.container_memory()["records"]
+        # what stood before the files, once what the case before left has gone: 25 readings in a row within 64 KB
+        empty, steady = kernels(), 0
+        for _ in range(500):
+            time.sleep(0.02)
+            now = kernels()
+            steady = steady + 1 if abs(now - empty) <= 2**16 else 0
+            empty = min(empty, now)
+            if steady >= 25:
+                break
+        assert steady >= 25, "the kernel's memory of the case before did not settle"
     with case(files=files) as c:
+        mark = {}
         if looked:
-            reading_of, before, after = c._container, [], []
+            reading_of, state = c._container, {}
 
             def marked():
                 gone = os.path.exists(c.work / "files-gone")
@@ -255,18 +269,22 @@ def attempt(name, args, files=None, looked=False):
                 if figure.get("late"):
                     return figure
                 kernel = dodam_cli._judge.kernel_part() + figure["records"]
-                if not before:
+                if mark:
+                    # what the kernel still lets go of after the mark, while the program takes its memory
+                    mark["lowest_after"] = min(mark["lowest_after"], kernel)
+                elif "before" not in state:
                     # the first reading in time, before the program started: the files all stand
-                    before.append(kernel)
-                elif gone and not os.path.exists(c.work / "looked-after-gone"):
-                    if not after:
-                        after[:] = [kernel, 1]
-                    elif kernel < after[0] - 2**16:
-                        after[:] = [kernel, 0]
+                    state["before"] = kernel
+                elif gone:
+                    state["readings"] = state.get("readings", 0) + 1
+                    if "low" not in state or kernel < state["low"] - 2**16:
+                        state["low"], state["steady"] = kernel, 0
                     else:
-                        after[1] += 1
-                    fell = before[0] - kernel >= max(8 * 2**20, before[0] - empty - 3 * 2**20)
-                    if fell and after[1] >= STEADY:
+                        state["steady"] += 1
+                    fell = state["before"] - kernel >= max(8 * 2**20, state["before"] - empty - 3 * 2**20)
+                    if fell and state["steady"] >= STEADY:
+                        mark.update(readings=state["readings"], at=kernel, lowest_after=kernel, empty=empty,
+                                    before=state["before"])
                         c.write("looked-after-gone", "")
                 return figure
             c._container = marked
@@ -276,7 +294,7 @@ def attempt(name, args, files=None, looked=False):
         after_the_run()
         seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
         seen[name] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
-                      "start": start, "held": while_held, "measured": c.measured}
+                      "start": start, "held": while_held, "measured": c.measured, "mark": mark}
         with open("/logs/verifier/attack.json", "w") as f:
             json.dump(seen, f)
         return r
@@ -3339,7 +3357,8 @@ elif what.startswith("deletes the test's files"):
             time.sleep(0.001)
         else:
             sys.exit("no mark after deleting the test's files")
-    block = bytearray(b"x") * ((limit_mb + 2) * MB)
+    # more than the mark leaves the kernel to let go of afterwards (3 MB) when it waits; 2 MB when it does not
+    block = bytearray(b"x") * ((limit_mb + (8 if "waits" in what else 2)) * MB)
 touch(block)
 held_until_read()
 print("done")
@@ -3408,6 +3427,10 @@ def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in
         assert json.loads(seen[name]["left"])["attributes"] > 250, f"the first run was to leave its attributes: {seen[name]['left']}"
     within_the_bound(seen["kept"], limit_mb, f"folders kept from an earlier run, limit {limit_mb} MB")
     within_the_bound(seen["given at once"], limit_mb, f"the test's own files deleted while memory is taken, limit {limit_mb} MB")
+    mark = seen["given"]["mark"]
+    assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
+    note_figures(f"the mark after deleting the test's files, limit {limit_mb} MB", readings=mark["readings"],
+                 above_empty=(mark["at"] - mark["empty"]) / 2**20, fell_after=(mark["at"] - mark["lowest_after"]) / 2**20)
     for name, what in (("removed", "that removed what an earlier run left"), ("given", "that deleted the test's own files")):
         assert seen[name]["limit"] == "memory", f"a run {what} held more than its limit and was to fail for memory: {seen[name]}"
         note_figures(f"a run {what}, limit {limit_mb} MB", counted=seen[name]["measured"].get("memory_highest", 0) / 2**20)
