@@ -1,0 +1,103 @@
+# Trials (b) and (c) again, by the ruling after the fourth looks: the first start brought only 10 runs on the kind of runner
+# on which the isolation test failed, and its record of one failing job was cut short; on a side branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: e9ad89e9beb1a12056eb15073f83e7d126c964dd
+  WAITS: tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it
+jobs:
+  # (b) the isolation test that needs one look after deleting files: 70 times in a row in seven jobs of ten, so that at
+  # least 20 runs fall on the kind of runner on which it failed; once with its protection broken, once with its mark
+  # never written
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 10 runs
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          # every run is recorded, and the step fails only after all ten and their figures are printed
+          for r in $(seq 1 10); do python -m pytest -q -p no:cacheprovider -rs --tb=short $WAITS > ../said/$r.txt 2>&1 || true; done
+          echo "summaries:"; cat ../said/*.txt | grep -E "^[0-9]+ (passed|failed|skipped)" | sed 's/ in .*//' | sort | uniq -c
+          echo "what failed said:"; cat ../said/*.txt | grep -E "^E |^/.*Error" | cut -c1-400 | sort | uniq -c | head -40
+          for r in $(seq 1 10); do echo "== run $r: $(grep -E '^[0-9]+ (passed|failed)' ../said/$r.txt)"; grep -E "^the runner|^the mark after deleting|^the kernel's records after|^E " ../said/$r.txt | cut -c1-600 || true; done
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+      - name: the case counted from a figure that is not its lowest, the test must fail on its assertion
+        if: matrix.part == 1
+        working-directory: bench
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          entry = next(p for p in tomllib.loads(Path("experiments/protections.toml").read_text())["protection"]
+                       if p["what"] == "A case is counted from the lowest figure it reached")
+          path = Path(entry["file"]); text = path.read_text()
+          for change in entry["change"]:
+              assert text.count(change["find"]) == 1
+              text = text.replace(change["find"], change["put"])
+          path.write_text(text)
+          PY
+          set +e
+          python -m pytest -q -p no:cacheprovider --tb=line $WAITS; code=$?
+          echo "exit code with the break: $code"
+          [ "$code" -eq 1 ]
+      - name: the mark never written, the test must fail on its assertion
+        if: matrix.part == 2
+        working-directory: bench
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/test_cli_isolation.py"); text = path.read_text()
+          find = '                        c.write("looked-after-gone", "")\n'
+          assert text.count(find) == 1
+          path.write_text(text.replace(find, '                        pass\n'))
+          PY
+          set +e
+          python -m pytest -q -p no:cacheprovider --tb=line $WAITS; code=$?
+          echo "exit code without the mark: $code"
+          [ "$code" -eq 1 ]
+  # (c) second-lines six times
+  second-lines:
+    needs: [image]
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench
+        run: python experiments/check_protections.py --second-lines
