@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import CANARY, unseparated
+from conftest import CANARY, note_figures, unseparated
 from dodambench import judge as judge_module
 from dodambench.convert import to_harbor, verifier_env
 from dodambench.judge import judge
@@ -1382,7 +1382,7 @@ def test_a_figure_is_made_of_readings_that_belong_together(tmp_path, change):
 # container starts with 400 MB in all, of it 100 MB of pages of files, 100 MB of the kernel's records
 # and 40 MB of the cases' files; the case's limit is 256 MB.
 UNDECIDED = r'''
-import builtins, functools, io, os, sys
+import builtins, functools, io, os, sys, types
 import pytest
 from pathlib import Path
 import dodam_cli
@@ -1436,21 +1436,24 @@ CASE_DIR = [None]
 # the run whose program the judge has started and not yet waited for, and the judge's looks in each run
 SPAWNED = [None]
 LOOKS_IN_RUN = {}
-# for the runs whose first look is held to how soon it comes: the run whose first reading has not yet come, and
-# what the case runner asked to wait (its sleeps and the timeouts of its waits for output) since it started the
-# program of each run
-BEFORE_FIRST_LOOK = [None]
-ASKED_WAIT = {}
-# and, in the same span, what the case runner does besides the waits it asks for: its steps (calls and jumps of its
-# code) and every call of the system that can wait, by its name; a stop of the case runner from outside makes none
-STEPS, UNCOUNTED, ALLOWED = {}, {}, [0]
-WAITING_MODULES = {"select", "socket", "_socket", "signal", "_signal", "_posixsubprocess", "ctypes", "_ctypes",
-                   "_thread", "threading", "subprocess"}
-WAITING_NAMES = {"sleep", "select", "poll", "epoll", "kqueue", "control", "waitpid", "wait", "wait3", "wait4",
-                 "waitid", "acquire", "acquire_lock", "join", "pipe", "pipe2", "fork", "fork_exec", "system",
-                 "posix_spawn", "posix_spawnp", "spawnv", "spawnve", "pause", "sigwait", "sigwaitinfo",
-                 "sigtimedwait", "recv", "recv_into", "recvfrom", "accept", "connect", "sendall", "nanosleep",
-                 "usleep", "communicate", "lockf", "flock"}
+# The runs the helper watches, from the start of the program until the judge waits for its end, in stretches: from
+# the start to the return of the first reading, and from the return of each reading to the return of the next. In
+# each the case runner can let time pass by its own doing in four ways only: waiting it asks for, waking without
+# reading, calls that reach the system, and its own computing. Each is counted here; none is read from a clock.
+WATCHED = [None]        # the run being watched
+STRETCH = {}            # the open stretch
+STRETCHES = {}          # the stretches of each run that ended with a reading, and the last one, which ended the run
+ALLOWED, OPENED, IN_READING = [0], set(), [False]
+
+# calls that cannot reach the system: the plain built-in types and functions, but these
+BLOCKED = {"print", "input", "open", "__import__", "exec", "eval", "compile", "breakpoint"}
+# and the few calls of the system a right case runner makes, by name: its clock, its pipes and their numbers, the
+# signal that ends the program's group; reads and writes only on a file descriptor that is not blocking
+NAMED = {"time.monotonic", "posix.set_blocking", "posix.get_blocking", "posix.close", "posix.fspath", "posix.killpg",
+         "posix._path_splitroot_ex", "sys.intern", "_codecs.utf_8_decode", "_codecs.utf_8_encode",
+         "_codecs.ascii_decode", "_io.text_encoding", "_io.BufferedReader.fileno", "_io.BufferedWriter.fileno",
+         "_io.BufferedWriter.close", "_io.BufferedReader.close"}
+ON_A_DESCRIPTOR = {"posix.read", "posix.write"}
 # how many tries of a reading a patient program waits for in its run, counted from the end of the run before
 ENOUGH = 70
 
@@ -1496,20 +1499,53 @@ def test_measured():
         return n
 
     def opening(file, mode="r", *args, **kwargs):
+        if not TRACK_WAIT:
+            name = str(file)
+            if name in parts and not any(m in mode for m in "wax+"):
+                at(parts[name])
+                if SLOW:
+                    time.sleep(SLOW)
+            return real_open(file, mode, *args, **kwargs)
         name = str(file)
-        if name in parts and not any(m in mode for m in "wax+"):
-            at(parts[name])
-            if SLOW:
-                time.sleep(SLOW)
-        return real_open(file, mode, *args, **kwargs)
+        ALLOWED[0] += 1
+        try:
+            if name in parts and not any(m in mode for m in "wax+"):
+                at(parts[name])
+                if SLOW:
+                    time.sleep(SLOW)
+            # a reading opens only regular files of the container and of the machine, to read them
+            plain = (IN_READING[0] and not any(m in mode for m in "wax+") and os.path.isfile(name)
+                     and (name.startswith(str(group) + os.sep) or name == "/proc/meminfo"))
+            if WATCHED[0] is not None and ALLOWED[0] == 1 and not plain:
+                STRETCH["calls"].append(f"open {name} {mode}")
+            opened = real_open(file, mode, *args, **kwargs)
+            if plain:
+                # the file, and the layers under it, whose methods are then allowed by kind
+                for layer in (opened, getattr(opened, "buffer", None), getattr(getattr(opened, "buffer", None), "raw", None)):
+                    if layer is not None:
+                        OPENED.add(id(layer))
+            return opened
+        finally:
+            ALLOWED[0] -= 1
 
     def files_held(folder):
-        if not reads["inside"]:
-            return outside(held)
-        at("files")
-        if reads["after"]:
-            reads["after"] = False
-        return held["files"]
+        if not TRACK_WAIT:
+            if not reads["inside"]:
+                return outside(held)
+            at("files")
+            if reads["after"]:
+                reads["after"] = False
+            return held["files"]
+        ALLOWED[0] += 1
+        try:
+            if not reads["inside"]:
+                return outside(held)
+            at("files")
+            if reads["after"]:
+                reads["after"] = False
+            return held["files"]
+        finally:
+            ALLOWED[0] -= 1
 
     tool = dodam_cli._judge
     kept = builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory
@@ -1526,10 +1562,10 @@ def test_measured():
             return cls.now
 
     def container_memory(*args, **kwargs):
+        ALLOWED[0] += 1
         here = CASE_DIR[0]
-        if BEFORE_FIRST_LOOK[0] is not None:
-            watching(False)
-        BEFORE_FIRST_LOOK[0] = None
+        if WATCHED[0] is not None:
+            STRETCH["steps_before"] = STRETCH["steps"]
         if SPAWNED[0] is not None and here is not None:
             # a reading after the judge started the program and before it waits for the program's end is a look
             # in its run, however the run ends; the first leaves the mark a program looked at once ends on
@@ -1546,10 +1582,18 @@ def test_measured():
                 if counted[run] == 300:
                     (here / f"plenty-{run}").write_text("")
         reads["inside"], tool.time = True, Clock
+        ALLOWED[0] -= 1
+        IN_READING[0] = True
         try:
             return reading(*args, **kwargs)
         finally:
+            IN_READING[0] = False
             reads["inside"], tool.time = False, real_time
+            if WATCHED[0] is not None:
+                ALLOWED[0] += 1
+                closing(True)
+                opening_stretch()
+                ALLOWED[0] -= 1
 
     real_popen = dodam_cli.subprocess.Popen
 
@@ -1557,34 +1601,61 @@ def test_measured():
         # the judge starts the program: the next reading is its first look in the run, and the run ends for the
         # count when the judge waits for the program's end (the watch only polls)
         proc = real_popen(*args, **kwargs)
+        if HOLD_S:
+            # the case runner held up right after the start, as a busy machine holds it, by a sleep the helper keeps
+            # aside from what it counts
+            ALLOWED[0] += 1
+            time.sleep(HOLD_S)
+            ALLOWED[0] -= 1
         here = CASE_DIR[0]
         SPAWNED[0] = (len(real_open(here / "ended").read()) if here is not None and (here / "ended").exists() else 0)
-        polling = proc.poll
+        if TRACK_WAIT:
+            polling = proc.poll
 
-        def poll(*a, **k):
-            return allowed(polling, *a, **k)
+            def poll(*a, **k):
+                return allowed(polling, *a, **k)
 
-        proc.poll = poll
+            proc.poll = poll
         waiting = proc.wait
 
         def wait(*a, **k):
-            if BEFORE_FIRST_LOOK[0] is not None:
-                watching(False)
-            SPAWNED[0] = BEFORE_FIRST_LOOK[0] = None
+            if WATCHED[0] is not None:
+                ALLOWED[0] += 1
+                closing(False)
+                if TOOL:
+                    monitor.set_events(monitor_id, 0)
+                WATCHED[0] = None
+                ALLOWED[0] -= 1
+            SPAWNED[0] = None
             return waiting(*a, **k)
 
         if TRACK_WAIT:
-            BEFORE_FIRST_LOOK[0] = SPAWNED[0]
-            ASKED_WAIT[SPAWNED[0]] = 0.0
-            STEPS[SPAWNED[0]], UNCOUNTED[SPAWNED[0]] = 0, []
-            watching(True)
+            WATCHED[0] = SPAWNED[0]
+            STRETCHES[SPAWNED[0]] = []
+            opening_stretch()
+            if TOOL:
+                monitor.set_events(monitor_id, monitor.events.CALL | monitor.events.JUMP)
 
         proc.wait = wait
         return proc
 
-    def asked(seconds):
-        if BEFORE_FIRST_LOOK[0] is not None:
-            ASKED_WAIT[BEFORE_FIRST_LOOK[0]] += float("inf") if seconds is None else max(seconds, 0.0)
+    def opening_stretch():
+        STRETCH.clear()
+        STRETCH.update(waits=0, empty=0.0, longest=0.0, slept=0, steps=0, steps_before=None, calls=[],
+                       cpu=time.thread_time())
+        OPENED.clear()
+
+    def closing(by_a_reading):
+        done = dict(STRETCH, cpu=time.thread_time() - STRETCH["cpu"], by_a_reading=by_a_reading)
+        STRETCHES[WATCHED[0]].append(done)
+
+    def asked(seconds, empty):
+        if WATCHED[0] is not None:
+            waited = float("inf") if seconds is None else max(seconds, 0.0)
+            STRETCH["waits"] += 1
+            STRETCH["longest"] = max(STRETCH["longest"], waited)
+            if empty:
+                STRETCH["empty"] += waited
 
     def allowed(call, *a, **k):
         # a wait the case runner asks for, counted above, or its look at whether the program has ended
@@ -1594,31 +1665,71 @@ def test_measured():
         finally:
             ALLOWED[0] -= 1
 
-    def profiled(frame, event, arg):
-        run = BEFORE_FIRST_LOOK[0]
-        if run is None or ALLOWED[0]:
-            return
-        if event in ("call", "c_call"):
-            STEPS[run] += 1
-        if event == "c_call":
-            module = getattr(arg, "__module__", None) or type(getattr(arg, "__self__", None)).__module__
-            name = getattr(arg, "__name__", "")
-            if module in WAITING_MODULES or name in WAITING_NAMES:
-                UNCOUNTED[run].append(f"{module}.{name}")
+    PLAIN_MODULES = {"builtins"}
 
-    def jumped(code, instruction, destination):
-        run = BEFORE_FIRST_LOOK[0]
-        if run is not None and not ALLOWED[0]:
-            STEPS[run] += 1
+    def python_made(kind):
+        module = sys.modules.get(getattr(kind, "__module__", ""), None)
+        return getattr(module, "__file__", "") is not None and str(getattr(module, "__file__", "")).endswith(".py")
+
+    def harmless(target, first):
+        if isinstance(target, (types.FunctionType, functools.partial)):
+            return True
+        if isinstance(target, types.MethodType):
+            return isinstance(target.__func__, types.FunctionType)
+        if isinstance(target, type):
+            # a type whose every part is a plain built-in one or written in Python
+            return all(part.__module__ in PLAIN_MODULES or python_made(part) for part in target.__mro__)
+        owner = getattr(target, "__self__", None)
+        if isinstance(target, (types.MethodDescriptorType, types.WrapperDescriptorType, types.ClassMethodDescriptorType)):
+            # unbound: the object it is called on is its first argument
+            owner_type, owner = target.__objclass__, first
+        elif owner is None or isinstance(owner, types.ModuleType):
+            module = owner.__name__ if owner is not None else getattr(target, "__module__", "")
+            name = f"{module}.{getattr(target, '__name__', '')}"
+            if module == "builtins":
+                return target.__name__ not in BLOCKED
+            if name in ON_A_DESCRIPTOR:
+                return isinstance(first, int) and not os.get_blocking(first)
+            return name in NAMED
+        else:
+            owner_type = type(owner)
+        if owner is not None and id(owner) in OPENED:
+            # a method of a file the helper itself opened for the reading
+            return True
+        if owner_type.__module__ in PLAIN_MODULES or python_made(owner_type):
+            return True
+        return f"{owner_type.__module__}.{owner_type.__qualname__}.{getattr(target, '__name__', '')}" in NAMED
+
+    def named(target):
+        owner = getattr(target, "__self__", None)
+        if hasattr(target, "__objclass__"):
+            kind = target.__objclass__
+            return f"{kind.__module__}.{kind.__qualname__}.{target.__name__}"
+        if isinstance(target, type):
+            return f"{target.__module__}.{target.__qualname__}"
+        if owner is None or isinstance(owner, types.ModuleType):
+            module = owner.__name__ if owner is not None else getattr(target, "__module__", "")
+            return f"{module}.{getattr(target, '__name__', type(target).__name__)}"
+        return f"{type(owner).__module__}.{type(owner).__qualname__}.{getattr(target, '__name__', '')}"
+
+    def called(code, offset, target, first):
+        if WATCHED[0] is None or ALLOWED[0]:
+            return
+        STRETCH["steps"] += 1
+        if not harmless(target, first):
+            STRETCH["calls"].append(named(target))
+
+    def jumped(code, offset, destination):
+        if WATCHED[0] is not None and not ALLOWED[0]:
+            STRETCH["steps"] += 1
 
     monitor = sys.monitoring
-    monitor_id = next(i for i in range(6) if monitor.get_tool(i) is None)
-    monitor.use_tool_id(monitor_id, "the case runner's steps before its first look")
-    monitor.register_callback(monitor_id, monitor.events.JUMP, jumped)
-
-    def watching(on):
-        monitor.set_events(monitor_id, monitor.events.JUMP if on else 0)
-        sys.setprofile(profiled if on else None)
+    monitor_id = None
+    if TOOL:
+        monitor_id = next(i for i in range(6) if monitor.get_tool(i) is None)
+        monitor.use_tool_id(monitor_id, "the case runner's steps and calls")
+        monitor.register_callback(monitor_id, monitor.events.CALL, called)
+        monitor.register_callback(monitor_id, monitor.events.JUMP, jumped)
 
     class AskedTime:
         """The case runner's time, which adds up what it asks to sleep before a run's first reading."""
@@ -1627,7 +1738,8 @@ def test_measured():
 
         @staticmethod
         def sleep(seconds):
-            asked(seconds)
+            if WATCHED[0] is not None:
+                STRETCH["slept"] += 1
             allowed(real_time_module.sleep, seconds)
 
     class AskedSelector:
@@ -1640,8 +1752,9 @@ def test_measured():
             return (lambda *a, **k: allowed(real, *a, **k)) if callable(real) else real
 
         def select(self, timeout=None):
-            asked(timeout)
-            return allowed(self._real.select, timeout)
+            ready = allowed(self._real.select, timeout)
+            asked(timeout, not ready)
+            return ready
 
     real_time_module, real_selector = dodam_cli.time, dodam_cli.selectors.DefaultSelector
     builtins.open = io.open = opening
@@ -1653,6 +1766,7 @@ def test_measured():
     dodam_cli._files_held = files_held
     dodam_cli._own_memory = lambda: 0
     dodam_cli.WATCH = WATCH_S
+RUNNER
     try:
         with case() as c:
             c._side = Side()
@@ -1671,9 +1785,7 @@ def test_measured():
                            "late": c.measured.get("late"), "run_seconds": run_seconds,
                            "in_run": reads.get("in_run_of", {}).get(RUNS - 1, 0),
                            "looks": [LOOKS_IN_RUN.get(run, 0) for run in range(RUNS)],
-                           "asked_wait": [ASKED_WAIT.get(run) for run in range(RUNS)],
-                           "steps": [STEPS.get(run) for run in range(RUNS)],
-                           "uncounted": [UNCOUNTED.get(run) for run in range(RUNS)],
+                           "stretches": [STRETCHES.get(run) for run in range(RUNS)],
                            "gave_up": os.path.exists(CASE_DIR[0] / "gave-up"),
                            "undecided": c.measured.get("undecided"),
                            **{k: c.measured.get(k) for k in ("settle_looks", "settle_fell", "kernel_fell_after", "measurements")}}, f)
@@ -1683,9 +1795,19 @@ def test_measured():
         tool.kernel_part = kept_kernel
         dodam_cli.subprocess.Popen = real_popen
         dodam_cli.time, dodam_cli.selectors.DefaultSelector = real_time_module, real_selector
-        watching(False)
-        monitor.register_callback(monitor_id, monitor.events.JUMP, None)
-        monitor.free_tool_id(monitor_id)
+        if TOOL:
+            monitor.set_events(monitor_id, 0)
+            monitor.register_callback(monitor_id, monitor.events.CALL, None)
+            monitor.register_callback(monitor_id, monitor.events.JUMP, None)
+            monitor.free_tool_id(monitor_id)
+            if os.path.exists(SEEN):
+                with open(SEEN) as f:
+                    said = json.load(f)
+                said["tool_freed"] = monitor.get_tool(monitor_id) is None and all(
+                    monitor.register_callback(monitor_id, event, None) is None
+                    for event in (monitor.events.CALL, monitor.events.JUMP))
+                with open(SEEN, "w") as f:
+                    json.dump(said, f)
 '''
 
 # A program that sleeps and then gives what its kind of solution gives: the right output; the right
@@ -1834,7 +1956,8 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
                    slow: float = 0.0, cap_mb: int = 4096, memory_mb: str = "256",
                    records_mb: int = 10, watch: float = 0.002, runs: int = 1,
                    lose_note: bool = False, spaced: bool = False, patient: bool | None = None,
-                   separated: bool = True, once: bool | None = None) -> tuple[dict, dict]:
+                   separated: bool = True, once: bool | None = None, with_tool: bool | None = None,
+                   runner: str = "", hold: float = 0.0) -> tuple[dict, dict]:
     """Judge one case of `test`'s kind for a `solution` whose readings the stand-in makes as `way_code`
     says: the judging, and what the case's run saw. A patient program runs until the judge has read the
     container 70 times in its run, counted from the end of the case's run before it, so that a test that
@@ -1848,8 +1971,11 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         solution = "patient" if solution == "right" else f"patient-{solution}"
     if once is None:
         once = not patient and watch >= 1 and separated
-    # the runs whose first look is held to how soon it comes: the one-look runs and the silent program's
-    track_wait = once or solution == "silent"
+    # the runs whose own waiting, waking, calls and computing are bounded: the one-look runs and the interval test's;
+    # the calls and the steps need the tool, which stretches each interval, so the rate is read without it
+    track_wait = once or solution in ("silent", "chatty")
+    if with_tool is None:
+        with_tool = once or solution == "silent"
     if once:
         # with a long watch the judge's only look in the run is its first, taken only while the program runs: the
         # program lasts until that look (at most eight seconds) and 0.6 s more, in which a right judge does not look
@@ -1859,7 +1985,9 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
     source = (UNDECIDED.replace("WAY", way_code).replace("GROUP", repr(str(tmp_path / "group"))).replace("SEEN", repr(str(seen)))
               .replace("SOLUTION", repr(solution)).replace("CAP_MB", str(cap_mb)).replace("SLOW", repr(slow))
               .replace("CHECK", CHECKS[test]).replace("RECORDS_MB", str(records_mb)).replace("WATCH_S", repr(watch))
-              .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)).replace("TRACK_WAIT", repr(track_wait)))
+              .replace("RUNS", str(runs)).replace("LOSE_NOTE", repr(lose_note)).replace("TRACK_WAIT", repr(track_wait))
+              .replace("TOOL", repr(bool(with_tool))).replace("HOLD_S", repr(hold))
+              .replace("RUNNER\n", "".join(f"    {line}\n" for line in runner.splitlines())))
     if spaced:
         # a test whose name, as pytest gives it, holds spaces
         source = source.replace("def test_measured():", "@pytest.mark.parametrize('label', ['with spaces in it'])\n"
@@ -1878,19 +2006,55 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         assert said["looks"] == [1] * runs, f"a run looked at once had another number of looks: {said['looks']}"
         assert not said["gave_up"], "a run looked at once gave up waiting for the judge's first look"
     if track_wait:
-        # what the case runner asks to wait between starting the program and its first reading in the run: one wait
-        # for output of at most two thousandths of a second, or less in parts; however long the runner is held up
-        assert all(w is not None and round(w, 9) <= 0.002 for w in said["asked_wait"]), \
-            f"the case runner asked to wait longer before a run's first reading: {said['asked_wait']}"
-        # nor did it wait in any other way, or keep itself busy: a right case runner takes some tens of steps there,
-        # and a stop of it from outside adds none
-        assert all(u == [] for u in said["uncounted"]), f"the case runner waited before a run's first reading: {said['uncounted']}"
-        assert all(n is not None and n <= 500 for n in said["steps"]), \
-            f"the case runner kept itself busy before a run's first reading: {said['steps']} steps"
+        held_to_its_own_time(said, with_tool)
     if not separated:
         assert said["looks"] == [0] * runs and said["tries"] == 0, \
             f"a case without separation was measured: {said['looks']}, {said['tries']} tries"
     return result, said
+
+
+def held_to_its_own_time(said: dict, with_tool: bool) -> None:
+    """Between the program's start and the first reading's return, and between the returns of two readings, the case
+    runner lets time pass by its own doing only as a right one does: each number below is written here, with what a
+    right case runner gives beside it, and none is read from the case runner or from a clock that a hold-up moves."""
+    for run, stretches in enumerate(said["stretches"]):
+        assert stretches, f"run {run} was not watched"
+        for n, stretch in enumerate(stretches):
+            where = (f"run {run}, " + ("after its last reading" if not stretch["by_a_reading"] else
+                                       "up to the first reading" if n == 0 else f"between readings {n} and {n + 1}"))
+            # (1) waiting asked: no wait for output longer than 0.002 s (a right one: 0.002), no sleep after the start
+            # (a right one: none), and the waits that came back empty add up to at most 0.002 s before the first
+            # reading and 0.010 s between two (a right one: 0.002 and 0.004)
+            assert round(stretch["longest"], 9) <= 0.002 and stretch["slept"] == 0, f"(1) {where}: {stretch}"
+            if stretch["by_a_reading"]:
+                assert round(stretch["empty"], 9) <= (0.002 if n == 0 else 0.010), f"(1) {where}: {stretch}"
+                # (2) waking without reading: at most 50 waits for output (a right one: 1 to 8; output in bursts: 5
+                # to 23)
+                assert stretch["waits"] <= 50, f"(2) {where}: {stretch}"
+                # its own computing on the processor: at most 0.1 s (a right one: 0.001 to 0.005)
+                assert stretch["cpu"] <= 0.1, f"(4) cpu {where}: {stretch}"
+            if with_tool:
+                # (3) no call that reaches the system but those a right case runner makes (a right one: none other)
+                assert stretch["calls"] == [], f"(3) {where}: {stretch['calls']}"
+                # (4) steps: at most 500 before the first reading begins (a right one: 24 to 37) and 3,000 until a
+                # reading returns (a right one: about 250, and about 1,700 when all eight tries of a reading are made)
+                if n == 0 and stretch["steps_before"] is not None:
+                    assert stretch["steps_before"] <= 500, f"(4) steps {where}: {stretch['steps_before']}"
+                if stretch["by_a_reading"]:
+                    assert stretch["steps"] <= 3000, f"(4) steps {where}: {stretch['steps']}"
+    if with_tool:
+        assert said.get("tool_freed") is True, "the helper's tool was left in place after the case"
+    # the largest seen against each bound, printed with the run
+    ended = [st for stretches in said["stretches"] for st in stretches if st["by_a_reading"]]
+    first = [stretches[0] for stretches in said["stretches"] if stretches and stretches[0]["by_a_reading"]]
+    later = [st for stretches in said["stretches"] for st in stretches[1:] if st["by_a_reading"]]
+    note_figures(f"the case runner's own time, {'with' if with_tool else 'without'} the tool (not MB)",
+                 empty_ms_before_first=1000 * max((st["empty"] for st in first), default=0),
+                 empty_ms_between=1000 * max((st["empty"] for st in later), default=0),
+                 waits_between=max((st["waits"] for st in later), default=0),
+                 steps_before_first=max((st["steps_before"] or 0 for st in first), default=0),
+                 steps_to_return=max((st["steps"] for st in ended), default=0),
+                 cpu_ms=1000 * max((st["cpu"] for st in ended), default=0))
 
 
 def read_as_the_tool_does(tmp_path: Path, result: dict, test: str):
@@ -2266,12 +2430,46 @@ def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
     assert the_case(silent)["outcome"] == "passed", the_case(silent)
     span = float(re.search(r"span=([0-9.e-]+)", quiet["out"]).group(1))
     assert quiet["in_run"] >= span / 0.030, (span, quiet["in_run"])
-    result, seen = judge_measured(tmp_path / "chatty", way(), solution="chatty", test="chatty")
+    # the writing program once with the tool, which sees the case runner's calls and steps, and first, so that a stall
+    # at the first output falls into it; then once without, as the tool stretches each interval, for the rate
+    (tmp_path / "chatty-watched").mkdir()
+    watched, _ = judge_measured(tmp_path / "chatty-watched", way(), solution="chatty", test="chatty", with_tool=True)
+    assert the_case(watched)["outcome"] == "passed", the_case(watched)
+    result, seen = judge_measured(tmp_path / "chatty", way(), solution="chatty", test="chatty", with_tool=False)
     assert the_case(result)["outcome"] == "passed", the_case(result)
     span = float(re.search(r"span=([0-9.e-]+)", seen["out"]).group(1))
     assert seen["in_run"] >= span / 0.030, (span, seen["in_run"])
     assert seen["in_run"] <= span / 0.002 + 5, (span, seen["in_run"])
     assert seen["in_run"] <= seen["measurements"] <= seen["run_seconds"] / 0.002 + 5, (seen["run_seconds"], seen)
+
+
+# Case runners that each break one of the bounds the helper holds a watched run to, and nothing else: the waiting
+# asked (a wait for output of 0.05 s), waking without reading (measuring a writing program only every 0.2 s), a call
+# that reaches the system (asking for its parent's number), its own computing in steps (a loop of 5,000 turns) and on
+# the processor (a sum over 30 million numbers, in one call)
+WATCHED_BEFORE = "_watching = dodam_cli.Case._watch\n\n\ndef _watch(self, *a, **k):\n    {}\n    return _watching(self, *a, **k)\n\n\ndodam_cli.Case._watch = _watch"
+ONE_BOUND_BROKEN = {
+    "(1)": ("dodam_cli.TICK = 0.05", "silent", True),
+    "(2)": ("dodam_cli.WATCH = 0.2", "chatty", False),
+    "(3)": (WATCHED_BEFORE.format("os.getppid()"), "silent", True),
+    "(4) steps": (WATCHED_BEFORE.format("for _ in range(5000):\n        pass"), "silent", True),
+    "(4) cpu": (WATCHED_BEFORE.format("sum(range(30_000_000))"), "silent", True),
+}
+
+
+@pytest.mark.parametrize("bound", list(ONE_BOUND_BROKEN))
+def test_the_helper_holds_a_watched_case_runner_to_each_of_its_own_bounds(tmp_path, bound):
+    """A case runner that lets time pass by its own doing in one way only fails the helper by the bound for that way."""
+    runner, solution, with_tool = ONE_BOUND_BROKEN[bound]
+    with pytest.raises(AssertionError, match=re.escape(bound + " ")):
+        judge_measured(tmp_path, way(), solution=solution, test=solution, with_tool=with_tool, runner=runner)
+
+
+def test_the_helper_leaves_no_tool_behind(tmp_path):
+    """The tool that sees the case runner's calls and steps is freed after the case, with no callback left."""
+    result, seen = judge_measured(tmp_path, way(), solution="silent", test="silent")
+    assert the_case(result)["outcome"] == "passed", the_case(result)
+    assert seen["tool_freed"] is True, seen
 
 
 def test_records_that_stand_count_against_the_room_below_the_cap(tmp_path):
