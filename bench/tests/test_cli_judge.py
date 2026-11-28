@@ -1443,13 +1443,13 @@ LOOKS_IN_RUN = {}
 WATCHED = [None]        # the run being watched
 STRETCH = {}            # the open stretch
 STRETCHES = {}          # the stretches of each run that ended with a reading, and the last one, which ended the run
-ALLOWED, OPENED, IN_READING = [0], set(), [False]
+ALLOWED, OPENED, OPENED_FILES, IN_READING, PROGRAM = [0], set(), [], [False], [None]
 
 # calls that cannot reach the system: the plain built-in types and functions, but these
 BLOCKED = {"print", "input", "open", "__import__", "exec", "eval", "compile", "breakpoint"}
 # and the few calls of the system a right case runner makes, by name: its clock, its pipes and their numbers, the
 # signal that ends the program's group; reads and writes only on a file descriptor that is not blocking
-NAMED = {"time.monotonic", "posix.set_blocking", "posix.get_blocking", "posix.close", "posix.fspath", "posix.killpg",
+NAMED = {"time.monotonic", "posix.get_blocking", "posix.close", "posix.fspath", "posix.killpg",
          "posix._path_splitroot_ex", "sys.intern", "_codecs.utf_8_decode", "_codecs.utf_8_encode",
          "_codecs.ascii_decode", "_io.text_encoding", "_io.BufferedReader.fileno", "_io.BufferedWriter.fileno",
          "_io.BufferedWriter.close", "_io.BufferedReader.close"}
@@ -1524,6 +1524,7 @@ def test_measured():
                 for layer in (opened, getattr(opened, "buffer", None), getattr(getattr(opened, "buffer", None), "raw", None)):
                     if layer is not None:
                         OPENED.add(id(layer))
+                        OPENED_FILES.append(layer)
             return opened
         finally:
             ALLOWED[0] -= 1
@@ -1566,6 +1567,9 @@ def test_measured():
         here = CASE_DIR[0]
         if WATCHED[0] is not None:
             STRETCH["steps_before"] = STRETCH["steps"]
+            for stream in (PROGRAM[0].stdout, PROGRAM[0].stderr) if PROGRAM[0] is not None else ():
+                if stream is not None and not stream.closed and real_os.get_blocking(stream.fileno()):
+                    STRETCH["calls"].append("a pipe of the program left blocking")
         if SPAWNED[0] is not None and here is not None:
             # a reading after the judge started the program and before it waits for the program's end is a look
             # in its run, however the run ends; the first leaves the mark a program looked at once ends on
@@ -1588,6 +1592,8 @@ def test_measured():
             return reading(*args, **kwargs)
         finally:
             IN_READING[0] = False
+            OPENED.clear()
+            OPENED_FILES.clear()
             reads["inside"], tool.time = False, real_time
             if WATCHED[0] is not None:
                 ALLOWED[0] += 1
@@ -1630,6 +1636,7 @@ def test_measured():
             return waiting(*a, **k)
 
         if TRACK_WAIT:
+            PROGRAM[0] = proc
             WATCHED[0] = SPAWNED[0]
             STRETCHES[SPAWNED[0]] = []
             opening_stretch()
@@ -1665,20 +1672,28 @@ def test_measured():
         finally:
             ALLOWED[0] -= 1
 
-    PLAIN_MODULES = {"builtins"}
+    PURE = (bool, int, float, complex, str, bytes, bytearray, memoryview, list, tuple, dict, set, frozenset, slice,
+            range, type, super, BaseException)
+    # methods made in C (the slots and the instance dictionary of a Python class are made by Python itself)
+    C_PARTS = (types.MethodDescriptorType, types.BuiltinMethodType, types.WrapperDescriptorType,
+               types.ClassMethodDescriptorType)
 
-    def python_made(kind):
+    def written_in_python(kind):
+        # a class of a Python module with no part of its own made in C: a C type may name a Python module
         module = sys.modules.get(getattr(kind, "__module__", ""), None)
-        return getattr(module, "__file__", "") is not None and str(getattr(module, "__file__", "")).endswith(".py")
+        return (str(getattr(module, "__file__", "") or "").endswith(".py")
+                and not any(isinstance(value, C_PARTS) for value in vars(kind).values()))
 
     def harmless(target, first):
-        if isinstance(target, (types.FunctionType, functools.partial)):
+        if isinstance(target, types.FunctionType):
             return True
+        if isinstance(target, functools.partial):
+            return isinstance(target.func, types.FunctionType)
         if isinstance(target, types.MethodType):
             return isinstance(target.__func__, types.FunctionType)
         if isinstance(target, type):
-            # a type whose every part is a plain built-in one or written in Python
-            return all(part.__module__ in PLAIN_MODULES or python_made(part) for part in target.__mro__)
+            return issubclass(target, PURE) or all(part is object or part in PURE or written_in_python(part)
+                                                   for part in target.__mro__)
         owner = getattr(target, "__self__", None)
         if isinstance(target, (types.MethodDescriptorType, types.WrapperDescriptorType, types.ClassMethodDescriptorType)):
             # unbound: the object it is called on is its first argument
@@ -1696,7 +1711,7 @@ def test_measured():
         if owner is not None and id(owner) in OPENED:
             # a method of a file the helper itself opened for the reading
             return True
-        if owner_type.__module__ in PLAIN_MODULES or python_made(owner_type):
+        if isinstance(owner, PURE) or (owner is None and issubclass(owner_type, PURE)):
             return True
         return f"{owner_type.__module__}.{owner_type.__qualname__}.{getattr(target, '__name__', '')}" in NAMED
 
@@ -1716,8 +1731,12 @@ def test_measured():
         if WATCHED[0] is None or ALLOWED[0]:
             return
         STRETCH["steps"] += 1
-        if not harmless(target, first):
-            STRETCH["calls"].append(named(target))
+        ALLOWED[0] += 1
+        try:
+            if not harmless(target, first):
+                STRETCH["calls"].append(named(target))
+        finally:
+            ALLOWED[0] -= 1
 
     def jumped(code, offset, destination):
         if WATCHED[0] is not None and not ALLOWED[0]:
@@ -1756,11 +1775,22 @@ def test_measured():
             asked(timeout, not ready)
             return ready
 
-    real_time_module, real_selector = dodam_cli.time, dodam_cli.selectors.DefaultSelector
+    class AskedOs:
+        """The case runner's os, which lets it set its pipes to not blocking and nothing else."""
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        @staticmethod
+        def set_blocking(fd, blocking):
+            if WATCHED[0] is not None and blocking:
+                STRETCH["calls"].append("posix.set_blocking to blocking")
+            return allowed(real_os.set_blocking, fd, blocking)
+
+    real_time_module, real_selector, real_os = dodam_cli.time, dodam_cli.selectors.DefaultSelector, dodam_cli.os
     builtins.open = io.open = opening
     dodam_cli.subprocess.Popen = starting
     if TRACK_WAIT:
-        dodam_cli.time, dodam_cli.selectors.DefaultSelector = AskedTime(), AskedSelector
+        dodam_cli.time, dodam_cli.selectors.DefaultSelector, dodam_cli.os = AskedTime(), AskedSelector, AskedOs()
     tool.container_memory = container_memory
     tool.kernel_part = lambda *args, **kwargs: kernel_part(held)
     dodam_cli._files_held = files_held
@@ -1794,7 +1824,7 @@ RUNNER
         builtins.open, io.open, tool.container_memory, dodam_cli._files_held, dodam_cli._own_memory = kept
         tool.kernel_part = kept_kernel
         dodam_cli.subprocess.Popen = real_popen
-        dodam_cli.time, dodam_cli.selectors.DefaultSelector = real_time_module, real_selector
+        dodam_cli.time, dodam_cli.selectors.DefaultSelector, dodam_cli.os = real_time_module, real_selector, real_os
         if TOOL:
             monitor.set_events(monitor_id, 0)
             monitor.register_callback(monitor_id, monitor.events.CALL, None)
@@ -2006,14 +2036,14 @@ def judge_measured(tmp_path: Path, way_code: str, solution: str = "right", test:
         assert said["looks"] == [1] * runs, f"a run looked at once had another number of looks: {said['looks']}"
         assert not said["gave_up"], "a run looked at once gave up waiting for the judge's first look"
     if track_wait:
-        held_to_its_own_time(said, with_tool)
+        held_to_its_own_time(said, with_tool, watch < 1)
     if not separated:
         assert said["looks"] == [0] * runs and said["tries"] == 0, \
             f"a case without separation was measured: {said['looks']}, {said['tries']} tries"
     return result, said
 
 
-def held_to_its_own_time(said: dict, with_tool: bool) -> None:
+def held_to_its_own_time(said: dict, with_tool: bool, short_watch: bool) -> None:
     """Between the program's start and the first reading's return, and between the returns of two readings, the case
     runner lets time pass by its own doing only as a right one does: each number below is written here, with what a
     right case runner gives beside it, and none is read from the case runner or from a clock that a hold-up moves."""
@@ -2026,13 +2056,15 @@ def held_to_its_own_time(said: dict, with_tool: bool) -> None:
             # (a right one: none), and the waits that came back empty add up to at most 0.002 s before the first
             # reading and 0.010 s between two (a right one: 0.002 and 0.004)
             assert round(stretch["longest"], 9) <= 0.002 and stretch["slept"] == 0, f"(1) {where}: {stretch}"
-            if stretch["by_a_reading"]:
+            # its own computing on the processor: at most 0.1 s in every stretch (a right one: 0.001 to 0.005)
+            assert stretch["cpu"] <= 0.1, f"(4) cpu {where}: {stretch}"
+            # the last stretch, after the last reading, is held as the others where the watch is short: a reading
+            # would have closed it within one interval
+            if stretch["by_a_reading"] or short_watch:
                 assert round(stretch["empty"], 9) <= (0.002 if n == 0 else 0.010), f"(1) {where}: {stretch}"
                 # (2) waking without reading: at most 50 waits for output (a right one: 1 to 8; output in bursts: 5
                 # to 23)
                 assert stretch["waits"] <= 50, f"(2) {where}: {stretch}"
-                # its own computing on the processor: at most 0.1 s (a right one: 0.001 to 0.005)
-                assert stretch["cpu"] <= 0.1, f"(4) cpu {where}: {stretch}"
             if with_tool:
                 # (3) no call that reaches the system but those a right case runner makes (a right one: none other)
                 assert stretch["calls"] == [], f"(3) {where}: {stretch['calls']}"
@@ -2040,7 +2072,7 @@ def held_to_its_own_time(said: dict, with_tool: bool) -> None:
                 # reading returns (a right one: about 250, and about 1,700 when all eight tries of a reading are made)
                 if n == 0 and stretch["steps_before"] is not None:
                     assert stretch["steps_before"] <= 500, f"(4) steps {where}: {stretch['steps_before']}"
-                if stretch["by_a_reading"]:
+                if stretch["by_a_reading"] or short_watch:
                     assert stretch["steps"] <= 3000, f"(4) steps {where}: {stretch['steps']}"
     if with_tool:
         assert said.get("tool_freed") is True, "the helper's tool was left in place after the case"
@@ -2446,14 +2478,14 @@ def test_the_judge_measures_a_run_no_more_often_than_its_interval(tmp_path):
 # Case runners that each break one of the bounds the helper holds a watched run to, and nothing else: the waiting
 # asked (a wait for output of 0.05 s), waking without reading (measuring a writing program only every 0.2 s), a call
 # that reaches the system (asking for its parent's number), its own computing in steps (a loop of 5,000 turns) and on
-# the processor (a sum over 30 million numbers, in one call)
+# the processor (a sum over 120 million numbers, in one call: 0.5 to 0.8 s on this Mac at a load of about 2)
 WATCHED_BEFORE = "_watching = dodam_cli.Case._watch\n\n\ndef _watch(self, *a, **k):\n    {}\n    return _watching(self, *a, **k)\n\n\ndodam_cli.Case._watch = _watch"
 ONE_BOUND_BROKEN = {
     "(1)": ("dodam_cli.TICK = 0.05", "silent", True),
     "(2)": ("dodam_cli.WATCH = 0.2", "chatty", False),
     "(3)": (WATCHED_BEFORE.format("os.getppid()"), "silent", True),
     "(4) steps": (WATCHED_BEFORE.format("for _ in range(5000):\n        pass"), "silent", True),
-    "(4) cpu": (WATCHED_BEFORE.format("sum(range(30_000_000))"), "silent", True),
+    "(4) cpu": (WATCHED_BEFORE.format("sum(range(120_000_000))"), "silent", True),
 }
 
 
