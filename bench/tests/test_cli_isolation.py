@@ -2147,18 +2147,33 @@ def kept_aside_turn(where, body, tests, before, measuring, turn):
     kept = record("held.json")
     assert kept.get("order") == "written, then continued", kept
     assert "dodam_judge" in kept.get("cmdline", ""), kept
-    # the judge stood neither stopped nor gone when the watcher came to stop it
+    # the watcher's own record first. Right before its stop: the judge stood neither stopped nor gone, had no stop
+    # pending, and had one thread, which is what the reading of pending stops covers
     assert kept.get("state_before") not in (None, "T", "t", "gone"), kept
+    assert kept.get("stops_pending_before_the_stop") == 0, f"a stop was pending on the judge before the watcher's stop: {kept}"
+    assert kept.get("threads_before") == 1, f"the judge has more than one thread; the reading of pending stops covers one: {kept}"
+    # at every look of the watcher through the hold, 5 ms apart, the case runner did not stand stopped
+    assert kept.get("runner_stopped") == 0, f"the watcher also stopped the case runner: {kept}"
+    # once the judge was seen stopped: a stop still pending means that the watcher's stop met a judge that already
+    # stood stopped
+    assert kept.get("stops_pending_once_stopped") == 0, f"the judge stood stopped before the watcher's stop took effect: {kept}"
+    # during the hold a stop sent to the judge by anyone stays pending until the continue: read when the memory was
+    # back, and as the very last thing before the continue
+    assert kept.get("stops_pending_when_the_memory_is_back") == 0, f"a stop was sent to the judge while the watcher held it: {kept}"
+    last_reading = record("keep-last.json")
+    assert last_reading.get("stops_pending_before_the_continue") == 0, f"a stop was sent to the judge right before the watcher's continue: {last_reading}"
+    # the watcher's wait for the end of the attack's run has a bound of its own
+    assert kept.get("run_ended") is True, f"the attack's run did not end within the watcher's 35 s: {kept}"
     # the second line stood ready before the stop, and the watcher, not it, let the judge go
     second = (out / "keep-second").read_text().strip() if (out / "keep-second").is_file() else None
     assert kept.get("second_line") == "ready" and second == "the watcher continued the judge", (kept, second)
     # by the hidden test's own reading of the kernel, right before the program was started: the judge stood
-    # stopped, and no other process of the container did
+    # stopped, and no other process of the container did; and at the watcher's last look, before it let the judge
+    # go, nothing else of the container stood stopped
     begun = record("stopped-before-the-run.json")
     assert begun.get("judge") is not None and begun.get("stopped") == [begun["judge"]], begun
-    # at every look of the watcher through the hold, 5 ms apart, the judge stood stopped and the case runner did
-    # not; and at its last look, before it let the judge go, nothing else of the container stood stopped
-    assert kept.get("judge_ran") == 0 and kept.get("runner_stopped") == 0, kept
+    # and at every look of the watcher through the hold the judge stood stopped
+    assert kept.get("judge_ran") == 0, kept
     assert kept.get("last_look") == [begun["judge"]], kept
     attack = record("attack.json")
     if attack:
@@ -2179,7 +2194,12 @@ def kept_aside_turn(where, body, tests, before, measuring, turn):
                  held_for=kept.get("held_for", -1), memory_back=kept.get("memory_back", -1),
                  program_run=attack["seconds"] if attack else -1,
                  second_line_ready=kept.get("waited_for_the_second_line", -1),
-                 word_of_the_second_line=after.get("waited_for_the_word", -1))
+                 word_of_the_second_line=after.get("waited_for_the_word", -1),
+                 shell_check=kept.get("shell_check", -1), run_wait=kept.get("run_wait", -1),
+                 last_reading_to_the_continue_ms=last_reading.get("last_reading_to_the_continue", -0.001) * 1000)
+    sizes = kept.get("resident_kb", {})
+    note_figures(f"the watcher, {measuring}, turn {turn} (resident KB at the last look)",
+                 judge=sizes.get("judge", -1), watcher=sizes.get("watcher", -1), second_line=sizes.get("second_line", -1))
     if not attack:
         note_figures(f"the watcher, {measuring}, turn {turn}: the kernel ended the case runner (no program run)")
     assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
