@@ -122,12 +122,14 @@ and the encoding it was read in). It never prints a text, a path, a title or any
 ## Where it runs
 
 The owner's gate refuses a pull request whose head carries any run that was cancelled or failed. So no run of the
-check is cancelled, no clock decides, and nothing waits: a run fails at once on whatever breaks a rule, and only
-then, or because the way for forks is shut.
+check is cancelled, and nothing is read again. The only clock is the budget of the tries at GitHub's API, and the
+only waits are between those tries. A run fails at once on whatever breaks a rule, and otherwise only when the way
+for forks is shut, when GitHub's API did not answer, or when the pull request does not merge cleanly with main's
+tip.
 
 - **Pushes to a branch and the project's own pull requests** are judged in the workflow `commits`. A branch or a pull
-  request that does not change the check or its two workflows is judged by the base's copy of the check, so that a
-  rule main gained since the branch was made holds before its merge. One that changes them is judged by its own
+  request that does not change the check or its two workflows is judged by main's copy of the check, as main is
+  when the run starts, so that a rule main gained since the branch was made holds before its merge. One that changes them is judged by its own
   copy, so that a broken copy on main never blocks the pull request that mends it, and must have main's newest commit
   among its ancestors. A branch cannot loosen the settings it is judged by. Tags are outside the check.
 - **Main** is checked on every push from the push's "before" commit.
@@ -215,7 +217,7 @@ one of three holds:
 | --- | --- | --- |
 | a commit, a line, a path, a title or a branch name that breaks a rule | (i) | the pull request's run refuses it first |
 | the merge commit: its paths, its lines, its author's name, its message (the repository's owner and a fork's owner in its first line alike) | (i) | the pull request's run builds that merge and judges it with main's function |
-| a rule main gained since the pull request's last green run | (i) | a branch that does not change the check is judged by the base's copy |
+| a rule main gained since the pull request's last green run | (i) | a branch that does not change the check is judged by main's copy |
 | the settings loosened, or the way opened without what it needs | (i) | the branch's own runs ask the same |
 | the check's own tests | (i) | the same tests run first in every run of the pull request |
 | GitHub's API did not answer (each thing asked up to five times, waits of 2, 5, 10 and 20 seconds, each try at most 10 seconds, and 90 seconds in all for every try of the run, so the job ends well inside its limit with the check's own message) | (ii) | the coordinating session, once |
@@ -245,7 +247,8 @@ forced push); on a fork, any new commit. To check a text before it is published:
     python3 -I .github/commit-check/check.py --text-only --settings .github/commit-check/settings.json \
         --context own --event text.json
 
-where `text.json` holds `{"pull_request": {"title": "...", "body": "...", "head": {"ref": "<branch>"}}}`.
+where `text.json` holds `{"pull_request": {"number": N, "title": "...", "body": "...", "head": {"ref": "<branch>",
+"repo": {"owner": {"login": "<owner>"}}}}}`; the merge message is then checked as GitHub will write it.
 
 ## Tests
 

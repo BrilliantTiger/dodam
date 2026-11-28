@@ -3,8 +3,9 @@
 # project's own branches runs no code here: the workflow "commits" judges it with its branch's own copy. Because this
 # workflow holds the repository's token and could read secrets for a pull request from a fork:
 # - nothing from the pull request is executed or imported: the checkout is main's, the pull request's commits are
-#   fetched into a ref and read as data, its paths are read from GitHub's answer as data, nothing is installed, and
-#   git is told to use no diff program and no text conversion;
+#   fetched into a ref and read as data, git merges their trees with main's tip to judge the merge GitHub will make,
+#   its paths are read from GitHub's answer as data, nothing is installed, and git is told to use no diff program and
+#   no text conversion;
 # - the only permission is contents, to read; it also reads whether the environment of forks waits for a reviewer;
 # - no value of the event goes into a shell line through the expression syntax, only through env;
 # - every action is pinned by its commit;
@@ -13,7 +14,8 @@
 #   forks and that the environment names a reviewer; until then that first job fails with a fixed message.
 # A pull request from a fork that touches a path closed to outside pull requests fails the job pull-request-paths at
 # once, with no secret and no approval; the closed paths are those of the desk's tool on main.
-# No run here is cancelled and nothing waits but the environment's approval. The tests in
+# No run here is cancelled, and nothing waits but the environment's approval and the tries at GitHub's API, within
+# one budget. The tests in
 # .github/commit-check/test_workflows.py hold this file's whole text.
 name: pull-requests
 

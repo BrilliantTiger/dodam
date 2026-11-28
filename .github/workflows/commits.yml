@@ -3,17 +3,21 @@
 # check, with the private pattern: a push from one of the project's branches runs that branch's workflows with the
 # repository's secrets anyway, so judging the branch by its own copy opens nothing new, and a broken copy of the
 # check's script on main cannot block the pull request that mends it. A branch or a pull request that does not change
-# the check or its two workflows is judged by the base's copy instead, so that a rule main gained since the branch
-# was made holds for it before its merge; one that changes them must have main's newest commit among its ancestors. A pull request from a fork is judged by main's
-# copy in the workflow "pull-requests"; here it only runs the check's own tests. Tags are outside the check.
+# the check or its two workflows is judged by main's copy instead, as main is when the run starts, so that a rule main
+# gained since the branch was made holds for it before its merge; one that changes them must have main's newest commit
+# among its ancestors. A pull request from a fork is judged by main's copy in the workflow "pull-requests"; here it
+# only runs the check's own tests. Tags are outside the check.
 #
 # The owner's gate refuses a head on which any run ended otherwise than in success, so no run here is cancelled
-# (there is no concurrency group), nothing waits and nothing is read again: a run fails only on a commit, a text or
-# a path that breaks a rule. The way back after a text is mended is a new head: on a branch of the project an empty
-# commit whose message says why. The runs of a branch also read ahead what a merge will carry (the displayed name of
-# the account that merges) and, once the way for forks is open, what main's push asks; the fork's secret is passed only
-# as whether it is set, never its value. On main the range starts at the push's "before", so it is never empty; there the
-# check detects and does not prevent, and a red main stops the next merge at the owner's gate.
+# (there is no concurrency group) and nothing is read again; the only waits are between the tries at GitHub's API,
+# within one budget. A run fails on a commit, a text or a path that breaks a rule, when GitHub's API did not answer,
+# or when the pull request does not merge cleanly with main's tip. The way back after a text is mended is a new head:
+# on a branch of the project an empty commit whose message says why. A pull request's run has git build the merge
+# GitHub will make of main's tip, as it is when the run starts, with the head, and judges that merge commit (its
+# author's name, its message, its paths and lines) and the range to it as main's push will. The runs of a branch, once
+# the way for forks is open, ask what main's push asks; the fork's secret is passed only as whether it is set, never
+# its value. On main the range starts at the push's "before", so it is never empty; there the check detects and does
+# not prevent, and a red main stops the next merge at the owner's gate.
 #
 # Reading whether the environment of forks waits for a reviewer needs no permission beyond contents in this public
 # repository (measured on the side branch: the token of contents only reads an environment). It needs no package and ends in well under a minute.
