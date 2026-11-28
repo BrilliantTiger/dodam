@@ -1894,28 +1894,42 @@ def states():
 
 
 # the commands the second line will use must be built into the image's shell, or nothing is stopped
-builtins_said = subprocess.run(["/bin/sh", "-c", "command -V read; command -V kill"], capture_output=True, text=True).stdout
-if builtins_said.count("builtin") != 2 or not judge > 1:
-    write_record(order="nothing stopped", why=f"the shell's read and kill are not both built in, or the judge is {judge}",
+builtins_said = subprocess.run(["/bin/sh", "-c", "command -V read; command -V kill; command -V echo"], capture_output=True,
+                               text=True).stdout
+if builtins_said.count("builtin") != 3 or not judge > 1:
+    write_record(order="nothing stopped", why=f"the shell's read, kill and echo are not all built in, or the judge is {judge}",
                  shell=builtins_said)
     os._exit(0)
 cmdline = open(f"/proc/{judge}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
 state_before = states().get(judge, "gone")
 record.update(cmdline=cmdline, state_before=state_before)
 # a second line, ready before the stop: it reads a pipe whose only writing end the watcher holds, and continues the
-# judge only when the watcher went without saying that it had done so
+# judge only when the watcher went without saying that it had done so. Besides the shell's own syntax (case, not the
+# command [) it uses only read, kill and echo, built in; each of its words is one line, and a reader takes a word only
+# once its line has ended
 told_r, told_w = os.pipe()
+second_began = time.monotonic()
 second = subprocess.Popen(["/bin/sh", "-c", (
     "echo ready > /logs/verifier/keep-second-ready; read said; "
-    "if [ \"$said\" = continued ]; then { sleep SECOND_LINE_HELD; echo 'the watcher continued the judge'; } > /logs/verifier/keep-second; "
-    f"else kill -CONT {judge}; {{ sleep SECOND_LINE_HELD; echo 'the second line continued the judge'; }} > /logs/verifier/keep-second; fi")],
+    "case \"$said\" in continued) { SECOND_LINE_HOLDecho 'the watcher continued the judge'; } > /logs/verifier/keep-second;; "
+    f"*) kill -CONT {judge}; {{ SECOND_LINE_HOLDecho 'the second line continued the judge'; }} > /logs/verifier/keep-second;; esac")],
     stdin=told_r, pass_fds=(), close_fds=True)
 os.close(told_r)
-for _ in range(400):
-    if os.path.exists("/logs/verifier/keep-second-ready"):
+
+
+def said_whole(path):
+    try:
+        return open(path, "rb").read().endswith(b"\n")
+    except OSError:
+        return False
+
+
+for _ in range(1000):
+    if said_whole("/logs/verifier/keep-second-ready"):
         break
     time.sleep(0.005)
-record["second_line"] = "ready" if os.path.exists("/logs/verifier/keep-second-ready") else "not ready"
+record["second_line"] = "ready" if said_whole("/logs/verifier/keep-second-ready") else "not ready"
+record["waited_for_the_second_line"] = time.monotonic() - second_began
 told = b"continued\n"
 # what is used between the stop and the continue is all made here: descriptors, a buffer of unsigned bytes whose
 # readings are whole numbers the language keeps ready, a clock read into a structure, and the names of the mark. In
@@ -2064,15 +2078,33 @@ def stopped_now(when):
 """
     assert tests.count(after) == 1, "the hidden test after the attack no longer writes what it holds as this expects"
     tests = tests.replace(after, """    # the second line has its word before the judging can end: the watcher tells it after it continued the judge
+    # its word is taken only once its line has ended: the file stands empty for a moment before the word is in it
+    def said_whole():
+        try:
+            return open("/logs/verifier/keep-second", "rb").read().endswith(b"\\n")
+        except OSError:
+            return False
     waited = time.monotonic()
-    while not os.path.exists("/logs/verifier/keep-second") and time.monotonic() < waited + 10:
+    while not said_whole() and time.monotonic() < waited + 10:
         time.sleep(0.01)
-    with open("/logs/verifier/after.json", "w") as f:
-        json.dump({**held(), "runner": os.getpid()}, f)
+    with open("/logs/verifier/after.json.part", "w") as f:
+        json.dump({**held(), "runner": os.getpid(), "waited_for_the_word": time.monotonic() - waited}, f)
+    os.rename("/logs/verifier/after.json.part", "/logs/verifier/after.json")
+""")
+    # what the case of the attack says, whole, under another name and then renamed, like every mark of these tests
+    attack = """        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"exit_code": r.exit_code, "limit": r.limit, "seconds": time.monotonic() - started,
+                       "out": r.out[-300:], "err": r.err[-300:], "before": before, "after": held()}, f)
+"""
+    assert tests.count(attack) == 1, "the case of the attack no longer writes what it says as this expects"
+    tests = tests.replace(attack, attack.replace('"/logs/verifier/attack.json", "w"', '"/logs/verifier/attack.json.part", "w"')
+                          + """        os.rename("/logs/verifier/attack.json.part", "/logs/verifier/attack.json")
 """)
     import base64
-    # a second line held up between making the file of its word and writing the word in it, by `second_line_held`
-    code = base64.b64encode(KEEP_ASIDE.replace("SECOND_LINE_HELD", repr(second_line_held)).encode()).decode()
+    # a second line held up between making the file of its word and writing the word in it, by `second_line_held`;
+    # the hold-up is a command the shell does not have built in, so it is put in only when a test asks for one
+    hold = f"sleep {second_line_held}; " if second_line_held else ""
+    code = base64.b64encode(KEEP_ASIDE.replace("SECOND_LINE_HOLD", hold).encode()).decode()
     before = ("( /opt/judge/bin/python -c "
               '"import base64; exec(base64.b64decode(' + "'" + code + "'" + '))"'
               " < /dev/null > /dev/null 2>&1 & )")
@@ -2145,7 +2177,9 @@ def kept_aside_turn(where, body, tests, before, measuring, turn):
     note_figures(f"the watcher, {measuring}, turn {turn} (seconds, not MB)",
                  waited_for_the_ask=kept.get("waited_for_the_ask", -1), seen_stopped=kept.get("seen_stopped", -1),
                  held_for=kept.get("held_for", -1), memory_back=kept.get("memory_back", -1),
-                 program_run=attack["seconds"] if attack else -1)
+                 program_run=attack["seconds"] if attack else -1,
+                 second_line_ready=kept.get("waited_for_the_second_line", -1),
+                 word_of_the_second_line=after.get("waited_for_the_word", -1))
     if not attack:
         note_figures(f"the watcher, {measuring}, turn {turn}: the kernel ended the case runner (no program run)")
     assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
