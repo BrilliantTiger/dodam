@@ -1,0 +1,62 @@
+# Trials (a) and (c) for 43 after the second addendum to the fourth ruling, in jobs that wait on nothing; on a side branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: 3a3b2ac6609ca1f3dbdb77a5dbe09efcbe4914ad
+  WAITS: tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it
+jobs:
+  # (a) the six host tests that stay mended: 25 rounds in each of 8 processes, in one job
+  load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: trials
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - name: 8 processes x 25 rounds
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for p in 1 2 3 4 5 6 7 8; do
+            ( for r in $(seq 1 25); do python -m pytest -q -p no:cacheprovider --tb=short @../trials/trial6-tests.txt > ../said/$p-$r.txt 2>&1 || true; done ) &
+          done
+          wait
+          echo "rounds: $(ls ../said | wc -l)"
+          echo "summaries:"; cat ../said/*.txt | grep -E "^[0-9]+ (passed|failed)" | sed 's/ in .*//' | sort | uniq -c
+          echo "failed, by test:"; cat ../said/*.txt | grep "^FAILED" | sed 's/ - .*//' | sort | uniq -c
+          echo "what failed said:"; cat ../said/*.txt | grep -E "^E |^/.*Error" | cut -c1-400 | sort | uniq -c | head -40
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  # (c) second-lines six times
+  second-lines:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench
+        run: python experiments/check_protections.py --second-lines
