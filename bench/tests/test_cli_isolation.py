@@ -1851,10 +1851,358 @@ def test_the_one_that_is_ended():
     assert said["severity"] == "error" and said["key"] == "ended" and "without a result" in said["message"], said
 
 
+# The judge out of the way while the program takes the container's memory, as in the test of a case runner the kernel
+# ends below: the kernel can end the judge itself at that moment, a fault not mended here (the documents name it).
+# A watcher started as root before the judge, and so marked like the judge and below the case runner and the program,
+# waits for the hidden test to ask; it stops the judge, and only the judge, and lets the hidden test go on once the
+# kernel shows the judge stopped. It lets the judge go once the program's run is over (or the case runner is gone)
+# and the container's memory has come back, or after five seconds of that, whatever happens. While the judge is held
+# it reads only into buffers made beforehand, so that it asks the kernel for no memory in that moment. What it did
+# is written to held.json beside the results.
+KEEP_ASIDE = r"""
+import ctypes, errno, json, os, signal, subprocess, time
+libc = ctypes.CDLL(None, use_errno=True)
+here = "/logs/verifier/keep-"
+started = time.monotonic()
+os.mkfifo(here + "fifo", 0o600)
+ended = os.open(here + "fifo", os.O_RDONLY | os.O_NONBLOCK)
+# no bound of its own here: the hidden test asks within its first seconds, and the judging's own bound ends the rest
+while not os.path.exists(here + "ask"):
+    time.sleep(0.01)
+judge, runner = (int(word) for word in open(here + "ask").read().split())
+asked = time.monotonic()
+record = {"judge": judge, "runner": runner, "waited_for_the_ask": asked - started}
+
+
+def write_record(**more):
+    # whole, under another name and then renamed
+    with open("/logs/verifier/held.json.part", "w") as f:
+        json.dump({**record, **more}, f)
+    os.rename("/logs/verifier/held.json.part", "/logs/verifier/held.json")
+
+
+def states():
+    # the state of every process of the container, by its id; one that goes away during the reading is passed over
+    seen = {}
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            try:
+                seen[int(name)] = open(f"/proc/{name}/stat").read().rsplit(")", 1)[-1].split()[0]
+            except OSError:
+                pass
+    return seen
+
+
+# the commands the second line will use must be built into the image's shell, or nothing is stopped
+builtins_said = subprocess.run(["/bin/sh", "-c", "command -V read; command -V kill; command -V echo"], capture_output=True,
+                               text=True).stdout
+if builtins_said.count("builtin") != 3 or not judge > 1:
+    write_record(order="nothing stopped", why=f"the shell's read, kill and echo are not all built in, or the judge is {judge}",
+                 shell=builtins_said)
+    os._exit(0)
+cmdline = open(f"/proc/{judge}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
+state_before = states().get(judge, "gone")
+record.update(cmdline=cmdline, state_before=state_before)
+# a second line, ready before the stop: it reads a pipe whose only writing end the watcher holds, and continues the
+# judge only when the watcher went without saying that it had done so. Besides the shell's own syntax (case, not the
+# command [) it uses only read, kill and echo, built in; each of its words is one line, and a reader takes a word only
+# once its line has ended
+told_r, told_w = os.pipe()
+second_began = time.monotonic()
+second = subprocess.Popen(["/bin/sh", "-c", (
+    "echo ready > /logs/verifier/keep-second-ready; read said; "
+    "case \"$said\" in continued) { SECOND_LINE_HOLDecho 'the watcher continued the judge'; } > /logs/verifier/keep-second;; "
+    f"*) kill -CONT {judge}; {{ SECOND_LINE_HOLDecho 'the second line continued the judge'; }} > /logs/verifier/keep-second;; esac")],
+    stdin=told_r, pass_fds=(), close_fds=True)
+os.close(told_r)
+
+
+def said_whole(path):
+    try:
+        return open(path, "rb").read().endswith(b"\n")
+    except OSError:
+        return False
+
+
+for _ in range(1000):
+    if said_whole("/logs/verifier/keep-second-ready"):
+        break
+    time.sleep(0.005)
+record["second_line"] = "ready" if said_whole("/logs/verifier/keep-second-ready") else "not ready"
+record["waited_for_the_second_line"] = time.monotonic() - second_began
+told = b"continued\n"
+# what is used between the stop and the continue is all made here: descriptors, a buffer of unsigned bytes whose
+# readings are whole numbers the language keeps ready, a clock read into a structure, and the names of the mark. In
+# between, no slice, no new list, no open, no text: the numbers it adds up and the frames of its two small functions
+# come from memory the process already holds, and ask the kernel for none
+stat = os.open(f"/proc/{judge}/stat", os.O_RDONLY)
+runner_stat = os.open(f"/proc/{runner}/stat", os.O_RDONLY)
+current = os.open("/sys/fs/cgroup/memory.current", os.O_RDONLY)
+cap = int(open("/sys/fs/cgroup/memory.max").read())
+room = cap - 64 * 2**20
+buf = (ctypes.c_ubyte * 512)()
+pause = (ctypes.c_long * 2)(0, 5_000_000)
+clock = (ctypes.c_long * 2)()
+times = (ctypes.c_long * 8)()          # the stop, the judge seen stopped, the memory back: seconds and nanoseconds
+seen = (ctypes.c_long * 2)()           # the judge seen not stopped, the case runner seen stopped
+mark_from, mark_to = (here + "held.part").encode(), (here + "held").encode()
+open(here + "held.part", "w").close()
+T = ord("T")
+
+
+def state_of(fd):
+    # the state letter's number, from one reading of /proc/<id>/stat, without making an object
+    n = libc.pread(fd, buf, 511, 0)
+    i = n - 1
+    while i > 0 and buf[i] != 41:  # the last ")"
+        i -= 1
+    return buf[i + 2] if 0 < i < n - 2 else 0
+
+
+def now(slot):
+    libc.clock_gettime(1, clock)
+    times[slot], times[slot + 1] = clock[0], clock[1]
+
+
+def look():
+    if state_of(stat) != T:
+        seen[0] = 1
+    if state_of(runner_stat) == T:
+        seen[1] = 1
+
+
+written = False
+try:
+    now(0)
+    libc.kill(judge, signal.SIGSTOP)
+    for _ in range(2000):
+        if state_of(stat) == T:
+            break
+        libc.nanosleep(pause, None)
+    now(2)
+    libc.rename(mark_from, mark_to)
+    # until the attack's run is over or the case runner is gone (the pipe's write end closes, also when the case runner
+    # stands as a zombie its stopped parent has not taken back), and until the container's memory has come back
+    while libc.read(ended, buf, 1) != 0:
+        look()
+        libc.nanosleep(pause, None)
+    for _ in range(1000):
+        look()
+        n = libc.pread(current, buf, 31, 0)
+        figure, k = 0, 0
+        while k < n:
+            if 48 <= buf[k] <= 57:
+                figure = figure * 10 + buf[k] - 48
+            k += 1
+        if n > 0 and figure < room:
+            break
+        libc.nanosleep(pause, None)
+    now(4)
+    # the memory has come back: from here making objects is allowed. The last look reads every process of the container
+    last = sorted(pid for pid, state in states().items() if state == "T")
+    seconds = [times[k] + times[k + 1] / 1e9 for k in (0, 2, 4)]
+    record.update(state=chr(state_of(stat)) if state_of(stat) else "?", last_look=last, judge_ran=seen[0],
+                  runner_stopped=seen[1], seen_stopped=seconds[1] - seconds[0], held_for=seconds[2] - seconds[0],
+                  memory_back=seconds[2] - seconds[1])
+    write_record(order="written, then continued")
+    written = True
+finally:
+    # the one continue, on every way out; then the second line is told
+    libc.kill(judge, signal.SIGCONT)
+    os.write(told_w, told)
+    os.close(told_w)
+    if not written:
+        write_record(order="continued, then written", why="the watcher went wrong while the judge was held")
+os._exit(0)
+"""
+
+
+# The test's own bound on one judging with the judge kept aside, far below the 300 seconds of a judging: it is
+# reached only when the watcher and its second line are both gone with the judge stopped
+KEPT_ASIDE_SECONDS = 90
+
+
+def judge_kept_aside(tests: str, second_line_held: float = 0.0) -> tuple[str, str]:
+    """The hidden tests with the judge kept aside while the attack runs, and the command, run as root before the
+    judge, that starts the watcher in the background."""
+    reading = """
+def stopped_now(when):
+    # the hidden test's own reading of the kernel: which processes of the container stand stopped, and whether the
+    # judge (its parent, by its command line) is one of them; a process that goes away during the reading is passed over
+    stopped = []
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            try:
+                if open(f"/proc/{name}/stat").read().rsplit(")", 1)[-1].split()[0] == "T":
+                    stopped.append(int(name))
+            except OSError:
+                pass
+    parent = os.getppid()
+    judge = parent if b"dodam_judge" in open(f"/proc/{parent}/cmdline", "rb").read() else None
+    with open(f"/logs/verifier/stopped-{when}-the-run.json.part", "w") as f:
+        json.dump({"runner": os.getpid(), "judge": judge, "stopped": sorted(stopped)}, f)
+    os.rename(f"/logs/verifier/stopped-{when}-the-run.json.part", f"/logs/verifier/stopped-{when}-the-run.json")
+
+
+"""
+    asking = """    with case() as c:
+        started = time.monotonic()
+        ended = None
+        while ended is None and time.monotonic() < started + 10:
+            try:  # the watcher's pipe, once it is there and the watcher reads it
+                ended = os.open("/logs/verifier/keep-fifo", os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                time.sleep(0.005)
+        assert ended is not None, "the watcher never began"
+        with open("/logs/verifier/keep-ask.part", "w") as f:
+            f.write(f"{os.getppid()} {os.getpid()}")
+        os.rename("/logs/verifier/keep-ask.part", "/logs/verifier/keep-ask")
+        while not os.path.exists("/logs/verifier/keep-held") and time.monotonic() < started + 10:
+            time.sleep(0.005)
+        assert os.path.exists("/logs/verifier/keep-held"), "the judge was not kept aside"
+        stopped_now("before")
+        try:
+            r = c.run(["attack"])
+            # right after the run has returned and before the pipe's end is closed, which lets the judge go
+            stopped_now("after")
+        finally:
+            os.close(ended)
+"""
+    plain = """    with case() as c:
+        started = time.monotonic()
+        r = c.run(["attack"])
+"""
+    assert tests.count(plain) == 1, "the attack's hidden test no longer runs its program as this expects"
+    after = """    with open("/logs/verifier/after.json", "w") as f:
+        json.dump(held(), f)
+"""
+    assert tests.count(after) == 1, "the hidden test after the attack no longer writes what it holds as this expects"
+    tests = tests.replace(after, """    # the second line has its word before the judging can end: the watcher tells it after it continued the judge
+    # its word is taken only once its line has ended: the file stands empty for a moment before the word is in it
+    def said_whole():
+        try:
+            return open("/logs/verifier/keep-second", "rb").read().endswith(b"\\n")
+        except OSError:
+            return False
+    waited = time.monotonic()
+    while not said_whole() and time.monotonic() < waited + 10:
+        time.sleep(0.01)
+    with open("/logs/verifier/after.json.part", "w") as f:
+        json.dump({**held(), "runner": os.getpid(), "waited_for_the_word": time.monotonic() - waited}, f)
+    os.rename("/logs/verifier/after.json.part", "/logs/verifier/after.json")
+""")
+    # what the case of the attack says, whole, under another name and then renamed, like every mark of these tests
+    attack = """        with open("/logs/verifier/attack.json", "w") as f:
+            json.dump({"exit_code": r.exit_code, "limit": r.limit, "seconds": time.monotonic() - started,
+                       "out": r.out[-300:], "err": r.err[-300:], "before": before, "after": held()}, f)
+"""
+    assert tests.count(attack) == 1, "the case of the attack no longer writes what it says as this expects"
+    tests = tests.replace(attack, attack.replace('"/logs/verifier/attack.json", "w"', '"/logs/verifier/attack.json.part", "w"')
+                          + """        os.rename("/logs/verifier/attack.json.part", "/logs/verifier/attack.json")
+""")
+    import base64
+    # a second line held up between making the file of its word and writing the word in it, by `second_line_held`;
+    # the hold-up is a command the shell does not have built in, so it is put in only when a test asks for one
+    hold = f"sleep {second_line_held}; " if second_line_held else ""
+    code = base64.b64encode(KEEP_ASIDE.replace("SECOND_LINE_HOLD", hold).encode()).decode()
+    before = ("( /opt/judge/bin/python -c "
+              '"import base64; exec(base64.b64decode(' + "'" + code + "'" + '))"'
+              " < /dev/null > /dev/null 2>&1 & )")
+    return reading + tests.replace(plain, asking), before
+
+
 # The judge with its own two stops taken out: it no longer ends a program that leaves the container
 # too little memory, and it measures once in an hour. What ends the program then is the kernel.
 NO_STOPS = (("dodam_judge.py", "MEMORY_RESERVE_MB = 128", "MEMORY_RESERVE_MB = 0"),
             ("dodam_cli.py", "WATCH = 0.002", "WATCH = 3600.0"))
+
+
+def test_the_watcher_stops_one_process_greater_than_one_and_continues_it_once():
+    """The watcher's program, read as a syntax tree: one stop, sent to one process id that it holds greater than 1,
+    never to a group; one continue, sent to the same process."""
+    import ast
+    tree = ast.parse(KEEP_ASIDE)
+    kills = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr in ("kill", "killpg")]
+    signals = [(ast.unparse(node.func), ast.unparse(node.args[0]), ast.unparse(node.args[1])) for node in kills]
+    assert sorted(signals) == [("libc.kill", "judge", "signal.SIGCONT"), ("libc.kill", "judge", "signal.SIGSTOP")], signals
+    guards = [node for node in ast.walk(tree) if isinstance(node, ast.Compare) and ast.unparse(node) == "judge > 1"]
+    assert guards, "the watcher stops a process without holding its id greater than 1"
+
+
+def kept_aside_turn(where, body, tests, before, measuring, turn):
+    """One turn of a program the kernel ends, with the judge kept aside: the judging and everything the test asserts of it."""
+    result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": tests},
+                          room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1],
+                                "before": before, "seconds": KEPT_ASIDE_SECONDS},
+                          CASE_MEMORY_MB="100000", CASE_TIMEOUT_SEC="15")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
+    assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
+    out = where / "out"
+
+    def record(name):
+        return found_by(out, name) if (out / name).is_file() else {}
+    # the watcher's record, written whole before it let the judge go
+    assert (out / "held.json").is_file(), "the watcher left none"
+    kept = record("held.json")
+    assert kept.get("order") == "written, then continued", kept
+    assert "dodam_judge" in kept.get("cmdline", ""), kept
+    # the watcher's own record first. Right before its stop: the judge stood neither stopped nor gone, had no stop
+    # pending, and had one thread, which is what the reading of pending stops covers
+    assert kept.get("state_before") not in (None, "T", "t", "gone"), kept
+    assert kept.get("stops_pending_before_the_stop") == 0, f"a stop was pending on the judge before the watcher's stop: {kept}"
+    assert kept.get("threads_before") == 1, f"the judge has more than one thread; the reading of pending stops covers one: {kept}"
+    # at every look of the watcher through the hold, 5 ms apart, the case runner did not stand stopped
+    assert kept.get("runner_stopped") == 0, f"the watcher also stopped the case runner: {kept}"
+    # once the judge was seen stopped: a stop still pending means that the watcher's stop met a judge that already
+    # stood stopped
+    assert kept.get("stops_pending_once_stopped") == 0, f"the judge stood stopped before the watcher's stop took effect: {kept}"
+    # during the hold a stop sent to the judge by anyone stays pending until the continue: read when the memory was
+    # back, and as the very last thing before the continue
+    assert kept.get("stops_pending_when_the_memory_is_back") == 0, f"a stop was sent to the judge while the watcher held it: {kept}"
+    last_reading = record("keep-last.json")
+    assert last_reading.get("stops_pending_before_the_continue") == 0, f"a stop was sent to the judge right before the watcher's continue: {last_reading}"
+    # the watcher's wait for the end of the attack's run has a bound of its own
+    assert kept.get("run_ended") is True, f"the attack's run did not end within the watcher's 35 s: {kept}"
+    # the second line stood ready before the stop, and the watcher, not it, let the judge go
+    second = (out / "keep-second").read_text().strip() if (out / "keep-second").is_file() else None
+    assert kept.get("second_line") == "ready" and second == "the watcher continued the judge", (kept, second)
+    # by the hidden test's own reading of the kernel, right before the program was started: the judge stood
+    # stopped, and no other process of the container did; and at the watcher's last look, before it let the judge
+    # go, nothing else of the container stood stopped
+    begun = record("stopped-before-the-run.json")
+    assert begun.get("judge") is not None and begun.get("stopped") == [begun["judge"]], begun
+    # and at every look of the watcher through the hold the judge stood stopped
+    assert kept.get("judge_ran") == 0, kept
+    assert kept.get("last_look") == [begun["judge"]], kept
+    attack = record("attack.json")
+    if attack:
+        assert attack["after"]["kernel_kills"] > attack["before"]["kernel_kills"], "the kernel was to end the program here"
+        assert attack["limit"] == "memory" and attack["exit_code"] is None, attack
+        # and right after the program's run returned, before the hidden test let the watcher know
+        returned = record("stopped-after-the-run.json")
+        assert returned.get("stopped") == [begun["judge"]], returned
+    else:
+        # what the kernel ends is its choice: here it was the case runner, before the test could hand anything back
+        ends = result["report"]["runner_ended"]
+        assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], lost(result, where / "out")
+    # every turn: the case after ran in another process than the case of the attack
+    after = record("after.json")
+    assert after.get("runner") is not None and after["runner"] != begun.get("runner"), (after, begun)
+    note_figures(f"the watcher, {measuring}, turn {turn} (seconds, not MB)",
+                 waited_for_the_ask=kept.get("waited_for_the_ask", -1), seen_stopped=kept.get("seen_stopped", -1),
+                 held_for=kept.get("held_for", -1), memory_back=kept.get("memory_back", -1),
+                 program_run=attack["seconds"] if attack else -1,
+                 second_line_ready=kept.get("waited_for_the_second_line", -1),
+                 word_of_the_second_line=after.get("waited_for_the_word", -1),
+                 shell_check=kept.get("shell_check", -1), run_wait=kept.get("run_wait", -1),
+                 last_reading_to_the_continue_ms=last_reading.get("last_reading_to_the_continue", -0.001) * 1000)
+    sizes = kept.get("resident_kb", {})
+    note_figures(f"the watcher, {measuring}, turn {turn} (resident KB at the last look)",
+                 judge=sizes.get("judge", -1), watcher=sizes.get("watcher", -1), second_line=sizes.get("second_line", -1))
+    if not attack:
+        note_figures(f"the watcher, {measuring}, turn {turn}: the kernel ended the case runner (no program run)")
+    assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
 
 
 @pytest.mark.parametrize("measuring, turns", [("switched off", 5), ("every 0.002 seconds", 3)])
@@ -1866,20 +2214,18 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
     for turn in range(turns):
         where = tmp_path / str(turn)
         where.mkdir()
-        result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": LIMIT_TESTS},
-                              room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1]},
-                              CASE_MEMORY_MB="100000")
-        assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
-        assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
-        if (where / "out/attack.json").is_file():
-            seen = found_by(where / "out", "attack.json")
-            assert seen["after"]["kernel_kills"] > seen["before"]["kernel_kills"], "the kernel was to end the program here"
-            assert seen["limit"] == "memory" and seen["exit_code"] is None, seen
-        else:
-            # what the kernel ends is its choice: here it was the case runner, before the test could hand anything back
-            ends = result["report"]["runner_ended"]
-            assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], lost(result, where / "out")
-        assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
+        tests, before = judge_kept_aside(LIMIT_TESTS)
+        kept_aside_turn(where, body, tests, before, measuring, turn)
+
+
+def test_a_second_line_held_up_between_its_file_and_its_word_fails_nothing(tmp_path):
+    """The second line's word is read by the case after the attack and by this test: held up for 2 s between making
+    the file of its word and writing the word in it, it lets no reader see the file half written."""
+    limit, body = BREAKS["memory"]
+    where = tmp_path / "held"
+    where.mkdir()
+    tests, before = judge_kept_aside(LIMIT_TESTS, second_line_held=2.0)
+    kept_aside_turn(where, body, tests, before, "switched off", 0)
 
 
 # The judge out of the way while the hidden test takes the container's memory: the kernel can end the judge
