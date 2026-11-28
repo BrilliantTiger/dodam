@@ -120,6 +120,14 @@ def respond(handler, answer):
         handler.send_header("Content-Length", "0")
         handler.end_headers()
         return
+    if isinstance(answer, tuple) and answer[0] == "raw":  # an error whose JSON body cannot be read
+        body = answer[2].encode()
+        handler.send_response(answer[1])
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        return
     if isinstance(answer, tuple) and answer[0] == "text":
         body = answer[1].encode()
         handler.send_response(200)
@@ -2205,6 +2213,77 @@ class MergeKindTest(RepoTestCase):
         self.assert_fails(self.run_check(single, merge), merge, "tracker code (file 1, line 2)")
 
 
+class ReaderTest(RepoTestCase):
+    """The reader of differences refuses what git does not give, and reads what it gives by its own shape."""
+
+    def setUp(self):
+        super().setUp()
+        self.check = load("check.py")
+        self.assertTrue(hasattr(self.check, "git_bytes"), "the reader of differences by the bytes git gives")
+
+    def test_git_failing_and_a_list_or_a_patch_git_does_not_give_are_refused(self):
+        check = self.check
+        for call in (lambda: check.git_bytes(str(self.repo.root), "cat-file", "-p", "0" * 40),
+                     lambda: check.empty_tree(str(self.dir / "nowhere")),
+                     lambda: check.entries_of(b"M\0a"), lambda: check.entries_of(b"R100\0a\0"),
+                     lambda: check.entries_of(b"\0a\0"), lambda: check.sections_of(b"not a patch\n")):
+            with self.subTest(call=call):
+                self.assertIsInstance(raised(call), check.Problem)
+        self.assertEqual(check.entries_of(b""), [])
+        self.assertEqual(check.entries_of(b"R100\0a\0b\0M\0c\0"), [("R100", [b"a", b"b"]), ("M", [b"c"])])
+
+    def test_a_renamed_file_is_read_as_renamed_not_as_added(self):
+        self.repo.commit("Before", files={"old.txt": f"{TRACKER_CODE}\n"})
+        start = self.repo.head()
+        self.repo.git("mv", "old.txt", "new.txt")
+        sha = self.repo.commit("Rename", files={})
+        code, out = self.run_check(start)
+        self.assertNotIn(f"commit {sha[:12]}: tracker code (file", out)  # its lines stood before the range
+
+    def test_a_commit_without_a_parent_is_read_against_the_empty_tree(self):
+        check = self.check
+        repo = Repo(self.dir / "root-repo")
+        sha = repo.commit("The first commit", files={"a.txt": f"{TRACKER_CODE}\n"})
+        checker = check.Checker(None, lambda sha: True)
+        self.assertIsNone(raised(lambda: check.check_commit(str(repo.root), sha, checker)))
+        self.assertIn(f"commit {sha[:12]}: tracker code (file 1, line 1)", checker.findings)
+
+    def test_the_form_by_entry_is_taken_and_an_entry_without_a_section_stops_the_run(self):
+        check = self.check
+        check.BY_ENTRY[0] = True
+        start = self.repo.head()
+        sha = self.repo.commit("A change", files={"a.txt": f"{TRACKER_CODE}\n"})
+        real, asked = check.git_bytes, []
+
+        def counting(repo, *args):
+            asked.append(args)
+            return real(repo, *args)
+        check.git_bytes = counting
+        try:
+            checker = check.Checker(None, lambda sha: True)
+            check.check_commit(str(self.repo.root), sha, checker)
+            self.assertTrue(any("--" in args for args in asked), "one difference for each entry")
+            self.assertIn(f"commit {sha[:12]}: tracker code (file 1, line 1)", checker.findings)
+            check.git_bytes = lambda repo, *args: b"" if "--" in args else real(repo, *args)
+            outcome = raised(lambda: check.check_commit(str(self.repo.root), sha, check.Checker(None, lambda s: True)))
+        finally:
+            check.git_bytes = real
+        self.assertIsInstance(outcome, check.Problem)
+        self.assertEqual(str(outcome), "a difference cannot be read")
+        self.assertTrue(start)
+
+    def test_an_error_of_the_library_is_closed_after_it_is_read(self):
+        import email.message
+        import io
+        check = self.check
+        body = io.BytesIO(b'{"message": "Not Found"}')
+        headers = email.message.Message()
+        headers["Content-Type"] = "application/json"
+        error = check.urllib.error.HTTPError("http://x", 404, "Not Found", headers, body)
+        self.assertTrue(check.nothing_there(error))
+        self.assertTrue(body.closed)
+
+
 class MergeKindByEntryTest(MergeKindTest):
     """Every shape of merge again, read through the other form: one difference for each entry."""
 
@@ -2562,6 +2641,37 @@ class SecretJudgeTest(unittest.TestCase):
                 self.assertTrue(compiled.search(self.check.normalise(text)), text)
         self.assertTrue(z)
 
+    def test_ways_that_cannot_stand_stop_with_the_form_s_message(self):
+        check = self.check
+        many = "".join("(?:a|-)" for _ in range(12))  # 4,096 ways: more than the judge counts
+        for secret in ("zorb[ -!][ -!]latt", "[\\x00-a]zorb", "\\b[\\d]\\b[\\d]", many, "(?:(zorb)|x)\\1latt", "zorb{0}",
+                       "(?a:x)zorb", "\\d\\B\\s"):
+            with self.subTest(secret=secret):
+                os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = secret
+                try:
+                    outcome = raised(lambda: check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN"))
+                finally:
+                    del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
+                self.assertIsInstance(outcome, check.Problem)
+                self.assertEqual(str(outcome), check.FORM)
+
+    def test_a_position_the_parser_does_not_give_stops_and_collecting_is_off_while_the_secret_is_judged(self):
+        import re._parser as parser
+        check = self.check
+        tree = parser.parse("a", re.IGNORECASE)
+        tree.data = [(parser.AT, parser.AT_BEGINNING_LINE), (parser.LITERAL, ord("a"))]
+        self.assertIsInstance(raised(lambda: check.secret_meets_the_copy(tree)), check.Unmet)
+        seen, real = [], check.secret_meets_the_copy
+        check.secret_meets_the_copy = lambda parsed: seen.append(check.gc.isenabled())
+        os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = "zorb" "latt"
+        try:
+            check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN")
+        finally:
+            check.secret_meets_the_copy = real
+            del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
+        self.assertEqual(seen, [False])
+        self.assertTrue(check.gc.isenabled())
+
     def test_the_seconds_come_from_the_language_s_tables(self):
         seconds = self.check.seconds()
         self.assertGreater(len(seconds), 100)
@@ -2758,7 +2868,7 @@ class EdgeTest(RepoTestCase):
                       "diff --git a/x b/x\n@@ -0,0 +1,2 @@\n+a",
                       "diff --git a/x b/x\n@@ -0,0 +1,1 @@\nXa\n", "diff --cc x\n@@@ -1,1 -1,1 +1,1 @@@\n*+a\n"):
             with self.subTest(patch=patch):
-                self.assertIsInstance(raised(lambda: check.Checker(None, lambda sha: False).patch("x", patch)),
+                self.assertIsInstance(raised(lambda: list(check.added_lines(patch))),
                                       check.Problem)
 
     def test_a_list_of_paths_that_does_not_keep_its_shape_is_refused(self):
@@ -3031,6 +3141,8 @@ class ApiTest(unittest.TestCase):
                 return check.api_get(*question), headers
             except check.Problem as problem:
                 return str(problem), headers
+            except Exception as error:  # a fault of the check's own: an outcome the test's assertion reads
+                return f"raised {type(error).__name__}", headers
         finally:
             check.time.sleep = sleep
             for key, value in saved.items():
@@ -3118,26 +3230,39 @@ class AnswerTest(unittest.TestCase):
     ROWS = {
         "commit": ((SHA,), {"sha": SHA, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}},
                    [{"sha": "b" * 40, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}},
+                    {"sha": SHA, "commit": {"verification": "x", "committer": {"email": GITHUB}}},
+                    {"sha": SHA, "commit": {"verification": {"verified": True}, "committer": {"email": 5}}},
+                    {"sha": SHA, "commit": "x"},
                     {"sha": SHA, "commit": {"verification": {"verified": "yes"}, "committer": {"email": GITHUB}}},
                     {"sha": SHA, "commit": {"verification": {"verified": True}}}, {"sha": SHA}, [], None]),
         "user": (("someone",), {"login": "SomeOne", "id": 7, "name": None},
                  [{"login": "another", "id": 7, "name": None}, {"login": "someone", "id": True, "name": None},
+                  {"login": "someone", "id": "7", "name": None}, {"login": 5, "id": 7, "name": None},
                   {"login": "someone", "id": 7, "name": 5}, {"id": 7}, []]),
         "environment": (("private-check",), REVIEWED,
                         [{"name": "another", "protection_rules": []}, {"name": "private-check", "protection_rules": "x"},
                          {"name": "private-check"}, []]),
         "pull": ((1,), PULL, [{**PULL, "number": 2}, {**PULL, "number": "1"}, {**PULL, "draft": None},
-                             {**PULL, "changed_files": True}, {**PULL, "base": {}}, {"number": 1}, []]),
+                             {**PULL, "changed_files": True}, {**PULL, "base": {}},
+                             {**PULL, "base": {"ref": 5}}, {**PULL, "base": "main"}, {"number": 1}, []]),
         "files": ((None,), [{"filename": "a", "status": "added"}, {"filename": "b", "status": "renamed",
                                                                     "previous_filename": "c"}],
                   [{}, None, "x", [{"filename": "a"}], [{"filename": "a", "status": "added"}, "junk"],
+                   [{"filename": 5, "status": "added"}], [{"filename": "a", "status": 5}],
                    [{"filename": "a", "status": "renamed", "previous_filename": 5}]]),
         "folder": ((None,), [{"name": "a", "type": "dir"}], [{}, None, [{"name": "a"}], [{"name": 5, "type": "dir"}],
+                                                             [{"name": "a", "type": 5}], ["junk"],
                                                              [{"name": "a", "type": "dir"}, "junk"]]),
     }
     NO_ANSWERS = [403, 410, 422, 401, 429, 500, ("html", 404), (404, {"Content-Type": "application/json"}, {"x": 1}),
                   (404, {"Content-Type": "text/plain"}, {"message": "Not Found"}), ("redirect", "/elsewhere"),
-                  ("text", "<html>gateway</html>")]
+                  ("text", "<html>gateway</html>"),
+                  (410, {"Content-Type": "application/json"}, {"message": "Gone"}),
+                  (404, {"Content-Type": "application/json", "Retry-After": "60"}, {"message": "Not Found"}),
+                  (404, {"Content-Type": "application/json", "X-RateLimit-Remaining": "0"}, {"message": "Not Found"}),
+                  (404, {"Content-Type": "application/json"}, ["Not Found"]), ("raw", 404, "{not json"),
+                  (203, {"Content-Type": "application/json"}, PULL), ("text", json.dumps(PULL)),
+                  (404, {"Content-Type": "application/json"}, {"message": 5})]
 
     def test_each_question_takes_only_its_own_answer(self):
         for question, (subject, good, bad) in self.ROWS.items():
