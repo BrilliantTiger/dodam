@@ -18,13 +18,17 @@ never runs anything from the commits it reads.
 """
 
 import argparse
+import gc
 import json
 import os
 import re
+import re._compiler
+import re._parser as parser  # the pattern language's own reading and compiling, from Python 3.11 on
 import subprocess
 import sys
 import time
 import unicodedata
+import warnings
 import urllib.error
 import urllib.request
 
@@ -263,50 +267,139 @@ class Checker:
         self.place(who, path, f"path {number}")
 
     def patch(self, who, patch):
-        """Reads a patch made with -U0 by its structure: a file's header only outside a hunk, a hunk by the lengths its
-        own header gives; in a combined patch only the lines added against every parent count."""
-        lines = patch.split("\n")
-        index = 0
-        file_number = 0
-        deleted = False
-        while index < len(lines):
-            line = lines[index]
-            index += 1
-            if line.startswith("diff --git ") or line.startswith("diff --cc "):
-                file_number += 1
-                deleted = False
-                continue
-            if line == "+++ /dev/null":
-                deleted = True  # the file is gone from the result: its hunks have no line of the result
-                continue
-            hunk = re.match(r"^(@@+) ((?:-\d+(?:,\d+)? )+)\+(\d+)(?:,(\d+))? @@+", line)
-            if not hunk:
-                continue  # a header line of the file
-            parents = len(hunk.group(1)) - 1
-            if len(hunk.group(2).split()) != parents:
+        """The lines a difference of one side adds, each by the number of its file in the difference."""
+        for section, number, content in added_lines(patch):
+            self.added_line(who, section, number, content)
+
+
+def added_lines(patch):
+    """Reads an ordinary difference by its structure: a file's header only outside a hunk, a hunk by the lengths its
+    own header gives (its unchanged lines counted, its removed lines passed over). Gives each added line with the number of its file's section and its line number in
+    the result."""
+    lines = patch.split("\n")
+    index = 0
+    section = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if line.startswith("diff --git "):
+            section += 1
+            continue
+        hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+        if not hunk and line.startswith("@@"):
+            raise Problem("a difference cannot be read")
+        if not hunk:
+            continue  # a header line of the file, or a removed line after a hunk's last line of the result
+        number = int(hunk.group(1))
+        new_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
+        while new_left > 0:
+            if index >= len(lines):
                 raise Problem("a difference cannot be read")
-            number = int(hunk.group(3))
-            # git writes the length of a combined hunk of a deleted file as minus one wrapped round; the removed lines
-            # after it begin with "-" or " " and are read as no header.
-            new_left = 0 if deleted else int(hunk.group(4)) if hunk.group(4) is not None else 1
-            # The hunk ends after the lines of the result its header counts; a removed line after the last of them
-            # begins with "-" or " " and is no header.
-            while new_left > 0:
-                if index >= len(lines):
-                    raise Problem("a difference cannot be read")
-                body = lines[index]
-                index += 1
-                if body.startswith("\\"):
-                    continue  # "\ No newline at end of file"
-                prefix, content = body[:parents], body[parents:]
-                if len(prefix) != parents or set(prefix) - {"+", "-", " "}:
-                    raise Problem("a difference cannot be read")
-                if "-" in prefix:
-                    continue  # a removed line
-                new_left -= 1
-                if set(prefix) == {"+"}:
-                    self.added_line(who, file_number, number, content)
-                number += 1
+            body = lines[index]
+            index += 1
+            if body.startswith("\\"):
+                continue  # "\ No newline at end of file"
+            if body[:1] not in ("+", "-", " ") or body == "":
+                raise Problem("a difference cannot be read")
+            if body[:1] == "-":
+                continue  # a removed line
+            new_left -= 1
+            if body[:1] == "+":
+                yield section, number, body[1:]
+            number += 1
+
+
+QUOTED = set(range(0x20)) | {0x22, 0x5C, 0x7F}  # bytes git writes quoted in a header, also with quoting turned off
+BY_ENTRY = [False]  # the tests read every shape through both forms
+
+
+def git_bytes(repo, *args):
+    """git's output as the bytes it gave: paths are bytes, and a byte that is no UTF-8 is never replaced."""
+    done = subprocess.run(["git", "-C", repo, "-c", "core.quotePath=false", *args], capture_output=True, env=git_env())
+    if done.returncode != 0:
+        raise Problem("git could not read the history")
+    return done.stdout
+
+
+def entries_of(listing):
+    """The entries of --name-status -z of one side: (status, paths), the paths as bytes."""
+    fields = listing.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    entries = []
+    index = 0
+    while index < len(fields):
+        status = fields[index].decode("ascii", "replace")
+        names = 2 if status[:1] in ("R", "C") else 1
+        if index + names >= len(fields) or not status:
+            raise Problem("a list of paths cannot be read")
+        entries.append((status, fields[index + 1:index + 1 + names]))
+        index += 1 + names
+    return entries
+
+
+def sections_of(patch):
+    """The sections of a patch, each beginning with its header line."""
+    starts = [0] if patch.startswith(b"diff --git ") else []
+    position = patch.find(b"\ndiff --git ")
+    while position != -1:
+        starts.append(position + 1)
+        position = patch.find(b"\ndiff --git ", position + 1)
+    if patch and not starts:
+        raise Problem("a difference cannot be read")
+    return [patch[start:end] for start, end in zip(starts, starts[1:] + [len(patch)])]
+
+
+def lines_against(repo, base, sha):
+    """The lines one ordinary difference adds, by the path of the result (bytes) and the line number. A hunk belongs to
+    the entry of the list separated by NUL bytes it is paired with: by their order, a change of kind being two
+    sections and every other entry one, each pairing held against the section's own header; or, when a path holds a
+    byte git writes quoted in a header, by one difference for each entry, asked by its own paths as literal paths."""
+    entries = entries_of(git_bytes(repo, "diff", "--name-status", "-z", "-M", base, sha))
+    pairs = []
+    if BY_ENTRY[0] or any(byte in QUOTED for _, paths in entries for path in paths for byte in path):
+        for _, paths in entries:
+            sections = sections_of(git_bytes(repo, "diff", *DIFF_OPTIONS, base, sha, "--",
+                                             *[b":(literal)" + path for path in paths]))
+            if not sections:
+                raise Problem("a difference cannot be read")
+            pairs += [(section, paths[-1]) for section in sections]
+    else:
+        sections = sections_of(git_bytes(repo, "diff", *DIFF_OPTIONS, base, sha))
+        expected = [paths for status, paths in entries for _ in range(2 if status[:1] == "T" else 1)]
+        if len(sections) != len(expected):
+            raise Problem("a difference cannot be read")
+        for section, paths in zip(sections, expected):
+            if section.split(b"\n", 1)[0] != b"diff --git a/" + paths[0] + b" b/" + paths[-1]:
+                raise Problem("a difference cannot be read")
+            pairs.append((section, paths[-1]))
+    added = {}
+    for section, path in pairs:
+        for _, number, content in added_lines(section.decode("utf-8", "replace")):
+            added[(path, number)] = content
+    return added
+
+
+def check_lines(checker, who, repo, bases, sha, numbering):
+    """The lines a commit adds: of one difference against each base, those added against every base, by the path of
+    the result and the line number; each named by its entry's number in the commit's own list of paths."""
+    own = None
+    for base in bases:
+        added = lines_against(repo, base, sha)
+        own = added if own is None else {key: content for key, content in own.items() if added.get(key) == content}
+    numbers = {path: number for number, path in enumerate(numbering, 1)}
+    for (path, number), content in sorted(own.items(), key=lambda item: (numbers.get(item[0][0], 0), item[0][1])):
+        if path not in numbers:
+            raise Problem("a difference cannot be read")
+        checker.added_line(who, numbers[path], number, content)
+
+
+def empty_tree(repo):
+    done = subprocess.run(["git", "-C", repo, "hash-object", "-t", "tree", "--stdin"], input=b"", capture_output=True,
+                          env=git_env())
+    if done.returncode != 0:
+        raise Problem("git could not read the history")
+    return done.stdout.decode("ascii").strip()
 
 
 def parse_commit(raw):
@@ -324,7 +417,7 @@ def parse_commit(raw):
     return people, message
 
 
-DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "-M"]
+DIFF_OPTIONS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "-M"]
 
 
 def check_paths(checker, who, fields, parents=1):
@@ -449,12 +542,18 @@ def check_people_and_message(checker, who, people, message, signed, merge=False)
 def check_commit(repo, sha, checker):
     who = f"commit {sha[:12]}"
     people, message = parse_commit(git(repo, "cat-file", "commit", sha))
-    parents = len(git(repo, "rev-list", "--parents", "-n", "1", sha).split()) - 1
+    parent_shas = git(repo, "rev-list", "--parents", "-n", "1", sha).split()[1:]
+    parents = len(parent_shas)
     check_people_and_message(checker, who, people, message, lambda: checker.verifier(sha), merge=parents > 1)
     # The combined forms: for a commit of one parent (and for the first commit) they give what the plain forms give;
     # for a merge, only what it brings beyond all of its parents.
-    checker.patch(who, git(repo, "diff-tree", "--cc", "--root", "--format=", *DIFF_OPTIONS, sha))
     fields = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
+    listing = git_bytes(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--name-status", "-z", "-M", sha)
+    if parents > 1:
+        numbering = [field for field in listing.split(b"\0") if field != b""][1::2]  # one path for every entry
+    else:
+        numbering = [paths[-1] for _, paths in entries_of(listing)]
+    check_lines(checker, who, repo, parent_shas or [empty_tree(repo)], sha, numbering)
     check_paths(checker, who, fields.split("\0"), parents)
     raw = git(repo, "diff-tree", "-r", "-c", "--root", "--no-commit-id", "--raw", "-z", "-M", sha)
     check_other_encodings(checker, who, repo, raw.split("\0"))
@@ -462,16 +561,72 @@ def check_commit(repo, sha, checker):
 
 API_BUDGET = 90.0  # seconds for every try at GitHub's API in one run, on a clock that only runs forward
 API_TRY = 10.0  # seconds at most for one try
+API_WAITS = (2, 5, 10, 20)  # seconds between the tries of one thing asked
 API_SPENT = {"deadline": None}
 SILENT = "GitHub's API did not answer"
-NOTHING_THERE = (403, 404, 410, 422)  # answers that say what was asked for is not there, or not for this token
 
 
-def api_get(path, outside_repository=False):
-    """One answer of GitHub's API. None only when GitHub answers that what was asked for is not there (or not for this
-    token). Asked up to five times when it does not answer (waits of 2, 5, 10 and 20 seconds between the tries), all
-    tries of the run within one budget; when they or the budget run out, the check stops: GitHub's API did not
-    answer."""
+def is_text(value):
+    return isinstance(value, str)
+
+
+def is_number(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+# The questions the check asks GitHub, and what an answer to each must be: JSON of the type the question expects,
+# naming what was asked, with the fields the verdict reads in their types. One row each.
+ANSWERS = {
+    "commit": lambda data, sha: (isinstance(data, dict) and data.get("sha") == sha
+                                 and isinstance(data.get("commit"), dict)
+                                 and isinstance(data["commit"].get("verification"), dict)
+                                 and isinstance(data["commit"]["verification"].get("verified"), bool)
+                                 and isinstance(data["commit"].get("committer"), dict)
+                                 and is_text(data["commit"]["committer"].get("email"))),
+    "user": lambda data, login: (isinstance(data, dict) and is_text(data.get("login"))
+                                 and data["login"].casefold() == login.casefold() and is_number(data.get("id"))
+                                 and (data.get("name") is None or is_text(data.get("name")))),
+    "environment": lambda data, name: (isinstance(data, dict) and data.get("name") == name
+                                       and isinstance(data.get("protection_rules"), list)),
+    "pull": lambda data, number: (isinstance(data, dict) and data.get("number") == number
+                                  and is_number(data.get("changed_files")) and isinstance(data.get("draft"), bool)
+                                  and isinstance(data.get("base"), dict) and is_text(data["base"].get("ref"))),
+    "files": lambda data, _: isinstance(data, list) and all(
+        isinstance(entry, dict) and is_text(entry.get("filename")) and is_text(entry.get("status"))
+        and (entry.get("previous_filename") is None or is_text(entry.get("previous_filename"))) for entry in data),
+    "folder": lambda data, _: isinstance(data, list) and all(
+        isinstance(entry, dict) and is_text(entry.get("name")) and is_text(entry.get("type")) for entry in data),
+}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a redirect is no answer of GitHub about what was asked
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def nothing_there(error):
+    """A 404 with a JSON content type and a body that is an object with a text message: GitHub's word that what was
+    asked is not there. Nothing else is."""
+    try:
+        if error.code != 404 or "json" not in (error.headers.get("Content-Type") or "") \
+                or error.headers.get("Retry-After") is not None or error.headers.get("X-RateLimit-Remaining") == "0":
+            return False
+        body = json.loads(error.read().decode("utf-8"))
+        return isinstance(body, dict) and is_text(body.get("message"))
+    except Exception:
+        return False
+    finally:
+        error.close()
+
+
+def api_get(question, path, subject, outside_repository=False):
+    """One answer of GitHub's API to one of the questions in ANSWERS. None only when GitHub answers that what was asked
+    for is not there. Anything else that is not an answer of the expected shape is asked again, up to five times in
+    all with waits of 2, 5, 10 and 20 seconds between the tries, all tries of the run within one budget; when they or
+    the budget run out, the check stops: GitHub's API did not answer."""
     token = os.environ.get("GITHUB_TOKEN", "")
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -484,16 +639,15 @@ def api_get(path, outside_repository=False):
     request = urllib.request.Request(url, headers=headers)
     if API_SPENT["deadline"] is None:
         API_SPENT["deadline"] = time.monotonic() + API_BUDGET
-    for wait in (2, 5, 10, 20, None):
-        left = API_SPENT["deadline"] - time.monotonic()
-        if left <= 0:
-            break
+    for wait in API_WAITS + (None,):
         try:
-            with urllib.request.urlopen(request, timeout=min(API_TRY, left)) as answer:
-                return json.load(answer)
+            with OPENER.open(request, timeout=min(API_TRY, API_SPENT["deadline"] - time.monotonic())) as answer:
+                if answer.status == 200 and "json" in (answer.headers.get("Content-Type") or ""):
+                    data = json.load(answer)
+                    if ANSWERS[question](data, subject):
+                        return data
         except urllib.error.HTTPError as error:
-            limited = error.headers.get("Retry-After") is not None or error.headers.get("X-RateLimit-Remaining") == "0"
-            if error.code in NOTHING_THERE and not limited:  # a 403 of GitHub's rate limits is no answer
+            if nothing_there(error):
                 return None
         except Exception:
             pass
@@ -504,23 +658,20 @@ def api_get(path, outside_repository=False):
 
 
 def github_api_verifier(sha):
-    data = api_get(f"commits/{sha}")
-    if not isinstance(data, dict):
-        return False
-    commit = data.get("commit") if isinstance(data.get("commit"), dict) else {}
-    verification = commit.get("verification") if isinstance(commit.get("verification"), dict) else {}
-    committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
-    return data.get("sha") == sha and verification.get("verified") is True and committer.get("email") == GITHUB_ADDRESS
+    data = api_get("commit", f"commits/{sha}", sha)
+    if data is None:
+        return False  # GitHub says there is no such commit: it signed none
+    return data["commit"]["verification"]["verified"] is True and data["commit"]["committer"]["email"] == GITHUB_ADDRESS
 
 
 def environment_waits_for_a_named_reviewer():
     """Whether the environment of a fork's job makes every run wait for a reviewer that it names."""
-    data = api_get(f"environments/{ENVIRONMENT}")
-    rules = data.get("protection_rules") if isinstance(data, dict) else None
-    if not isinstance(rules, list):
+    data = api_get("environment", f"environments/{ENVIRONMENT}", ENVIRONMENT)
+    if data is None:
         return False
     return any(isinstance(rule, dict) and rule.get("type") == "required_reviewers"
-               and isinstance(rule.get("reviewers"), list) and len(rule["reviewers"]) > 0 for rule in rules)
+               and isinstance(rule.get("reviewers"), list) and len(rule["reviewers"]) > 0
+               for rule in data["protection_rules"])
 
 
 def read_settings(path):
@@ -628,9 +779,8 @@ def build_merges(checker, repo, base, head, texts, context):
     authors = []
     logins = merging_logins(repo, base, context)
     for login in logins:
-        data = api_get(f"users/{login}", outside_repository=True)
-        if not isinstance(data, dict) or not isinstance(data.get("name") or "", str) \
-                or not isinstance(data.get("id"), int) or isinstance(data.get("id"), bool):
+        data = api_get("user", f"users/{login}", login, outside_repository=True)
+        if data is None:
             checker.add("merge commit", "author name", "the displayed name of the account that merges cannot be read")
             continue
         authors.append((data.get("name") or login, f"{data['id']}+{login}@users.noreply.github.com"))
@@ -721,58 +871,219 @@ def main(argv=None):
         return 1
 
 
-CONTROL_ESCAPES = set("xuUN0afnrtv")  # escapes that name a character by its number or its name, or a control
+class Unmet(Exception):
+    """The secret names something a copy can never hold."""
 
 
-def pattern_meets_the_copy(pattern):
-    """Whether every text the pattern names can stand in the copy, so that its reach does not hang on how it is
-    written: no character that the copy takes out or replaces or that has a compatibility form (each character must
-    be its own copy but for letter case), no letter that folding turns into something other than its small letter, no
-    two spaces in a row (the copy makes them one), no escape that names a character by its number or its name or names
-    a control character, and no inline flag that narrows how the pattern matches."""
-    if "  " in pattern:
-        return False
-    for ch in pattern:
-        if ch != unicodedata.normalize("NFKC", ch) or normalise(ch) != ch.casefold() or ch.casefold() != ch.lower() \
-                or ch.upper().casefold() != ch.casefold():
-            return False
-    index = 0
-    while index < len(pattern):
-        if pattern[index] == "\\":
-            following = pattern[index + 1:index + 4]
-            if following[:1] in CONTROL_ESCAPES or re.fullmatch(r"[0-7]{3}", following):
-                return False
-            index += 2
-        elif re.match(r"\(\?[aiLmsux]*[aL-]", pattern[index:]):
-            return False  # ASCII or locale matching, or a flag turned off, such as (?-i:...), anywhere in the flags
+SECONDS = []  # every character that stands after the first in a canonical decomposition, made in the run
+
+
+def seconds():
+    if not SECONDS:
+        SECONDS.append({ch for code in range(0x110000) for ch in unicodedata.normalize("NFD", chr(code))[1:]})
+    return SECONDS[0]
+
+
+ACCEPTED = {}
+
+
+def accepted(ch):
+    """A character a copy can hold beside any neighbour: it is its own copy but for letter case and folds into its
+    small letter; every character of its canonical decomposition has combining class 0; and the first of them is not
+    among the seconds. Proof that nothing else is needed: the copy changes a text by taking out, replacing and
+    composing; the first two act on one character, which the first fact rules out; NFC composes two characters only
+    when the second is a second, or reorders them only when one has a combining class, and the other two facts rule
+    both out for every character of every decomposition; so the only neighbours a copy cannot hold are two spaces,
+    which the copy makes one."""
+    if ch not in ACCEPTED:
+        decomposed = unicodedata.normalize("NFD", ch)
+        ACCEPTED[ch] = (ch == unicodedata.normalize("NFKC", ch) and normalise(ch) == ch.casefold()
+                        and ch.casefold() == ch.lower() and ch.upper().casefold() == ch.casefold()
+                        and all(unicodedata.combining(part) == 0 for part in decomposed)
+                        and decomposed[0] not in seconds())
+    return ACCEPTED[ch]
+
+
+# The judge of the secret: a small, closed part of the pattern language is taken, everything else stops the run, and
+# every way through the secret must be able to match a copy. A way is the characters it takes, each by its kind (a
+# space, a letter of a word, another character), and the positions between them.
+SPACE, WORD, OTHER, NOTHING = "space", "word", "other", "nothing"
+WAYS_LIMIT = 3000  # a secret with more ways than this stops the run: none is taken unjudged
+POSITION_NAMES = {parser.AT_BEGINNING: "start", parser.AT_BEGINNING_STRING: "start", parser.AT_END: "end",
+                  parser.AT_END_STRING: "end", parser.AT_BOUNDARY: "boundary", parser.AT_NON_BOUNDARY: "no boundary"}
+
+
+def kind(code):
+    """The kind of a character written out, which must be one a copy can hold beside any neighbour."""
+    ch = chr(code)
+    if not accepted(ch):
+        raise Unmet()
+    if ch == " ":
+        return SPACE
+    return WORD if re.match(r"\w", ch) else OTHER
+
+
+def set_kinds(members):
+    """A positive set or range of characters written out, which may also hold \\s and \\d: the kinds of its members."""
+    kinds = set()
+    for op, value in members:
+        if op == parser.LITERAL:
+            kinds.add(kind(value))
+        elif op == parser.RANGE:
+            kinds.update(kind(code) for code in range(value[0], value[1] + 1))
+        elif op == parser.CATEGORY and value == parser.CATEGORY_SPACE:
+            kinds.add(SPACE)  # in a copy every white space is the space
+        elif op == parser.CATEGORY and value == parser.CATEGORY_DIGIT:
+            kinds.add(WORD)
         else:
-            index += 1
-    return True
+            raise Unmet()  # a negated set, or another class
+    return kinds
+
+
+def stands(way):
+    """Whether one way can match a copy: it takes a character; no two spaces side by side; and at every place the
+    positions there can all be true for one choice of what stands on its two sides (between two characters their
+    kinds; at an edge of the way anything, or nothing, the same for every position at that place)."""
+    chars = [value for what, value in way if what == "character"]
+    if not chars:
+        return False
+    places = [[] for _ in range(len(chars) + 1)]
+    at = 0
+    for what, value in way:
+        if what == "character":
+            at += 1
+        else:
+            places[at].append(value)
+    for place, positions in enumerate(places):
+        if not positions:
+            continue
+        lefts = [chars[place - 1]] if place > 0 else [NOTHING, WORD, OTHER, SPACE]
+        rights = [chars[place]] if place < len(chars) else [NOTHING, WORD, OTHER, SPACE]
+        if not any(all((left == NOTHING) if position == "start" else (right == NOTHING) if position == "end"
+                       else ((left == WORD) != (right == WORD)) if position == "boundary"
+                       else ((left == WORD) == (right == WORD)) for position in positions)
+                   for left in lefts for right in rights):
+            return False
+    return not any(left == SPACE and right == SPACE for left, right in zip(chars, chars[1:]))
+
+
+def secret_ways(tree):
+    """Every way through the secret, from the parser's tree: one branch of each alternation, one member of each set
+    by its kind; a repeat whose least count is none left out and taken once, whose least count is one once, whose
+    least count is two or more twice; and where a repeat may run more than once, two of its bodies side by side as
+    well, unless the body is one character, set or class and its least count is at most one. A back reference
+    stands for every way of its group, and only where the group stands closed before it."""
+    groups = {}
+
+    def item(op, value, closed):
+        if op == parser.LITERAL:
+            return [((("character", kind(value)),), closed)]
+        if op == parser.IN:
+            return [((("character", one),), closed) for one in sorted(set_kinds(value))]
+        if op == parser.AT:
+            if value not in POSITION_NAMES:
+                raise Unmet()
+            return [((("position", POSITION_NAMES[value]),), closed)]
+        if op == parser.SUBPATTERN:
+            group, add_flags, del_flags, inner = value
+            if del_flags & re.IGNORECASE or add_flags & (re.ASCII | re.LOCALE):
+                raise Unmet()
+            out = sequence(inner, closed)
+            if group is not None:
+                groups.setdefault(group, set()).update(way for way, _ in out)
+                out = [(way, done | {group}) for way, done in out]
+            return out
+        if op == parser.BRANCH:
+            return [one for branch in value[1] for one in sequence(branch, closed)]
+        if op in (parser.MAX_REPEAT, parser.MIN_REPEAT):
+            low, high, inner = value
+            if high == 0:  # a greatest count of none
+                raise Unmet()
+            body = sequence(inner, closed)
+            single = len(inner) == 1 and inner[0][0] in (parser.LITERAL, parser.IN)
+            pairs = [(first + second, one | two) for first, one in body for second, two in body]
+            if low >= 2:
+                return pairs
+            out = list(body)
+            if low == 0:
+                out.append(((), closed))
+            if high >= 2 and not single:
+                out += pairs
+            return out
+        if op == parser.GROUPREF:
+            if value not in closed:
+                raise Unmet()  # a back reference to a group not closed on that way
+            return [(way, closed) for way in groups[value]]
+        raise Unmet()  # not on the list: the dot, a negated set, a look-around, a conditional, an atomic group, ...
+
+    def sequence(items, closed):
+        ways = [((), closed)]
+        for op, value in items:
+            ways = list({(way + more, done) for way, before in ways for more, done in item(op, value, before)})
+            if len(ways) > WAYS_LIMIT:
+                raise Unmet()
+        return ways
+
+    return [way for way, _ in sequence(list(tree), frozenset())]
+
+
+def secret_meets_the_copy(parsed):
+    """The judge, on the parser's tree and the flags beside it, and nothing else. It holds: where the secret matches a
+    text as written, between neighbours the copy leaves as they are, it matches the copy of that text between the same
+    neighbours; and it matches some line that is its own copy. It does not hold what stands outside a match: the copy
+    also takes characters out there and joins white space, and a boundary at the secret's edge may then differ."""
+    if parsed.state.flags & (re.ASCII | re.LOCALE):
+        raise Unmet()
+    if not all(stands(way) for way in secret_ways(parsed)):
+        raise Unmet()
+
+
+FORM = ("the private pattern given in the secret is written in a way the copy can never meet: it names a character "
+        "the copy takes out or replaces, two white spaces side by side, or what nothing in a copy can be")
+NOT_A_PATTERN = "the private pattern given in the secret is not a regular expression"
+
+
+def judge_secret(name):
+    """The one function the secret's text is read in, from the environment, and bound to no name outside it: its
+    parse, its judge (whose helpers are given the tree, never the text) and the compiling from that same tree, so that
+    nothing is parsed twice and the compiled pattern does not carry the text. Inside it a warning is an error and
+    collecting of cycles is off, so that nothing Python could say about anything is printed while the secret is in
+    hand; every exception ends in one of the secret's fixed messages, raised without the error that caused it. None
+    when the secret is not set."""
+    collecting = gc.isenabled()
+    gc.disable()
+    message = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            try:
+                text = os.environ.get(name, "")
+                if not text:
+                    return None
+                parsed = parser.parse(text, re.IGNORECASE)
+                del text
+                secret_meets_the_copy(parsed)
+                return re._compiler.compile(parsed, re.IGNORECASE)
+            except Unmet:
+                message = FORM
+            except Exception:
+                message = NOT_A_PATTERN
+    finally:
+        if collecting:
+            gc.enable()
+    raise Problem(message) from None
 
 
 def private_pattern(args, settings, failures):
     """The private pattern of this run, or None."""
     name = "COMMIT_CHECK_PRIVATE_PATTERN" if args.context == "own" else "FORK_CHECK_PRIVATE_PATTERN"
-    pattern = os.environ.get(name, "")
-    if not pattern:
+    compiled = judge_secret(name)
+    if compiled is None:
         if settings["private_pattern_expected"]:
             failures.append("private pattern: settings.json says the secret is set, but this run did not get it")
         else:
             print("::notice::No private pattern is set yet; only the public properties were checked.")
-        return None
-    return compile_private(pattern)
-
-
-def compile_private(pattern):
-    """The private pattern as every place matches it: as written, ignoring letter case."""
-    if not pattern_meets_the_copy(pattern):
-        raise Problem("the private pattern given in the secret is written in a way the copy can never meet: a "
-                      "character the copy takes out or replaces, a letter that folds into another, or a character "
-                      "named by its number or its name")
-    try:
-        return re.compile(pattern, re.IGNORECASE)
-    except re.error:
-        raise Problem("the private pattern given in the secret is not a regular expression") from None
+    return compiled
 
 
 SHUT = "The way for pull requests from forks is not open yet: nothing of this pull request was judged."
@@ -869,7 +1180,9 @@ def run(args):
     for sha in commits + built[1:]:
         check_commit(repo, sha, checker)
     if commits:
-        checker.patch("the range", git(repo, "diff", *DIFF_OPTIONS, f"{start}...{head}"))
+        base = git(repo, "merge-base", start, head).strip()
+        numbering = [paths[-1] for _, paths in entries_of(git_bytes(repo, "diff", "--name-status", "-z", "-M", base, head))]
+        check_lines(checker, "the range", repo, [base], head, numbering)
         check_paths(checker, "the range", git(repo, "diff", "--name-status", "-z", "-M", f"{start}...{head}").split("\0"))
         check_other_encodings(checker, "the range", repo,
                               git(repo, "diff", "--raw", "-z", "-M", "--abbrev=40", f"{start}...{head}").split("\0"))

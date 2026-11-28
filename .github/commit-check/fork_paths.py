@@ -33,7 +33,7 @@ class Parser(argparse.ArgumentParser):
 
 def listing(path, ref):
     """The names in a folder at a commit, as the desk's tool wants them."""
-    data = check.api_get(f"contents/{path}?ref={ref}")
+    data = check.api_get("folder", f"contents/{path}?ref={ref}", None)
     if not isinstance(data, list):
         return None
     if len(data) >= pr_files.MAX_GITHUB_DIRECTORY_ENTRIES:
@@ -71,18 +71,18 @@ def main(argv=None):
 
 
 def judge(number, base):
-    pull = check.api_get(f"pulls/{number}")
+    pull = check.api_get("pull", f"pulls/{number}", int(number))
     if not isinstance(pull, dict):
         return {"refused": True}
     entries = []
     for page in range(1, MAX_PAGES + 1):
-        files = check.api_get(f"pulls/{number}/files?per_page={PAGE}&page={page}")
+        files = check.api_get("files", f"pulls/{number}/files?per_page={PAGE}&page={page}", None)
         if not isinstance(files, list):
             return {"refused": True}
         entries.extend(files)
         if len(files) < PAGE:
             break
-    tests = check.api_get("contents/bench/tests?ref=main")
+    tests = check.api_get("folder", "contents/bench/tests?ref=main", None)
     main_tests = [entry.get("name") for entry in tests if isinstance(entry, dict)] if isinstance(tests, list) else None
     base_ref = pull.get("base", {}).get("ref") if isinstance(pull.get("base"), dict) else None
     return pr_files.classify_pr_files(entries, changed_files=pull.get("changed_files"), draft=pull.get("draft"),

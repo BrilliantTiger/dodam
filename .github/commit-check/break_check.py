@@ -133,6 +133,39 @@ class Breaks(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def reach(tree, found):
+    """What the breaks reach, counted by the script itself: every statement of the file is broken at itself, broken
+    only inside (an operand, a conditional expression, an element, a comprehension's condition), or not broken, and
+    the statements not broken are given by their kind with their lines; besides them, the calls inside expressions and
+    the numbers, which no break changes. The three counts of statements add up to all of the file's statements."""
+    at, inside = set(), set()
+    for brk in found:
+        node, owner = tree, None
+        for field, index in brk["where"]:
+            value = getattr(node, field)
+            node = value[index] if index is not None else value
+            if isinstance(node, ast.stmt):
+                owner = node
+        if isinstance(node, ast.stmt) and brk["kind"] in ("take out", "turn round"):
+            at.add(id(node))
+        elif owner is not None:
+            inside.add(id(owner))
+    statements = [node for node in ast.walk(tree) if isinstance(node, ast.stmt)]
+    not_broken = {}
+    for node in statements:
+        if id(node) not in at and id(node) not in inside:
+            not_broken.setdefault(type(node).__name__, []).append(node.lineno)
+    calls = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    called_as_statements = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
+    numbers = sorted({node.lineno for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                      and isinstance(node.value, (int, float)) and not isinstance(node.value, bool)})
+    return {"statements": len(statements), "broken at the statement": len(at), "broken only inside": len(inside - at),
+            "not broken": {kind: sorted(lines) for kind, lines in sorted(not_broken.items())},
+            "calls inside expressions": len([node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                             and id(node) not in called_as_statements]),
+            "lines with numbers": len(numbers)}
+
+
 def locate(tree, where):
     node = tree
     for field, index in where:
@@ -302,7 +335,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shard", default="1/1")
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--report", required=True)
+    parser.add_argument("--report")
+    parser.add_argument("--reach", action="store_true", help="print what the breaks reach and what they do not; no run")
     parser.add_argument("--workflows", help="the folder that holds the two workflows of the check, where it is not "
                                              ".github/workflows (on the side branch, which runs no other workflow)")
     args = parser.parse_args(argv)
@@ -310,12 +344,18 @@ def main(argv=None):
     part, parts = (int(x) for x in args.shard.split("/"))
     sources = {path.name: path.read_text() for path in HERE.iterdir() if path.suffix in (".py", ".json", ".md")}
     jobs = []
-    base = Path(tempfile.mkdtemp(prefix="breaks-"))
+    reached = {}
     for target in TARGETS:
         tree = ast.parse(sources[target])
         collector = Breaks()
         collector.visit(tree)
-        jobs += [(base, sources, target, brk, tree, workflow_folder) for brk in collector.found]
+        reached[target] = reach(tree, collector.found)
+        jobs += [(None, sources, target, brk, tree, workflow_folder) for brk in collector.found]
+    if args.reach:
+        print(json.dumps(reached, indent=1))
+        return 0
+    base = Path(tempfile.mkdtemp(prefix="breaks-"))
+    jobs = [(base, *job[1:]) for job in jobs]
     total = len(jobs)
     mine = jobs[part - 1::parts]
     # Nothing broken first: every test passes, and there are tests.
@@ -329,8 +369,8 @@ def main(argv=None):
         results = list(pool.map(one, mine))
     shutil.rmtree(base, ignore_errors=True)
     Path(args.report).write_text(json.dumps({"share": args.shard, "breaks in all": total, "tests": count,
-                                             "seconds": round(time.monotonic() - started), "results": results},
-                                            indent=1))
+                                             "seconds": round(time.monotonic() - started), "reach": reached,
+                                             "results": results}, indent=1))
     counts = {}
     for entry in results:
         counts[entry["result"]] = counts.get(entry["result"], 0) + 1

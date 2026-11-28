@@ -109,11 +109,15 @@ from every byte a character of that width can start at, passing over bytes that 
 the start or a header of a binary file hides nothing after it), and once more as UTF-8 with its zero bytes taken
 out. Reading ends there: content that is compressed or encoded (an archive, an image's pixels, base64) is not read.
 
-A commit with more than one parent is read by its own shape: the lines it adds beyond all of its parents count as
-its own, and its combined list of paths gives one path for every entry, a renamed or copied one too (git gives two
-paths only for a commit with one parent). A file the merge deletes has no line of the result. The difference and
-the paths of the whole range are checked as well, so that a merge cannot bring back a line or a path of the exempt
-history.
+A commit of n parents is read as n ordinary differences, one against each parent, by the same reader as a commit
+of one parent: a line is the commit's own when it is added against every parent, by its path and its line number in
+the result. No combined patch is read. A hunk belongs to the entry of git's list of paths, separated by NUL bytes,
+that it is paired with: by their order (a change of a file's kind is two sections, every other entry one), each
+pairing held against the section's own header line; or, in a commit whose paths hold a byte git writes quoted in a
+header, by one difference for each entry, asked by its own paths. Paths are the bytes git gave. A finding names a
+file by its entry's number in the commit's own list of paths, which for a merge is its combined list (one path for
+every entry, a renamed or copied one too). The difference and the paths of the whole range are checked as well, by
+the same reader, so that a merge cannot bring back a line or a path of the exempt history.
 
 What the check prints is made by the check alone: a commit's id, a property's name and positions by number (a
 message's line, the number of a file in the commit's difference and its line, the number of a path in git's list
@@ -123,9 +127,16 @@ and the encoding it was read in). It never prints a text, a path, a title or any
 
 The owner's gate refuses a pull request whose head carries any run that was cancelled or failed. So no run of the
 check is cancelled, and nothing is read again. The only clock is the budget of the tries at GitHub's API, and the
-only waits are between those tries. A run fails at once on whatever breaks a rule, and otherwise only when the way
-for forks is shut, when GitHub's API did not answer, or when the pull request does not merge cleanly with main's
-tip.
+only waits are between those tries. A run fails on whatever breaks a rule, and otherwise only with one of these
+fixed messages: the way for forks is not open yet; the environment does not wait for a named reviewer; GitHub's API
+did not answer; git could not read the history; a difference, a list of paths, a commit's author or committer line,
+the event, settings.json or the list of signed commits cannot be read; the exempt commit is not in the history; the
+pull request does not merge cleanly with main's tip; there is no commit to check; the secret is expected and
+missing, is written in a way the copy can never meet, or is not a regular expression; the settings are loosened;
+the fork's secret stands at the repository's level; the way for forks is open without its date or its reviewer; a
+branch that changes the check does not have main's newest commit among its ancestors; the check's own tests fail; the
+job's outputs cannot be written; the check was not called as its workflows call it; or it stopped on something it
+does not know. In the records the job takes under two minutes of its limit of five.
 
 - **Pushes to a branch and the project's own pull requests** are judged in the workflow `commits`. A branch or a pull
   request that does not change the check or its two workflows is judged by main's copy of the check, as main is
@@ -184,14 +195,26 @@ The owner sets the repository's secret `COMMIT_CHECK_PRIVATE_PATTERN`. It is app
 value; `private_pattern_expected` in `settings.json`, turned to `true` by a small pull request afterwards, only makes
 a missing secret fail.
 
-How it is written: as a regular expression in plain letters, in either case; it is matched ignoring letter case,
-on the text as written and on its copy. The run stops with a fixed message, showing nothing of the secret, when the
-pattern holds a character that is not its own copy but for letter case (an accent or another mark; a format,
-control, surrogate, private-use or unassigned character; one of the four letters named FILLER; a space other than
-the plain one; a dash or minus sign other than the plain hyphen; a character with a compatibility form, such as a
-full-width letter or a ligature), a letter that folding turns into something other than its small letter (such as
-the German sharp s), two spaces in a row, an escape that names a character by its number or its name or names a
-control character, or an inline flag that narrows how it matches.
+How it is written: in a small, closed part of the pattern language, read once by the language's own parser and
+compiled from that same reading. What is taken, and nothing else:
+
+- a character written out (by itself or by any escape), which must be one a copy can hold beside any neighbour;
+  a positive set or range of such characters, which may also hold `\s` and `\d`;
+- `\s` and `\d` by themselves;
+- a group (plain, capturing or named), alternatives, a repeat (greedy or lazy) of any part, a back reference;
+- the start, the end, a word boundary and its opposite;
+- of the flags set inside the secret, ignoring case, white space ignored, the two about lines and the dot, and
+  Unicode.
+
+Everything else stops the run with a fixed message that shows nothing of the secret: the dot, a negated set, every
+other class, a look-around, a conditional branch, an atomic group, a possessive count, ASCII or locale matching, and
+ignoring case turned off. And every way through the secret must be able to match a copy: it takes a character, no
+two spaces stand side by side, a start has nothing before it and an end nothing after it, the positions at one place
+can all be true together, and a back reference points to a group that stands closed before it; one way that cannot
+stand stops the run. What this holds: where the secret matches a text as written, between neighbours the copy
+leaves as they are, it matches the copy of that text between the same neighbours, and it matches some line that is
+its own copy. What it does not hold: the copy also changes what stands outside a match, and a word boundary at the
+secret's edge can then be true as written and false in the copy; such a line is hit as written.
 
 What it must not match, beyond what the rule for names spares: the account's displayed name, which GitHub writes
 as the author of every merge commit, and this repository's owner's name, which GitHub writes in the first line of
