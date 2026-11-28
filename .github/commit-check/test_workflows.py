@@ -143,8 +143,14 @@ COMMITS = r'''# Every commit that a push to a branch brings, and every commit an
 #
 # The owner's gate refuses a head on which any run ended otherwise than in success, so no run here is cancelled
 # (there is no concurrency group) and nothing is read again; the only waits are between the tries at GitHub's API,
-# within one budget. A run fails on a commit, a text or a path that breaks a rule, when GitHub's API did not answer,
-# or when the pull request does not merge cleanly with main's tip. The way back after a text is mended is a new head:
+# within one budget. A run fails on a commit, a text or a path that breaks a rule, and otherwise only with one of the
+# check's fixed messages: the way for forks not open or its environment without a reviewer; GitHub's API did not
+# answer; git could not read the history; a difference, a list of paths, a commit, the event, the settings or the list
+# of signed commits cannot be read; the exempt commit missing; the merge not clean with main's tip; no commit to check;
+# the secret expected and missing, in a form the copy can never meet, or no regular expression; the settings loosened;
+# the fork's secret at the repository's level; the way open without its date or reviewer; a change of the check
+# without main among its ancestors; the check's own tests failing; outputs that cannot be written; a call not as the
+# workflows make it; or something the check does not know. The way back after a text is mended is a new head:
 # on a branch of the project an empty commit whose message says why. A pull request's run has git build the merge
 # GitHub will make of main's tip, as it is when the run starts, with the head, and judges that merge commit (its
 # author's name, its message, its paths and lines) and the range to it as main's push will. The runs of a branch, once
@@ -153,7 +159,8 @@ COMMITS = r'''# Every commit that a push to a branch brings, and every commit an
 # not prevent, and a red main stops the next merge at the owner's gate.
 #
 # Reading whether the environment of forks waits for a reviewer needs no permission beyond contents in this public
-# repository (measured on the side branch: the token of contents only reads an environment). It needs no package and ends in well under a minute.
+# repository (measured on the side branch: the token of contents only reads an environment). It needs no package; in
+# the records its job takes under two minutes of its limit of five.
 name: commits
 
 on:

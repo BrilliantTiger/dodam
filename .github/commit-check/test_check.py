@@ -8,6 +8,8 @@ Run: python3 -I -m unittest discover -s .github/commit-check
 """
 
 import http.server
+import itertools
+import random
 import json
 import re
 import os
@@ -100,6 +102,55 @@ class Repo:
         return self.git("rev-parse", "HEAD")
 
 
+def respond(handler, answer):
+    """What a made-up GitHub sends: a JSON body with 200; for 404 GitHub's own error object; "hang" is slow and then
+    502; ("html", code) an error page that is not JSON; ("redirect", path) a redirect; ("text", body) a 200 that is not
+    JSON; (code, headers) an error with those headers; another number an error page."""
+    if answer == "hang":
+        time.sleep(3)
+        answer = 502
+    if answer == 404:
+        answer = (404, {"Content-Type": "application/json"}, {"message": "Not Found"})
+    if isinstance(answer, tuple) and answer[0] == "html":
+        handler.send_error(answer[1])
+        return
+    if isinstance(answer, tuple) and answer[0] == "redirect":
+        handler.send_response(302)
+        handler.send_header("Location", answer[1])
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+        return
+    if isinstance(answer, tuple) and answer[0] == "text":
+        body = answer[1].encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/html")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        return
+    if isinstance(answer, tuple):  # an error with headers, and a body when one is given
+        body = json.dumps(answer[2]).encode() if len(answer) > 2 else b""
+        handler.send_response(answer[0])
+        for key, value in answer[1].items():
+            handler.send_header(key, value)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        return
+    if isinstance(answer, int):
+        handler.send_error(answer)
+        return
+    body = json.dumps(answer).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+PULL = {"number": 1, "changed_files": 0, "draft": False, "base": {"ref": "main"}}
+
+
 class FakeGitHub:
     """GitHub's API for the paths a test names: each answer is JSON, or a number for an HTTP error."""
 
@@ -111,19 +162,7 @@ class FakeGitHub:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 fake.asked.append(self.path)
-                answer = fake.answers.get(self.path, 404)
-                if answer == "hang":  # GitHub that takes the question and does not answer in time
-                    time.sleep(3)
-                    answer = 502
-                if isinstance(answer, int):
-                    self.send_error(answer)
-                    return
-                body = json.dumps(answer).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                respond(self, fake.answers.get(self.path, 404))
 
             def log_message(self, *args):
                 pass
@@ -189,6 +228,16 @@ class RepoTestCase(unittest.TestCase):
             env["FORK_CHECK_PRIVATE_PATTERN"] = fork_pattern
         done = subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
         return done.returncode, done.stdout + done.stderr
+
+    def run_quietly(self, start, *, event, extra=(), env=None):
+        """The check in this process with no wait between the tries of GitHub's API, for answers that are none."""
+        check = load("check.py")
+        event_path = self.dir / "event-quiet.json"
+        event_path.write_text(json.dumps(event))
+        args = ["--repo", str(self.repo.root), "--from", start, "--head", "HEAD", "--settings", str(self.settings()),
+                "--context", "own", "--compare-settings", start, "--verified-shas", os.devnull, "--event",
+                str(event_path), *extra]
+        return in_process(check.main, args, env or {}, check)
 
     def fake(self, answers):
         fake = FakeGitHub(answers)
@@ -259,9 +308,7 @@ class CheckTest(RepoTestCase):
         cases = [({"sha": sha, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}}, 0),
                  ({"sha": sha, "commit": {"verification": {"verified": False}, "committer": {"email": GITHUB}}}, 1),
                  ({"sha": sha, "commit": {"verification": {"verified": True}, "committer": {"email": PERSONAL}}}, 1),
-                 ({"sha": "0" * 40, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}}, 1),
-                 ({"sha": sha, "commit": {"verification": "yes", "committer": {"email": GITHUB}}}, 1),
-                 (404, 1)]
+                 (404, 1)]  # an answer about another commit, or of another shape, is no answer: the table's test
         for answer, expected in cases:
             with self.subTest(answer=answer):
                 fake = FakeGitHub({f"/repos/made-up/repo/commits/{sha}": answer})
@@ -1197,15 +1244,13 @@ class MergeTest(RepoTestCase):
         for answer, expected in (({"login": OWN_LOGIN, "id": 1234567, "name": None}, 0), ({"login": OWN_LOGIN, "id": 1234567, "name": ""}, 0),
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": "SOMEONE-made-up"}, 0),
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": "Some Real Person"}, 1),
-                                 ({"login": OWN_LOGIN, "name": None}, 1),  # no id: the address cannot be written
-                                 ({"login": OWN_LOGIN, "id": True, "name": None}, 1),
                                  ({"login": OWN_LOGIN, "id": 1234567, "name": C}, 1), (404, 1)):
             with self.subTest(answer=answer):
                 self.tearDown_repo()
                 code, out = self.preview(answer)
                 self.assertEqual(code, expected, out)
                 if expected:
-                    self.assertRegex(out, BUILT_AUTHOR_NAME + "|merge commit: author name")
+                    self.assertRegex(out, BUILT_AUTHOR_NAME + "|merge commit: author name|" + SILENT)
                     self.assertNotIn("Some Real Person", out)
 
     def test_a_displayed_name_github_does_not_answer_fails_after_every_try(self):
@@ -1269,6 +1314,29 @@ class MergeTest(RepoTestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(fake.asked, [f"/users/{OWN_LOGIN}"])
 
+    def test_only_main_s_own_merges_name_the_merging_account(self):
+        # A merge GitHub made inside a branch that main merged later, by another account, is not main's last merge.
+        start = self.merged_main()
+        self.repo.git("checkout", "-q", "-b", "outer")
+        self.repo.git("checkout", "-q", "-b", "inner")
+        self.repo.commit("Inner work")
+        self.repo.git("checkout", "-q", "outer")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge pull request #2 from SomeOrg/inner", "inner",
+                      env={"GIT_AUTHOR_NAME": "another-made-up", "GIT_AUTHOR_EMAIL": "999+another-made-up@users.noreply"
+                           ".github.com", "GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": GITHUB})
+        self.repo.git("checkout", "-q", "main")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge the outer branch", "outer",
+                      env={"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
+                           "GIT_COMMITTER_EMAIL": OWN})
+        tip = self.repo.head()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "id": 1234567, "name": None},
+                          "/users/another-made-up": {"login": "another-made-up", "id": 999, "name": None}})
+        code, out = self.run_check(tip, extra=["--build-merge"], event=OWN_EVENT, env_extra=fake.env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fake.asked, [f"/users/{OWN_LOGIN}"])
+        self.assertTrue(start)
+
     def test_the_account_that_pushed_is_not_asked_twice_when_it_is_the_merging_one(self):
         code, out = self.preview({"login": OWN_LOGIN, "id": 1234567, "name": None}, actor=OWN_LOGIN.upper(),
                                  actor_answer={"login": OWN_LOGIN, "id": 1234567, "name": None})
@@ -1276,9 +1344,12 @@ class MergeTest(RepoTestCase):
         self.assertEqual(self.last_fake.asked, [f"/users/{OWN_LOGIN}"])
 
     def test_a_displayed_name_that_is_not_text_cannot_be_read(self):
-        code, out = self.preview({"login": OWN_LOGIN, "id": 1234567, "name": 5})
+        start = self.merged_main()
+        self.repo.commit("A change")
+        fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "id": 1234567, "name": 5}})
+        code, out = self.run_quietly(start, event=OWN_EVENT, extra=["--build-merge"], env=fake.env)
         self.assertEqual(code, 1, out)
-        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be read)", out)
+        self.assertIn(SILENT, out)  # an answer not of GitHub's shape is no answer
 
     def test_a_merging_account_named_like_a_tool_is_refused_even_by_its_own_login(self):
         start = self.merged_main(author=("Co" "pilot", "175728472+Co" "pilot@users.noreply.github.com"))
@@ -1547,8 +1618,15 @@ class ClassesTest(unittest.TestCase):
 
     def checker(self, pattern=None):
         import re as regex
-        compiled = getattr(self.check, "compile_private", regex.compile)  # as the check compiles the secret
-        return self.check.Checker(compiled(pattern) if pattern else None, lambda sha: False)
+        if not pattern:
+            return self.check.Checker(None, lambda sha: False)
+        if not hasattr(self.check, "judge_secret"):
+            return self.check.Checker(regex.compile(pattern), lambda sha: False)
+        os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = pattern  # as the check takes the secret
+        try:
+            return self.check.Checker(self.check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN"), lambda sha: False)
+        finally:
+            del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
 
     def refused_everywhere(self, text, prop):
         message = self.checker(PRIVATE_PATTERN)
@@ -1580,12 +1658,14 @@ class ClassesTest(unittest.TestCase):
                 caught = {found.rsplit("(", 1)[1] for found in message.findings if f": {prop} (" in found}
                 missing = [ch for number, ch in enumerate(assigned, 1) if f"line {number})" not in caught]
                 self.assertEqual([f"U+{ord(ch):04X}" for ch in missing[:5]], [], (pattern, prop))
+        small, capitals = self.checker(PRIVATE_PATTERN), self.checker("ZORB" "LATT|QUIX" "OTL")
         for ch in assigned:
-            line = self.checker(PRIVATE_PATTERN)
-            line.added_line("x", 1, 1, f"DO{ch}D-17 Zorb{ch}latt")
-            if len(line.findings) != 2 or self.checker(PRIVATE_PATTERN).name_passes(f"Cl{ch}aude", OWN) \
-                    or self.checker(PRIVATE_PATTERN).name_passes(f"Zorb{ch}latt", OWN):
-                self.fail(f"U+{ord(ch):04X} lets a forbidden text through in a line or a name")
+            for checker in (small, capitals):  # the secret in small letters and in capitals, in a line and in a name
+                checker.findings = []
+                checker.added_line("x", 1, 1, f"DO{ch}D-17 Zorb{ch}latt")
+                if len(checker.findings) != 2 or checker.name_passes(f"Cl{ch}aude", OWN) \
+                        or checker.name_passes(f"Zorb{ch}latt", OWN):
+                    self.fail(f"U+{ord(ch):04X} lets a forbidden text through in a line or a name")
         # Every one of them between two letters, so that each stands next to a letter and none next to another.
         copy = self.check.normalise("O" + "O".join(others) + "O")
         if copy != "o" * (len(others) + 1):
@@ -1681,6 +1761,15 @@ class TextsTest(unittest.TestCase):
                       "letter case, or empty", text)
         self.assertIn("90 seconds in all", text)
 
+    def test_the_readme_s_numbers_are_the_code_s(self):
+        text = " ".join(self.readme.split())
+        self.assertTrue(hasattr(self.check, "API_WAITS"), "the waits between the tries, as one constant")
+        words = {4: "four", 5: "five", 6: "six"}
+        waits = self.check.API_WAITS
+        self.assertIn(f"each thing asked up to {words[len(waits) + 1]} times, waits of "
+                      + ", ".join(str(wait) for wait in waits[:-1]) + f" and {waits[-1]} seconds, each try at most "
+                      f"{self.check.API_TRY:.0f} seconds, and {self.check.API_BUDGET:.0f} seconds in all", text)
+
     def test_no_number_of_main_s_history_stands_in_the_readme(self):
         self.assertNotRegex(self.readme, r"\d+ (?:added )?lines? of \d+ commits")
 
@@ -1729,20 +1818,36 @@ class ThirdLookTest(RepoTestCase):
     def test_a_secret_the_copy_can_never_meet_stops_the_run_without_showing_it(self):
         self.repo.commit("A change")
         for secret in ("(?i)jos\u00e9", "jose\u0301", "stra\u00dfe", "zorb\u200blatt", "zorb\tlatt", "zorb\u2013latt",
-                       "zorb\u2238latt", "zorb\u3164latt", "zorb\\x41", "zorb\\u00e9", "zorb\\N{LATIN SMALL LETTER A}",
-                       "zorb\\101", "zorb\\0", "zorb\\tlatt", "zorb\uff08a\uff09", "\uff3aorblatt", "zorb\u2122+",
+                       "zorb\u2238latt", "zorb\u3164latt", "zorb\\x00", "zorb\\u00e9", "zorb\\N{NO-BREAK SPACE}",
+                       "zorb\\001", "zorb\\0", "zorb\\tlatt", "zorb {2}latt", "zorb\\s\\slatt", "zorb\\s{2}latt",
+                       "zorb\\ \\ latt", "zorb[ ][ ]latt", "zorb[\\b]latt", "zorb[\\1]latt", "zorb[\\11]latt",
+                       "zorb[\\12]latt", "zorb[\\37]latt", "zorb[[a]latt", "zorb[a--z]latt", "zorb[a&&b]latt",
+                       "zorb[a||b]latt", "zorb\uff08a\uff09", "\uff3aorblatt", "zorb\u2122+",
                        "zorb\\\u00b9", "zorb  latt", "zorb\u00a0latt", "(?a)zorb" "latt", "(?-i:Z)orb" "latt", "\u037e",
-                       "\uf900", "zorb\u2126", "zorb\u212a", "zorb\u03f4", "zorb\u0131"):
+                       "\uf900", "zorb\u2126", "zorb\u212a", "zorb\u03f4", "zorb\u0131",
+                       # what the copy joins or puts in another order, and what a tree can name
+                       "\u1100\u1161", "zorb\u302e\u1715latt", "zorb\u09c7\u09be", "( )( )", "(?: ){2}", "(a| ) ",
+                       " x? ", " (?= )", "( )\\1", "(?P<s>\\s)(?P=s)", "[a ] ", "[^\\w\\W]", "[^\\s\\S]", "[^\\S] ",
+                       " \\B ", "(?s: ){2}", "(?a:x)", "zorb..latt", "zorb.*latt", "zorb\\w", "zorb[^x]", "zorb\\S", "zorb\\D",
+                       "a*", "\\b", "^\\Ba", "a$a", "a^b", "\\b\\Ba", "a\\ba", "zorb{0}", "(zorb\\1)", "(?=zorb)zorb" "latt", "(?>zorb)",
+                       "zorb++", "(z)?(?(1)orb|x)", "(?<!x)zorb", "[^\\S](?=.)\\S", "(zorb\\1)"):
             with self.subTest(secret=secret.encode("unicode_escape").decode()):
                 code, out = self.run_check(self.base, pattern=secret)
                 self.assertEqual(code, 1, out)
-                self.assertIn("::error::the private pattern given in the secret is written in a way the copy can never "
-                              "meet", out)
+                self.assertRegex(out, r"^::error::the private pattern given in the secret (is written in a way the "
+                                      r"copy can never meet|is not a regular expression)")
                 self.assertNotIn(secret, out)
+                self.assertNotIn("Warning", out)  # nothing Python says about the secret reaches the log
+                self.assertNotIn("position", out)
+                self.assertEqual(out.count("\n"), 1, out)  # the fixed message and nothing else
 
     def test_a_secret_in_capitals_reaches_as_one_in_small_letters(self):
         for number, secret in enumerate(("ZORB" "LATT", "Zorb latt|zorb" "latt", "(?i)zorb\\s?latt",
-                                         "[zZ]orb(l)\\1?att", "(?x) z o r b latt")):
+                                         "[zZ]orb(l)\\1?att", "(?x) z o r b latt", "zorb\\x6catt",
+                                         "zorb\\N{LATIN SMALL LETTER L}att", "zorb\\154att", "zorb\\s{1,3}latt|zorb" "latt",
+                                         "zorb\\s+latt|zorb" "latt", "(zorb)\\1?latt", "(?P<w>zorb)(?P=w)?latt",
+                                         "[a-z]orb" "latt", "\\bzorb\\B", "zorb\\s?latt", "[\\uac00-\\ud7a3]{0,9}zorb",
+                                         "\\bzorb[\\s-]?latt\\b", "zorb\\d*latt")):
             with self.subTest(secret=secret.encode("unicode_escape").decode()):
                 sha = self.repo.commit("Thanks to Zorb\u200blatt", files={f"a{number}.txt": "ZORB\u0301LATT\n"})
                 code, out = self.run_check(sha + "~1", pattern=secret)
@@ -1970,46 +2075,146 @@ class MergeKindTest(RepoTestCase):
         self.assert_fails((code, out), merge, "tracker code (path 2)")
         self.assertNotIn(f"commit {merge[:12]}: tracker code (path 1)", out)
 
-    def test_a_merge_of_three_parents(self):
-        start = self.base_with({"keep.txt": "k\n"})
-        for name in ("one", "two", "three"):
-            self.side(name, start, lambda name=name: self.write(f"{name}.txt", f"{name}\n"))
-        self.repo.git("checkout", "-q", "one")
-        env = {"GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN, "GIT_COMMITTER_NAME": OWN_LOGIN,
-               "GIT_COMMITTER_EMAIL": OWN}
-        self.repo.git("merge", "-q", "--no-ff", "--no-commit", "two", "three", env=env)
-        self.write(f"{TRACKER_CODE}-octopus.txt", f"{TRACKER_CODE}\n")
-        self.repo.git("add", "-A")
-        self.repo.git("commit", "-q", "-m", "Merge three", env=env)
-        merge = self.repo.head()
-        self.assertEqual(len(self.repo.git("rev-list", "--parents", "-n", "1", merge).split()), 4)
-        out = self.judged(start, merge, "AAA")
-        self.assertIn(f"commit {merge[:12]}: tracker code (file 1, line 1)", out)
+    def test_a_merge_that_keeps_a_file_and_empties_it_and_a_path_after_it(self):
+        start = self.base_with({"a-empty.txt": "line1\nline2\n", "z-after.txt": "keep\n"})
+        self.side("left", start, lambda: self.write("a-empty.txt", "side1\nline2\n"))
+        self.side("right", start, lambda: self.write("a-empty.txt", "line1\nmain2\n"))
 
-    def test_a_line_and_a_path_a_merge_adds_stay_refused_when_a_later_commit_takes_the_file_away(self):
+        def resolve():
+            self.write("a-empty.txt", "")
+            self.write("z-after.txt", f"{TRACKER_CODE}\n")
+        merge = self.merge("right", "left", resolve=resolve)
+        code, out = self.run_check(start, merge)
+        self.assertNotIn("cannot be read", out)
+        self.assert_fails((code, out), merge, "tracker code (file 2, line 1)")
+
+    def test_a_merge_that_takes_away_both_parents_last_lines_of_a_file(self):
+        body = "".join(f"L{n}\n" for n in range(1, 11))
+        start = self.base_with({"a-long.txt": body + "BOT\n", "z-after.txt": "keep\n"})
+        self.side("left", start, lambda: self.write("a-long.txt", body + "BOT1\n"))
+        self.side("right", start, lambda: self.write("a-long.txt", body + "BOT2\n"))
+
+        def resolve():
+            self.write("a-long.txt", body)
+            self.write("z-after.txt", f"{TRACKER_CODE}\n")
+        merge = self.merge("right", "left", resolve=resolve)
+        code, out = self.run_check(start, merge)
+        self.assertNotIn("cannot be read", out)
+        self.assert_fails((code, out), merge, "tracker code (file 2, line 1)")
+
+    def test_lines_that_can_be_aligned_two_ways_are_the_merge_s_own_only_when_added_against_every_parent(self):
+        start = self.base_with({"a.txt": "X\n"})
+        self.side("left", start, lambda: self.write("a.txt", f"{TRACKER_CODE}\nX\n"))
+        self.side("right", start, lambda: self.write("a.txt", f"X\n{TRACKER_CODE}\n"))
+        merge = self.merge("left", "right", resolve=lambda: self.write("a.txt", f"{TRACKER_CODE}\nX\n{TRACKER_CODE}\n"))
+        code, out = self.run_check(start, merge)
+        self.assertNotIn(f"commit {merge[:12]}: tracker code (file", out)  # against each parent one of them stood
+
+    def test_lines_dropped_at_the_top_and_in_the_middle_and_a_line_after_them(self):
+        body = "".join(f"L{n}\n" for n in range(1, 11))
+        start = self.base_with({"a.txt": "TOP\n" + body, "z.txt": "keep\n"})
+        self.side("left", start, lambda: self.write("a.txt", "TOP1\n" + body.replace("L5\n", "L5\nMID1\n")))
+        self.side("right", start, lambda: self.write("a.txt", "TOP2\n" + body.replace("L5\n", "L5\nMID2\n")))
+
+        def resolve():
+            self.write("a.txt", body.replace("L7\n", f"L7\n{TRACKER_CODE}\n"))
+            self.write("z.txt", f"keep\n{TRACKER_CODE}\n")
+        merge = self.merge("left", "right", resolve=resolve)
+        code, out = self.run_check(start, merge)
+        self.assertNotIn("cannot be read", out)
+        own = sorted(line.split(": ", 1)[1] for line in out.splitlines() if line.startswith(f"commit {merge[:12]}"))
+        self.assertEqual(own, ["tracker code (file 1, line 8)", "tracker code (file 2, line 2)"])
+
+    def test_a_line_that_stood_before_the_check_began_and_is_added_again_by_the_merge(self):
+        self.repo.commit("Before", files={"dup.txt": f"L1\n{TRACKER_CODE}\nL3\n"})
         start = self.base_with({"keep.txt": "k\n"})
         self.side("left", start, lambda: self.write("a.txt", "a\n"))
         self.side("right", start, lambda: self.write("b.txt", "b\n"))
-        name = f"{TRACKER_CODE}-brief.txt"
-        merge = self.merge("left", "right", resolve=lambda: self.write(name, f"{PRIVATE_WORD}\n"))
-        self.repo.git("rm", "-q", name)
-        self.repo.commit("Take it away", files={})
-        code, out = self.run_check(start, pattern=PRIVATE_PATTERN)
-        self.assert_fails((code, out), merge, "tracker code (path 1)", hidden=(PRIVATE_WORD,))
-        self.assertIn(f"commit {merge[:12]}: private pattern (file 1, line 1)", out)
+        merge = self.merge("left", "right", resolve=lambda: self.write("dup.txt", f"L1\n{TRACKER_CODE}\nL3\n{TRACKER_CODE}\n"))
+        self.assert_fails(self.run_check(start, merge), merge, "tracker code (file 1, line 4)")
 
-    def test_lines_a_merge_adds_are_numbered_by_the_files_of_its_own_difference(self):
-        # One side changes the first line of a file, the other its last line; the merge takes both, which git leaves
-        # out of the merge's own difference, and adds a line of its own to another file.
-        start = self.base_with({"a.txt": "L1\nL2\nL3\nL4\n", "z.txt": "Z1\n"})
-        self.side("left", start, lambda: self.write("a.txt", "L1-from-side\nL2\nL3\nL4\n"))
-        self.side("right", start, lambda: self.write("a.txt", "L1\nL2\nL3\nL4-from-main\n"))
+    def test_a_path_with_a_line_break_in_it_is_paired_by_the_list_not_by_the_patch(self):
+        start = self.base_with({"keep.txt": "k\n"})
+        self.side("left", start, lambda: self.write("a.txt", "a\n"))
+        self.side("right", start, lambda: self.write("b.txt", "b\n"))
+        name = "weird\n+++ b/fake.txt"
+        merge = self.merge("left", "right", resolve=lambda: self.write(name, f"{TRACKER_CODE}\n"))
+        code, out = self.run_check(start, merge)
+        self.assertNotIn("cannot be read", out)
+        self.assertIn(f"commit {merge[:12]}: tracker code (file 1, line 1)", out)
 
-        def resolve():
-            self.write("a.txt", "L1-from-side\nL2\nL3\nL4-from-main\n")
-            self.write("z.txt", f"{TRACKER_CODE}\n")
-        merge = self.merge("right", "left", resolve=resolve)
-        self.assert_fails(self.run_check(start, merge), merge, "tracker code (file 1, line 1)")
+    def test_sections_that_do_not_pair_with_the_list_of_paths_stop_the_run(self):
+        check = load("check.py")
+        self.assertTrue(hasattr(check, "git_bytes"), "the reader of differences by the bytes git gives")
+        start = self.base_with({"keep.txt": "k\n"})
+        self.side("left", start, lambda: self.write("a.txt", "a\n"))
+        self.side("right", start, lambda: self.write("b.txt", "b\n"))
+        merge = self.merge("left", "right", resolve=lambda: self.write("c.txt", "c\n"))
+        real = check.git_bytes
+        for change in (lambda out: out + b"diff --git a/x b/x\n",  # one section more than the list has entries
+                       lambda out: out.replace(b"diff --git a/c.txt b/c.txt", b"diff --git a/d.txt b/d.txt")):  # a header
+            with self.subTest(change=change):
+                def changed(repo, *args):
+                    out = real(repo, *args)
+                    return change(out) if args[:1] == ("diff",) and "--name-status" not in args else out
+                check.git_bytes = changed
+                try:
+                    outcome = raised(lambda: check.check_commit(str(self.repo.root), merge,
+                                                                check.Checker(None, lambda sha: True)))
+                finally:
+                    check.git_bytes = real
+                self.assertIsInstance(outcome, check.Problem)
+                self.assertEqual(str(outcome), "a difference cannot be read")
+
+    def test_a_merge_that_adds_a_forbidden_line_to_a_file_attributes_mark_as_no_text(self):
+        start = self.base_with({".gitattributes": "*.dat -diff\n", "data.dat": "one\n"})
+        self.side("left", start, lambda: self.write("a.txt", "a\n"))
+        self.side("right", start, lambda: self.write("b.txt", "b\n"))
+        merge = self.merge("left", "right", resolve=lambda: self.write("data.dat", f"one\n{TRACKER_CODE}\n"))
+        self.assert_fails(self.run_check(start, merge), merge, "tracker code (file 1, line 2)")
+
+    def plumbed(self, parents, path, content, message):
+        """A commit made through git's index alone: the file system of this computer may not hold the path."""
+        env = {**clean_env(), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_INDEX_FILE":
+               str(self.dir / "plumbed.index"), "GIT_AUTHOR_NAME": OWN_LOGIN, "GIT_AUTHOR_EMAIL": OWN,
+               "GIT_COMMITTER_NAME": OWN_LOGIN, "GIT_COMMITTER_EMAIL": OWN}
+
+        def git(*args, data=None):
+            done = subprocess.run(["git", *args], cwd=self.repo.root, input=data, capture_output=True, env=env)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return done.stdout.decode().strip()
+        git("read-tree", parents[0])
+        blob = git("hash-object", "-w", "--stdin", data=content.encode())
+        git("update-index", "-z", "--index-info", data=b"100644 " + blob.encode() + b"\t" + path + b"\0")
+        tree = git("write-tree")
+        return git("commit-tree", tree, *[part for parent in parents for part in ("-p", parent)], "-m", message)
+
+    def test_a_path_with_a_line_break_and_a_byte_that_is_no_text_in_one_parent_and_in_a_merge(self):
+        name = b"odd\nname-\xff.txt"
+        start = self.base_with({"keep.txt": "k\n"})
+        single = self.plumbed([start], name, f"{TRACKER_CODE}\n", "A file with an odd name")
+        self.assert_fails(self.run_check(start, single), single, "tracker code (file 1, line 1)")
+        self.repo.git("branch", "-f", "odd", single)
+        self.side("left", "odd", lambda: self.write("a.txt", "a\n"))
+        self.side("right", "odd", lambda: self.write("b.txt", "b\n"))
+        left, right = self.repo.git("rev-parse", "left"), self.repo.git("rev-parse", "right")
+        merged = self.repo.git("merge-tree", "--write-tree", left, right).split()[0]
+        self.repo.git("read-tree", merged)
+        merge = self.plumbed([left, right], name, f"{TRACKER_CODE}\nagain {TRACKER_CODE}\n", "Merge")
+        self.repo.git("read-tree", "HEAD")
+        self.assert_fails(self.run_check(single, merge), merge, "tracker code (file 1, line 2)")
+
+
+class MergeKindByEntryTest(MergeKindTest):
+    """Every shape of merge again, read through the other form: one difference for each entry."""
+
+    def run_check(self, start, head=None, *, pattern=None, **kwargs):
+        check = load("check.py")
+        self.assertTrue(hasattr(check, "BY_ENTRY"), "the second form: one difference for each entry")
+        check.BY_ENTRY[0] = True
+        args = ["--repo", str(self.repo.root), "--from", start, "--head", head or self.repo.head(), "--settings",
+                str(self.settings()), "--context", "own", "--compare-settings", start, "--verified-shas", os.devnull]
+        return in_process(check.main, args, {"COMMIT_CHECK_PRIVATE_PATTERN": pattern} if pattern else {}, check)
 
 
 class SameVerdictTest(RepoTestCase):
@@ -2130,13 +2335,15 @@ class SurvivorsTest(RepoTestCase):
 
     def test_github_s_api_without_a_named_repository_is_no_answer_and_nothing_is_asked(self):
         check = load("check.py")
+        self.assertTrue(hasattr(check, "OPENER"), "the opener that follows no redirect")
         asked = []
-        saved = os.environ.pop("GITHUB_REPOSITORY", None), check.urllib.request.urlopen
-        check.urllib.request.urlopen = lambda request, timeout: asked.append(request) or (_ for _ in ()).throw(OSError())
+        saved = os.environ.pop("GITHUB_REPOSITORY", None), check.OPENER
+        check.OPENER = type("Opener", (), {"open": staticmethod(
+            lambda request, timeout: asked.append(request) or (_ for _ in ()).throw(OSError()))})
         try:
-            outcome = raised(lambda: check.api_get("commits/x"))
+            outcome = raised(lambda: check.api_get("pull", "pulls/1", 1))
         finally:
-            check.urllib.request.urlopen = saved[1]
+            check.OPENER = saved[1]
             if saved[0] is not None:
                 os.environ["GITHUB_REPOSITORY"] = saved[0]
         self.assertIsInstance(outcome, check.Problem)
@@ -2147,9 +2354,9 @@ class SurvivorsTest(RepoTestCase):
         start = self.github_merge()
         self.repo.commit("A change")
         fake = self.fake({f"/users/{OWN_LOGIN}": {"login": OWN_LOGIN, "id": True, "name": None}})
-        code, out = self.run_check(start, event=OWN_EVENT, extra=["--build-merge"], env_extra=fake.env)
+        code, out = self.run_quietly(start, event=OWN_EVENT, extra=["--build-merge"], env=fake.env)
         self.assertEqual(code, 1, out)
-        self.assertIn("merge commit: author name (the displayed name of the account that merges cannot be read)", out)
+        self.assertIn(SILENT, out)  # an answer not of GitHub's shape is no answer
         self.assertNotIn("author address", out)
 
     def test_the_owner_of_the_base_stands_in_the_merge_message_when_the_head_names_none(self):
@@ -2219,13 +2426,249 @@ class SurvivorsTest(RepoTestCase):
         self.assertEqual(out.count("committer address"), 1)
 
 
+class ReachTest(unittest.TestCase):
+    """The breaking script counts what its breaks reach: every statement is broken at itself, only inside, or not
+    broken, and the three counts add up to all statements of each file it breaks."""
+
+    def test_every_statement_is_counted_once(self):
+        import ast
+        breaking = load("break_check.py")
+        self.assertTrue(hasattr(breaking, "reach"), "the script counts what it reaches")
+        for target in breaking.TARGETS:
+            with self.subTest(target=target):
+                tree = ast.parse((HERE / target).read_text())
+                collector = breaking.Breaks()
+                collector.visit(tree)
+                counted = breaking.reach(tree, collector.found)
+                statements = [node for node in ast.walk(tree) if isinstance(node, ast.stmt)]
+                not_broken = sum(len(lines) for lines in counted["not broken"].values())
+                self.assertEqual(counted["statements"], len(statements))
+                self.assertEqual(counted["broken at the statement"] + counted["broken only inside"] + not_broken,
+                                 len(statements))
+                self.assertIn("Continue", counted["not broken"]) if target == "check.py" else None
+
+
+# The judge of the secret held against the matcher and the copy, not against itself: a fixed family of secrets, every
+# line up to a length over a letter, a hyphen, a space and a tab, between nine pairs of neighbours.
+FAMILY_ATOMS = ["a", "a", "-", " ", " ", r"\s", r"\s", "[a ]", "[- ]", r"[\s-]", "[a-]"]
+FAMILY_POSITIONS = ["^", "$", r"\b", r"\B"]
+FAMILY_COUNTS = ["?", "*", "+", "{2}", "{1,2}", "{2,3}", "{0,2}", "??", "*?", "+?"]
+
+
+def secret_family(seed, many):
+    rnd = random.Random(seed)
+    names = itertools.count(1)
+
+    def gen(depth):
+        r = rnd.random()
+        if depth <= 0 or r < 0.40:
+            return rnd.choice(FAMILY_ATOMS)
+        if r < 0.55:
+            return rnd.choice(FAMILY_POSITIONS)
+        if r < 0.72:
+            return gen(depth - 1) + gen(depth - 1)
+        if r < 0.82:
+            return "(?:" + gen(depth - 1) + "|" + gen(depth - 1) + ")"
+        if r < 0.94:
+            body = gen(depth - 1)
+            return (body if body in FAMILY_ATOMS else "(?:" + body + ")") + rnd.choice(FAMILY_COUNTS)
+        name = "g%d" % next(names)
+        return "(?P<%s>%s)%s(?P=%s)" % (name, gen(depth - 1), gen(depth - 1), name)
+    patterns, seen = [], set()
+    while len(patterns) < many:
+        p = "".join(gen(2) for _ in range(rnd.randint(1, 4)))
+        if p not in seen:
+            seen.add(p)
+            patterns.append(p)
+    return patterns
+
+
+def hold_against_the_matcher(check, patterns, longest):
+    lines = [""] + ["".join(t) for n in range(1, longest + 1) for t in itertools.product("a- \t", repeat=n)]
+    copies = [check.normalise(line) for line in lines]
+    stable = [line for line, copy in zip(lines, copies) if line == copy]
+    moved = [(line, copy) for line, copy in zip(lines, copies) if line != copy]
+    contexts = [(u, v) for u in ("", "a", "-") for v in ("", "a", "-")]
+    taken = stopped = 0
+    holes, dead = [], []
+    for p in patterns:
+        try:
+            compiled = re.compile(p, re.IGNORECASE)
+        except re.error:
+            continue
+        try:
+            check.secret_meets_the_copy(check.parser.parse(p, re.IGNORECASE))
+        except check.Unmet:
+            stopped += 1
+            continue
+        taken += 1
+        ends = {v: re.compile("(?:%s)(?=%s\\Z)" % (p, re.escape(v)), re.IGNORECASE) for v in ("", "a", "-")}
+        if any(ends[v].match(u + t + v, len(u)) and not compiled.search(u + c + v) for t, c in moved for u, v in contexts):
+            holes.append(p)
+        elif min(sum(1 for what, _ in way if what == "character")
+                 for way in check.secret_ways(check.parser.parse(p, re.IGNORECASE))) <= longest - 2 \
+                and not any(compiled.search(line) for line in stable):
+            dead.append(p)
+    return taken, stopped, holes, dead
+
+
+class SecretJudgeTest(unittest.TestCase):
+    """The secret is judged on the parser's tree, by two facts from the language's own tables, in one function."""
+
+    def setUp(self):
+        self.check = load("check.py")
+        self.assertTrue(hasattr(self.check, "secret_ways"), "the judge of the secret on the parser's tree")
+
+    def test_every_accepted_character_keeps_its_copy_beside_itself_and_beside_fixed_neighbours(self):
+        check = self.check
+        accepted = [chr(code) for code in range(0x110000) if check.accepted(chr(code))]
+        self.assertGreater(len(accepted), 100000)
+        self.assertIn("\uac00", accepted)
+        for left_out in ("\u1161", "\u302e", "\u09be", "\u0301", "\u00e9", "\uff3a"):
+            self.assertNotIn(left_out, accepted)
+        failures = []
+        for ch in accepted:
+            for text in (ch + ch, "a" + ch, ch + "a", "\uac00" + ch, ch + "\uac00", ch + "\u1100", "\u1100" + ch,
+                         ch + "\u09c7", "\u09c7" + ch):
+                if text != "  " and check.normalise(text) != text.casefold():
+                    failures.append(f"U+{ord(ch):04X}")
+        self.assertEqual(failures[:5], [])
+
+    def test_the_judge_holds_against_the_matcher_on_a_fixed_family(self):
+        # Where a taken secret matches a text as written, between neighbours the copy leaves as they are, it matches the
+        # copy between the same neighbours; and it matches some line that is its own copy. Seed 4104, 3,000 secrets,
+        # lines of up to 6: measured on Python 3.12 and 3.13.
+        self.assertEqual(hold_against_the_matcher(self.check, secret_family(4104, 3000), 6), (690, 2310, [], []))
+
+    def test_ordinary_secrets_within_the_list_are_taken_and_reach_the_copy(self):
+        z = "zorb" "latt"
+        cases = [("\ub3c4\ub2f4\uc774", "\ub3c4\u200b\ub2f4\uc774"),  # a name in Hangul
+                 ("zorb[\\s.-]?latt", "Zorb\u2013Latt"),  # a name in Latin letters with separators
+                 ("\\bz\\.?\\s?l\\.?\\b", "Z.\u00a0L."),  # initials
+                 ("zorb-?latt|zl\\d{0,3}", "ZORB\u200b-LATT"),  # account names
+                 ("zorb\\.latt@example\\.org", "Zorb.Latt@Example.org"),  # an address
+                 ("\\b\\d{6}\\b", "no 123\u200b456 here"),  # a number between boundaries
+                 ("\\d{3}-\\d{4}", "123\u2212" "4567"),  # a number between separators
+                 ("(?x) zorb [\\s.-]? latt | \\b \\d{6} \\b", "zorb\u3000latt"),  # joined, white space ignored
+                 ("(?:zorb|quix)\\s+latt", "quix\t\tlatt"),
+                 ("\\bZORB\\b", "a zo\u0301rb b")]
+        for secret, text in cases:
+            with self.subTest(secret=secret):
+                os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = secret
+                try:
+                    compiled = self.check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN")
+                finally:
+                    del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
+                self.assertTrue(compiled.search(self.check.normalise(text)), text)
+        self.assertTrue(z)
+
+    def test_the_seconds_come_from_the_language_s_tables(self):
+        seconds = self.check.seconds()
+        self.assertGreater(len(seconds), 100)
+        self.assertIn("\u0301", seconds)
+        self.assertIn("\u1161", seconds)
+
+    def test_every_kind_of_node_is_judged_or_stops(self):
+        import re._constants as constants
+        import re._parser as parser
+        check = self.check
+        corpus = [r"a.b[^c][d-f]\d\s\w(?:g|h)(?P<n>i)(?P=n)(?(n)j|k)(?=l)(?!m)(?<=n)(?<!o)(?>p)q*?r++s{2,3}\bt\B^$\A\Z",
+                  r"[\D\S\W]", r"[^\d]"]
+        seen = set()
+
+        def walk(items):
+            for op, value in items:
+                seen.add(op)
+                for part in (value if isinstance(value, (tuple, list)) else [value]):
+                    if isinstance(part, parser.SubPattern):
+                        walk(part)
+                    elif isinstance(part, list) and part and isinstance(part[0], (parser.SubPattern, tuple)):
+                        for inner in part:
+                            walk(inner if isinstance(inner, parser.SubPattern) else [inner])
+        for pattern in corpus:
+            walk(parser.parse(pattern, re.IGNORECASE))
+        taken = {"LITERAL", "IN", "AT", "SUBPATTERN", "BRANCH", "MAX_REPEAT", "MIN_REPEAT", "GROUPREF"}
+        for op in constants.OPCODES:
+            with self.subTest(op=str(op)):
+                tree = parser.parse("a", re.IGNORECASE)
+                tree.data = [(op, None)]
+                outcome = raised(lambda: check.secret_meets_the_copy(tree))
+                if str(op) not in taken:
+                    self.assertIsInstance(outcome, check.Unmet, "a kind of node not on the list stops the run")
+        self.assertLessEqual(seen, {getattr(parser, name) for name in taken} | {parser.NEGATE, parser.RANGE,
+                                                                                 parser.CATEGORY, parser.ANY,
+                                                                                 parser.NOT_LITERAL, parser.ASSERT,
+                                                                                 parser.ASSERT_NOT, parser.GROUPREF_EXISTS,
+                                                                                 parser.ATOMIC_GROUP,
+                                                                                 parser.POSSESSIVE_REPEAT})
+
+    def test_the_secret_s_text_is_read_in_one_function_only_and_not_kept_by_the_compiled_pattern(self):
+        import ast
+        tree = ast.parse((HERE / "check.py").read_text())
+        readers = []
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for node in ast.walk(function):
+                if isinstance(node, ast.Attribute) and node.attr == "environ":
+                    readers.append(function.name)
+        self.assertEqual(sorted(set(readers) & {"judge_secret", "private_pattern"}), ["judge_secret"])
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "judge_secret"]
+        self.assertTrue(all(isinstance(arg, ast.Name) and arg.id == "name" for call in calls for arg in call.args))
+        os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = "zorb" "latt"
+        try:
+            compiled = self.check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN")
+        finally:
+            del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
+        self.assertIn(compiled.pattern, (None, ""))
+        self.assertTrue(compiled.search("ZORB" "LATT"))
+
+    def test_inside_the_one_function_each_call_made_to_warn_or_to_raise_ends_in_one_fixed_line(self):
+        import contextlib
+        import io
+        check = self.check
+        for target in ("parse", "compile", "judge", "read"):
+            for kind in (FutureWarning("Possible nested set at position 5"), ValueError("zorb at position 5")):
+                with self.subTest(target=target, kind=type(kind).__name__):
+                    saved = check.parser.parse, check.re._compiler.compile, check.secret_meets_the_copy, check.os.environ.get
+
+                    def trouble(*args, **kwargs):
+                        if isinstance(kind, Warning):
+                            import warnings
+                            warnings.warn(kind)
+                        raise kind
+                    if target == "parse":
+                        check.parser.parse = trouble
+                    elif target == "compile":
+                        check.re._compiler.compile = trouble
+                    elif target == "read":
+                        check.os.environ.get = trouble
+                    else:
+                        check.secret_meets_the_copy = trouble
+                    printed, said = io.StringIO(), io.StringIO()
+                    try:
+                        with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(said):
+                            os.environ["COMMIT_CHECK_PRIVATE_PATTERN"] = "zorb" "latt"
+                            try:
+                                outcome = raised(lambda: check.judge_secret("COMMIT_CHECK_PRIVATE_PATTERN"))
+                            finally:
+                                del os.environ["COMMIT_CHECK_PRIVATE_PATTERN"]
+                    finally:
+                        (check.parser.parse, check.re._compiler.compile, check.secret_meets_the_copy,
+                         check.os.environ.get) = saved
+                    self.assertIsInstance(outcome, check.Problem)
+                    self.assertTrue(str(outcome).startswith("the private pattern given in the secret "))
+                    self.assertIsNone(outcome.__cause__)
+                    self.assertTrue(outcome.__suppress_context__)
+                    self.assertEqual(printed.getvalue() + said.getvalue(), "")
+                    self.assertTrue(check.gc.isenabled())
+
+
 class BudgetTest(unittest.TestCase):
     """Every try at GitHub's API in one run shares one budget of 90 seconds on a clock that only runs forward, each try
     the lesser of 10 seconds and what is left; when it runs out the check stops with its own message."""
 
     def test_a_github_that_does_not_answer_ends_the_run_inside_its_budget_with_a_fixed_message(self):
         check = load("check.py")
-        self.assertTrue(hasattr(check, "API_BUDGET"), "one budget for every try at GitHub's API")
+        self.assertTrue(hasattr(check, "OPENER"), "one budget for every try at GitHub's API, which follows no redirect")
 
         class Clock:  # the stand-in clock: a try takes all the time it is given, a wait takes its seconds
             now = 1000.0
@@ -2245,18 +2688,18 @@ class BudgetTest(unittest.TestCase):
             Clock.now += timeout
             raise TimeoutError()
 
-        saved = (check.time, check.urllib.request.urlopen, {key: os.environ.get(key) for key in ("GITHUB_REPOSITORY",)})
-        check.time, check.urllib.request.urlopen = Clock, silent
+        saved = (check.time, check.OPENER, {key: os.environ.get(key) for key in ("GITHUB_REPOSITORY",)})
+        check.time, check.OPENER = Clock, type("Opener", (), {"open": staticmethod(silent)})
         os.environ["GITHUB_REPOSITORY"] = "made-up/repo"
         outcomes = []
         try:
             for path in ("commits/a", "commits/b", "commits/c", "users/x"):
                 try:
-                    outcomes.append(check.api_get(path))
+                    outcomes.append(check.api_get("pull", path, 1))
                 except check.Problem as problem:
                     outcomes.append(str(problem))
         finally:
-            check.time, check.urllib.request.urlopen = saved[0], saved[1]
+            check.time, check.OPENER = saved[0], saved[1]
             for key, value in saved[2].items():
                 if value is None:
                     os.environ.pop(key, None)
@@ -2563,8 +3006,9 @@ class ApiTest(unittest.TestCase):
     """How the check asks GitHub: with the token when there is one, again after a failed answer, not again after an
     answer that says no."""
 
-    def ask(self, answers, token="made-up"):
+    def ask(self, answers, token="made-up", question=("pull", "x", 1)):
         check = load("check.py")
+        self.assertTrue(hasattr(check, "ANSWERS"), "one table of the questions and their answers")
         fake = FakeGitHub({})
         self.addCleanup(fake.close)
         sequence = list(answers)
@@ -2573,22 +3017,7 @@ class ApiTest(unittest.TestCase):
         class Handler(fake.server.RequestHandlerClass):
             def do_GET(self):
                 headers.append(self.headers.get("Authorization"))
-                answer = sequence.pop(0) if len(sequence) > 1 else sequence[0]
-                if isinstance(answer, tuple):  # an error with headers
-                    self.send_response(answer[0])
-                    for key, value in answer[1].items():
-                        self.send_header(key, value)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
-                if isinstance(answer, int):
-                    self.send_error(answer)
-                    return
-                body = json.dumps(answer).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                respond(self, sequence.pop(0) if len(sequence) > 1 else sequence[0])
 
         fake.server.RequestHandlerClass = Handler
         saved = {key: os.environ.get(key) for key in fake.env}
@@ -2599,7 +3028,7 @@ class ApiTest(unittest.TestCase):
         self.check = check
         try:
             try:
-                return check.api_get("x"), headers
+                return check.api_get(*question), headers
             except check.Problem as problem:
                 return str(problem), headers
         finally:
@@ -2615,11 +3044,11 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(answer, "GitHub's API did not answer")
         self.assertEqual(len(asked), 5)
         self.assertEqual(self.waits, [2, 5, 10, 20])
-        answer, asked = self.ask([500, 503, {"a": 1}])
-        self.assertEqual(answer, {"a": 1})
+        answer, asked = self.ask([500, 503, PULL])
+        self.assertEqual(answer, PULL)
         self.assertEqual(len(asked), 3)
         self.assertEqual(self.waits, [2, 5])
-        answer, asked = self.ask([{"a": 1}])
+        answer, asked = self.ask([PULL])
         self.assertEqual(self.waits, [])
 
     def test_the_wait_between_tries_is_put_back_after_the_test(self):
@@ -2629,23 +3058,26 @@ class ApiTest(unittest.TestCase):
         self.assertIs(clock.sleep, before)
 
     def test_the_token_is_sent_when_there_is_one_and_not_otherwise(self):
-        self.assertEqual(self.ask([{"a": 1}])[1], ["Bearer made-up"])
-        self.assertEqual(self.ask([{"a": 1}], token="")[1], [None])
+        self.assertEqual(self.ask([PULL])[1], ["Bearer made-up"])
+        self.assertEqual(self.ask([PULL], token="")[1], [None])
 
     def test_too_many_requests_is_no_answer_and_is_asked_again(self):
-        answer, asked = self.ask([429, {"a": 1}])
-        self.assertEqual((answer, len(asked)), ({"a": 1}, 2))
+        answer, asked = self.ask([429, PULL])
+        self.assertEqual((answer, len(asked)), (PULL, 2))
         answer, asked = self.ask([429])
         self.assertEqual((answer, len(asked)), ("GitHub's API did not answer", 5))
 
     def test_a_rate_limit_or_a_refused_token_is_no_answer(self):
-        for answer in ((403, {"X-RateLimit-Remaining": "0"}), (403, {"Retry-After": "60"}), 401):
+        # A 403 is never taken as "nothing there": GitHub's secondary rate limits answer 403 with no header that says
+        # so, and none of the check's questions expects a 403.
+        for answer in ((403, {"X-RateLimit-Remaining": "0"}), (403, {"Retry-After": "60"}),
+                       (403, {"X-RateLimit-Remaining": "4000"}), 403, 401):
             with self.subTest(answer=answer):
                 said, asked = self.ask([answer])
                 self.assertEqual((said, len(asked)), ("GitHub's API did not answer", 5))
 
     def test_an_answer_that_says_no_is_not_asked_again(self):
-        for code in (403, 404, 410, 422):
+        for code in (404,):
             with self.subTest(code=code):
                 answer, asked = self.ask([code])
                 self.assertIsNone(answer)
@@ -2654,25 +3086,90 @@ class ApiTest(unittest.TestCase):
     def test_a_failed_answer_is_asked_again(self):
         for code in (500, 502, 429):
             with self.subTest(code=code):
-                answer, asked = self.ask([code, {"a": 1}])
-                self.assertEqual(answer, {"a": 1})
+                answer, asked = self.ask([code, PULL])
+                self.assertEqual(answer, PULL)
                 self.assertEqual(len(asked), 2)
 
     def test_an_environment_is_believed_to_wait_only_for_a_named_reviewer(self):
         check = load("check.py")
-        cases = [({"protection_rules": ["x"]}, False),
-                 ({"protection_rules": [{"type": "required_reviewers", "reviewers": "someone"}]}, False),
-                 ({"protection_rules": [{"type": "branch_policy", "reviewers": [{"type": "User"}]}]}, False),
-                 ({"protection_rules": "x"}, False), (REVIEWED, True)]
+        cases = [({"name": "private-check", "protection_rules": ["x"]}, False),
+                 ({"name": "private-check", "protection_rules": [{"type": "required_reviewers", "reviewers": "someone"}]},
+                  False),
+                 ({"name": "private-check", "protection_rules": [{"type": "branch_policy", "reviewers": [{"type": "User"}]}]},
+                  False),
+                 (None, False), (REVIEWED, True)]
         for answer, expected in cases:
             with self.subTest(answer=answer):
                 real = check.api_get
-                check.api_get = lambda path: answer
+                check.api_get = lambda *args, **kwargs: answer
                 try:
                     result = raised(lambda: self.assertEqual(check.environment_waits_for_a_named_reviewer(), expected))
                 finally:
                     check.api_get = real
                 self.assertIsNone(result)
+
+
+class AnswerTest(unittest.TestCase):
+    """A verdict about GitHub comes only from a 200 of the expected type that names what was asked, or from a 404 in
+    GitHub's JSON error shape; everything else is no answer, asked again, and ends in the fixed message."""
+
+    ask = ApiTest.ask
+    SHA = "a" * 40
+    ROWS = {
+        "commit": ((SHA,), {"sha": SHA, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}},
+                   [{"sha": "b" * 40, "commit": {"verification": {"verified": True}, "committer": {"email": GITHUB}}},
+                    {"sha": SHA, "commit": {"verification": {"verified": "yes"}, "committer": {"email": GITHUB}}},
+                    {"sha": SHA, "commit": {"verification": {"verified": True}}}, {"sha": SHA}, [], None]),
+        "user": (("someone",), {"login": "SomeOne", "id": 7, "name": None},
+                 [{"login": "another", "id": 7, "name": None}, {"login": "someone", "id": True, "name": None},
+                  {"login": "someone", "id": 7, "name": 5}, {"id": 7}, []]),
+        "environment": (("private-check",), REVIEWED,
+                        [{"name": "another", "protection_rules": []}, {"name": "private-check", "protection_rules": "x"},
+                         {"name": "private-check"}, []]),
+        "pull": ((1,), PULL, [{**PULL, "number": 2}, {**PULL, "number": "1"}, {**PULL, "draft": None},
+                             {**PULL, "changed_files": True}, {**PULL, "base": {}}, {"number": 1}, []]),
+        "files": ((None,), [{"filename": "a", "status": "added"}, {"filename": "b", "status": "renamed",
+                                                                    "previous_filename": "c"}],
+                  [{}, None, "x", [{"filename": "a"}], [{"filename": "a", "status": "added"}, "junk"],
+                   [{"filename": "a", "status": "renamed", "previous_filename": 5}]]),
+        "folder": ((None,), [{"name": "a", "type": "dir"}], [{}, None, [{"name": "a"}], [{"name": 5, "type": "dir"}],
+                                                             [{"name": "a", "type": "dir"}, "junk"]]),
+    }
+    NO_ANSWERS = [403, 410, 422, 401, 429, 500, ("html", 404), (404, {"Content-Type": "application/json"}, {"x": 1}),
+                  (404, {"Content-Type": "text/plain"}, {"message": "Not Found"}), ("redirect", "/elsewhere"),
+                  ("text", "<html>gateway</html>")]
+
+    def test_each_question_takes_only_its_own_answer(self):
+        for question, (subject, good, bad) in self.ROWS.items():
+            with self.subTest(question=question, answer="good"):
+                self.assertEqual(self.ask([good], question=(question, "x", *subject))[0], good)
+            for answer in bad:
+                with self.subTest(question=question, answer=answer):
+                    said, asked = self.ask([answer], question=(question, "x", *subject))
+                    self.assertEqual((said, len(asked)), ("GitHub's API did not answer", 5))
+
+    def test_only_github_s_404_object_is_nothing_there(self):
+        said, asked = self.ask([404])
+        self.assertEqual((said, len(asked)), (None, 1))
+        for answer in self.NO_ANSWERS:
+            with self.subTest(answer=answer):
+                said, asked = self.ask([answer])
+                self.assertEqual((said, len(asked)), ("GitHub's API did not answer", 5))
+
+    def test_a_redirect_is_not_followed(self):
+        said, asked = self.ask([("redirect", "/elsewhere"), PULL])
+        self.assertEqual(said, PULL)
+        self.assertEqual(len(asked), 2)  # asked again at the address it asked, never at the redirect's
+
+    def test_the_budget_is_full_again_at_each_run_of_the_check_in_one_process(self):
+        check = load("check.py")
+        check.API_SPENT["deadline"] = 0.0  # a run before this one spent it
+        args = ["--fork-way-gate", "--context", "fork-approved", "--settings", os.devnull]
+        try:
+            in_process(check.main, args, {}, check)
+        except Exception:
+            pass
+        self.assertIsNone(check.API_SPENT["deadline"])
 
 
 class ForkPathsEdgeTest(ForkPathsCase):
@@ -2698,7 +3195,7 @@ class ForkPathsEdgeTest(ForkPathsCase):
 
     def test_a_pull_request_that_touches_no_closed_path_is_told_so(self):
         code, out = self.run_paths([self.entry("README.md")], extra_answers={
-            "/repos/made-up/repo/contents/bench/tests?ref=main": [{"name": "test_judge.py", "type": "file"}, "junk"]})
+            "/repos/made-up/repo/contents/bench/tests?ref=main": [{"name": "test_judge.py", "type": "file"}]})
         self.assertEqual(code, 0, out)
         self.assertIn("touches no path that the working rules close", out)
 
@@ -2712,7 +3209,7 @@ class ForkPathsEdgeTest(ForkPathsCase):
 
     def test_a_new_task_folder_is_known_by_the_folders_of_the_listing_only(self):
         added = [self.entry("bench/tasks/brand-new-task/task.toml", "added")]
-        listing = [{"name": "brand-new-task", "type": "file"}, "junk"]
+        listing = [{"name": "brand-new-task", "type": "file"}]
         code, out = self.run_paths(added, tasks=listing)
         self.assertEqual(code, 0, out)
         full = [{"name": "brand-new-task", "type": "file"}] + [{"name": f"t{index}", "type": "dir"} for index in range(999)]
