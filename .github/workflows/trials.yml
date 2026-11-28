@@ -1,0 +1,31 @@
+# Trial (c) for c80ff91, by the ruling after the fourth looks: second-lines six times, in jobs that wait on nothing; on a
+# side branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: c80ff914d84ed456aeb189e87cdb359d97962416
+  WAITS: tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it
+jobs:
+  # (c) second-lines six times
+  second-lines:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench
+        run: python experiments/check_protections.py --second-lines
