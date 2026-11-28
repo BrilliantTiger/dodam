@@ -1,0 +1,396 @@
+# The measurement of the addendum to the ruling on pull request 44, started again with what a run that is not a plain
+# pass leaves on disk printed before the next run: 49 jobs of 20 runs at 5b20f44, in seven waves of seven; on a side
+# branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: 5b20f4487e0b9144c67bc8b54b82c3f73fd01999
+  BOTH: >-
+    tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged
+    tests/test_cli_isolation.py::test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running
+jobs:
+  wave-1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-2:
+    needs: [wave-1]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-3:
+    needs: [wave-2]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-4:
+    needs: [wave-3]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-5:
+    needs: [wave-4]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-6:
+    needs: [wave-5]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
+  wave-7:
+    needs: [wave-6]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 20 runs, every one recorded first
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 20); do
+            began=$(date +%s.%N)
+            code=0
+            python -m pytest -vv -rs -rfE --tb=long --durations=0 -p no:cacheprovider --basetemp=../base-$r $BOTH > ../said/$r.txt 2>&1 || code=$?
+            took=$(python -c "import time; print(round(time.time() - $began, 1))")
+            echo "run $r: exit $code, $took s, $(grep -E '^=+ .*[0-9]+ (passed|failed|errors?).* in [0-9.]+s' ../said/$r.txt | tail -1)"
+            if [ "$code" -ne 0 ] || ! grep -qE "^=+ 3 passed in [0-9.]+s( \(.*\))? =+$" ../said/$r.txt; then
+              echo "--- right after run $r, which is not a plain pass: its whole output"
+              cat ../said/$r.txt
+              echo "--- every file under its temporary base, with its size"
+              find ../base-$r -type f -printf '%s %p\n' 2>/dev/null | sort -k2 || true
+              echo "--- every file under its out folders, whole (each up to 64 KB)"
+              find ../base-$r -path '*/out/*' -type f -size -65k 2>/dev/null | sort | while read f; do echo "=== $f ($(stat -c %s "$f") bytes)"; cat "$f"; echo; done || true
+              echo "--- the containers that exist, the processes that stand stopped, and the engine's last lines"
+              docker ps -a --no-trunc || true
+              ps -eo pid,ppid,stat,etime,args | awk 'NR == 1 || $3 ~ /^T/' || true
+              sudo journalctl -u docker --no-pager -n 40 || true
+            fi
+          done
+          echo "each case's seconds, every run:"; grep -hE "^[0-9.]+s (call|setup|teardown) " ../said/*.txt | sort -rn | head -12
+          echo "every turn's numbers:"; cat ../said/*.txt | grep -E "^the watcher, " | sort | uniq -c | sort -rn | head -80
+          ! grep -qE "[0-9]+ (failed|errors?)([ ,]|$)" ../said/*.txt
