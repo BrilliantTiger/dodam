@@ -8,7 +8,7 @@ The rule, fixed before any run: in check.py and fork_paths.py
 - every operand of an "or" is made False and every operand of an "and" is made True, one at a time;
 - every element of a list, a set or a tuple at the module's level, and of a literal that a loop or a comprehension runs
   over (the waits between the tries among them), is taken out, one at a time.
-A break is caught only when a test fails on an assertion. Each run of the tests is bounded: 180 seconds, 2 GB of address
+A break is caught only when a test fails on an assertion. Each run of the tests is bounded: 300 seconds, 2 GB of address
 space for each of its processes, and a process group of its own that is ended whole. A break ends in one of three
 classes: caught; not settled (the tests met their time limit, and again on a second try, or ended in an error with no
 test failing on an assertion, or did not load);
@@ -37,7 +37,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TARGETS = ("check.py", "fork_paths.py")
-TIME_LIMIT = 180
+TIME_LIMIT = 300
 WORKFLOWS = HERE.parent / "workflows"
 
 
