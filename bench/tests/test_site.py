@@ -1377,7 +1377,7 @@ def test_the_guide_for_agents_says_what_the_page_and_the_status_say(tmp_path):
         assert fact in guide, fact
     for change in status["changes"]:
         assert change["title"] in guide and change["url"] in guide
-    for i in range(1, 8):   # the rules are stated in the guide itself, in the page's own words
+    for i in range(1, 9):   # the rules are stated in the guide itself, in the page's own words
         assert en[f"rule{i}_h"] in guide and en[f"rule{i}_p"] in guide, i
     for question, answer in visible_questions("en"):
         assert question in guide and answer in guide
@@ -1665,6 +1665,16 @@ def test_only_a_missing_status_file_counts_as_nothing_published(monkeypatch):
                   urllib.error.URLError("no route"), TimeoutError("timed out"), b"<html>not a status</html>", b'{"version": 1}'):
         with pytest.raises(Exception):
             digest_when(monkeypatch, fault)   # the run fails and nothing is deployed, instead of deploying every hour unseen
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_rules_for_outside_work_say_what_the_check_on_every_commit_holds_it_to(lang):
+    # The automatic check reads every commit: the addresses, the lines about an AI, the work item numbers and the
+    # paths of a computer; on a pull request from a fork that part is not open yet.
+    html = page_path(lang).read_text(encoding="utf-8")
+    rules = html.split('<section id="rules">', 1)[1].split("</section>", 1)[0]
+    assert "no-reply" in rules, lang
+    assert rules.count("<li>") == 8, lang
 
 
 @pytest.mark.parametrize("lang", LANGS)
