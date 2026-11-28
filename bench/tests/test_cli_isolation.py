@@ -2053,7 +2053,11 @@ def stopped_now(when):
         json.dump(held(), f)
 """
     assert tests.count(after) == 1, "the hidden test after the attack no longer writes what it holds as this expects"
-    tests = tests.replace(after, """    with open("/logs/verifier/after.json", "w") as f:
+    tests = tests.replace(after, """    # the second line has its word before the judging can end: the watcher tells it after it continued the judge
+    waited = time.monotonic()
+    while not os.path.exists("/logs/verifier/keep-second") and time.monotonic() < waited + 10:
+        time.sleep(0.01)
+    with open("/logs/verifier/after.json", "w") as f:
         json.dump({**held(), "runner": os.getpid()}, f)
 """)
     import base64
