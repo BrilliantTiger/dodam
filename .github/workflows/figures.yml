@@ -1,0 +1,40 @@
+# The isolation test's figures before a new form of its mark: the kind of runner and, for every run, the kernel's
+# records before the files, with them, after they went by seconds, at the mark and after it; on a side branch only.
+name: figures
+on: push
+permissions:
+  contents: read
+env:
+  WAITS: tests/test_cli_isolation.py::test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in_it
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null) / $(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: 10 runs, with their figures
+        working-directory: bench
+        run: |
+          mkdir -p ../said
+          for r in $(seq 1 10); do python -m pytest -q -p no:cacheprovider -rs --tb=line $WAITS > ../said/$r.txt 2>&1; done
+          echo "summaries:"; cat ../said/*.txt | grep -E "^[0-9]+ (passed|failed|skipped)" | sed 's/ in .*//' | sort | uniq -c
+          echo "what failed said:"; cat ../said/*.txt | grep -E "^E " | cut -c1-300 | sort | uniq -c | head -20
+          for r in $(seq 1 10); do echo "== run $r"; grep -E "^the mark after deleting|^the kernel's records after the files went|^[0-9]+ (passed|failed)" ../said/$r.txt; done

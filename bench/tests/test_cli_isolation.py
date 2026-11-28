@@ -258,10 +258,16 @@ def attempt(name, args, files=None, looked=False):
             if steady >= 25:
                 break
         assert steady >= 25, "the kernel's memory of the case before did not settle"
+        stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat").read().splitlines() if line.strip())
+        slab_empty = int(stat.get("slab_reclaimable", 0)) + int(stat.get("slab_unreclaimable", 0))
     with case(files=files) as c:
         mark = {}
         if looked:
             reading_of, state = c._container, {}
+
+            def slabs():
+                stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat").read().splitlines() if line.strip())
+                return int(stat.get("slab_reclaimable", 0)) + int(stat.get("slab_unreclaimable", 0))
 
             def marked():
                 gone = os.path.exists(c.work / "files-gone")
@@ -269,9 +275,24 @@ def attempt(name, args, files=None, looked=False):
                 if figure.get("late"):
                     return figure
                 kernel = dodam_cli._judge.kernel_part() + figure["records"]
-                if mark:
+                # the figures of the kernel's records alone, over time after the files went (figures only)
+                slab = slabs()
+                if "slab_before" not in state:
+                    state["slab_before"] = slab
+                if gone:
+                    state.setdefault("gone_at", time.monotonic())
+                    since = time.monotonic() - state["gone_at"]
+                    series = state.setdefault("series", {})
+                    for point in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0):
+                        if since >= point and point not in series:
+                            series[point] = slab
+                    state["slab_lowest"] = min(state.get("slab_lowest", slab), slab)
+                    mark["series"], mark["slab_lowest"] = dict(series), state["slab_lowest"]
+                    mark["slab_before"], mark["slab_empty"] = state["slab_before"], slab_empty
+                if mark.get("at") is not None:
                     # what the kernel still lets go of after the mark, while the program takes its memory
                     mark["lowest_after"] = min(mark["lowest_after"], kernel)
+                    mark["slab_lowest_after"] = min(mark.get("slab_lowest_after", slab), slab)
                 elif "before" not in state:
                     # the first reading in time, before the program started: the files all stand
                     state["before"] = kernel
@@ -284,7 +305,8 @@ def attempt(name, args, files=None, looked=False):
                     fell = state["before"] - kernel >= max(8 * 2**20, state["before"] - empty - 3 * 2**20)
                     if fell and state["steady"] >= STEADY:
                         mark.update(readings=state["readings"], at=kernel, lowest_after=kernel, empty=empty,
-                                    before=state["before"])
+                                    before=state["before"], seconds=time.monotonic() - state["gone_at"],
+                                    slab_at=slab, slab_lowest_after=slab)
                         c.write("looked-after-gone", "")
                 return figure
             c._container = marked
@@ -3357,8 +3379,7 @@ elif what.startswith("deletes the test's files"):
             time.sleep(0.001)
         else:
             sys.exit("no mark after deleting the test's files")
-    # more than the mark leaves the kernel to let go of afterwards (3 MB) when it waits; 2 MB when it does not
-    block = bytearray(b"x") * ((limit_mb + (8 if "waits" in what else 2)) * MB)
+    block = bytearray(b"x") * ((limit_mb + 2) * MB)
 touch(block)
 held_until_read()
 print("done")
@@ -3428,9 +3449,16 @@ def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in
     within_the_bound(seen["kept"], limit_mb, f"folders kept from an earlier run, limit {limit_mb} MB")
     within_the_bound(seen["given at once"], limit_mb, f"the test's own files deleted while memory is taken, limit {limit_mb} MB")
     mark = seen["given"]["mark"]
-    assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
+    assert mark.get("at") is not None, f"the run that deleted the test's own files was given no mark: {seen['given']}"
+    MiB = 2**20
     note_figures(f"the mark after deleting the test's files, limit {limit_mb} MB", readings=mark["readings"],
-                 above_empty=(mark["at"] - mark["empty"]) / 2**20, fell_after=(mark["at"] - mark["lowest_after"]) / 2**20)
+                 seconds=mark["seconds"], above_empty=(mark["at"] - mark["empty"]) / MiB,
+                 fell_after=(mark["at"] - mark["lowest_after"]) / MiB,
+                 slab_empty=mark["slab_empty"] / MiB, slab_with_files=mark["slab_before"] / MiB,
+                 slab_at_mark=mark["slab_at"] / MiB, slab_lowest_after=mark["slab_lowest_after"] / MiB,
+                 counted=seen["given"]["measured"].get("memory_highest", 0) / MiB)
+    note_figures(f"the kernel's records after the files went, limit {limit_mb} MB, by seconds",
+                 **{f"s{point}": value / MiB for point, value in sorted(mark["series"].items(), key=lambda kv: float(kv[0]))})
     for name, what in (("removed", "that removed what an earlier run left"), ("given", "that deleted the test's own files")):
         assert seen[name]["limit"] == "memory", f"a run {what} held more than its limit and was to fail for memory: {seen[name]}"
         note_figures(f"a run {what}, limit {limit_mb} MB", counted=seen[name]["measured"].get("memory_highest", 0) / 2**20)
