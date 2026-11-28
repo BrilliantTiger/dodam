@@ -34,11 +34,11 @@ class Parser(argparse.ArgumentParser):
 def listing(path, ref):
     """The names in a folder at a commit, as the desk's tool wants them."""
     data = check.api_get("folder", f"contents/{path}?ref={ref}", None)
-    if not isinstance(data, list):
+    if data is None:
         return None
     if len(data) >= pr_files.MAX_GITHUB_DIRECTORY_ENTRIES:
-        return [entry.get("name") for entry in data if isinstance(entry, dict)]
-    return [entry.get("name") for entry in data if isinstance(entry, dict) and entry.get("type") == "dir"]
+        return [entry["name"] for entry in data]  # every entry is an object with a name and a type: the table's row
+    return [entry["name"] for entry in data if entry["type"] == "dir"]
 
 
 def main(argv=None):
@@ -83,7 +83,7 @@ def judge(number, base):
         if len(files) < PAGE:
             break
     tests = check.api_get("folder", "contents/bench/tests?ref=main", None)
-    main_tests = [entry.get("name") for entry in tests if isinstance(entry, dict)] if isinstance(tests, list) else None
+    main_tests = [entry["name"] for entry in tests] if tests is not None else None
     base_ref = pull.get("base", {}).get("ref") if isinstance(pull.get("base"), dict) else None
     return pr_files.classify_pr_files(entries, changed_files=pull.get("changed_files"), draft=pull.get("draft"),
                                       base_ref=base_ref, task_folders=listing("bench/tasks", base),

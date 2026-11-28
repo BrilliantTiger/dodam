@@ -266,30 +266,21 @@ class Checker:
     def path(self, who, number, path):
         self.place(who, path, f"path {number}")
 
-    def patch(self, who, patch):
-        """The lines a difference of one side adds, each by the number of its file in the difference."""
-        for section, number, content in added_lines(patch):
-            self.added_line(who, section, number, content)
 
-
-def added_lines(patch):
-    """Reads an ordinary difference by its structure: a file's header only outside a hunk, a hunk by the lengths its
-    own header gives (its unchanged lines counted, its removed lines passed over). Gives each added line with the number of its file's section and its line number in
-    the result."""
-    lines = patch.split("\n")
+def added_lines(section):
+    """Reads one section of an ordinary difference by its structure: its header only outside a hunk, a hunk by the
+    lengths its own header gives (its unchanged lines counted, its removed lines passed over). Gives each added line
+    with its line number in the result."""
+    lines = section.split("\n")
     index = 0
-    section = 0
     while index < len(lines):
         line = lines[index]
         index += 1
-        if line.startswith("diff --git "):
-            section += 1
-            continue
         hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
         if not hunk and line.startswith("@@"):
             raise Problem("a difference cannot be read")
         if not hunk:
-            continue  # a header line of the file, or a removed line after a hunk's last line of the result
+            continue  # a header line, or a removed line after a hunk's last line of the result
         number = int(hunk.group(1))
         new_left = int(hunk.group(2)) if hunk.group(2) is not None else 1
         while new_left > 0:
@@ -299,13 +290,13 @@ def added_lines(patch):
             index += 1
             if body.startswith("\\"):
                 continue  # "\ No newline at end of file"
-            if body[:1] not in ("+", "-", " ") or body == "":
+            if body[:1] not in ("+", "-", " "):
                 raise Problem("a difference cannot be read")
             if body[:1] == "-":
                 continue  # a removed line
             new_left -= 1
             if body[:1] == "+":
-                yield section, number, body[1:]
+                yield number, body[1:]
             number += 1
 
 
@@ -323,9 +314,9 @@ def git_bytes(repo, *args):
 
 def entries_of(listing):
     """The entries of --name-status -z of one side: (status, paths), the paths as bytes."""
-    fields = listing.split(b"\0")
-    if fields and fields[-1] == b"":
-        fields.pop()
+    if listing and not listing.endswith(b"\0"):
+        raise Problem("a list of paths cannot be read")
+    fields = listing.split(b"\0")[:-1]
     entries = []
     index = 0
     while index < len(fields):
@@ -375,7 +366,7 @@ def lines_against(repo, base, sha):
             pairs.append((section, paths[-1]))
     added = {}
     for section, path in pairs:
-        for _, number, content in added_lines(section.decode("utf-8", "replace")):
+        for number, content in added_lines(section.decode("utf-8", "replace")):
             added[(path, number)] = content
     return added
 
@@ -387,10 +378,9 @@ def check_lines(checker, who, repo, bases, sha, numbering):
     for base in bases:
         added = lines_against(repo, base, sha)
         own = added if own is None else {key: content for key, content in own.items() if added.get(key) == content}
+    # A line added against every base stands in a path that differs from every base, so in the commit's own list.
     numbers = {path: number for number, path in enumerate(numbering, 1)}
-    for (path, number), content in sorted(own.items(), key=lambda item: (numbers.get(item[0][0], 0), item[0][1])):
-        if path not in numbers:
-            raise Problem("a difference cannot be read")
+    for (path, number), content in sorted(own.items(), key=lambda item: (numbers[item[0][0]], item[0][1])):
         checker.added_line(who, numbers[path], number, content)
 
 
@@ -571,7 +561,7 @@ def is_text(value):
 
 
 def is_number(value):
-    return isinstance(value, int) and not isinstance(value, bool)
+    return type(value) is int
 
 
 # The questions the check asks GitHub, and what an answer to each must be: JSON of the type the question expects,
@@ -611,7 +601,7 @@ def nothing_there(error):
     """A 404 with a JSON content type and a body that is an object with a text message: GitHub's word that what was
     asked is not there. Nothing else is."""
     try:
-        if error.code != 404 or "json" not in (error.headers.get("Content-Type") or "") \
+        if error.code != 404 or "json" not in error.headers.get("Content-Type", "") \
                 or error.headers.get("Retry-After") is not None or error.headers.get("X-RateLimit-Remaining") == "0":
             return False
         body = json.loads(error.read().decode("utf-8"))
@@ -640,17 +630,17 @@ def api_get(question, path, subject, outside_repository=False):
     if API_SPENT["deadline"] is None:
         API_SPENT["deadline"] = time.monotonic() + API_BUDGET
     for wait in API_WAITS + (None,):
-        data, read = None, False
+        data = None  # no table's row takes None
         try:
             with OPENER.open(request, timeout=min(API_TRY, API_SPENT["deadline"] - time.monotonic())) as answer:
-                if answer.status == 200 and "json" in (answer.headers.get("Content-Type") or ""):
-                    data, read = json.load(answer), True
+                if answer.status == 200 and "json" in answer.headers.get("Content-Type", ""):
+                    data = json.load(answer)
         except urllib.error.HTTPError as error:
             if nothing_there(error):
                 return None
         except Exception:
             pass  # no answer: a time-out, a failed connection, a body that is no JSON
-        if read and ANSWERS[question](data, subject):  # judged outside: the judge's own faults are not "no answer"
+        if ANSWERS[question](data, subject):  # judged outside: the judge's own faults are not "no answer"
             return data
         if wait is None or wait >= API_SPENT["deadline"] - time.monotonic():
             break
@@ -924,6 +914,10 @@ def kind(code):
     return WORD if re.match(r"\w", ch) else OTHER
 
 
+CLASS_KINDS = {(parser.CATEGORY, parser.CATEGORY_SPACE): SPACE,  # in a copy every white space is the space
+               (parser.CATEGORY, parser.CATEGORY_DIGIT): WORD}
+
+
 def set_kinds(members):
     """A positive set or range of characters written out, which may also hold \\s and \\d: the kinds of its members."""
     kinds = set()
@@ -932,10 +926,8 @@ def set_kinds(members):
             kinds.add(kind(value))
         elif op == parser.RANGE:
             kinds.update(kind(code) for code in range(value[0], value[1] + 1))
-        elif op == parser.CATEGORY and value == parser.CATEGORY_SPACE:
-            kinds.add(SPACE)  # in a copy every white space is the space
-        elif op == parser.CATEGORY and value == parser.CATEGORY_DIGIT:
-            kinds.add(WORD)
+        elif (op, value) in CLASS_KINDS:
+            kinds.add(CLASS_KINDS[(op, value)])
         else:
             raise Unmet()  # a negated set, or another class
     return kinds
@@ -1035,7 +1027,8 @@ def secret_meets_the_copy(parsed):
     also takes characters out there and joins white space, and a boundary at the secret's edge may then differ."""
     if parsed.state.flags & (re.ASCII | re.LOCALE):
         raise Unmet()
-    if not all(stands(way) for way in secret_ways(parsed)):
+    ways = secret_ways(parsed)
+    if not ways or not all(stands(way) for way in ways):
         raise Unmet()
 
 
