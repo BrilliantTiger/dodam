@@ -1,0 +1,37 @@
+# The cases of the second addendum to the ruling on pull request 44, at d8a6b24: rows 12 and 13 written before the
+# mend (both pass here: the record of the finding), beside the eleven before them, each with words only its own
+# assertion prints, and the line that matched printed; on a side branch only.
+name: cases
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: d8a6b243d26f3b31b61c2a235f541142915f30df
+  CASES_AT: d8a6b24
+jobs:
+  cases:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: trials
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: the kind of runner
+        run: |
+          echo "kernel: $(uname -r)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - name: the thirteen cases
+        run: python trials/cases-44.py bench
