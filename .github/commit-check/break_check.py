@@ -257,6 +257,7 @@ def run_tests(folder, limit, failfast=True):
     """Runs the check's tests in a copy; returns (class, number of tests run, names that failed)."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("GITHUB_", "COMMIT_CHECK_", "FORK_"))}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["MALLOC_ARENA_MAX"] = "2"  # threads of the tests' made-up GitHub would each reserve an arena of address space
     # Each run of the tests is a process group of its own, bounded in memory, and ended whole at its time limit, so
     # that a break that loops or grows takes down neither the runner nor the processes it started after it.
     process = subprocess.Popen([sys.executable, "-I", "-m", "unittest", "discover", *(["-f"] if failfast else []),
