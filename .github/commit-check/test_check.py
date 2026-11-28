@@ -2226,6 +2226,7 @@ class ReaderTest(RepoTestCase):
         for call in (lambda: check.git_bytes(str(self.repo.root), "cat-file", "-p", "0" * 40),
                      lambda: check.empty_tree(str(self.dir / "nowhere")),
                      lambda: check.entries_of(b"M\0a"), lambda: check.entries_of(b"R100\0a\0"),
+                     lambda: check.entries_of(b"M\0a\0x"),
                      lambda: check.entries_of(b"\0a\0"), lambda: check.sections_of(b"not a patch\n")):
             with self.subTest(call=call):
                 self.assertIsInstance(raised(call), check.Problem)
@@ -2233,12 +2234,14 @@ class ReaderTest(RepoTestCase):
         self.assertEqual(check.entries_of(b"R100\0a\0b\0M\0c\0"), [("R100", [b"a", b"b"]), ("M", [b"c"])])
 
     def test_a_renamed_file_is_read_as_renamed_not_as_added(self):
+        self.repo.git("config", "diff.renames", "false")  # a repository's own setting does not decide it
         self.repo.commit("Before", files={"old.txt": f"{TRACKER_CODE}\n"})
         start = self.repo.head()
         self.repo.git("mv", "old.txt", "new.txt")
         sha = self.repo.commit("Rename", files={})
         code, out = self.run_check(start)
         self.assertNotIn(f"commit {sha[:12]}: tracker code (file", out)  # its lines stood before the range
+        self.assertEqual(code, 0, out)
 
     def test_a_commit_without_a_parent_is_read_against_the_empty_tree(self):
         check = self.check
