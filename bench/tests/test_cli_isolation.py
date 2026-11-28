@@ -275,6 +275,8 @@ def attempt(name, args, files=None, looked=False):
                 elif gone and not figure.get("late"):
                     state.setdefault("gone_at", time.monotonic())
                     state["readings"] = state.get("readings", 0) + 1
+                    # kept also when no mark comes, so that a run without one shows what it saw
+                    state["last"], state["lowest"] = slab, min(state.get("lowest", slab), slab)
                     since, series = time.monotonic() - state["gone_at"], state.setdefault("series", {})
                     for point in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0):
                         if since >= point and point not in series:
@@ -291,7 +293,9 @@ def attempt(name, args, files=None, looked=False):
         after_the_run()
         seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
         seen[name] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
-                      "start": start, "held": while_held, "measured": c.measured, "mark": mark}
+                      "start": start, "held": while_held, "measured": c.measured, "mark": mark,
+                      "watched": {k: v for k, v in (state.items() if looked else ()) if k != "series"} | (
+                          {"empty": empty, "series": state.get("series", {})} if looked else {})}
         with open("/logs/verifier/attack.json", "w") as f:
             json.dump(seen, f)
         return r
@@ -3434,9 +3438,17 @@ def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in
     within_the_bound(seen["kept"], limit_mb, f"folders kept from an earlier run, limit {limit_mb} MB")
     within_the_bound(seen["given at once"], limit_mb, f"the test's own files deleted while memory is taken, limit {limit_mb} MB")
     mark = seen["given"]["mark"]
-    assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
     MiB = 2**20
     note_figures(f"the runner: {runner_kind()}", cores=os.cpu_count() or 0)
+    if not mark:
+        watched = seen["given"].get("watched", {})
+        note_figures(f"no mark after deleting the test's files, limit {limit_mb} MB",
+                     readings=watched.get("readings", 0), records_before_the_files=watched.get("empty", 0) / MiB,
+                     records_with_the_files=watched.get("before", 0) / MiB, last=watched.get("last", 0) / MiB,
+                     lowest=watched.get("lowest", 0) / MiB)
+        note_figures(f"the kernel's records after the files went, no mark, limit {limit_mb} MB, by seconds",
+                     **{f"s{point}": value / MiB for point, value in sorted(watched.get("series", {}).items(), key=lambda kv: float(kv[0]))})
+    assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
     note_figures(f"the mark after deleting the test's files, limit {limit_mb} MB", readings=mark["readings"],
                  seconds=mark["seconds"], records_before_the_files=mark["empty"] / MiB,
                  records_with_the_files=mark["before"] / MiB, records_at_the_mark=mark["at"] / MiB,
