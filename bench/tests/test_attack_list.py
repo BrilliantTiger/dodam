@@ -179,26 +179,42 @@ def test_a_second_line_whose_variant_leaves_some_tests_unlisted_does_not_hold():
 
 
 def test_the_documents_say_the_kernel_ending_the_judge_is_not_mended_while_the_test_keeps_the_judge_out_of_the_way():
-    """The two tests in which the kernel ends a process, the case runner in one and the program in the other, hold
-    the judge still while the container's memory runs out, because the kernel can end the judge at that moment, which
-    is not mended. Both documents say so for as long as either test holds the judge still, and only then: whoever
-    mends the fault takes the holding out of both tests, and whoever calls it mended without that fails here. The
-    lock reads the tests' text, as the rest of this file does."""
+    """Both tests in which the kernel ends a process, the case runner in one and the program in the other, and both
+    documents at once: each test keeps the judge out of that moment, by a call whose result it uses, through a helper
+    program that stops the judge by a call; and each document says, outside its comments, that the kernel can end the
+    judge and that this is not mended. Whoever mends the fault changes this test in the same change."""
     import ast
+    import re
+    import textwrap
     isolation = (BENCH / "tests" / "test_cli_isolation.py").read_text(encoding="utf-8")
-    functions = {node.name: ast.get_source_segment(isolation, node) for node in ast.parse(isolation).body
-                 if isinstance(node, ast.FunctionDef)}
-    # each of the two tests in which the kernel ends a process keeps the judge out of that moment
-    runner_held = "JUDGE_HELD_STILL.replace(" in functions.get(
-        "test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running", "")
-    program_held = "judge_kept_aside(" in functions.get(
-        "test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged", "")
-    stops = "os.kill(judge, signal.SIGSTOP)" in isolation and "libc.kill(judge, signal.SIGSTOP)" in isolation
-    english = (DOCS / "command-line-tasks.en.md").read_text(encoding="utf-8")
-    korean = (DOCS / "command-line-tasks.ko.md").read_text(encoding="utf-8")
+    tree = ast.parse(isolation)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    texts = {target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign)
+             for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)
+             and isinstance(node.value.value, str)}
+
+    def used_call(function, name):
+        # a call of `name` (a function, or a method of a text) whose result is used: not a statement of its own
+        node = functions.get(function)
+        if node is None:
+            return False
+        parents = {child: parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+        return any(isinstance(call, ast.Call) and ast.unparse(call.func) == name and not isinstance(parents.get(call), ast.Expr)
+                   for call in ast.walk(node))
+
+    def stops_the_judge(text, call):
+        program = ast.parse(textwrap.dedent(text))
+        return any(isinstance(node, ast.Call) and ast.unparse(node.func) == call and len(node.args) == 2
+                   and ast.unparse(node.args[1]) == "signal.SIGSTOP" for node in ast.walk(program))
+
+    runner_held = used_call("test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running", "JUDGE_HELD_STILL.replace")
+    program_held = used_call("test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged", "judge_kept_aside")
+    stops = (stops_the_judge(texts.get("JUDGE_HELD_STILL", ""), "os.kill"),
+             stops_the_judge(texts.get("KEEP_ASIDE", ""), "libc.kill"))
+
+    def outside_comments(path):
+        return re.sub(r"<!--.*?-->", "", path.read_text(encoding="utf-8"), flags=re.S)
+    english, korean = outside_comments(DOCS / "command-line-tasks.en.md"), outside_comments(DOCS / "command-line-tasks.ko.md")
     said = ("**The kernel can end the judge.**" in english and "This change does not mend it." in english,
             "**커널이 판정기를 끝낼 수 있다.**" in korean and "이 변경은 그것을 고치지 않는다." in korean)
-    # the sentences stay while either test keeps the judge aside, and both tests keep it aside while the fault is not
-    # mended: taking the holding out of either test, or the sentence out of either document, fails here
-    assert (runner_held, program_held, stops, *said) == (True, True, True, True, True), (runner_held, program_held,
-                                                                                       stops, said)
+    assert (runner_held, program_held, *stops, *said) == (True,) * 6, (runner_held, program_held, stops, said)
