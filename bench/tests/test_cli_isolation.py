@@ -1907,8 +1907,8 @@ record.update(cmdline=cmdline, state_before=state_before)
 told_r, told_w = os.pipe()
 second = subprocess.Popen(["/bin/sh", "-c", (
     "echo ready > /logs/verifier/keep-second-ready; read said; "
-    "if [ \"$said\" = continued ]; then echo 'the watcher continued the judge' > /logs/verifier/keep-second; "
-    f"else kill -CONT {judge}; echo 'the second line continued the judge' > /logs/verifier/keep-second; fi")],
+    "if [ \"$said\" = continued ]; then { sleep SECOND_LINE_HELD; echo 'the watcher continued the judge'; } > /logs/verifier/keep-second; "
+    f"else kill -CONT {judge}; {{ sleep SECOND_LINE_HELD; echo 'the second line continued the judge'; }} > /logs/verifier/keep-second; fi")],
     stdin=told_r, pass_fds=(), close_fds=True)
 os.close(told_r)
 for _ in range(400):
@@ -2008,7 +2008,7 @@ os._exit(0)
 KEPT_ASIDE_SECONDS = 90
 
 
-def judge_kept_aside(tests: str) -> tuple[str, str]:
+def judge_kept_aside(tests: str, second_line_held: float = 0.0) -> tuple[str, str]:
     """The hidden tests with the judge kept aside while the attack runs, and the command, run as root before the
     judge, that starts the watcher in the background."""
     reading = """
@@ -2071,7 +2071,8 @@ def stopped_now(when):
         json.dump({**held(), "runner": os.getpid()}, f)
 """)
     import base64
-    code = base64.b64encode(KEEP_ASIDE.encode()).decode()
+    # a second line held up between making the file of its word and writing the word in it, by `second_line_held`
+    code = base64.b64encode(KEEP_ASIDE.replace("SECOND_LINE_HELD", repr(second_line_held)).encode()).decode()
     before = ("( /opt/judge/bin/python -c "
               '"import base64; exec(base64.b64decode(' + "'" + code + "'" + '))"'
               " < /dev/null > /dev/null 2>&1 & )")
@@ -2097,6 +2098,59 @@ def test_the_watcher_stops_one_process_greater_than_one_and_continues_it_once():
     assert guards, "the watcher stops a process without holding its id greater than 1"
 
 
+def kept_aside_turn(where, body, tests, before, measuring, turn):
+    """One turn of a program the kernel ends, with the judge kept aside: the judging and everything the test asserts of it."""
+    result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": tests},
+                          room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1],
+                                "before": before, "seconds": KEPT_ASIDE_SECONDS},
+                          CASE_MEMORY_MB="100000", CASE_TIMEOUT_SEC="15")
+    assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
+    assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
+    out = where / "out"
+
+    def record(name):
+        return found_by(out, name) if (out / name).is_file() else {}
+    # the watcher's record, written whole before it let the judge go
+    assert (out / "held.json").is_file(), "the watcher left none"
+    kept = record("held.json")
+    assert kept.get("order") == "written, then continued", kept
+    assert "dodam_judge" in kept.get("cmdline", ""), kept
+    # the judge stood neither stopped nor gone when the watcher came to stop it
+    assert kept.get("state_before") not in (None, "T", "t", "gone"), kept
+    # the second line stood ready before the stop, and the watcher, not it, let the judge go
+    second = (out / "keep-second").read_text().strip() if (out / "keep-second").is_file() else None
+    assert kept.get("second_line") == "ready" and second == "the watcher continued the judge", (kept, second)
+    # by the hidden test's own reading of the kernel, right before the program was started: the judge stood
+    # stopped, and no other process of the container did
+    begun = record("stopped-before-the-run.json")
+    assert begun.get("judge") is not None and begun.get("stopped") == [begun["judge"]], begun
+    # at every look of the watcher through the hold, 5 ms apart, the judge stood stopped and the case runner did
+    # not; and at its last look, before it let the judge go, nothing else of the container stood stopped
+    assert kept.get("judge_ran") == 0 and kept.get("runner_stopped") == 0, kept
+    assert kept.get("last_look") == [begun["judge"]], kept
+    attack = record("attack.json")
+    if attack:
+        assert attack["after"]["kernel_kills"] > attack["before"]["kernel_kills"], "the kernel was to end the program here"
+        assert attack["limit"] == "memory" and attack["exit_code"] is None, attack
+        # and right after the program's run returned, before the hidden test let the watcher know
+        returned = record("stopped-after-the-run.json")
+        assert returned.get("stopped") == [begun["judge"]], returned
+    else:
+        # what the kernel ends is its choice: here it was the case runner, before the test could hand anything back
+        ends = result["report"]["runner_ended"]
+        assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], lost(result, where / "out")
+    # every turn: the case after ran in another process than the case of the attack
+    after = record("after.json")
+    assert after.get("runner") is not None and after["runner"] != begun.get("runner"), (after, begun)
+    note_figures(f"the watcher, {measuring}, turn {turn} (seconds, not MB)",
+                 waited_for_the_ask=kept.get("waited_for_the_ask", -1), seen_stopped=kept.get("seen_stopped", -1),
+                 held_for=kept.get("held_for", -1), memory_back=kept.get("memory_back", -1),
+                 program_run=attack["seconds"] if attack else -1)
+    if not attack:
+        note_figures(f"the watcher, {measuring}, turn {turn}: the kernel ended the case runner (no program run)")
+    assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
+
+
 @pytest.mark.parametrize("measuring, turns", [("switched off", 5), ("every 0.002 seconds", 3)])
 def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_path, measuring, turns):
     """Really out of memory, several times over: the container is full and the kernel ends a process.
@@ -2107,55 +2161,17 @@ def test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged(tmp_
         where = tmp_path / str(turn)
         where.mkdir()
         tests, before = judge_kept_aside(LIMIT_TESTS)
-        result = judge_attack(where, PLAIN + body, {"functional/test_limits.py": tests},
-                              room={"memory_mb": 640, "changed": NO_STOPS if measuring == "switched off" else NO_STOPS[:1],
-                                    "before": before, "seconds": KEPT_ASIDE_SECONDS},
-                              CASE_MEMORY_MB="100000", CASE_TIMEOUT_SEC="15")
-        assert result["exit_code"] == 0 and result["reward"] is not None, lost(result, where / "out")
-        assert outcomes(result) == {"test_before": "passed", "test_the_attack": "failed", "test_after": "passed"}, lost(result, where / "out")
-        out = where / "out"
+        kept_aside_turn(where, body, tests, before, measuring, turn)
 
-        def record(name):
-            return found_by(out, name) if (out / name).is_file() else {}
-        # the watcher's record, written whole before it let the judge go
-        assert (out / "held.json").is_file(), "the watcher left none"
-        kept = record("held.json")
-        assert kept.get("order") == "written, then continued", kept
-        assert "dodam_judge" in kept.get("cmdline", ""), kept
-        # the judge stood neither stopped nor gone when the watcher came to stop it
-        assert kept.get("state_before") not in (None, "T", "t", "gone"), kept
-        # the second line stood ready before the stop, and the watcher, not it, let the judge go
-        second = (out / "keep-second").read_text().strip() if (out / "keep-second").is_file() else None
-        assert kept.get("second_line") == "ready" and second == "the watcher continued the judge", (kept, second)
-        # by the hidden test's own reading of the kernel, right before the program was started: the judge stood
-        # stopped, and no other process of the container did
-        begun = record("stopped-before-the-run.json")
-        assert begun.get("judge") is not None and begun.get("stopped") == [begun["judge"]], begun
-        # at every look of the watcher through the hold, 5 ms apart, the judge stood stopped and the case runner did
-        # not; and at its last look, before it let the judge go, nothing else of the container stood stopped
-        assert kept.get("judge_ran") == 0 and kept.get("runner_stopped") == 0, kept
-        assert kept.get("last_look") == [begun["judge"]], kept
-        attack = record("attack.json")
-        if attack:
-            assert attack["after"]["kernel_kills"] > attack["before"]["kernel_kills"], "the kernel was to end the program here"
-            assert attack["limit"] == "memory" and attack["exit_code"] is None, attack
-            # and right after the program's run returned, before the hidden test let the watcher know
-            returned = record("stopped-after-the-run.json")
-            assert returned.get("stopped") == [begun["judge"]], returned
-        else:
-            # what the kernel ends is its choice: here it was the case runner, before the test could hand anything back
-            ends = result["report"]["runner_ended"]
-            assert ends and ends[0]["kernel_kills_after"] > ends[0]["kernel_kills_before"], lost(result, where / "out")
-        # every turn: the case after ran in another process than the case of the attack
-        after = record("after.json")
-        assert after.get("runner") is not None and after["runner"] != begun.get("runner"), (after, begun)
-        note_figures(f"the watcher, {measuring}, turn {turn} (seconds, not MB)",
-                     waited_for_the_ask=kept.get("waited_for_the_ask", -1), seen_stopped=kept.get("seen_stopped", -1),
-                     held_for=kept.get("held_for", -1), memory_back=kept.get("memory_back", -1),
-                     program_run=attack["seconds"] if attack else -1)
-        if not attack:
-            note_figures(f"the watcher, {measuring}, turn {turn}: the kernel ended the case runner (no program run)")
-        assert "memory" in message(result, "test_the_attack"), lost(result, where / "out")
+
+def test_a_second_line_held_up_between_its_file_and_its_word_fails_nothing(tmp_path):
+    """The second line's word is read by the case after the attack and by this test: held up for 2 s between making
+    the file of its word and writing the word in it, it lets no reader see the file half written."""
+    limit, body = BREAKS["memory"]
+    where = tmp_path / "held"
+    where.mkdir()
+    tests, before = judge_kept_aside(LIMIT_TESTS, second_line_held=2.0)
+    kept_aside_turn(where, body, tests, before, "switched off", 0)
 
 
 # The judge out of the way while the hidden test takes the container's memory: the kernel can end the judge
