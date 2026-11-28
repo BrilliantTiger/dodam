@@ -1,0 +1,35 @@
+# Trial (c) of the kernel-ends tests on fb3a624, by the rule written before it: protections six times at once; on a side branch only.
+name: trials
+on: push
+permissions:
+  contents: read
+env:
+  MENDED: fb3a62466f9e6fd627657eb66320b3f879efba6b
+  BOTH: >-
+    tests/test_cli_isolation.py::test_a_program_the_kernel_ends_fails_its_case_and_the_others_are_judged
+    tests/test_cli_isolation.py::test_a_case_runner_the_kernel_ends_costs_only_the_case_that_was_running
+jobs:
+  # (c) the job that ran this test when it failed falsely, protections, six times, three at a time
+  protections:
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.MENDED }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - working-directory: bench
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r images/judge/requirements.txt
+      - working-directory: bench/images
+        run: docker build --quiet -f python/Dockerfile -t dodam-bench/python:dev .
+      - working-directory: bench
+        run: python experiments/check_protections.py
