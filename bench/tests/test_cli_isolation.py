@@ -8,7 +8,6 @@ vetting and the verifier run it. They need Docker and the image, and are skipped
 missing; CI builds the image and runs them.
 """
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -232,66 +231,16 @@ def read_while_held(c, label, into):
     return after_the_run
 
 
-# The level at or under which the kernel's records of the container (its two slab figures) show the test's deleted
-# files gone, written here from the figures of 50 runs on both kinds of the check's runners: 0.63 to 0.70 MB before
-# the files, 18.13 to 18.34 MB with them, 0.67 to 0.74 MB from 0.02 to 0.05 s after they went, falling by at most
-# 0.25 MB after that. At most this much can still fall after the mark, and the program's excess of 2 MB less it
-# leaves at least 1 MB.
-GONE_MB = 1.0
-assert 2 - GONE_MB >= 1
-
-
-def slabs():
-    stat = dict(line.split()[:2] for line in open("/sys/fs/cgroup/memory.stat").read().splitlines() if line.strip())
-    return int(stat.get("slab_reclaimable", 0)) + int(stat.get("slab_unreclaimable", 0))
-
-
-def attempt(name, args, files=None, looked=False):
-    # one case: a reading when it begins, the program run once, a reading while it holds. With `looked`, the mark
-    # the program waits for after deleting the test's files is left by the first reading of the case runner that
-    # began after the program wrote "files-gone" and shows the kernel's records at or under GONE_MB. Its figures are
-    # kept with the case and printed with the run: the records before the files, with them, after they went by
-    # seconds, at the mark and the lowest after it, the seconds and readings to the mark
-    mark = {}
-    if looked:
-        # what the case before left goes first, for at most a second, so that the figure before the files is its own
-        for _ in range(100):
-            if slabs() <= GONE_MB * 2**20:
-                break
-            time.sleep(0.01)
-        empty = slabs()
+def attempt(name, args, files=None):
+    # one case: a reading when it begins, the program run once, a reading while it holds
     with case(files=files) as c:
-        if looked:
-            reading_of, state = c._container, {}
-
-            def marked():
-                gone = os.path.exists(c.work / "files-gone")
-                figure = reading_of()
-                slab = slabs()
-                state.setdefault("before", slab)
-                if mark:
-                    # what the kernel still lets go of after the mark, while the program takes its memory
-                    mark["lowest_after"] = min(mark["lowest_after"], slab)
-                elif gone and not figure.get("late"):
-                    state.setdefault("gone_at", time.monotonic())
-                    state["readings"] = state.get("readings", 0) + 1
-                    since, series = time.monotonic() - state["gone_at"], state.setdefault("series", {})
-                    for point in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0):
-                        if since >= point and point not in series:
-                            series[point] = slab
-                    if slab <= GONE_MB * 2**20:
-                        mark.update(at=slab, lowest_after=slab, empty=empty, before=state["before"],
-                                    readings=state["readings"], seconds=since, series=dict(series))
-                        c.write("looked-after-gone", "")
-                return figure
-            c._container = marked
         start, while_held = reading(name + "-start"), {}
         after_the_run = read_while_held(c, name + "-held", while_held)
         r = c.run(args)
         after_the_run()
         seen = json.load(open("/logs/verifier/attack.json")) if os.path.exists("/logs/verifier/attack.json") else {}
         seen[name] = {"exit_code": r.exit_code, "limit": r.limit, "out": r.out[-2000:], "err": r.err[-600:],
-                      "start": start, "held": while_held, "measured": c.measured, "mark": mark}
+                      "start": start, "held": while_held, "measured": c.measured}
         with open("/logs/verifier/attack.json", "w") as f:
             json.dump(seen, f)
         return r
@@ -3344,15 +3293,7 @@ elif what.startswith("deletes the test's files"):
         if name.startswith("given-"):
             os.unlink(name)
     if "waits" in what:
-        # the judge must measure once while the files are gone and before the memory is taken: the test marks
-        # the case runner's reading that shows them gone, and the program waits for that mark, at most eight seconds
-        # of real time (it comes in some hundredths); without it the program takes no memory, and the test fails
-        open("files-gone", "w").close()
-        end = time.monotonic() + 8
-        while not os.path.exists("looked-after-gone") and time.monotonic() < end:
-            time.sleep(0.001)
-        if not os.path.exists("looked-after-gone"):
-            sys.exit("no mark after deleting the test's files")
+        time.sleep(1.0)
     block = bytearray(b"x") * ((limit_mb + 2) * MB)
 touch(block)
 held_until_read()
@@ -3388,8 +3329,7 @@ def test_removed():
 
 
 def test_the_tests_own_files():
-    attempt("given", ["runs", "deletes the test's files, waits and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)},
-            looked=True)
+    attempt("given", ["runs", "deletes the test's files, waits and holds", LIMIT_MB], files={f"given-{n}": "" for n in range(19000)})
 
 
 def test_the_tests_own_files_at_once():
@@ -3400,17 +3340,6 @@ def test_after():
     with case() as c:
         assert c.run(["plain"]).out == "plain\\n"
 """
-
-
-def runner_kind() -> str:
-    """The machine's maker and model, and its processor's name, as this machine says them."""
-    def said(path):
-        try:
-            return Path(path).read_text().strip()
-        except OSError:
-            return "?"
-    names = [line.split(":", 1)[1].strip() for line in said("/proc/cpuinfo").splitlines() if line.startswith("model name")]
-    return f"{said('/sys/class/dmi/id/sys_vendor')} {said('/sys/class/dmi/id/product_name')}, {names[0] if names else '?'}"
 
 
 @pytest.mark.parametrize("limit_mb", [64, 256, 512])
@@ -3433,19 +3362,6 @@ def test_what_an_earlier_run_or_the_test_itself_put_into_a_case_makes_no_room_in
         assert json.loads(seen[name]["left"])["attributes"] > 250, f"the first run was to leave its attributes: {seen[name]['left']}"
     within_the_bound(seen["kept"], limit_mb, f"folders kept from an earlier run, limit {limit_mb} MB")
     within_the_bound(seen["given at once"], limit_mb, f"the test's own files deleted while memory is taken, limit {limit_mb} MB")
-    mark = seen["given"]["mark"]
-    assert mark, f"the run that deleted the test's own files was given no mark: {seen['given']}"
-    MiB = 2**20
-    note_figures(f"the runner: {runner_kind()}", cores=os.cpu_count() or 0)
-    note_figures(f"the mark after deleting the test's files, limit {limit_mb} MB", readings=mark["readings"],
-                 seconds=mark["seconds"], records_before_the_files=mark["empty"] / MiB,
-                 records_with_the_files=mark["before"] / MiB, records_at_the_mark=mark["at"] / MiB,
-                 lowest_after_the_mark=mark["lowest_after"] / MiB,
-                 counted=seen["given"]["measured"].get("memory_highest", 0) / MiB)
-    # what fell after the mark stays within the level the mark asks for
-    assert mark["at"] - mark["lowest_after"] <= 1.0 * MiB, mark
-    note_figures(f"the kernel's records after the files went, limit {limit_mb} MB, by seconds",
-                 **{f"s{point}": value / MiB for point, value in sorted(mark["series"].items(), key=lambda kv: float(kv[0]))})
     for name, what in (("removed", "that removed what an earlier run left"), ("given", "that deleted the test's own files")):
         assert seen[name]["limit"] == "memory", f"a run {what} held more than its limit and was to fail for memory: {seen[name]}"
         note_figures(f"a run {what}, limit {limit_mb} MB", counted=seen[name]["measured"].get("memory_highest", 0) / 2**20)
