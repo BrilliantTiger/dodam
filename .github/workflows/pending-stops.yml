@@ -1,0 +1,29 @@
+name: pending stops
+# Does the kernel keep a stop signal pending on a process that already stands stopped, until it is continued? A
+# script straight on the runner, no container, in three jobs so that both kinds of runner are in it; every expected
+# value is written in the script, and a job fails on a difference. On a side branch only.
+on: push
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the kind of runner
+        run: |
+          echo "kernel: $(uname -r)"
+          echo "vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) / $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+          echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2) x $(nproc)"
+          echo "azure location: $(curl -s -m 2 -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' || true)"
+          token=$(curl -s -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token || true)
+          echo "aws region: $(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/placement/region || true)"
+      - name: the pending stops
+        run: python3 -I bench/experiments/pending_stops.py
