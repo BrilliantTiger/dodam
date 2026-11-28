@@ -3169,6 +3169,7 @@ def test_the_outside_reader_settles_after_letting_go_however_long_writing_took(t
     is; its files are replaced whole, as the kernel's never read half written."""
     from test_cli_isolation import READER
     asked, held, drop, machine = tmp_path / "asked", tmp_path / "group", tmp_path / "drop", tmp_path / "meminfo"
+    began = tmp_path / "began"
     reclaim, freeze = HELPERS_NAMES[:2]
     asked.mkdir()
     held.mkdir()
@@ -3196,10 +3197,13 @@ _number, _after_drop = number, 0
 
 
 def number(name):
-    # the stand-in kernel: what it let go of at the drop it frees at the third reading after it
+    # the stand-in kernel: what it let go of at the drop it frees at the third reading after it. Its first reading of
+    # the container's memory is the helper's first, right after its time has started: it leaves a mark of that moment
     global _after_drop
     if name != "memory.current":
         return _number(name)
+    if not os.path.exists({str(began)!r}):
+        open({str(began)!r}, "w").close()
     with open("{drop}", "rb") as f:
         dropped = f.read() == b"2"
     _after_drop += dropped
@@ -3211,7 +3215,12 @@ def number(name):
     helper = subprocess.Popen([sys.executable, str(tmp_path / "helper.py")], cwd=tmp_path, stderr=subprocess.PIPE)
     try:
         put(asked / "ask-one", "one")
-        # the waiting pages take 3.5 seconds to be written
+        # the helper marks the moment its time starts, however late a busy machine hands it the question: the
+        # waiting pages take three and a half seconds from that mark, so that the whole wait lies inside its time
+        deadline = time.monotonic() + 60
+        while not began.exists() and time.monotonic() < deadline and helper.poll() is None:
+            time.sleep(0.01)
+        assert began.exists(), "the helper never began its time"
         time.sleep(3.5)
         put(held / "memory.stat", "anon 4096\nfile 0\nfile_dirty 0\n")
         deadline = time.monotonic() + 60
@@ -3613,17 +3622,29 @@ def test_walking_and_removing_what_the_program_left_share_one_time_in_a_step(tmp
     much = judge_module.TooMuchLeft
     first, second = many_files(tmp_path / "first", 20), many_files(tmp_path / "second", 40)
     third = many_files(tmp_path / "third", 5)
-    unlink = os.unlink
+    unlink, real = os.unlink, judge_module.time
+
+    class Ahead:
+        """The judge's clock, which each removal of a file moves on by 0.2 seconds instead of taking them."""
+        seconds = 0.0
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def monotonic(self):
+            return real.monotonic() + self.seconds
+    ahead = Ahead()
 
     def slow(*args, **kwargs):
-        time.sleep(0.02)
+        ahead.seconds += 0.2
         return unlink(*args, **kwargs)
-    monkeypatch.setattr(clock, "left", 1.0)
+    monkeypatch.setattr(clock, "left", 10.0)
+    monkeypatch.setattr(judge_module, "time", ahead)
     monkeypatch.setattr(judge_module.os, "unlink", slow)
-    judge_module.remove_tree(first)                 # about 0.4 of the 1.0 seconds
+    judge_module.remove_tree(first)                 # 4 of the 10 seconds
     assert not first.exists()
     with pytest.raises(much, match="seconds"):
-        judge_module.remove_tree(second)            # needs about 0.8 seconds; about 0.6 are left
+        judge_module.remove_tree(second)            # needs 8 seconds, 6 are left; alone it would have had 10
     with pytest.raises(much, match="seconds"):
         judge_module.walk_tree(third, lambda folder, name, info: None)
 
@@ -3708,10 +3729,31 @@ def test_a_step_whose_walking_and_removing_runs_out_of_time_fails_with_a_result(
 
 # a program that leaves twenty files in its working folder
 LEAVES_IN_ITS_FOLDER = "import os\nfor n in range(20):\n    open(f'left-{n}', 'w').close()\nprint('ok')\n"
-# a file of tests in whose case runner every file is removed slowly, about 0.6 seconds for what that program leaves
+# a file of tests in whose case runner every file is removed slowly, really: the time it takes is the time this test
+# is about
 SLOW_REMOVAL = ("import dodam_cli\n_unlink = dodam_cli._judge.os.unlink\n\n\n"
                 "def _slowly(*args, **kwargs):\n    time.sleep(0.03)\n    return _unlink(*args, **kwargs)\n\n\n"
                 "dodam_cli._judge.os.unlink = _slowly\n\n\n")
+
+
+def removal_moves_the_clock(seconds: float) -> str:
+    # It moves the judge's clock inside the case runner only; the judge outside still reads, on its own clock, the
+    # real time at which a removal began. A test that ends a runner in the middle of a removal must not use it: the
+    # removal in flight is shown by the test whose runner really sleeps.
+    """Test code for a case runner in which every file the judge removes moves the judge's clock on by `seconds`
+    instead of taking them. How much of the step's time for walking and removing a removal uses is then that,
+    however busy the machine is; only the few milliseconds of real work come on top. The notes the runner leaves
+    the judge keep the real time at which a removal began, so that the judge, which reads them on its own clock
+    while the runner removes, never sees a removal that began later than now."""
+    return ("import dodam_cli\n_judge = dodam_cli._judge\n_unlink, _real, _note = _judge.os.unlink, _judge.time, "
+            "_judge._note_progress\n\n\n"
+            "class _Ahead:\n    seconds = 0.0\n\n    def __getattr__(self, name):\n        return getattr(_real, name)\n\n"
+            "    def monotonic(self):\n        return _real.monotonic() + self.seconds\n\n\n"
+            "_clock = _Ahead()\n\n\n"
+            f"def _slowly(*args, **kwargs):\n    _clock.seconds += {seconds!r}\n    return _unlink(*args, **kwargs)\n\n\n"
+            "def _noted(record):\n    if 'at' in record:\n        record = {**record, 'at': record['at'] - _clock.seconds}\n"
+            "    return _note(record)\n\n\n"
+            "_judge.time, _judge.os.unlink, _judge._note_progress = _clock, _slowly, _noted\n\n\n")
 
 
 def said_of(result: dict) -> dict[str, tuple[str, str]]:
@@ -3736,11 +3778,13 @@ def test_the_case_runners_remove_on_the_time_the_step_gives_all_walking_and_remo
 
 def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatch):
     """Each case runner is given what is left of the step's time for walking and removing, and what it
-    used is taken back. Here the step gives one second, and removing what one case left takes about
-    0.6 of it: the case of the first file passes, and the case of the second finds too little left."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
-    tests = {"functional/test_a.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
-             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
+    used is taken back. Here the step gives seven seconds, and removing what one case left takes four of
+    them, on the judge's clock: the case of the first file passes with three to spare, and the case of the
+    second finds three left where it needs four. A judge that took nothing back would give it seven."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 7, raising=False)
+    slow = removal_moves_the_clock(0.2)
+    tests = {"functional/test_a.py": slow + RUNS_OK.replace("test_ok", "test_in_the_first_file"),
+             "functional/test_b.py": slow + RUNS_OK.replace("test_ok", "test_in_the_second_file")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
     said = said_of(result)
     assert said["test_in_the_first_file"] == ("passed", ""), said
@@ -3749,12 +3793,13 @@ def test_what_a_case_runner_used_of_that_time_is_taken_back(tmp_path, monkeypatc
 
 def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_the_steps_time(tmp_path, monkeypatch):
     """A case runner notes what is left of the step's time for walking and removing after every
-    removal as well as before it. Here the step gives one second; the first file's runner removes
-    little and then waits more than a second; the second file's case needs about 0.6 seconds."""
-    monkeypatch.setattr(judge_module, "TREE_SECONDS", 1, raising=False)
-    waits = "def test_waits_after_it():\n    time.sleep(1.2)\n"
+    removal as well as before it. Here the step gives four seconds; the first file's runner removes
+    little and then waits five and a half, longer than the whole time; the second file's case needs one
+    second of it, on the judge's clock. A judge that counted the wait would leave it nothing."""
+    monkeypatch.setattr(judge_module, "TREE_SECONDS", 4, raising=False)
+    waits = "def test_waits_after_it():\n    time.sleep(5.5)\n"
     tests = {"functional/test_a.py": RUNS_OK.replace("test_ok", "test_removes_little") + "\n\n" + waits,
-             "functional/test_b.py": SLOW_REMOVAL + RUNS_OK.replace("test_ok", "test_needs_some")}
+             "functional/test_b.py": removal_moves_the_clock(0.05) + RUNS_OK.replace("test_ok", "test_needs_some")}
     result = judge_program(tmp_path, LEAVES_IN_ITS_FOLDER, tests)
     said = said_of(result)
     assert said["test_removes_little"] == ("passed", "") and said["test_waits_after_it"] == ("passed", ""), said
@@ -3764,16 +3809,17 @@ def test_the_time_a_case_runner_spends_after_its_last_removal_is_not_taken_from_
 def test_a_case_runners_walking_and_removing_is_not_taken_from_its_files_time(tmp_path, monkeypatch, capsys):
     """What a case runner spends removing what the program left is drawn from the step's time for
     walking and removing, not from the time of its file of tests, also for the runner started after
-    it. Here the file has six seconds, removing what its first case left takes about ten, and the
-    runner is ended after it, so a second runner judges the last case."""
+    it. Here the file has twelve seconds, removing what its first case left takes twenty, really, and
+    the runner is ended after it, so a second runner judges the last case. A judge that drew the removal
+    from the file's time would end the runner eight seconds before the removal is done."""
     monkeypatch.setattr(judge_module, "FILE_SECONDS", 0.5, raising=False)
     monkeypatch.setattr(judge_module, "CASE_SECONDS", 0, raising=False)
     program = ("import sys\nif sys.argv[1:] == ['leave']:\n    for n in range(100):\n"
                "        open(f'left-{n}', 'w').close()\nprint('ok')\n")
-    slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.1)")
+    slow = SLOW_REMOVAL.replace("time.sleep(0.03)", "time.sleep(0.2)")
     tests = slow + ("def test_leaves():\n    with case() as c:\n        assert c.run(['leave']).out == 'ok\\n'\n\n\n"
                     "def test_ends_its_runner():\n    os.kill(os.getpid(), 9)\n\n\n") + RUNS_OK
-    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": tests}, CASE_TIMEOUT_SEC="1")
+    code, out = judge_command(tmp_path, program, {"functional/test_slow.py": tests}, CASE_TIMEOUT_SEC="3")
     assert code == 0 and (out / "reward.json").is_file(), capsys.readouterr()
     report = json.loads((out / "details.json").read_text())
     assert [(t["name"], t["outcome"]) for t in report["tests"]] == [
@@ -3968,24 +4014,55 @@ def test_a_program_folder_with_too_many_entries_fails_the_step_and_leaves_a_resu
 
 def test_the_search_for_places_any_user_may_write_ends_at_its_time_while_it_still_finds_some(tmp_path, monkeypatch):
     """The search is given its time whether or not what it found so far waits to be read: one that
-    still finds places when its time is up gives up all the same. Here it has one second, and the
-    search, a stand-in, finds places without a pause for three, which always wait to be read."""
+    still finds places when its time is up gives up all the same, at its time and not later, and ends
+    the search's process. Here it has one second on a clock the test moves, and the search, a real
+    program standing in, finds places without a pause for six seconds of real time. A search that ends
+    later than its time by one step of that clock, or any more, fails; so does one that never ends or
+    leaves the search's process running, on an assertion, once the program has ended by itself."""
     much = judge_module.TooMuchLeft
     monkeypatch.setattr(judge_module, "SEARCH_SECONDS", 1)
     monkeypatch.setattr(judge_module, "WRITABLE_PLACES", 10**12)
-    start = subprocess.Popen
-    finds = ("import sys, time\nend = time.monotonic() + 3\nwhile time.monotonic() < end:\n"
-             "    sys.stdout.buffer.write(b'/nowhere\\0' * 1000)\n")
-    monkeypatch.setattr(judge_module.subprocess, "Popen", lambda args, **kwargs: start([sys.executable, "-c", finds], **kwargs))
-    # what the search found waits to be read whenever the judge asks, however fast this machine reads
-    monkeypatch.setattr(judge_module.select, "select", lambda read, write, special, timeout=None: (list(read), [], []))
+    start, real_select = subprocess.Popen, judge_module.select.select
+    finds = ("import os, time\nos.set_blocking(1, False)\nend = time.monotonic() + 6\n"
+             "while time.monotonic() < end:\n    try:\n        os.write(1, b'/nowhere\\0' * 1000)\n"
+             "    except BlockingIOError:\n        time.sleep(0.005)\n")
+    started = []
+
+    def search(args, **kwargs):
+        started.append(start([sys.executable, "-c", finds], **kwargs))
+        return started[-1]
+
+    class Clock:
+        # the judge's clock: it moves only by one step at each wait for what the search found (by the timeout
+        # asked for, when nothing came), so that no runner's speed reaches it; the search program and the waits
+        # themselves run on real time
+        now = 100.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+    asked = []
+
+    def wait_for_output(read, write, special, timeout=None):
+        asked.append(timeout)
+        ready = real_select(read, write, special, 5.0)
+        Clock.now = round(Clock.now + (0.05 if ready[0] else max(timeout or 0.05, 0.05)), 6)
+        return ready
+
+    monkeypatch.setattr(judge_module.subprocess, "Popen", search)
+    monkeypatch.setattr(judge_module, "time", Clock)
+    monkeypatch.setattr(judge_module.select, "select", wait_for_output)
     mounts = tmp_path / "mounts"
     mounts.write_text(f"none {tmp_path} tmpfs rw 0 0\n")
-    began = time.monotonic()
+    found = 0
     with pytest.raises(much):
         for _ in judge_module.writable_by_others(mounts):
-            pass
-    assert time.monotonic() - began < 2.5, "the search went on past its time"
+            found += 1
+    assert found > 0 and Clock.now == 101.0, f"the search ended at {Clock.now - 100.0} s of its one second"
+    assert all(t is not None and 0 <= t <= 1.0 for t in asked), f"a wait asked for more than the search's time: {asked}"
+    assert len(started) == 1 and started[0].returncode is not None and started[0].returncode < 0, \
+        "the search's process was not ended"
 
 
 def test_opening_the_built_program_for_reading_follows_no_link_out_of_it(tmp_path):
